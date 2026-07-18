@@ -1,30 +1,14 @@
-# Python
-.venv/
 __pycache__/
 *.py[cod]
+.venv/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+artifacts/
+.vda/
+*.log
 .coverage
 htmlcov/
+dist/
+build/
 *.egg-info/
-
-# Node
-frontend/node_modules/
-frontend/coverage/
-frontend/.vite/
-
-# Research Workbench runtime data
-.runtime/
-*.sqlite3
-*.sqlite3-shm
-*.sqlite3-wal
-*.log
-
-# Reports are runtime exports; keep only the directory marker.
-reports/*
-!reports/.gitkeep
-
-# Editors / OS
-.DS_Store
-Thumbs.db
-.idea/
-.vscode/

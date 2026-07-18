@@ -1,144 +1,84 @@
-# Research Workbench / 科研工作台
+# Virtuoso Design Agent
 
-Research Workbench 是面向个人科研工作的本地操作台。它把 Obsidian 中的项目、文献、概念、实验和复盘入口组织成“下一步可执行”的工作流，但不替代 Obsidian、Zotero、外部工程目录或 Codex。
+Virtuoso Design Agent 是 `virtuoso-bridge-lite` 之上的受控设计编排层。它把“建原理图、读回、应用参数、跑仿真、判定规格、有限调优”组织成可单独执行、可组合、可审计的任务，而不是再造一套 Bridge。
 
-第一阶段是可运行的只读应用：扫描 Obsidian Vault，建立本地 SQLite 索引，提供中文 React 前端、搜索筛选、详情、健康检查、收件箱整理建议与每日/每周复盘草稿。
+当前版本从 **L5A** 起步：在已知 PDK、固定电路模板、显式规格和有限搜索空间内完成闭环。第一条真实 adapter 面向 TSMC28 反相器；共源/源极退化放大器和差分对是后续两个验收门。
 
-## 与 Codex Board 的关系
+## 当前能做什么
 
-两者是独立产品。Research Workbench：
+- 将任务编译为带副作用标记的稳定执行计划。
+- 单独规划或执行：`schematic.create`、`schematic.inspect`、`parameters.apply`、`simulation.run`、`design.tune`、`design.close_loop`。
+- 用确定性 demo adapter 离线验证闭环、规格判定和参数选择；结果明确标为 `software_inference`。
+- 通过独立 worker 调用本机 `virtuoso-bridge-lite` 环境，提供反相器的 Bridge 探测、OA 建图/回读、参数写入和 Spectre 瞬态入口。
+- 对远端计算和 OA 写入分别授权；真实执行还需要计划 token，避免一句模糊指令直接改库。
+- 将动作、候选点、指标、约束判定、最终选择和证据来源写入本地 JSON run record。
 
-- 不修改或依赖 Codex Board；
-- 不共享后端、数据模型、导航、产品名称或端口；
-- 不读取 Codex Board 内部状态；
-- 默认使用 `127.0.0.1:4280`，不会占用 `4173`；
-- 未来最多提供普通网页链接。
+2026-07-19 已在 nics4304 完成真实远端 smoke：Bridge doctor、反相器单点 Spectre、OA 建图与结构回读、局部参数写入与前后回读、9 点有限搜索和最佳参数写回，以及不可行规格下的禁止写回均通过。仍未完成的是 OA schematic 与仿真 deck 的同源 netlisting closure；当前二者共享同一组语义参数，但不能把这当作 schematic 驱动的仿真。
 
 ## 快速开始
 
-要求 Python 3.13 和 Node.js。PowerShell 中执行：
+推荐 Python 3.13：
 
 ```powershell
-python -m venv .venv
+cd "H:\Virtuoso Design Agent"
+py -3.13 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-
-cd frontend
-npm ci
-npm run build
-cd ..
-
-.\.venv\Scripts\research-workbench.exe serve --vault "H:\Obsidian Vault"
 ```
 
-打开 [http://127.0.0.1:4280](http://127.0.0.1:4280)。FastAPI 直接提供 `frontend/dist`，正常使用不需要同时启动 Vite。开发时可单独运行 `npm run dev`（端口 `4281`，API 代理到 `4280`）。
-
-生产端口可通过环境变量修改：
+查看能力目录并生成计划：
 
 ```powershell
-$env:RESEARCH_WORKBENCH_PORT = "4290"
-.\.venv\Scripts\research-workbench.exe serve --vault "H:\Obsidian Vault"
+.\.venv\Scripts\vda.exe catalog
+.\.venv\Scripts\vda.exe plan examples\tasks\inverter-close-loop.demo.json
 ```
 
-## CLI
-
-启动完整应用：
+计划会打印确认 token。复制该 token 后运行离线闭环：
 
 ```powershell
-research-workbench serve --vault "H:\Obsidian Vault"
+.\.venv\Scripts\vda.exe run examples\tasks\inverter-close-loop.demo.json `
+  --adapter demo --execute --token <PLAN_TOKEN>
 ```
 
-无界面只读检查：
+离线结果写入 `artifacts/runs/`，不会连接远端，也不会修改 Virtuoso。
 
-```powershell
-research-workbench check --vault "H:\Obsidian Vault"
-research-workbench check --vault "H:\Obsidian Vault" --json
-```
+## 接入真实 Bridge
 
-将报告导出到本项目 `reports/`：
-
-```powershell
-research-workbench export-report --vault "H:\Obsidian Vault"
-```
-
-`--data-dir` 可为测试或便携运行指定应用数据目录。常规运行默认使用 `%LOCALAPPDATA%\ResearchWorkbench`；也可设置 `RESEARCH_WORKBENCH_DATA_DIR`。
-
-## 已实现工作流
-
-- **今日工作台**：进行中项目与明确下一步、等待/阻塞、收件箱、待读文献、最近实验、最近知识和复盘提醒。
-- **收件箱**：读取 `00_收件箱`，给出去向和关联建议，不移动或改写文件。
-- **项目**：目标、状态、下一步、完成标准、领域、外部路径与来源标签。
-- **文献**：collection、`reading_stage`、`reading_value`、Zotero/BibTeX key、全文覆盖记录和“需要我细看的地方”。第一阶段只读 Obsidian 文献笔记。
-- **知识**：领域、概念、方法、双链/反链详情、未解析链接和同名歧义。
-- **实验**：项目、环境、命令/入口、输出路径、证据、判断和下一步；不执行命令。
-- **复盘**：每日或每周草稿预览，明确区分文件事实与软件推断，不写入 Vault。
-- **集成与设置**：Vault/SQLite/报告路径、忽略目录、问题明细及未启用 adapter 的边界。
-
-全局搜索覆盖标题、正文和相对路径；对象页支持按状态、领域、collection 和阅读阶段筛选。所有页面都有 loading、空状态和错误状态，顶部可重新扫描。
-
-## 安全边界
-
-| 数据源或动作 | 第一阶段行为 |
-| --- | --- |
-| Obsidian Vault | 只读 Markdown/frontmatter/标题/wiki links；零写入 |
-| Zotero | 不查询数据库、不写入；只展示 Obsidian 已记录的 key |
-| 外部工程目录 | 仅对记录的 Windows 路径做存在性检查 |
-| WSL / SSH / EDA | adapter 边界预留，不执行 |
-| SQLite / 缓存 | 写入应用数据目录，不进入 Vault |
-| 扫描报告 | 只写入项目 `reports/` |
-| 整理建议 / 复盘 | 应用内预览，可复制；不自动写回 |
-| 密码 / API key / 云服务 | 不读取、不调用 |
-
-应用启动时会拒绝把数据目录或 `reports/` 放在 Vault 内。扫描器只以只读模式打开 Markdown 文件。完整只读边界由测试覆盖。
-
-## 架构
+已知本机 Bridge Python 默认路径：
 
 ```text
-Obsidian Vault（只读）
-        │
-        ▼
-Markdown parser / link resolver / path checks
-        │
-        ▼
-SQLite index（应用数据目录）
-        │
-        ▼
-FastAPI domain queries ──► reports/（显式导出）
-        │
-        ▼
-React + TypeScript production UI
+C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\python.exe
 ```
 
-后端是一个本地单体：
-
-- `adapters/obsidian/`：frontmatter、标题、wiki links 与只读扫描；
-- `indexing/`：扫描编排、领域视图、建议和复盘；
-- `storage/`：SQLite 原子重建与查询；
-- `domain/`：项目、文献和实验模型；
-- `api/`：FastAPI 路由和前端静态服务；
-- `adapters/zotero|projects|runners/`：未来能力的最小协议边界。
-
-前端按页面与公共组件组织，不依赖 CDN 或外部在线服务。更详细说明见 [docs/architecture.md](docs/architecture.md)。
-
-## 测试与构建
+先按现有 Bridge 流程启动 tunnel/daemon，再做只读探测：
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest
-
-cd frontend
-npm test
-npm run build
+C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe status
+.\.venv\Scripts\vda.exe doctor --adapter bridge
 ```
 
-测试覆盖 Markdown/frontmatter、wiki link/别名、中文 Windows 路径、领域模型、SQLite 重建、API、只读边界、fixture Vault 端到端、React 页面与筛选。真实 Vault 检查可使用 `check --json`，并应在扫描前后比较 Vault 指纹或 Git 状态。
+真实任务仍必须先 `plan`，再使用同一个 token 执行。任务文件还要显式允许远端计算或写入。默认 profile `nics4304_tsmc28` 和反相器 adapter 已完成 live smoke；换 library、cell 模板、PDK、analysis 或服务器仍要重新验证，不能从这次 smoke 外推。
 
-## 项目结构
+## 安全模型
 
-```text
-backend/src/research_workbench/  Python 应用
-backend/tests/                   后端与端到端测试
-frontend/src/                    React 界面
-frontend/src/test/               页面与筛选测试
-fixtures/vault/                  测试 Vault
-reports/                         显式导出的只读报告
-docs/                            架构与边界说明
-```
+真实写入需同时满足：
+
+1. CLI 提供 `--execute`。
+2. CLI 提供与当前任务和计划一致的 token。
+3. 任务设置 `allow_remote_write: true`。
+4. `target.library` 等于任务声明的 `allowed_library`。
+5. cell 名满足 `required_cell_prefix`，默认 `vda_`。
+6. 默认 `replace_existing: false`。
+
+仿真虽不修改 OA，也会创建远端 scratch，因此需要 `allow_remote_compute: true`。密码、Bridge `.env` 和 license 内容不进入任务或 run record。
+
+## 为什么暂不做成 Skill
+
+当前先把稳定能力做成普通本地工具：契约、状态机、执行边界和证据格式都可以独立测试。Codex 可以调用 CLI 充当上层 agent；当命令和边界稳定后，再决定是否封装成 Skill 或 MCP。这样不会把尚未稳定的实验流程固化成提示词约定。
+
+## 文档
+
+- [L5 路线与定义](docs/l5-roadmap.md)
+- [系统架构](docs/architecture.md)
+- [三类起步电路与验收门](docs/initial-circuits.md)
+- [首个决策记录](docs/decisions/0001-l5a-first.md)
+- [2026-07-19 反相器 L5A smoke](docs/validation/2026-07-19-inverter-l5a-smoke.md)

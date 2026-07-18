@@ -1,0 +1,11 @@
+{
+  "name": "nics4304_tsmc28",
+  "tech_library": "tsmcN28",
+  "nmos_cell": "nch_lvt_mac",
+  "pmos_cell": "pch_lvt_mac",
+  "model_include": "/data/technique/tsmcn28_lo_0v9_1p10m_5X2Y2Z/models/spectre/toplevel.scs",
+  "model_section": "top_tt",
+  "default_vdd_v": 0.9,
+  "default_load_ff": 2.0,
+  "default_length_um": 0.03
+}

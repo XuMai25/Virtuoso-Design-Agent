@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "inverter-simulate-bridge",
+  "operation": "simulation.run",
+  "circuit": "inverter",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_inv_l5a_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "parameters": {
+    "nmos_width_um": 0.5,
+    "pmos_width_um": 1.0,
+    "length_um": 0.03,
+    "load_ff": 2.0,
+    "vdd_v": 0.9
+  },
+  "constraints": [
+    {"metric": "delay_ps", "relation": "<=", "value": 45.0},
+    {"metric": "rise_fall_skew_ps", "relation": "<=", "value": 8.0}
+  ],
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}

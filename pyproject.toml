@@ -3,35 +3,30 @@ requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "research-workbench"
+name = "virtuoso-design-agent"
 version = "0.1.0"
-description = "Research Workbench / 科研工作台：本地只读科研工作流助手"
+description = "Bounded autonomous schematic design and verification orchestration for Virtuoso"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-  "fastapi>=0.115,<1",
-  "pydantic>=2.10,<3",
-  "PyYAML>=6.0,<7",
-  "uvicorn[standard]>=0.34,<1",
+  "pydantic>=2.7,<3",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "httpx>=0.28,<1",
-  "pytest>=8.3,<9",
-  "pytest-cov>=6,<7",
+  "pytest>=8.3",
 ]
 
 [project.scripts]
-research-workbench = "research_workbench.cli:main"
-
-[tool.setuptools]
-package-dir = {"" = "backend/src"}
+vda = "virtuoso_design_agent.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["backend/src"]
+where = ["src"]
+
+[tool.setuptools.package-data]
+virtuoso_design_agent = ["resources/pdks/*.json"]
 
 [tool.pytest.ini_options]
-testpaths = ["backend/tests"]
-pythonpath = ["backend/src"]
-addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q -p no:cacheprovider"

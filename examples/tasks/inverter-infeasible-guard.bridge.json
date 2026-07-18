@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "id": "inverter-infeasible-guard-bridge",
+  "operation": "design.tune",
+  "circuit": "inverter",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_inv_l5a_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "parameters": {
+    "length_um": 0.03,
+    "load_ff": 2.0,
+    "vdd_v": 0.9
+  },
+  "parameter_space": {
+    "nmos_width_um": [0.4],
+    "pmos_width_um": [0.8]
+  },
+  "constraints": [
+    {"metric": "delay_ps", "relation": "<=", "value": 1.0}
+  ],
+  "objective": {"metric": "delay_ps", "goal": "minimize"},
+  "create_if_missing": false,
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}

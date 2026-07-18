@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "inverter-apply-bridge",
+  "operation": "parameters.apply",
+  "circuit": "inverter",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_inv_l5a_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "parameters": {
+    "nmos_width_um": 0.6,
+    "pmos_width_um": 1.2,
+    "length_um": 0.03
+  },
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 180}
+}
