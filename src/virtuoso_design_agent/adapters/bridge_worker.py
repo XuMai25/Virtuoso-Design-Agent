@@ -428,6 +428,10 @@ def _expected_instance_parameters(
     return expected
 
 
+class ParameterReadbackMismatch(RuntimeError):
+    """A CDF callback completed but the requested value did not persist."""
+
+
 def _verify_instance_parameter_values(
     client,
     library: str,
@@ -478,7 +482,10 @@ def _verify_instance_parameter_values(
     result = client.execute_skill(skill, timeout=60)
     errors = getattr(result, "errors", None) or []
     if errors:
-        raise RuntimeError(f"targeted CDF readback failed: {errors[0]}")
+        message = f"targeted CDF readback failed: {errors[0]}"
+        if "CDF parameter readback mismatch:" in str(errors[0]):
+            raise ParameterReadbackMismatch(message)
+        raise RuntimeError(message)
     output = str(getattr(result, "output", "")).strip().strip('"').lower()
     if output != "t":
         raise RuntimeError(f"unexpected targeted CDF readback result: {output!r}")
@@ -699,9 +706,50 @@ def _apply_explicit_instance_parameters(
         _assert_inverter(updated, payload["profile"])
     elif payload["circuit"] == "common_source":
         _assert_common_source(updated, payload["profile"])
-    confirmed = _verify_instance_parameter_values(
-        client, library, cell, applied_parameters
-    )
+    repair_applied_parameters: dict[str, dict[str, str]] = {}
+    repair_reason: str | None = None
+    try:
+        confirmed = _verify_instance_parameter_values(
+            client, library, cell, applied_parameters
+        )
+    except ParameterReadbackMismatch as error:
+        repair_reason = str(error)
+        for instance, parameters in requested.items():
+            repaired: dict[str, str] = {}
+            for name, value in parameters.items():
+                applied = set_instance_params(
+                    client,
+                    instance,
+                    param_filters=None,
+                    **{name: value},
+                )
+                if not isinstance(applied, dict) or not applied:
+                    raise RuntimeError(
+                        "Bridge did not report ordered repair CDF parameter for "
+                        f"{instance}.{name}"
+                    )
+                repaired.update(
+                    {str(actual): str(result) for actual, result in applied.items()}
+                )
+            repair_applied_parameters[instance] = repaired
+        if repair_applied_parameters != applied_parameters:
+            raise RuntimeError(
+                "Bridge ordered repair changed the applied CDF parameter mapping"
+            )
+        try:
+            confirmed = _verify_instance_parameter_values(
+                client, library, cell, applied_parameters
+            )
+        except ParameterReadbackMismatch as replay_error:
+            raise ParameterReadbackMismatch(
+                "ordered replay was attempted once after an initial CDF "
+                f"mismatch but final readback still failed: {replay_error}"
+            ) from replay_error
+        updated = _read_schematic(client, library, cell)
+        if payload["circuit"] == "inverter":
+            _assert_inverter(updated, payload["profile"])
+        elif payload["circuit"] == "common_source":
+            _assert_common_source(updated, payload["profile"])
     return {
         "requested_instance_parameters": requested,
         "requested_evidence_source": "user_input",
@@ -710,6 +758,13 @@ def _apply_explicit_instance_parameters(
         "confirmed_instance_parameters": confirmed,
         "confirmed_evidence_source": "bridge_readback",
         "confirmation_method": "independent_targeted_cdf_equality",
+        "application_method": (
+            "bridge_batch_then_ordered_replay"
+            if repair_reason is not None
+            else "bridge_batch"
+        ),
+        "ordered_replay_reason": repair_reason,
+        "ordered_replay_applied_instance_parameters": repair_applied_parameters,
         "readback": summarize(updated),
     }
 

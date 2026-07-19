@@ -63,6 +63,7 @@ def test_explicit_instance_parameter_plan_discloses_raw_cdf_readback() -> None:
     assert apply.side_effect is SideEffect.REMOTE_WRITE
     assert "CDF/OA" in apply.description
     assert "定向回读" in apply.description
+    assert "至多" in apply.description
 
 
 def test_tuning_plan_discloses_candidate_oa_staging() -> None:

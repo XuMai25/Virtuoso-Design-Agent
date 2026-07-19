@@ -80,11 +80,12 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         if task.instance_parameter_updates and task.parameters:
             apply_description = (
                 "应用器件语义参数及按实例给出的原始 CDF/OA 字符串，"
-                "并逐项定向回读"
+                "并逐项定向回读；callback 后不一致时至多按声明顺序重放一次"
             )
         elif task.instance_parameter_updates:
             apply_description = (
-                "按实例应用明确给出的原始 CDF/OA 参数字符串并逐项定向回读"
+                "按实例应用明确给出的原始 CDF/OA 参数字符串并逐项定向回读；"
+                "callback 后不一致时至多按声明顺序重放一次"
             )
         else:
             apply_description = "应用明确给出的器件语义参数"

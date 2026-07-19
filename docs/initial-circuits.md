@@ -24,7 +24,7 @@
 - 最终 nominal：`Id=22.291 µA`、`VGS=0.35 V`、`VDS=0.4542 V`、`VDSAT=0.1044 V`、饱和/输出摆幅余量 `0.3498 V`、`gm=321.916 µS`、`gds=29.785 µS`。
 - 下一道硬门：在已验证 DC 偏置点上做共源 AC gain/bandwidth 与 gain-bandwidth trade-off；随后源极退化拓扑重新通过 DC→AC，而不是直接复用本结果。
 
-跨拓扑的参数基础：`existing_schematic` 可以不依赖固定模板读取已有 schematic，并用 `instance_parameter_updates` 人工指定实例原始 CDF 参数和值字符串；固定模板还可把它与 W/L/R semantic parameters 组合。写入必须经过 callback、立即定向 OA 回读和独立再次回读。通用只读 live smoke 已保留完整 Bridge 结构并枚举 MN0 的 233 个 CDF 字段；真实参数写入尚待 smoke。它只证明“按名字修改并确认”，不证明 VDA 理解任意参数的物理作用，也不自动允许该参数参与调优。
+跨拓扑的参数基础：`existing_schematic` 可以不依赖固定模板读取已有 schematic，并用 `instance_parameter_updates` 人工指定实例原始 CDF 参数和值字符串；固定模板还可把它与 W/L/R semantic parameters 组合。写入必须经过 callback、立即定向 OA 回读和独立再次回读。通用只读 live smoke 已保留完整 Bridge 结构并枚举 MN0 的 233 个 CDF 字段；专用新 cell 上又真实闭合 `MN0.fingers=2` 和 `RD0.r=22K` 的双重回读。`MN0.m=2` 被当前 PDK callback 恢复为 `1`，因此保留为字段不可持久化边界。它只证明“按名字尝试修改并以 OA 值确认”，不证明 VDA 理解任意参数的物理作用，也不自动允许该参数参与调优。
 
 Gate 2 完整验收仍需覆盖受控拓扑变更、AC 增益与带宽，以及器件尺寸、偏置、负载和退化电阻的受控调整。当前下一项开发目标是在新 cellview 上建立源极退化拓扑并先重新通过 DC；任何拓扑都必须先满足偏置和工作区，再比较增益/带宽。
 

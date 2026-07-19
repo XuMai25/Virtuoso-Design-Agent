@@ -55,9 +55,11 @@ VDA 保留两种用途不同的参数表示：
 
 `existing_schematic` 是不依赖固定拓扑模板的通用 circuit kind，只开放 `schematic.inspect` 与 `parameters.apply`：前者保留 Bridge reader 的完整结构对象、geometry、notes、nets/pins 细节和所有可回读 CDF 参数；后者允许人工指定任意已有实例。反相器和共源模板也能使用相同原始参数路径，并可在一个任务中与 semantic parameters 组合；semantic 写入先执行，原始 CDF callback 后执行，最终 OA 必须同时满足所有已声明 semantic 值和原始字段值。
 
-执行路径先结构化回读目标 schematic 并确认实例存在，再复用 Bridge 的 `set_instance_params(..., param_filters=None)` 触发 CDF callback、`schCheck` 和 `dbSave`。通用 reader 为控制输出会省略空值和超长值，因此 VDA 不用摘要缺失来限制 Bridge：写入后另发只读 SKILL，直接打开目标 OA、定位实例 CDF，并逐字段比较真实 `p~>value` 与请求字符串；executor 的 `schematic.inspect.after` 再独立执行一次同样的定向读取。任一比较失败，整个 run 失败。
+执行路径先结构化回读目标 schematic 并确认实例存在，再复用 Bridge 的 `set_instance_params(..., param_filters=None)` 触发 CDF callback、`schCheck` 和 `dbSave`。通用 reader 为控制输出会省略空值和超长值，因此 VDA 不用摘要缺失来限制 Bridge：写入后另发只读 SKILL，直接打开目标 OA、定位实例 CDF，并逐字段比较真实 `p~>value` 与请求字符串；executor 的 `schematic.inspect.after` 再独立执行一次同样的定向读取。首次值不一致时，worker 至多按任务声明顺序逐字段重放一次；计划必须披露该副作用，最终仍不一致则整个 run 失败。
 
 定向读取的字段名来自 Bridge 写入函数返回的实际应用映射，而不是 VDA 复制的别名表。因此 Bridge 公开的 `wf -> Wfg`、`nf -> fingers` 等简写仍可使用；run record 同时保存原始请求和 Bridge 报告的实际 CDF 目标。
+
+CDF 的 `display` 和 `editable` 元数据不是写入 allowlist。2026-07-20 的真实 smoke 中，`MN0.m` 为 `editable=nil` 且 callback 后不能保持 `2`，但 `RD0.r` 同样报告 `editable=nil` 却能成功持久化为 `22K`。因此 VDA 不依据 UI 元数据缩窄 Bridge 能力，最终权威只来自 callback 后目标 OA 值；失败仍可能留下部分写入，因为 Bridge 的多实例调用不是 OA 事务。
 
 任务请求及原始值标为 `user_input`；真实 OA 确认标为 `bridge_readback`；demo 只能产生 `software_inference`。完整 inspect 会保留 callback 导致的旁路参数变化，但 VDA 只对任务显式列出的字段宣称确认。`instance_parameter_updates` 当前不会自动进入 `parameter_space`；这保留有限搜索的显式边界，但后续会提供实例参数搜索维度，而不是长期维持人工透传上限。
 

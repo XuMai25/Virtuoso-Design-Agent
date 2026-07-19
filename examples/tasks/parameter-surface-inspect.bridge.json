@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "id": "common-source-apply-instance-parameters-bridge",
-  "operation": "parameters.apply",
+  "id": "parameter-surface-inspect-bridge",
+  "operation": "schematic.inspect",
   "circuit": "existing_schematic",
   "target": {
     "library": "vb_pdk_smoke",
@@ -9,23 +9,9 @@
     "view": "schematic"
   },
   "pdk_profile": "nics4304_tsmc28",
-  "instance_parameter_updates": [
-    {
-      "instance": "MN0",
-      "parameters": {
-        "fingers": "2"
-      }
-    },
-    {
-      "instance": "RD0",
-      "parameters": {
-        "r": "22K"
-      }
-    }
-  ],
   "safety": {
     "allow_remote_compute": false,
-    "allow_remote_write": true,
+    "allow_remote_write": false,
     "allowed_library": "vb_pdk_smoke",
     "required_cell_prefix": "vda_",
     "replace_existing": false

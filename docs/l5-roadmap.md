@@ -22,7 +22,7 @@ L5A 不允许自行发明无限搜索范围、修改 PDK、覆盖未知 cell、�
 
 Gate 2A 又把相同执行语义扩展到电阻负载 NMOS 共源级：新 OA cellview 的 MN0/RD0 结构、W/L/R 回读和 `si` 网表一致性通过；显式保存的 Spectre DC OP 提供 Id/VGS/VDS/VDSAT/gm/gds，6 点 W/Vbias 搜索完成 3 个可行点、3 个线性区点、最佳 W 写回和最终独立紧规格复核。该结果只闭合 common-source nominal DC；AC、source degeneration、noise 和 corner 仍未验证。
 
-实例参数面现已在任务契约、planner、demo、Bridge worker 和双重定向回读中实现。`existing_schematic` 不要求目标符合反相器或共源模板，可保留 Bridge 的完整结构读取并向任意已有实例透传 Bridge 字符串参数；空值或长值不再因通用摘要不可见而被 VDA 拒绝。固定模板还允许 semantic 与实例参数组合，并以最终 OA 同时满足两组请求为成功条件。通用只读 live smoke 已在 Gate 2A cell 上读到 MN0 的 233 个 CDF 字段、RD0 的 2 个字段及完整 geometry/nets/pins；真实 OA callback/write/readback 尚未执行，因此不能把写入路径写成 live verified，也不能据此宣称任意参数已具备自动搜索和网表逐项一致性。
+实例参数面现已在任务契约、planner、demo、Bridge worker 和双重定向回读中实现。`existing_schematic` 不要求目标符合反相器或共源模板，可保留 Bridge 的完整结构读取并向任意已有实例透传 Bridge 字符串参数；空值或长值不再因通用摘要不可见而被 VDA 拒绝。固定模板还允许 semantic 与实例参数组合，并以最终 OA 同时满足两组请求为成功条件。通用只读 live smoke 在 Gate 2A cell 上读到 MN0 的 233 个 CDF 字段、RD0 的 2 个字段及完整 geometry/nets/pins；专用 `vda_param_surface_001` 又闭合 `fingers=2`、`r=22K` 的 callback、立即回读和独立 after 回读。`m=2` 被 PDK callback 恢复为 `1`，且多字段失败留下已保存前缀，证明该能力不能外推为任意字段可持久化或事务式写入。
 
 Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发送前的 tunnel 自愈。新的 9 点压力任务仍在候选 8 发生一次本地端口拒绝，但 OA 恢复、候选前缀和续跑均正确，最终 9/9 与最佳写回成功；确定性同-client smoke 已覆盖 pre-send 自愈。payload 发送后的不确定错误仍不自动重放，这是保留的可靠性边界而不是跳过的工作。
 
@@ -56,7 +56,7 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
 ```text
 反相器 L5A
   -> 共源 nominal DC (Gate 2A 已通过)
-  -> 显式实例参数面 (本地实现，live write/readback 待验证)
+  -> 显式实例参数面 (可持久化字段 live 双重回读已验证)
   -> 受控拓扑变更（新 cellview，先 source degeneration DC）
   -> 各拓扑 AC gain/bandwidth
   -> 差分对
@@ -67,4 +67,4 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
 
 每一级只有在真实 Bridge smoke、结构回读、指标解析和失败注入均通过后才升级状态。
 
-反相器可靠性 Gate 1R 已通过 VDA 显式 checkpoint/resume 路径：Bridge 恢复后能核对 OA、继续剩余候选、保留原始基线，并在最终写回中断时只重试 finalize。Bridge 本地补丁 `9e52844` 已让 stale state/调用边界自动重建通过确定性测试和 live smoke，但不能外推为运行中 transport 永不掉线。共源 Gate 2A nominal DC 现已通过；按当前开发优先级，下一步先把显式实例参数面做一次真实 OA 写入/回读验证，再在新 cellview 上建立受控拓扑变更，首个具体对象是源极退化共源级并重新通过 DC。AC gain/bandwidth 仍是每个拓扑升级为完整放大器闭环前不可跳过的硬门。`gate_area_proxy_um2` 仍只是尺寸代价；真实供电能量/平均功率已经加入，但尚无 corner、输入电容或版图面积。
+反相器可靠性 Gate 1R 已通过 VDA 显式 checkpoint/resume 路径：Bridge 恢复后能核对 OA、继续剩余候选、保留原始基线，并在最终写回中断时只重试 finalize。Bridge 本地补丁 `9e52844` 已让 stale state/调用边界自动重建通过确定性测试和 live smoke，但不能外推为运行中 transport 永不掉线。共源 Gate 2A nominal DC 和可持久化显式实例字段的 live 双重回读现已通过；下一步在新 cellview 上建立受控拓扑变更，首个具体对象是源极退化共源级并重新通过 DC。AC gain/bandwidth 仍是每个拓扑升级为完整放大器闭环前不可跳过的硬门。`gate_area_proxy_um2` 仍只是尺寸代价；真实供电能量/平均功率已经加入，但尚无 corner、输入电容或版图面积。

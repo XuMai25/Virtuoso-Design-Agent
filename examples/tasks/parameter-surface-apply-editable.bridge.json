@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "id": "common-source-apply-instance-parameters-bridge",
+  "id": "parameter-surface-apply-editable-bridge",
   "operation": "parameters.apply",
   "circuit": "existing_schematic",
   "target": {

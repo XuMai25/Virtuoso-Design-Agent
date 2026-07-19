@@ -1,4 +1,4 @@
-# 2026-07-19 显式实例参数能力验证
+# 2026-07-19/20 显式实例参数能力验证
 
 ## 目标
 
@@ -17,12 +17,14 @@
 - inspect 保留 `bridge_schematic` 原始结构，包括 geometry、notes、详细 nets/pins、实例参数与 `nlAction` 等 Bridge reader 字段，同时提供兼容的摘要。
 - 写入前确认实例存在；写入复用 Bridge `set_instance_params(..., param_filters=None)`，不复制 callback、`schCheck` 或 `dbSave`。
 - 通用 reader 会省略空值和过长值，因此写后另用只读目标 CDF 查询直接比较 `p~>value`；立即验证与 executor 独立 after 验证都必须成功。
+- 首次定向回读不一致时，VDA 至多按用户声明顺序逐字段重放一次并再次读取；该恢复动作写入计划和结果。最终仍不一致则失败，不循环重试。
+- CDF 的 `display`/`editable` 元数据只作诊断，不作 VDA allowlist。真实 smoke 证明 `RD0.r` 虽报告 `editable=nil`，Bridge callback 仍能写入；成功权威仍是写后 OA 值。
 - 请求字段标为 `user_input`；真实定向 OA 确认标为 `bridge_readback`；demo 确认仍为 `software_inference`。
 - 未修改 `C:\Users\aknigsesl\tools\virtuoso-bridge-lite`。
 
 ## 本地验证
 
-最终完整测试：`72 passed`。
+最终完整测试：`73 passed`。
 
 覆盖内容包括：
 
@@ -69,18 +71,42 @@
 
 因此定向回读 SKILL 已在真实 Virtuoso 上验证，不只是 fake client 单元测试。Bridge 公共 `wf`/`nf` 简写由 `set_instance_params` 返回的实际应用映射（`Wfg`/`fingers`）驱动后续验证，VDA 不复制一份可能漂移的别名表。
 
+## 2026-07-20 真实写入证据
+
+专用目标：`vb_pdk_smoke/vda_param_surface_001/schematic`；未运行 Spectre，且 `replace_existing: false`。
+
+创建记录 `artifacts/runs/explicit-instance-parameters/create-vda-param-surface-001-20260720.json` 成功。结构化回读为 MN0/RD0、IN/OUT/VDD/VSS 四个网络和四个 pins；初始值是 `Wfg=1u`、`fingers=1`、`m=1`、`RD0.r=20K`。
+
+首个三字段任务尝试 `fingers=2`、`m=2`、`r=22K`：
+
+- `apply-vda-param-surface-001-20260720.json` 在立即定向读取时因 `MN0.m` 不匹配而失败。
+- `inspect-after-failed-apply-20260720.json` 证明任务形成了部分写入：`fingers=2`、`r=22K` 已持久化，但 `m=1`。
+- 加入一次有界按序重放后，`apply-vda-param-surface-001-retry1-20260720.json` 仍因 `MN0.m` 失败；因此未把重放包装成成功。
+
+随后用只读 SKILL 检查元数据：当前 TSMC28 MOS 的 `m` 和 `multi` 均为 `display=nil`、`editable=nil` 且有 callback；`fingers` 为可显示、可编辑。另一次诊断发现 `RD0.r` 也报告 `editable=nil`，但它已经真实持久化。因此曾尝试的 editability 硬门会缩窄 Bridge，已从最终实现移除；对应失败记录仍保留：
+
+- `apply-vda-param-surface-001-editability-guard-20260720.json`
+- `apply-editable-vda-param-surface-001-20260720.json`
+
+最终用原授权子集 `fingers=2`、`r=22K` 完成成功路径：
+
+- `apply-editable-vda-param-surface-001-retry1-20260720.json`
+- run：`succeeded`
+- 请求：`user_input`
+- apply 立即确认：`bridge_readback`、`fingers=2`、`r=22K`
+- 独立 `schematic.inspect.after`：`bridge_readback`、`independent_targeted_cdf_equality`、相同值
+- 正常路径：`bridge_batch`，未触发按序重放
+
+这些值在首次失败任务中已经发生改变，所以成功 run 单独证明的是“callback + 立即确认 + 独立确认”可完整执行；实际前后变化证据来自创建记录与失败后 inspect 的交叉核对。任务结束后 Bridge tunnel 已停止并确认 `NOT running`。
+
 ## 尚未验证的边界
 
-- 本轮没有 OA 参数写入授权，因此真实 callback 以及围绕一次写入的“立即确认 + 独立 after 确认”尚未 live smoke；定向读取本身已验证，但仍不能写成 write/readback verified。
-- 空字符串、长字符串与非标参数名已通过契约和 worker 测试，但尚未在当前 PDK 上选取真实 CDF 字段写入；具体 CDF callback 仍可能拒绝不合法值，这应作为 Bridge/PDK 错误保留，而不是由 VDA 猜测。
-- 多实例显式写入按 Bridge 调用顺序执行，不是 OA 事务；payload 发送后的 transport 中断仍可能形成不确定状态。独立 `parameters.apply` 尚无调优 checkpoint 的自动 resume 语义。
+- VDA 能接受并尝试 Bridge 字符串参数，但不能承诺 PDK 的每个 CDF 字段都可持久化。当前 `MN0.m=2` 已被真实 callback 反复恢复为 `1`；这是明确失败边界，不是 VDA 应静默绕过的字段。
+- 多字段/多实例显式写入不是 OA 事务；一个字段失败时，先前字段可能已经保存。一次有界重放不等于 rollback，payload 发送后的 transport 中断也仍可能形成不确定状态。
+- 空字符串、长字符串与非标参数名已通过契约和 worker 测试，但尚未在当前 PDK 上选取真实字段写入。
 - 任意实例参数还不能声明为自动 `parameter_space`，也没有对 `si` 网表中的所有原始 CDF 字段逐项建立一致性。当前自动搜索仍只覆盖模板 canonical semantic parameters。
-- `existing_schematic` 不提供 create、simulation 或 closure；这些能力需要明确 topology/analysis 契约和新的真实 Gate，不能因通用参数写入而推断成立。
+- `existing_schematic` 不提供 create、simulation 或 closure；这些能力需要明确 topology/analysis 契约，不能从通用参数写入推断成立。
 
 ## 下一道 Gate
 
-先通过 `common-source-create-parameter-surface.bridge.json` 新建专用
-`vb_pdk_smoke/vda_param_surface_001/schematic`，再用
-`common-source-apply-instance-parameters.bridge.json` 把 `MN0.fingers`、`MN0.m` 和 `RD0.r`
-分别从创建基线改为 `2`、`2` 和 `22K`，完成一次真实显式参数写入/回读 smoke；两项任务都保持
-`replace_existing: false`，不改 Gate 2A 已验证基线。随后进入受控拓扑变更：新建源极退化共源 cellview，明确新增实例/网络/参数和逆操作，先通过 DC 工作区，再进入各拓扑 AC gain/bandwidth。
+显式实例参数面现在可称为：**writable-field execution and double OA readback verified; arbitrary-field persistence remains PDK-conditional**。下一步进入受控拓扑变更：新建源极退化共源 cellview，明确新增实例、网络、参数和逆操作，先重新通过 DC 工作区，再进入 AC gain/bandwidth；不得从现有共源 DC 结果直接外推。

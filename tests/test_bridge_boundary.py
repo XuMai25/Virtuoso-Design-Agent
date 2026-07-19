@@ -16,6 +16,7 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     _instance_parameters_from_schematic,
     _parse_common_source_netlist,
     _parse_inverter_netlist,
+    ParameterReadbackMismatch,
     _read_nonempty_text,
     _requested_instance_parameters,
     _schematic_exists,
@@ -338,6 +339,113 @@ def test_explicit_parameter_worker_uses_bridge_callback_and_exact_readback(
     assert result["confirmed_instance_parameters"] == {
         "MN0": {"Wfg": "0.6u", "fingers": "2"}
     }
+    assert result["application_method"] == "bridge_batch"
+    assert result["ordered_replay_reason"] is None
+
+
+def test_explicit_parameter_worker_repairs_callback_order_once(monkeypatch) -> None:
+    import sys
+    from types import ModuleType
+
+    calls = []
+    params_module = ModuleType("virtuoso_bridge.virtuoso.schematic.params")
+
+    def set_instance_params(client, instance, param_filters=None, **parameters):
+        calls.append((instance, dict(parameters)))
+        return dict(parameters)
+
+    params_module.set_instance_params = set_instance_params
+    monkeypatch.setitem(
+        sys.modules, "virtuoso_bridge.virtuoso.schematic.params", params_module
+    )
+    reads = iter(
+        [
+            _inverter_schematic_data("1"),
+            _inverter_schematic_data("1"),
+            _inverter_schematic_data("2"),
+        ]
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._read_schematic",
+        lambda *args, **kwargs: next(reads),
+    )
+    verification_count = 0
+
+    def verify(client, library, cell, expected):
+        nonlocal verification_count
+        verification_count += 1
+        if verification_count == 1:
+            raise ParameterReadbackMismatch(
+                "targeted CDF readback failed: CDF parameter readback mismatch: MN0.m"
+            )
+        return expected
+
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._verify_instance_parameter_values",
+        verify,
+    )
+
+    class Client:
+        def open_window(self, library, cell, view):
+            return None
+
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump()
+    result = _apply_explicit_instance_parameters(
+        Client(),
+        "vda_test",
+        "vda_inv",
+        {
+            "circuit": "inverter",
+            "profile": profile,
+            "instance_parameter_updates": [
+                {"instance": "MN0", "parameters": {"fingers": "2", "m": "2"}}
+            ],
+        },
+    )
+
+    assert calls == [
+        ("MN0", {"fingers": "2", "m": "2"}),
+        ("MN0", {"fingers": "2"}),
+        ("MN0", {"m": "2"}),
+    ]
+    assert verification_count == 2
+    assert result["application_method"] == "bridge_batch_then_ordered_replay"
+    assert result["ordered_replay_applied_instance_parameters"] == {
+        "MN0": {"fingers": "2", "m": "2"}
+    }
+    assert "MN0.m" in result["ordered_replay_reason"]
+
+    failed_reads = iter(
+        [_inverter_schematic_data("1"), _inverter_schematic_data("1")]
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._read_schematic",
+        lambda *args, **kwargs: next(failed_reads),
+    )
+
+    def always_mismatch(*args, **kwargs):
+        raise ParameterReadbackMismatch("MN0.m still mismatched")
+
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._verify_instance_parameter_values",
+        always_mismatch,
+    )
+    with pytest.raises(ParameterReadbackMismatch, match="attempted once"):
+        _apply_explicit_instance_parameters(
+            Client(),
+            "vda_test",
+            "vda_inv",
+            {
+                "circuit": "inverter",
+                "profile": profile,
+                "instance_parameter_updates": [
+                    {
+                        "instance": "MN0",
+                        "parameters": {"fingers": "2", "m": "2"},
+                    }
+                ],
+            },
+        )
 
 
 def test_targeted_cdf_verification_does_not_use_reader_length_or_empty_filters(
