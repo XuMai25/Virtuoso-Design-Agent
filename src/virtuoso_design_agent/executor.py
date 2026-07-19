@@ -14,6 +14,7 @@ from .metrics import evaluate_constraints
 from .models import (
     ActionRecord,
     CandidateEvaluation,
+    CircuitKind,
     EvidenceSource,
     ExecutionCheckpoint,
     ExecutionPlan,
@@ -26,6 +27,15 @@ from .models import (
 from .safety import authorize_execution
 
 T = TypeVar("T")
+
+_OA_SEMANTIC_PARAMETERS = {
+    CircuitKind.INVERTER: ("nmos_width_um", "pmos_width_um", "length_um"),
+    CircuitKind.COMMON_SOURCE: (
+        "device_width_um",
+        "length_um",
+        "load_resistance_ohm",
+    ),
+}
 
 
 class TaskExecutor:
@@ -129,9 +139,11 @@ class TaskExecutor:
         return feasibility, candidate.total_violation, objective, float(candidate.index)
 
     @staticmethod
-    def _semantic_parameters(result: AdapterResult) -> dict[str, float]:
+    def _semantic_parameters(
+        result: AdapterResult, task: TaskSpec
+    ) -> dict[str, float]:
         raw = result.data.get("semantic_parameters")
-        required = ("nmos_width_um", "pmos_width_um", "length_um")
+        required = _OA_SEMANTIC_PARAMETERS[task.circuit]
         if not isinstance(raw, dict) or any(name not in raw for name in required):
             raise RuntimeError(
                 "schematic inspection did not return canonical semantic parameters"
@@ -140,16 +152,17 @@ class TaskExecutor:
 
     @classmethod
     def _applied_semantic_parameters(
-        cls, result: AdapterResult
+        cls, result: AdapterResult, task: TaskSpec
     ) -> dict[str, float]:
         data = result.data
         if "semantic_parameters" in data:
-            return cls._semantic_parameters(result)
+            return cls._semantic_parameters(result, task)
         readback = data.get("readback")
         if not isinstance(readback, dict):
             raise RuntimeError("parameter write did not return structured OA readback")
         return cls._semantic_parameters(
-            AdapterResult(data=readback, evidence_source=result.evidence_source)
+            AdapterResult(data=readback, evidence_source=result.evidence_source),
+            task,
         )
 
     @staticmethod
@@ -258,7 +271,7 @@ class TaskExecutor:
                             index,
                             parameters,
                             evaluations,
-                            self._applied_semantic_parameters(staged),
+                            self._applied_semantic_parameters(staged, task),
                         )
                 result = self._action(
                     f"simulation.candidate.{index}",
@@ -318,10 +331,12 @@ class TaskExecutor:
         total = self._candidate_space_size(task)
         evaluated = min(total, task.limits.max_iterations)
         if evaluated < total:
-            notes.append(
+            note = (
                 f"search budget exhausted after {evaluated} of {total} declared candidates; "
                 "selection is only best within the evaluated prefix"
             )
+            if note not in notes:
+                notes.append(note)
             return RunStatus.PARTIAL
         return status
 
@@ -444,7 +459,7 @@ class TaskExecutor:
                 action,
                 lambda: self.adapter.apply_parameters(task, parameters),
             )
-            expected_oa_parameters = self._applied_semantic_parameters(result)
+            expected_oa_parameters = self._applied_semantic_parameters(result, task)
             pending_oa_parameters = None
             persist_checkpoint()
             return expected_oa_parameters
@@ -508,7 +523,7 @@ class TaskExecutor:
                     else "schematic.inspect.before",
                     lambda: self.adapter.inspect_schematic(task),
                 )
-                current_parameters = self._semantic_parameters(before)
+                current_parameters = self._semantic_parameters(before, task)
                 if resume_checkpoint is None:
                     initial_parameters = current_parameters
                     expected_oa_parameters = current_parameters
@@ -565,7 +580,7 @@ class TaskExecutor:
                         "schematic.inspect.after",
                         lambda: self.adapter.inspect_schematic(task),
                     )
-                    final_parameters = self._semantic_parameters(after)
+                    final_parameters = self._semantic_parameters(after, task)
                     if not self._same_parameters(
                         expected_oa_parameters, final_parameters
                     ):

@@ -6,7 +6,7 @@ import hashlib
 import json
 
 from .catalog import validate_task_capability
-from .models import ExecutionPlan, Operation, PlanStep, SideEffect, TaskSpec
+from .models import CircuitKind, ExecutionPlan, Operation, PlanStep, SideEffect, TaskSpec
 
 
 def _step(
@@ -21,6 +21,18 @@ def _step(
 
 
 def _steps_for(task: TaskSpec) -> list[PlanStep]:
+    common_source = task.circuit is CircuitKind.COMMON_SOURCE
+    template_name = "共源放大器" if common_source else "反相器"
+    simulation_description = (
+        "用 OA 导出网表和受控 testbench 运行 Spectre DC operating point"
+        if common_source
+        else "用 OA 导出网表和受控 testbench 运行 Spectre transient"
+    )
+    sweep_description = (
+        "在 max_iterations 内运行 OA 同源 DC operating-point 候选"
+        if common_source
+        else "在 max_iterations 内运行 OA 同源网表候选"
+    )
     probe = _step(
         "01-probe",
         "bridge.probe",
@@ -52,7 +64,7 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             _step(
                 "02-create",
                 "schematic.create",
-                "按受控模板创建反相器 schematic",
+                f"按受控模板创建{template_name} schematic",
                 SideEffect.REMOTE_WRITE,
             ),
             inspect.model_copy(update={"id": "03-inspect"}),
@@ -85,7 +97,7 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             _step(
                 "04-simulate",
                 "simulation.run",
-                "用 OA 导出网表和受控 testbench 运行 Spectre transient",
+                simulation_description,
                 SideEffect.REMOTE_COMPUTE,
             ),
             _step(
@@ -110,7 +122,7 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             _step(
                 "05-sweep",
                 "simulation.sweep",
-                "在 max_iterations 内运行 OA 同源网表候选",
+                sweep_description,
                 SideEffect.REMOTE_COMPUTE,
             ),
             _step(
@@ -138,7 +150,7 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         _step(
             "02-create-or-verify",
             "schematic.ensure",
-            "创建缺失 schematic，或验证已有 topology",
+            f"创建缺失的{template_name} schematic，或验证已有 topology",
             SideEffect.REMOTE_WRITE,
         ),
         _step(
@@ -151,7 +163,7 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         _step(
             "05-sweep",
             "simulation.sweep",
-            "在 max_iterations 内运行 OA 同源网表候选",
+            sweep_description,
             SideEffect.REMOTE_COMPUTE,
         ),
         _step(

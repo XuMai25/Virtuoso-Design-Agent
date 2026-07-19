@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "id": "common-source-dc-budget-bridge",
+  "operation": "design.tune",
+  "circuit": "common_source",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_cs_gate2a_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "parameters": {
+    "length_um": 0.03,
+    "load_resistance_ohm": 20000.0,
+    "vdd_v": 0.9
+  },
+  "parameter_space": {
+    "device_width_um": [0.5, 1.0],
+    "bias_v": [0.35, 0.4]
+  },
+  "constraints": [
+    {"metric": "drain_current_ua", "relation": ">=", "value": 5.0},
+    {"metric": "saturation_margin_v", "relation": ">=", "value": 0.0},
+    {"metric": "output_swing_margin_v", "relation": ">=", "value": 0.05}
+  ],
+  "objective": {
+    "metric": "output_swing_margin_v",
+    "goal": "maximize"
+  },
+  "create_if_missing": false,
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}

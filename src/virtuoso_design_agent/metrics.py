@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from statistics import median
 
@@ -215,6 +216,73 @@ def extract_supply_metrics(
         "supply_cycle_period_ps": period_s * 1e12,
         "supply_energy_per_cycle_fj": energy_j * 1e15,
         "average_supply_power_uw": energy_j / period_s * 1e6,
+    }
+
+
+def extract_common_source_dc_metrics(
+    *,
+    vdd_v: float,
+    vin_v: float,
+    vout_v: float,
+    vss_v: float,
+    drain_current_a: float,
+    vdsat_v: float,
+    gm_s: float,
+    gds_s: float,
+    load_resistance_ohm: float,
+) -> dict[str, float]:
+    """Derive common-source DC metrics from a completed Spectre OP result."""
+    values = {
+        "vdd_v": vdd_v,
+        "vin_v": vin_v,
+        "vout_v": vout_v,
+        "vss_v": vss_v,
+        "drain_current_a": drain_current_a,
+        "vdsat_v": vdsat_v,
+        "gm_s": gm_s,
+        "gds_s": gds_s,
+        "load_resistance_ohm": load_resistance_ohm,
+    }
+    if any(not math.isfinite(float(value)) for value in values.values()):
+        raise MetricExtractionError("common-source operating-point values must be finite")
+    if vdd_v <= vss_v:
+        raise MetricExtractionError("vdd_v must be greater than vss_v")
+    if load_resistance_ohm <= 0:
+        raise MetricExtractionError("load resistance must be positive")
+    if gds_s <= 0:
+        raise MetricExtractionError("common-source gds must be positive")
+
+    drain_current_a = abs(float(drain_current_a))
+    vdsat_v = abs(float(vdsat_v))
+    gm_s = abs(float(gm_s))
+    gds_s = float(gds_s)
+    vgs_v = float(vin_v) - float(vss_v)
+    vds_v = float(vout_v) - float(vss_v)
+    upper_headroom_v = float(vdd_v) - float(vout_v)
+    saturation_margin_v = vds_v - vdsat_v
+    resistor_current_a = upper_headroom_v / float(load_resistance_ohm)
+    current_scale_a = max(drain_current_a, abs(resistor_current_a), 1e-18)
+    current_mismatch_percent = (
+        abs(drain_current_a - abs(resistor_current_a)) / current_scale_a * 100.0
+    )
+
+    return {
+        "drain_current_ua": drain_current_a * 1e6,
+        "vgs_v": vgs_v,
+        "vds_v": vds_v,
+        "vdsat_v": vdsat_v,
+        "saturation_margin_v": saturation_margin_v,
+        "upper_output_headroom_v": upper_headroom_v,
+        "lower_saturation_headroom_v": saturation_margin_v,
+        "output_swing_margin_v": min(upper_headroom_v, saturation_margin_v),
+        "gm_us": gm_s * 1e6,
+        "gds_us": gds_s * 1e6,
+        "intrinsic_gain_v_per_v": gm_s / gds_s,
+        "resistor_current_ua": abs(resistor_current_a) * 1e6,
+        "current_mismatch_percent": current_mismatch_percent,
+        "saturation_region": float(
+            drain_current_a > 0.0 and saturation_margin_v >= 0.0
+        ),
     }
 
 

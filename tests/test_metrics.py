@@ -4,6 +4,7 @@ import pytest
 
 from virtuoso_design_agent.metrics import (
     MetricExtractionError,
+    extract_common_source_dc_metrics,
     extract_inverter_metrics,
     extract_supply_metrics,
 )
@@ -88,4 +89,56 @@ def test_supply_metrics_reject_unexpected_current_polarity() -> None:
             [0.0, 1.0, 1.0, 0.0, 1.0],
             [2e-6] * 5,
             vdd_v=1.0,
+        )
+
+
+def test_extract_common_source_dc_metrics_from_operating_point() -> None:
+    metrics = extract_common_source_dc_metrics(
+        vdd_v=0.9,
+        vin_v=0.45,
+        vout_v=0.5,
+        vss_v=0.0,
+        drain_current_a=20e-6,
+        vdsat_v=0.12,
+        gm_s=200e-6,
+        gds_s=10e-6,
+        load_resistance_ohm=20_000.0,
+    )
+
+    assert metrics["drain_current_ua"] == pytest.approx(20.0)
+    assert metrics["vgs_v"] == pytest.approx(0.45)
+    assert metrics["vds_v"] == pytest.approx(0.5)
+    assert metrics["saturation_margin_v"] == pytest.approx(0.38)
+    assert metrics["output_swing_margin_v"] == pytest.approx(0.38)
+    assert metrics["intrinsic_gain_v_per_v"] == pytest.approx(20.0)
+    assert metrics["resistor_current_ua"] == pytest.approx(20.0)
+    assert metrics["current_mismatch_percent"] == pytest.approx(0.0)
+    assert metrics["saturation_region"] == pytest.approx(1.0)
+
+
+def test_common_source_dc_metrics_reject_nonfinite_or_zero_gds() -> None:
+    with pytest.raises(MetricExtractionError, match="finite"):
+        extract_common_source_dc_metrics(
+            vdd_v=0.9,
+            vin_v=float("nan"),
+            vout_v=0.5,
+            vss_v=0.0,
+            drain_current_a=20e-6,
+            vdsat_v=0.12,
+            gm_s=200e-6,
+            gds_s=10e-6,
+            load_resistance_ohm=20_000.0,
+        )
+
+    with pytest.raises(MetricExtractionError, match="gds"):
+        extract_common_source_dc_metrics(
+            vdd_v=0.9,
+            vin_v=0.45,
+            vout_v=0.5,
+            vss_v=0.0,
+            drain_current_a=20e-6,
+            vdsat_v=0.12,
+            gm_s=200e-6,
+            gds_s=0.0,
+            load_resistance_ohm=20_000.0,
         )

@@ -43,11 +43,20 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     ),
     CircuitKind.COMMON_SOURCE: CircuitCapability(
         circuit=CircuitKind.COMMON_SOURCE,
-        stage="Gate 2",
-        executable=False,
-        operations=(),
-        parameters=("device_width_um", "length_um", "bias_ua", "load_ff"),
-        evidence_gate="DC operating point before AC gain/bandwidth",
+        stage="Gate 2A DC operating point",
+        executable=True,
+        operations=_ALL_OPERATIONS,
+        parameters=(
+            "device_width_um",
+            "length_um",
+            "load_resistance_ohm",
+            "bias_v",
+            "vdd_v",
+        ),
+        evidence_gate=(
+            "OA readback + si netlist consistency + DC Id/VGS/VDS/VDSAT/gm/gds "
+            "before AC gain/bandwidth"
+        ),
     ),
     CircuitKind.SOURCE_DEGENERATED_COMMON_SOURCE: CircuitCapability(
         circuit=CircuitKind.SOURCE_DEGENERATED_COMMON_SOURCE,
@@ -88,6 +97,16 @@ def validate_task_capability(task: TaskSpec) -> None:
         raise UnsupportedCapability(
             f"unsupported parameters for {task.circuit.value}: {', '.join(unknown)}"
         )
+    if (
+        task.circuit is CircuitKind.COMMON_SOURCE
+        and task.operation in {Operation.SCHEMATIC_CREATE, Operation.PARAMETERS_APPLY}
+    ):
+        testbench_only = sorted(supplied & {"bias_v", "vdd_v"})
+        if testbench_only:
+            raise UnsupportedCapability(
+                f"{task.operation.value} cannot persist testbench-only parameters: "
+                + ", ".join(testbench_only)
+            )
 
 
 def catalog_as_dicts() -> list[dict]:

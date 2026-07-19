@@ -77,8 +77,29 @@ VDA 不嵌入一个新的通用 LLM。Codex 负责开放式推理，VDA 负责�
 
 后续 Bridge 提交 `f8fdb9e` 对已有幂等 SSH command/upload/download 重试加入 1 秒、3 秒有界退避，`2f41293` 则把 `connect()` 在 `sendall()` 前的拒绝标成私有 pre-send 错误，允许 managed client warm 并重试一次。安全边界取决于“payload 是否可能已发送”：pre-send 可自动恢复；send/recv 之后一律不重放 SKILL，由 VDA checkpoint 暂停并在新进程中核对 OA 后恢复。9 点压力任务在候选 8 的 pre-send connect refusal 处暂停并成功恢复到 9/9；同-client 强制断链 smoke 又直接验证了 pre-send 自动恢复。单次证据不外推为网络永不掉线。
 
+## 共源 Gate 2A DC 路径
+
+共源级沿用同一个 adapter port、worker 边界和 checkpoint 状态机，没有增加第二套执行框架：
+
+```text
+目标 OA schematic: MN0 + analogLib/RD0
+  -> Bridge 结构/连接/W/L/R 回读
+  -> si -batch 结构网表
+  -> 解析 MN0/RD0 端口、master、W/L/R，并与 OA 比对
+  -> 只含 VDD/VIN/VSS source 和 dcOp/info 的 wrapper
+  -> Spectre PSFASCII 节点电压 + MN0 operating-point 标量
+  -> Id/VGS/VDS/VDSAT/gm/gds、KCL、饱和余量和摆幅余量
+  -> 规格判定、有限 W/Vbias 搜索、最佳 W 写回和 OA 回读
+```
+
+`RD0` 是设计的一部分，因此在 OA/`si` 中；`Vbias` 和 `VDD` 是 testbench 条件，保留在 wrapper，并按任务是否显式给出标成 `user_input` 或 `software_inference`。调优时 W/L/R 属于可写回 OA 的 canonical semantic parameters；偏置条件进入候选和 run record，但当前没有被伪装成 OA 属性。
+
+Spectre 的通用 `dcOpInfo` 在当前 Bridge parser 中以器件聚合对象出现。VDA 没有修改或复制 Bridge parser，而是在 wrapper 中显式 `save MN0:ids/vgs/vds/vdsat/gm/gds`，使 Bridge 已有 PSFASCII 标量路径直接返回所需量。第一次未显式 save 的失败记录被保留；不会把存在 `dcOpInfo_MN0` 聚合对象误当成完整标量证据。
+
+工作区分类不读取一个未验证的模型枚举值：`saturation_region` 由 Spectre 给出的 `VDS`、`VDSAT` 和 `IDS` 按显式规则推导，标为 `software_inference`；原始器件量、节点量和从它们计算的连续指标标为 `eda_result`。Gate 2A 已在 `vb_pdk_smoke/vda_cs_gate2a_001/schematic` 完成 6 点真实搜索和最终独立 OA→si→DC OP 复核。下一步是在这个已验证偏置点上加入 AC gain/bandwidth；尚不能把 Gate 2A 称为完整放大器闭环。
+
 ## 证据链
 
 每次运行至少保存任务和计划 token、adapter 与证据来源、动作状态、候选参数、仿真指标、逐条规格判定、最终选择、OA 回读摘要，以及错误和未验证边界。调优 checkpoint 保留历史失败 actions，但恢复后只有完成的候选证据参与选择；最终 run 可以在完整证据和最终回读成立时成功，同时仍显式留下已恢复的 transport 事件。自动 netlisting 还保存远端网表/wrapper 路径、SHA-256、解析后的实例参数和一致性结论。
 
-timing、过冲/欠冲、`supply_energy_per_cycle_fj` 和 `average_supply_power_uw` 标为 `eda_result`；OA 结构和参数标为 `bridge_readback`；任务显式给出的 VDD/负载标为 `user_input`；`gate_area_proxy_um2=(Wn+Wp)L` 只是 `software_inference`，不能称为版图面积或输入电容。供电能量在相邻两次 VIN 50% 上升沿间积分，包含该周期泄漏，不称为纯动态开关能量。后续 Maestro、Calibre 和 PEX 沿用同一证据模型。
+timing、过冲/欠冲、`supply_energy_per_cycle_fj`、`average_supply_power_uw` 和共源 DC 连续指标标为 `eda_result`；OA 结构和参数标为 `bridge_readback`；任务显式给出的 VDD、负载或偏置标为 `user_input`；`gate_area_proxy_um2=(Wn+Wp)L` 与共源饱和区分类是 `software_inference`。供电能量在相邻两次 VIN 50% 上升沿间积分，包含该周期泄漏，不称为纯动态开关能量；饱和区分类也不冒充 PDK 模型直接输出。后续 Maestro、Calibre 和 PEX 沿用同一证据模型。

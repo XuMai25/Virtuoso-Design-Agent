@@ -10,5 +10,8 @@
   "remote_run_root": "/data/xum/virtuoso_bridge_smoke",
   "default_vdd_v": 0.9,
   "default_load_ff": 2.0,
-  "default_length_um": 0.03
+  "default_length_um": 0.03,
+  "default_common_source_width_um": 1.0,
+  "default_common_source_bias_v": 0.45,
+  "default_common_source_load_resistance_ohm": 20000.0
 }

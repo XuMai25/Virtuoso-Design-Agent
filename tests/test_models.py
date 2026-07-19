@@ -48,3 +48,33 @@ def test_unimplemented_circuit_is_explicit() -> None:
     task = TaskSpec.model_validate(data)
     with pytest.raises(UnsupportedCapability, match="Gate 3"):
         build_plan(task)
+
+
+def test_common_source_gate_accepts_only_implemented_dc_parameters() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "cs-dc",
+            "operation": "design.tune",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "parameters": {
+                "length_um": 0.03,
+                "load_resistance_ohm": 20_000.0,
+                "vdd_v": 0.9,
+            },
+            "parameter_space": {
+                "device_width_um": [0.5, 1.0],
+                "bias_v": [0.4, 0.45],
+            },
+            "constraints": [
+                {"metric": "saturation_margin_v", "relation": ">=", "value": 0.05}
+            ],
+        }
+    )
+    assert build_plan(task).circuit.value == "common_source"
+
+    invalid = task.model_copy(
+        update={"parameters": dict(task.parameters) | {"load_ff": 2.0}}
+    )
+    with pytest.raises(UnsupportedCapability, match="load_ff"):
+        build_plan(invalid)

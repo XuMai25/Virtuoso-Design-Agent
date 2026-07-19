@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from ..models import EvidenceSource, TaskSpec
+from ..models import CircuitKind, EvidenceSource, TaskSpec
 from ..profiles import load_pdk_profile
 from .base import AdapterInterrupted, AdapterResult
 
@@ -17,6 +17,21 @@ DEFAULT_BRIDGE_PYTHON = Path(
     r"C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\python.exe"
 )
 _MARKER = "VDA_RESULT="
+
+_WORKER_ACTIONS = {
+    CircuitKind.INVERTER: {
+        "create": "create_inverter",
+        "inspect": "inspect_inverter",
+        "apply": "apply_inverter_parameters",
+        "simulate": "simulate_inverter",
+    },
+    CircuitKind.COMMON_SOURCE: {
+        "create": "create_common_source",
+        "inspect": "inspect_common_source",
+        "apply": "apply_common_source_parameters",
+        "simulate": "simulate_common_source",
+    },
+}
 
 
 class BridgeWorkerError(AdapterInterrupted):
@@ -76,6 +91,7 @@ class SubprocessBridgeAdapter:
         return {
             "task_id": task.id,
             "operation": task.operation.value,
+            "circuit": task.circuit.value,
             "target": task.target.model_dump(mode="json"),
             "profile": load_pdk_profile(task.pdk_profile).model_dump(mode="json"),
             "parameters": task.parameters,
@@ -92,7 +108,7 @@ class SubprocessBridgeAdapter:
 
     def create_schematic(self, task: TaskSpec) -> AdapterResult:
         data = self._request(
-            "create_inverter",
+            _WORKER_ACTIONS[task.circuit]["create"],
             self._task_payload(task),
             timeout=task.limits.timeout_seconds,
         )
@@ -100,7 +116,7 @@ class SubprocessBridgeAdapter:
 
     def inspect_schematic(self, task: TaskSpec) -> AdapterResult:
         data = self._request(
-            "inspect_inverter",
+            _WORKER_ACTIONS[task.circuit]["inspect"],
             self._task_payload(task),
             timeout=min(task.limits.timeout_seconds, 120),
         )
@@ -112,7 +128,7 @@ class SubprocessBridgeAdapter:
         payload = self._task_payload(task)
         payload["parameters"] = parameters
         data = self._request(
-            "apply_inverter_parameters",
+            _WORKER_ACTIONS[task.circuit]["apply"],
             payload,
             timeout=min(task.limits.timeout_seconds, 180),
         )
@@ -124,7 +140,7 @@ class SubprocessBridgeAdapter:
         payload = self._task_payload(task)
         payload["parameters"] = parameters
         data = self._request(
-            "simulate_inverter",
+            _WORKER_ACTIONS[task.circuit]["simulate"],
             payload,
             timeout=task.limits.timeout_seconds + 240,
         )

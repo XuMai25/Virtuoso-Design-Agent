@@ -12,10 +12,11 @@ ROOT = Path(__file__).resolve().parents[1]
 DEMO_TASK = ROOT / "examples" / "tasks" / "inverter-close-loop.demo.json"
 
 
-def test_catalog_marks_only_inverter_executable(capsys) -> None:
+def test_catalog_marks_gate2a_common_source_executable(capsys) -> None:
     assert main(["catalog"]) == 0
     output = capsys.readouterr().out
     assert "inverter: L5A vertical slice [executable]" in output
+    assert "common_source: Gate 2A DC operating point [executable]" in output
     assert "differential_pair: Gate 3 [planned]" in output
 
 

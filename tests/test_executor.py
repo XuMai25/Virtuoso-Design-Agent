@@ -366,3 +366,174 @@ def test_resume_after_final_write_interruption_does_not_repeat_simulations(
         action.action == "parameters.apply.best" and action.status == "succeeded"
         for action in resumed.actions
     )
+
+
+def _common_source_loop() -> TaskSpec:
+    return TaskSpec.model_validate(
+        {
+            "id": "cs-loop",
+            "operation": "design.close_loop",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "parameters": {
+                "length_um": 0.03,
+                "load_resistance_ohm": 20_000.0,
+                "vdd_v": 0.9,
+            },
+            "parameter_space": {
+                "device_width_um": [0.5, 1.0, 1.5],
+                "bias_v": [0.45],
+            },
+            "constraints": [
+                {
+                    "metric": "drain_current_ua",
+                    "relation": "target",
+                    "value": 20.0,
+                    "tolerance": 1.0,
+                },
+                {
+                    "metric": "saturation_margin_v",
+                    "relation": ">=",
+                    "value": 0.05,
+                },
+            ],
+            "objective": {
+                "metric": "output_swing_margin_v",
+                "goal": "maximize",
+            },
+            "create_if_missing": True,
+            "safety": {
+                "allow_remote_compute": True,
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+            "limits": {"max_iterations": 3, "timeout_seconds": 600},
+        }
+    )
+
+
+def test_common_source_demo_closes_dc_operating_point_with_oa_readback() -> None:
+    task = _common_source_loop()
+    plan = build_plan(task)
+    adapter = DeterministicDemoAdapter()
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert record.selected_parameters is not None
+    assert record.selected_parameters["device_width_um"] == pytest.approx(1.0)
+    assert record.selected_parameters["bias_v"] == pytest.approx(0.45)
+    assert adapter.inspect_schematic(task).data["semantic_parameters"] == {
+        "device_width_um": pytest.approx(1.0),
+        "length_um": pytest.approx(0.03),
+        "load_resistance_ohm": pytest.approx(20_000.0),
+    }
+    assert all(
+        candidate.evidence_source.value == "software_inference"
+        for candidate in record.candidates
+    )
+
+
+def test_common_source_infeasible_search_restores_oa_parameters() -> None:
+    task = _common_source_loop().model_copy(
+        update={
+            "constraints": [
+                _common_source_loop().constraints[0].model_copy(
+                    update={"value": 1.0, "tolerance": 0.1}
+                )
+            ]
+        }
+    )
+    plan = build_plan(task)
+    adapter = DeterministicDemoAdapter()
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.PARTIAL
+    assert any(action.action == "parameters.restore" for action in record.actions)
+    assert adapter.inspect_schematic(task).data["semantic_parameters"] == {
+        "device_width_um": pytest.approx(1.0),
+        "length_um": pytest.approx(0.03),
+        "load_resistance_ohm": pytest.approx(20_000.0),
+    }
+
+
+def test_common_source_budget_exhaustion_is_explicit() -> None:
+    base = _common_source_loop()
+    task = base.model_copy(
+        update={
+            "parameter_space": {
+                "device_width_um": [0.5, 1.0, 1.5],
+                "bias_v": [0.35, 0.45],
+            },
+            "limits": base.limits.model_copy(update={"max_iterations": 2}),
+        }
+    )
+    plan = build_plan(task)
+    executor = TaskExecutor(DeterministicDemoAdapter())
+    record = executor.execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert len(record.candidates) == 2
+    assert record.status is RunStatus.PARTIAL
+    assert any("search budget exhausted" in note for note in record.notes)
+    notes = list(record.notes)
+    executor._note_budget_exhaustion(task, record.status, notes)
+    assert sum(note.startswith("search budget exhausted") for note in notes) == 1
+
+
+def test_common_source_checkpoint_resumes_completed_prefix(tmp_path) -> None:
+    class InterruptingCommonSourceAdapter(DeterministicDemoAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.widths: list[float] = []
+            self.interrupted = False
+
+        def simulate(self, task, parameters):
+            width = float(parameters["device_width_um"])
+            self.widths.append(width)
+            if width == 1.0 and not self.interrupted:
+                self.interrupted = True
+                raise BridgeWorkerError("injected common-source transport reset")
+            return super().simulate(task, parameters)
+
+    base = _common_source_loop()
+    task = base.model_copy(
+        update={
+            "parameter_space": {
+                "device_width_um": [0.5, 1.0],
+                "bias_v": [0.45],
+            },
+            "limits": base.limits.model_copy(update={"max_iterations": 2}),
+        }
+    )
+    plan = build_plan(task)
+    adapter = InterruptingCommonSourceAdapter()
+    checkpoint_path = tmp_path / "common-source.checkpoint.json"
+    first = TaskExecutor(adapter).execute(
+        task,
+        plan,
+        token=plan.confirmation_token,
+        checkpoint_path=checkpoint_path,
+    )
+    checkpoint = load_execution_checkpoint(checkpoint_path)
+
+    assert first.status is RunStatus.FAILED
+    assert checkpoint.next_candidate_index == 2
+    assert [candidate.index for candidate in checkpoint.candidates] == [1]
+
+    resumed = TaskExecutor(adapter).execute(
+        task,
+        plan,
+        token=plan.confirmation_token,
+        checkpoint_path=checkpoint_path,
+        resume_checkpoint=checkpoint,
+    )
+
+    assert resumed.status is RunStatus.SUCCEEDED
+    assert adapter.widths.count(0.5) == 1
+    assert adapter.widths.count(1.0) == 2
+    assert load_execution_checkpoint(checkpoint_path).complete is True

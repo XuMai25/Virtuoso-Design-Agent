@@ -7,9 +7,12 @@ import pytest
 
 from virtuoso_design_agent.adapters.bridge_worker import (
     _assert_parameter_consistency,
+    _common_source_metrics_from_result,
+    _common_source_testbench_deck,
     _complete_si_env,
     _generate_oa_netlist,
     _inverter_testbench_deck,
+    _parse_common_source_netlist,
     _parse_inverter_netlist,
     _read_nonempty_text,
     _schematic_exists,
@@ -52,6 +55,28 @@ def test_inverter_testbench_deck_includes_oa_netlist_without_device_topology() -
     assert "MP0 (" not in deck
 
 
+def test_common_source_deck_uses_oa_topology_and_requests_dc_op() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump()
+    deck = _common_source_testbench_deck(
+        profile,
+        {
+            "device_width_um": 1.0,
+            "length_um": 0.03,
+            "load_resistance_ohm": 20_000.0,
+            "bias_v": 0.45,
+            "vdd_v": 0.9,
+        },
+        "/data/xum/virtuoso_bridge_smoke/vda_cs/netlist",
+    )
+    assert 'include "/data/xum/virtuoso_bridge_smoke/vda_cs/netlist"' in deck
+    assert "VIN_SRC (IN 0) vsource dc=vbias" in deck
+    assert "dcOp dc" in deck
+    assert "dcOpInfo info what=oppoint where=rawfile" in deck
+    assert "save MN0:ids MN0:vgs MN0:vds MN0:vdsat MN0:gm MN0:gds" in deck
+    assert "MN0 (" not in deck
+    assert "RD0 (" not in deck
+
+
 def test_si_env_completion_adds_verified_spectre_formatter_context_once() -> None:
     completed = _complete_si_env(
         'simLibName = "vb_pdk_smoke"\n'
@@ -88,6 +113,103 @@ MP0 (OUT IN VDD VDD) pch_lvt_mac l=30n w=1u nf=1 multi=1
         expected_label="OA readback",
         actual_label="si netlist",
     )
+
+
+def test_common_source_oa_netlist_parameters_and_topology_are_parsed() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump()
+    parsed = _parse_common_source_netlist(
+        """
+MN0 (OUT IN VSS VSS) nch_lvt_mac l=30n w=1u nf=1 multi=1
+RD0 (VDD OUT) resistor r=20k
+""",
+        profile,
+    )
+    assert parsed["semantic_parameters"] == {
+        "device_width_um": pytest.approx(1.0),
+        "length_um": pytest.approx(0.03),
+        "load_resistance_ohm": pytest.approx(20_000.0),
+    }
+    assert parsed["instances"]["RD0"]["nodes"] == ["VDD", "OUT"]
+
+
+def test_common_source_operating_point_requires_consistent_eda_scalars() -> None:
+    metrics, evidence = _common_source_metrics_from_result(
+        {
+            "dc_IN": 0.45,
+            "dc_OUT": 0.5,
+            "dc_VDD": 0.9,
+            "dc_VSS": 0.0,
+            "dcOpInfo_MN0:ids": 20e-6,
+            "dcOpInfo_MN0:vgs": 0.45,
+            "dcOpInfo_MN0:vds": 0.5,
+            "dcOpInfo_MN0:vdsat": 0.12,
+            "dcOpInfo_MN0:gm": 200e-6,
+            "dcOpInfo_MN0:gds": 10e-6,
+        },
+        {
+            "vdd_v": 0.9,
+            "bias_v": 0.45,
+            "load_resistance_ohm": 20_000.0,
+        },
+    )
+    assert metrics["drain_current_ua"] == pytest.approx(20.0)
+    assert evidence["operating_region"] == "saturation"
+    assert evidence["node_device_consistency"] == "matched"
+    assert evidence["kcl_consistency"] == "matched"
+
+    with pytest.raises(RuntimeError, match="missing operating-point scalar.*vdsat"):
+        _common_source_metrics_from_result(
+            {
+                "dc_IN": 0.45,
+                "dc_OUT": 0.5,
+                "dc_VDD": 0.9,
+                "dc_VSS": 0.0,
+                "dcOpInfo_MN0:ids": 20e-6,
+                "dcOpInfo_MN0:vgs": 0.45,
+                "dcOpInfo_MN0:vds": 0.5,
+                "dcOpInfo_MN0:gm": 200e-6,
+                "dcOpInfo_MN0:gds": 10e-6,
+            },
+            {
+                "vdd_v": 0.9,
+                "bias_v": 0.45,
+                "load_resistance_ohm": 20_000.0,
+            },
+        )
+
+    inconsistent = {
+        "dc_IN": 0.45,
+        "dc_OUT": 0.5,
+        "dc_VDD": 0.9,
+        "dc_VSS": 0.0,
+        "dcOpInfo_MN0:ids": 30e-6,
+        "dcOpInfo_MN0:vgs": 0.45,
+        "dcOpInfo_MN0:vds": 0.5,
+        "dcOpInfo_MN0:vdsat": 0.12,
+        "dcOpInfo_MN0:gm": 200e-6,
+        "dcOpInfo_MN0:gds": 10e-6,
+    }
+    with pytest.raises(RuntimeError, match="KCL mismatch"):
+        _common_source_metrics_from_result(
+            inconsistent,
+            {
+                "vdd_v": 0.9,
+                "bias_v": 0.45,
+                "load_resistance_ohm": 20_000.0,
+            },
+        )
+
+    inconsistent["dcOpInfo_MN0:ids"] = 20e-6
+    inconsistent["dcOpInfo_MN0:vds"] = 0.4
+    with pytest.raises(RuntimeError, match="node/device mismatch for vds_v"):
+        _common_source_metrics_from_result(
+            inconsistent,
+            {
+                "vdd_v": 0.9,
+                "bias_v": 0.45,
+                "load_resistance_ohm": 20_000.0,
+            },
+        )
 
 
 def test_parameter_mismatch_is_not_silently_simulated() -> None:
