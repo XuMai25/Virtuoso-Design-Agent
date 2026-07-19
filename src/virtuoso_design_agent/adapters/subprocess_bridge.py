@@ -19,6 +19,10 @@ DEFAULT_BRIDGE_PYTHON = Path(
 _MARKER = "VDA_RESULT="
 
 _WORKER_ACTIONS = {
+    CircuitKind.EXISTING_SCHEMATIC: {
+        "inspect": "inspect_existing_schematic",
+        "apply": "apply_existing_schematic_parameters",
+    },
     CircuitKind.INVERTER: {
         "create": "create_inverter",
         "inspect": "inspect_inverter",
@@ -95,6 +99,10 @@ class SubprocessBridgeAdapter:
             "target": task.target.model_dump(mode="json"),
             "profile": load_pdk_profile(task.pdk_profile).model_dump(mode="json"),
             "parameters": task.parameters,
+            "instance_parameter_updates": [
+                update.model_dump(mode="json")
+                for update in task.instance_parameter_updates
+            ],
             "replace_existing": task.safety.replace_existing,
             "timeout_seconds": task.limits.timeout_seconds,
         }
@@ -119,6 +127,19 @@ class SubprocessBridgeAdapter:
             _WORKER_ACTIONS[task.circuit]["inspect"],
             self._task_payload(task),
             timeout=min(task.limits.timeout_seconds, 120),
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
+
+    def verify_parameters(
+        self, task: TaskSpec, expected: dict[str, dict[str, str]]
+    ) -> AdapterResult:
+        payload = self._task_payload(task)
+        payload["verify_instance_parameters"] = True
+        payload["expected_instance_parameters"] = expected
+        data = self._request(
+            _WORKER_ACTIONS[task.circuit]["inspect"],
+            payload,
+            timeout=min(task.limits.timeout_seconds, 180),
         )
         return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
 

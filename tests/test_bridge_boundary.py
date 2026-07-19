@@ -6,18 +6,22 @@ from types import SimpleNamespace
 import pytest
 
 from virtuoso_design_agent.adapters.bridge_worker import (
+    _apply_explicit_instance_parameters,
     _assert_parameter_consistency,
     _common_source_metrics_from_result,
     _common_source_testbench_deck,
     _complete_si_env,
     _generate_oa_netlist,
     _inverter_testbench_deck,
+    _instance_parameters_from_schematic,
     _parse_common_source_netlist,
     _parse_inverter_netlist,
     _read_nonempty_text,
+    _requested_instance_parameters,
     _schematic_exists,
     _signal,
     _validate_si_log,
+    _verify_instance_parameter_values,
 )
 from virtuoso_design_agent.adapters.subprocess_bridge import (
     BridgeWorkerError,
@@ -220,6 +224,159 @@ def test_parameter_mismatch_is_not_silently_simulated() -> None:
             expected_label="requested",
             actual_label="OA readback",
         )
+
+
+def _inverter_schematic_data(mn_multiplier: str) -> dict:
+    return {
+        "instances": [
+            {
+                "name": "MN0",
+                "lib": "tsmcN28",
+                "cell": "nch_lvt_mac",
+                "params": {
+                    "Wfg": "0.5u",
+                    "l": "0.03u",
+                    "fingers": "1",
+                    "m": mn_multiplier,
+                    "geo": "2",
+                },
+                "terms": {"D": "OUT", "G": "IN", "S": "VSS", "B": "VSS"},
+            },
+            {
+                "name": "MP0",
+                "lib": "tsmcN28",
+                "cell": "pch_lvt_mac",
+                "params": {
+                    "Wfg": "1u",
+                    "l": "0.03u",
+                    "fingers": "1",
+                    "m": "1",
+                },
+                "terms": {"D": "OUT", "G": "IN", "S": "VDD", "B": "VDD"},
+            },
+        ],
+        "nets": {name: {} for name in ("IN", "OUT", "VDD", "VSS")},
+        "pins": {name: {} for name in ("IN", "OUT", "VDD", "VSS")},
+    }
+
+
+def test_explicit_parameter_contract_keeps_unfiltered_cdf_values() -> None:
+    data = _inverter_schematic_data("1")
+    readback = _instance_parameters_from_schematic(data)
+    assert readback["MN0"]["geo"] == "2"
+
+    requested = _requested_instance_parameters(
+        {
+            "instance_parameter_updates": [
+                {"instance": "MN0", "parameters": {"m": "2", "geo": "3"}}
+            ]
+        }
+    )
+    assert requested == {"MN0": {"m": "2", "geo": "3"}}
+
+
+def test_explicit_parameter_worker_uses_bridge_callback_and_exact_readback(
+    monkeypatch,
+) -> None:
+    import sys
+    from types import ModuleType
+
+    calls = []
+    params_module = ModuleType("virtuoso_bridge.virtuoso.schematic.params")
+
+    def set_instance_params(client, instance, param_filters=None, **parameters):
+        calls.append((instance, {"param_filters": param_filters, **parameters}))
+        return {
+            {"wf": "Wfg", "nf": "fingers"}.get(name, name): value
+            for name, value in parameters.items()
+        }
+
+    params_module.set_instance_params = set_instance_params
+    monkeypatch.setitem(
+        sys.modules, "virtuoso_bridge.virtuoso.schematic.params", params_module
+    )
+    reads = iter([_inverter_schematic_data("1"), _inverter_schematic_data("1")])
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._read_schematic",
+        lambda *args, **kwargs: next(reads),
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._verify_instance_parameter_values",
+        lambda client, library, cell, expected: expected,
+    )
+
+    class Client:
+        def open_window(self, library, cell, view):
+            calls.append((library, cell, view))
+
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump()
+    result = _apply_explicit_instance_parameters(
+        Client(),
+        "vda_test",
+        "vda_inv",
+        {
+            "circuit": "inverter",
+            "profile": profile,
+            "instance_parameter_updates": [
+                {"instance": "MN0", "parameters": {"wf": "0.6u", "nf": "2"}}
+            ],
+        },
+    )
+
+    assert calls[-1] == (
+        "MN0",
+        {"param_filters": None, "wf": "0.6u", "nf": "2"},
+    )
+    assert result["requested_evidence_source"] == "user_input"
+    assert result["confirmed_evidence_source"] == "bridge_readback"
+    assert result["applied_instance_parameters"] == {
+        "MN0": {"Wfg": "0.6u", "fingers": "2"}
+    }
+    assert result["before_instance_parameters"] == {
+        "MN0": {"Wfg": "0.5u", "fingers": "1"}
+    }
+    assert result["confirmed_instance_parameters"] == {
+        "MN0": {"Wfg": "0.6u", "fingers": "2"}
+    }
+
+
+def test_targeted_cdf_verification_does_not_use_reader_length_or_empty_filters(
+    monkeypatch,
+) -> None:
+    import sys
+    from types import ModuleType
+
+    ops_module = ModuleType("virtuoso_bridge.virtuoso.ops")
+    ops_module.escape_skill_string = lambda value: value.replace("\\", "\\\\").replace(
+        '"', '\\"'
+    )
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.virtuoso.ops", ops_module)
+    captured = {}
+
+    class Client:
+        def execute_skill(self, skill, timeout):
+            captured["skill"] = skill
+            captured["timeout"] = timeout
+            return SimpleNamespace(output="t", errors=[])
+
+    long_value = "x" * 256
+    expected = {
+        "I0<3>": {
+            "empty_value": "",
+            "long_value": long_value,
+            "display-mode": "layout dependent",
+        }
+    }
+
+    confirmed = _verify_instance_parameter_values(
+        Client(), "vda_test", "vda_existing", expected
+    )
+
+    assert confirmed == expected
+    assert captured["timeout"] == 60
+    assert 'p~>value == ""' in captured["skill"]
+    assert long_value in captured["skill"]
+    assert 'p = get(iCDF "display-mode")' in captured["skill"]
 
 
 def test_empty_netlist_and_empty_waveform_are_rejected(tmp_path) -> None:

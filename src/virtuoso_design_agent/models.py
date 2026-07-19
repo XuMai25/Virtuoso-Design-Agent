@@ -6,7 +6,14 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 
 class StrictModel(BaseModel):
@@ -23,6 +30,7 @@ class Operation(str, Enum):
 
 
 class CircuitKind(str, Enum):
+    EXISTING_SCHEMATIC = "existing_schematic"
     INVERTER = "inverter"
     COMMON_SOURCE = "common_source"
     SOURCE_DEGENERATED_COMMON_SOURCE = "source_degenerated_common_source"
@@ -65,6 +73,22 @@ class DesignTarget(StrictModel):
     library: str = Field(min_length=1, pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$")
     cell: str = Field(min_length=1, pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$")
     view: str = Field(default="schematic", pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$")
+
+
+class InstanceParameterUpdate(StrictModel):
+    """Exact CDF/OA parameter strings requested for one existing instance."""
+
+    instance: StrictStr = Field(min_length=1)
+    parameters: dict[StrictStr, StrictStr]
+
+    @field_validator("parameters")
+    @classmethod
+    def validate_parameter_strings(
+        cls, value: dict[str, StrictStr]
+    ) -> dict[str, StrictStr]:
+        if not value:
+            raise ValueError("instance parameter update cannot be empty")
+        return value
 
 
 class MetricConstraint(StrictModel):
@@ -116,6 +140,9 @@ class TaskSpec(StrictModel):
     target: DesignTarget
     pdk_profile: str = Field(default="nics4304_tsmc28", min_length=1)
     parameters: dict[str, float] = Field(default_factory=dict)
+    instance_parameter_updates: list[InstanceParameterUpdate] = Field(
+        default_factory=list
+    )
     parameter_space: dict[str, list[float]] = Field(default_factory=dict)
     constraints: list[MetricConstraint] = Field(default_factory=list)
     objective: Objective | None = None
@@ -147,8 +174,25 @@ class TaskSpec(StrictModel):
 
     @model_validator(mode="after")
     def validate_operation_inputs(self) -> "TaskSpec":
-        if self.operation is Operation.PARAMETERS_APPLY and not self.parameters:
-            raise ValueError("parameters.apply requires parameters")
+        if self.instance_parameter_updates:
+            if self.operation is not Operation.PARAMETERS_APPLY:
+                raise ValueError(
+                    "instance_parameter_updates are currently supported only by "
+                    "parameters.apply"
+                )
+            instances = [update.instance for update in self.instance_parameter_updates]
+            if len(instances) != len(set(instances)):
+                raise ValueError(
+                    "instance_parameter_updates cannot repeat an instance"
+                )
+        if (
+            self.operation is Operation.PARAMETERS_APPLY
+            and not self.parameters
+            and not self.instance_parameter_updates
+        ):
+            raise ValueError(
+                "parameters.apply requires parameters or instance_parameter_updates"
+            )
         if self.operation in _TUNING_OPERATIONS:
             if not self.parameter_space:
                 raise ValueError(f"{self.operation.value} requires parameter_space")

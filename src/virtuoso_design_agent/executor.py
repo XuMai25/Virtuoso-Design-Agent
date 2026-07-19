@@ -177,6 +177,51 @@ class TaskExecutor:
             for name in expected
         )
 
+    @staticmethod
+    def _requested_instance_parameters(
+        task: TaskSpec,
+    ) -> dict[str, dict[str, str]]:
+        return {
+            update.instance: dict(update.parameters)
+            for update in task.instance_parameter_updates
+        }
+
+    @staticmethod
+    def _confirmed_instance_parameters(
+        data: dict[str, Any], field: str
+    ) -> dict[str, dict[str, str]]:
+        raw = data.get(field)
+        if not isinstance(raw, dict):
+            raise RuntimeError(
+                f"parameter write did not return structured {field}"
+            )
+        confirmed: dict[str, dict[str, str]] = {}
+        for instance, parameters in raw.items():
+            if not isinstance(instance, str) or not isinstance(parameters, dict):
+                raise RuntimeError(f"invalid structured {field}")
+            confirmed[instance] = {
+                str(name): str(value) for name, value in parameters.items()
+            }
+        return confirmed
+
+    @staticmethod
+    def _assert_explicit_parameter_confirmation(
+        requested: dict[str, dict[str, str]],
+        confirmed: dict[str, dict[str, str]],
+    ) -> None:
+        for instance, parameters in requested.items():
+            if instance not in confirmed:
+                raise RuntimeError(
+                    f"parameter confirmation is missing instance {instance}"
+                )
+            for name, value in parameters.items():
+                if confirmed[instance].get(name) != value:
+                    raise RuntimeError(
+                        "parameter confirmation mismatch for "
+                        f"{instance}.{name}: requested={value!r}, "
+                        f"readback={confirmed[instance].get(name)!r}"
+                    )
+
     @classmethod
     def _validate_checkpoint(
         cls,
@@ -486,15 +531,49 @@ class TaskExecutor:
                     "schematic.inspect.before",
                     lambda: self.adapter.inspect_schematic(task),
                 )
-                self._action(
+                applied = self._action(
                     "parameters.apply",
                     lambda: self.adapter.apply_parameters(task, task.parameters),
                 )
-                self._action(
-                    "schematic.inspect.after",
-                    lambda: self.adapter.inspect_schematic(task),
-                )
-                selected_parameters = dict(task.parameters)
+                if task.instance_parameter_updates:
+                    requested = self._requested_instance_parameters(task)
+                    echoed_request = self._confirmed_instance_parameters(
+                        applied.data, "requested_instance_parameters"
+                    )
+                    self._assert_explicit_parameter_confirmation(
+                        requested, echoed_request
+                    )
+                    expected = self._confirmed_instance_parameters(
+                        applied.data, "applied_instance_parameters"
+                    )
+                    confirmed = self._confirmed_instance_parameters(
+                        applied.data, "confirmed_instance_parameters"
+                    )
+                    self._assert_explicit_parameter_confirmation(
+                        expected, confirmed
+                    )
+
+                    def inspect_confirmed_parameters() -> AdapterResult:
+                        result = self.adapter.verify_parameters(task, expected)
+                        final = self._confirmed_instance_parameters(
+                            result.data, "confirmed_instance_parameters"
+                        )
+                        self._assert_explicit_parameter_confirmation(
+                            expected, final
+                        )
+                        return result
+
+                    self._action(
+                        "schematic.inspect.after", inspect_confirmed_parameters
+                    )
+                    if task.parameters:
+                        selected_parameters = dict(task.parameters)
+                else:
+                    self._action(
+                        "schematic.inspect.after",
+                        lambda: self.adapter.inspect_schematic(task),
+                    )
+                    selected_parameters = dict(task.parameters)
             elif operation is Operation.SIMULATION_RUN:
                 self._action(
                     "schematic.inspect.before",

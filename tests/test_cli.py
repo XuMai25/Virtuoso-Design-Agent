@@ -15,8 +15,10 @@ DEMO_TASK = ROOT / "examples" / "tasks" / "inverter-close-loop.demo.json"
 def test_catalog_marks_gate2a_common_source_executable(capsys) -> None:
     assert main(["catalog"]) == 0
     output = capsys.readouterr().out
+    assert "existing_schematic: Bridge-preserving manual OA surface [executable]" in output
     assert "inverter: L5A vertical slice [executable]" in output
     assert "common_source: Gate 2A DC operating point [executable]" in output
+    assert output.count("explicit instance parameters: parameters.apply") == 3
     assert "differential_pair: Gate 3 [planned]" in output
 
 

@@ -74,6 +74,18 @@ def _try_read_schematic(client, library: str, cell: str) -> dict[str, Any] | Non
     return _read_schematic(client, library, cell)
 
 
+def _instance_parameters_from_schematic(
+    data: dict[str, Any],
+) -> dict[str, dict[str, str]]:
+    return {
+        str(item.get("name")): {
+            str(name): str(value)
+            for name, value in sorted(item.get("params", {}).items())
+        }
+        for item in sorted(data.get("instances", []), key=lambda item: str(item.get("name")))
+    }
+
+
 def _summary(data: dict[str, Any]) -> dict[str, Any]:
     useful_params = {"Wfg", "w", "l", "fingers", "nf", "m", "model", "multi"}
     instances = []
@@ -96,7 +108,29 @@ def _summary(data: dict[str, Any]) -> dict[str, Any]:
         "instances": sorted(instances, key=lambda item: str(item["name"])),
         "nets": sorted(data.get("nets", {}).keys()),
         "pins": sorted(data.get("pins", {}).keys()),
+        "instance_parameters": _instance_parameters_from_schematic(data),
         "semantic_parameters": _semantic_parameters_from_schematic(data),
+        "bridge_schematic": data,
+    }
+
+
+def _existing_schematic_summary(data: dict[str, Any]) -> dict[str, Any]:
+    instances = [
+        {
+            "name": item.get("name"),
+            "library": item.get("lib"),
+            "cell": item.get("cell"),
+            "parameters": dict(item.get("params", {})),
+            "terminals": dict(item.get("terms", {})),
+        }
+        for item in data.get("instances", [])
+    ]
+    return {
+        "instances": sorted(instances, key=lambda item: str(item["name"])),
+        "nets": sorted(data.get("nets", {}).keys()),
+        "pins": sorted(data.get("pins", {}).keys()),
+        "instance_parameters": _instance_parameters_from_schematic(data),
+        "bridge_schematic": data,
     }
 
 
@@ -314,7 +348,9 @@ def _common_source_summary(data: dict[str, Any]) -> dict[str, Any]:
         "instances": sorted(instances, key=lambda item: str(item["name"])),
         "nets": sorted(data.get("nets", {}).keys()),
         "pins": sorted(data.get("pins", {}).keys()),
+        "instance_parameters": _instance_parameters_from_schematic(data),
         "semantic_parameters": _common_source_semantic_parameters_from_schematic(data),
+        "bridge_schematic": data,
     }
 
 
@@ -337,6 +373,118 @@ def _assert_parameter_consistency(
                 f"parameter mismatch for {name}: {expected_label}={float(expected_value):.12g}, "
                 f"{actual_label}={actual_value:.12g}"
             )
+
+
+def _requested_instance_parameters(
+    payload: dict[str, Any],
+) -> dict[str, dict[str, str]]:
+    raw_updates = payload.get("instance_parameter_updates", [])
+    if not isinstance(raw_updates, list) or not raw_updates:
+        raise RuntimeError("explicit instance parameter update list is empty")
+    updates: dict[str, dict[str, str]] = {}
+    for raw_update in raw_updates:
+        if not isinstance(raw_update, dict):
+            raise RuntimeError("invalid explicit instance parameter update")
+        instance = raw_update.get("instance")
+        parameters = raw_update.get("parameters")
+        if not isinstance(instance, str) or not instance:
+            raise RuntimeError(f"invalid instance name in parameter update: {instance!r}")
+        if instance in updates:
+            raise RuntimeError(f"duplicate instance parameter update: {instance}")
+        if not isinstance(parameters, dict) or not parameters:
+            raise RuntimeError(f"parameter update for {instance} is empty")
+        normalized: dict[str, str] = {}
+        for name, value in parameters.items():
+            if not isinstance(name, str):
+                raise RuntimeError(f"invalid CDF/OA parameter name: {name!r}")
+            if not isinstance(value, str):
+                raise RuntimeError(
+                    f"invalid CDF/OA parameter value for {instance}.{name}"
+                )
+            normalized[name] = value
+        updates[instance] = normalized
+    return updates
+
+
+def _expected_instance_parameters(
+    payload: dict[str, Any],
+) -> dict[str, dict[str, str]]:
+    raw = payload.get("expected_instance_parameters")
+    if not isinstance(raw, dict) or not raw:
+        raise RuntimeError("expected instance parameter map is empty")
+    expected: dict[str, dict[str, str]] = {}
+    for instance, parameters in raw.items():
+        if not isinstance(instance, str) or not instance:
+            raise RuntimeError(f"invalid expected instance name: {instance!r}")
+        if not isinstance(parameters, dict) or not parameters:
+            raise RuntimeError(f"expected parameter map for {instance} is empty")
+        expected[instance] = {}
+        for name, value in parameters.items():
+            if not isinstance(name, str) or not isinstance(value, str):
+                raise RuntimeError(
+                    f"invalid expected CDF/OA parameter for {instance}.{name}"
+                )
+            expected[instance][name] = value
+    return expected
+
+
+def _verify_instance_parameter_values(
+    client,
+    library: str,
+    cell: str,
+    expected: dict[str, dict[str, str]],
+) -> dict[str, dict[str, str]]:
+    """Read target CDF values directly, including empty or long strings."""
+    from virtuoso_bridge.virtuoso.ops import escape_skill_string
+
+    checks: list[str] = []
+    for instance, parameters in expected.items():
+        escaped_instance = escape_skill_string(instance)
+        checks.extend(
+            [
+                "inst = car(setof(x cv~>instances "
+                f'x~>name == "{escaped_instance}"))',
+                "unless(inst error("
+                f'"instance not found during parameter verification: {escaped_instance}"))',
+                "iCDF = cdfGetInstCDF(inst)",
+                "unless(iCDF error("
+                f'"instance has no CDF during parameter verification: {escaped_instance}"))',
+            ]
+        )
+        for name, value in parameters.items():
+            escaped_name = escape_skill_string(name)
+            escaped_value = escape_skill_string(value)
+            label = escape_skill_string(f"{instance}.{name}")
+            checks.extend(
+                [
+                    f'p = get(iCDF "{escaped_name}")',
+                    f'unless(p error("unknown CDF parameter: {label}"))',
+                    "unless(p~>value == "
+                    f'"{escaped_value}" error("CDF parameter readback mismatch: {label}"))',
+                ]
+            )
+
+    skill = " ".join(
+        [
+            "let((cv inst iCDF p)",
+            "cv = dbOpenCellViewByType("
+            f'"{escape_skill_string(library)}" "{escape_skill_string(cell)}" '
+            '"schematic" "schematic" "r")',
+            'unless(cv error("target schematic not found during parameter verification"))',
+            *checks,
+            "t)",
+        ]
+    )
+    result = client.execute_skill(skill, timeout=60)
+    errors = getattr(result, "errors", None) or []
+    if errors:
+        raise RuntimeError(f"targeted CDF readback failed: {errors[0]}")
+    output = str(getattr(result, "output", "")).strip().strip('"').lower()
+    if output != "t":
+        raise RuntimeError(f"unexpected targeted CDF readback result: {output!r}")
+    return {
+        instance: dict(parameters) for instance, parameters in expected.items()
+    }
 
 
 def _resolved_parameters(
@@ -491,6 +639,99 @@ def _apply_common_source_parameters(
     return summary
 
 
+def _apply_explicit_instance_parameters(
+    client,
+    library: str,
+    cell: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    from virtuoso_bridge.virtuoso.schematic.params import set_instance_params
+
+    requested = _requested_instance_parameters(payload)
+    current = _read_schematic(client, library, cell)
+    if payload["circuit"] == "inverter":
+        _assert_inverter(current, payload["profile"])
+        summarize = _summary
+    elif payload["circuit"] == "common_source":
+        _assert_common_source(current, payload["profile"])
+        summarize = _common_source_summary
+    elif payload["circuit"] == "existing_schematic":
+        summarize = _existing_schematic_summary
+    else:
+        raise RuntimeError(
+            f"explicit instance parameter writes are unsupported for {payload['circuit']}"
+        )
+
+    current_parameters = _instance_parameters_from_schematic(current)
+    missing_instances = sorted(set(requested) - set(current_parameters))
+    if missing_instances:
+        raise RuntimeError(
+            "explicit parameter write targets missing instances: "
+            + ", ".join(missing_instances)
+        )
+    client.open_window(library, cell, view="schematic")
+    applied_parameters: dict[str, dict[str, str]] = {}
+    for instance, parameters in requested.items():
+        applied = set_instance_params(
+            client,
+            instance,
+            param_filters=None,
+            **parameters,
+        )
+        if not isinstance(applied, dict) or not applied:
+            raise RuntimeError(
+                f"Bridge did not report applied CDF parameters for {instance}"
+            )
+        applied_parameters[instance] = {
+            str(name): str(value) for name, value in applied.items()
+        }
+
+    before = {
+        instance: {
+            name: current_parameters[instance].get(name)
+            for name in parameters
+        }
+        for instance, parameters in applied_parameters.items()
+    }
+
+    updated = _read_schematic(client, library, cell)
+    if payload["circuit"] == "inverter":
+        _assert_inverter(updated, payload["profile"])
+    elif payload["circuit"] == "common_source":
+        _assert_common_source(updated, payload["profile"])
+    confirmed = _verify_instance_parameter_values(
+        client, library, cell, applied_parameters
+    )
+    return {
+        "requested_instance_parameters": requested,
+        "requested_evidence_source": "user_input",
+        "applied_instance_parameters": applied_parameters,
+        "before_instance_parameters": before,
+        "confirmed_instance_parameters": confirmed,
+        "confirmed_evidence_source": "bridge_readback",
+        "confirmation_method": "independent_targeted_cdf_equality",
+        "readback": summarize(updated),
+    }
+
+
+def _attach_targeted_parameter_verification(
+    client,
+    library: str,
+    cell: str,
+    payload: dict[str, Any],
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    if not payload.get("verify_instance_parameters"):
+        return summary
+    expected = _expected_instance_parameters(payload)
+    summary["confirmed_instance_parameters"] = _verify_instance_parameter_values(
+        client, library, cell, expected
+    )
+    summary["confirmed_evidence_source"] = "bridge_readback"
+    summary["confirmation_method"] = "independent_targeted_cdf_equality"
+    return summary
+
+
 def probe(payload: dict[str, Any]) -> dict[str, Any]:
     import virtuoso_bridge
 
@@ -588,24 +829,50 @@ def inspect_inverter(payload: dict[str, Any]) -> dict[str, Any]:
     library, cell = _target(payload)
     data = _read_schematic(client, library, cell)
     _assert_inverter(data, payload["profile"])
-    return _summary(data)
+    return _attach_targeted_parameter_verification(
+        client, library, cell, payload, _summary(data)
+    )
 
 
 def apply_inverter_parameters(payload: dict[str, Any]) -> dict[str, Any]:
     client = _client()
     library, cell = _target(payload)
-    parameters = _resolved_parameters(payload)
-    device_parameters = {
-        name: parameters[name]
-        for name in ("nmos_width_um", "pmos_width_um", "length_um")
-    }
-    return {
-        "requested_parameters": payload.get("parameters", {}),
-        "applied_device_parameters": device_parameters,
-        "readback": _apply_parameters(
-            client, library, cell, device_parameters, payload["profile"]
-        ),
-    }
+    current = _read_schematic(client, library, cell)
+    _assert_inverter(current, payload["profile"])
+    result: dict[str, Any] = {}
+    if payload.get("parameters"):
+        parameters = _resolved_parameters(
+            payload, _semantic_parameters_from_schematic(current)
+        )
+        device_parameters = {
+            name: parameters[name]
+            for name in ("nmos_width_um", "pmos_width_um", "length_um")
+        }
+        result = {
+            "requested_parameters": payload["parameters"],
+            "applied_device_parameters": device_parameters,
+            "readback": _apply_parameters(
+                client, library, cell, device_parameters, payload["profile"]
+            ),
+        }
+    if payload.get("instance_parameter_updates"):
+        explicit = _apply_explicit_instance_parameters(
+            client, library, cell, payload
+        )
+        requested_semantic = {
+            name: float(payload["parameters"][name])
+            for name in ("nmos_width_um", "pmos_width_um", "length_um")
+            if name in payload.get("parameters", {})
+        }
+        _assert_parameter_consistency(
+            requested_semantic,
+            explicit["readback"]["semantic_parameters"],
+            expected_label="requested semantic write",
+            actual_label="final OA readback after explicit CDF callbacks",
+        )
+        result.update(explicit)
+        result["semantic_readback"] = explicit["readback"]["semantic_parameters"]
+    return result
 
 
 def create_common_source(payload: dict[str, Any]) -> dict[str, Any]:
@@ -679,7 +946,24 @@ def inspect_common_source(payload: dict[str, Any]) -> dict[str, Any]:
     library, cell = _target(payload)
     data = _read_schematic(client, library, cell)
     _assert_common_source(data, payload["profile"])
-    return _common_source_summary(data)
+    return _attach_targeted_parameter_verification(
+        client, library, cell, payload, _common_source_summary(data)
+    )
+
+
+def inspect_existing_schematic(payload: dict[str, Any]) -> dict[str, Any]:
+    client = _client()
+    library, cell = _target(payload)
+    data = _read_schematic(client, library, cell)
+    return _attach_targeted_parameter_verification(
+        client, library, cell, payload, _existing_schematic_summary(data)
+    )
+
+
+def apply_existing_schematic_parameters(payload: dict[str, Any]) -> dict[str, Any]:
+    client = _client()
+    library, cell = _target(payload)
+    return _apply_explicit_instance_parameters(client, library, cell, payload)
 
 
 def apply_common_source_parameters(payload: dict[str, Any]) -> dict[str, Any]:
@@ -687,20 +971,44 @@ def apply_common_source_parameters(payload: dict[str, Any]) -> dict[str, Any]:
     library, cell = _target(payload)
     current = _read_schematic(client, library, cell)
     _assert_common_source(current, payload["profile"])
-    parameters = _resolved_common_source_parameters(
-        payload, _common_source_semantic_parameters_from_schematic(current)
-    )
-    oa_parameters = {
-        name: parameters[name]
-        for name in ("device_width_um", "length_um", "load_resistance_ohm")
-    }
-    return {
-        "requested_parameters": payload.get("parameters", {}),
-        "applied_device_parameters": oa_parameters,
-        "readback": _apply_common_source_parameters(
-            client, library, cell, oa_parameters, payload["profile"]
-        ),
-    }
+    result: dict[str, Any] = {}
+    if payload.get("parameters"):
+        parameters = _resolved_common_source_parameters(
+            payload, _common_source_semantic_parameters_from_schematic(current)
+        )
+        oa_parameters = {
+            name: parameters[name]
+            for name in ("device_width_um", "length_um", "load_resistance_ohm")
+        }
+        result = {
+            "requested_parameters": payload["parameters"],
+            "applied_device_parameters": oa_parameters,
+            "readback": _apply_common_source_parameters(
+                client, library, cell, oa_parameters, payload["profile"]
+            ),
+        }
+    if payload.get("instance_parameter_updates"):
+        explicit = _apply_explicit_instance_parameters(
+            client, library, cell, payload
+        )
+        requested_semantic = {
+            name: float(payload["parameters"][name])
+            for name in (
+                "device_width_um",
+                "length_um",
+                "load_resistance_ohm",
+            )
+            if name in payload.get("parameters", {})
+        }
+        _assert_parameter_consistency(
+            requested_semantic,
+            explicit["readback"]["semantic_parameters"],
+            expected_label="requested semantic write",
+            actual_label="final OA readback after explicit CDF callbacks",
+        )
+        result.update(explicit)
+        result["semantic_readback"] = explicit["readback"]["semantic_parameters"]
+    return result
 
 
 _SI_ENV_OVERRIDES = {
@@ -1440,6 +1748,8 @@ def simulate_common_source(payload: dict[str, Any]) -> dict[str, Any]:
 
 _ACTIONS = {
     "probe": probe,
+    "inspect_existing_schematic": inspect_existing_schematic,
+    "apply_existing_schematic_parameters": apply_existing_schematic_parameters,
     "create_inverter": create_inverter,
     "inspect_inverter": inspect_inverter,
     "apply_inverter_parameters": apply_inverter_parameters,

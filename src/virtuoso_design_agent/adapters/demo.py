@@ -30,6 +30,8 @@ class DeterministicDemoAdapter:
 
     @staticmethod
     def _semantic_parameters(task: TaskSpec) -> dict[str, float]:
+        if task.circuit is CircuitKind.EXISTING_SCHEMATIC:
+            return {}
         if task.circuit is CircuitKind.COMMON_SOURCE:
             return {
                 "device_width_um": float(task.parameters.get("device_width_um", 1.0)),
@@ -44,18 +46,85 @@ class DeterministicDemoAdapter:
             "length_um": float(task.parameters.get("length_um", 0.03)),
         }
 
+    @staticmethod
+    def _instance_parameters(
+        task: TaskSpec, semantic_parameters: dict[str, float]
+    ) -> dict[str, dict[str, str]]:
+        if task.circuit is CircuitKind.EXISTING_SCHEMATIC:
+            return {
+                update.instance: {}
+                for update in task.instance_parameter_updates
+            }
+        if task.circuit is CircuitKind.COMMON_SOURCE:
+            return {
+                "MN0": {
+                    "Wfg": f"{semantic_parameters['device_width_um']:.12g}u",
+                    "l": f"{semantic_parameters['length_um']:.12g}u",
+                    "fingers": "1",
+                    "m": "1",
+                },
+                "RD0": {
+                    "r": f"{semantic_parameters['load_resistance_ohm']:.12g}"
+                },
+            }
+        return {
+            "MN0": {
+                "Wfg": f"{semantic_parameters['nmos_width_um']:.12g}u",
+                "l": f"{semantic_parameters['length_um']:.12g}u",
+                "fingers": "1",
+                "m": "1",
+            },
+            "MP0": {
+                "Wfg": f"{semantic_parameters['pmos_width_um']:.12g}u",
+                "l": f"{semantic_parameters['length_um']:.12g}u",
+                "fingers": "1",
+                "m": "1",
+            },
+        }
+
+    @staticmethod
+    def _applied_instance_parameters(
+        requested: dict[str, dict[str, str]],
+    ) -> dict[str, dict[str, str]]:
+        applied: dict[str, dict[str, str]] = {}
+        for instance, parameters in requested.items():
+            if "w" in parameters and "wf" in parameters:
+                raise ValueError("Specify w (total width) or wf (finger width), not both")
+            resolved = {
+                ({"wf": "Wfg", "nf": "fingers"}.get(name, name)): value
+                for name, value in parameters.items()
+            }
+            applied[instance] = resolved
+        return applied
+
     def create_schematic(self, task: TaskSpec) -> AdapterResult:
         key = self._key(task)
         existing = key in self._schematics
         if not existing:
             semantic_parameters = self._semantic_parameters(task)
             common_source = task.circuit is CircuitKind.COMMON_SOURCE
+            instance_parameters = self._instance_parameters(
+                task, semantic_parameters
+            )
             self._schematics[key] = {
-                "instances": ["MN0", "RD0"] if common_source else ["MN0", "MP0"],
-                "nets": ["IN", "OUT", "VDD", "VSS"],
-                "pins": ["IN", "OUT", "VDD", "VSS"],
+                "instances": (
+                    list(instance_parameters)
+                    if task.circuit is CircuitKind.EXISTING_SCHEMATIC
+                    else ["MN0", "RD0"] if common_source else ["MN0", "MP0"]
+                ),
+                "nets": (
+                    []
+                    if task.circuit is CircuitKind.EXISTING_SCHEMATIC
+                    else ["IN", "OUT", "VDD", "VSS"]
+                ),
+                "pins": (
+                    []
+                    if task.circuit is CircuitKind.EXISTING_SCHEMATIC
+                    else ["IN", "OUT", "VDD", "VSS"]
+                ),
                 "parameters": dict(task.parameters) | semantic_parameters,
                 "semantic_parameters": semantic_parameters,
+                "instance_parameters": instance_parameters,
             }
         return AdapterResult(
             data={"created": not existing, "already_exists": existing},
@@ -66,12 +135,40 @@ class DeterministicDemoAdapter:
         schematic = self._schematics.get(self._key(task))
         if schematic is None:
             raise RuntimeError("demo schematic does not exist")
-        return AdapterResult(
-            data={
-                **schematic,
-                "parameters": dict(schematic["parameters"]),
-                "semantic_parameters": dict(schematic["semantic_parameters"]),
+        data = {
+            **schematic,
+            "parameters": dict(schematic["parameters"]),
+            "semantic_parameters": dict(schematic["semantic_parameters"]),
+            "instance_parameters": {
+                instance: dict(parameters)
+                for instance, parameters in schematic["instance_parameters"].items()
             },
+        }
+        return AdapterResult(
+            data=data,
+            evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+        )
+
+    def verify_parameters(
+        self, task: TaskSpec, expected: dict[str, dict[str, str]]
+    ) -> AdapterResult:
+        result = self.inspect_schematic(task)
+        data = dict(result.data)
+        for instance, parameters in expected.items():
+            if instance not in data["instance_parameters"]:
+                raise RuntimeError(
+                    f"parameter confirmation is missing instance {instance}"
+                )
+            for name, value in parameters.items():
+                if data["instance_parameters"][instance].get(name) != value:
+                    raise RuntimeError(
+                        f"parameter confirmation mismatch for {instance}.{name}"
+                    )
+        data["confirmed_instance_parameters"] = expected
+        data["confirmed_evidence_source"] = "software_inference"
+        data["confirmation_method"] = "demo_exact_value_equality"
+        return AdapterResult(
+            data=data,
             evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
         )
 
@@ -81,20 +178,68 @@ class DeterministicDemoAdapter:
         schematic = self._schematics.get(self._key(task))
         if schematic is None:
             raise RuntimeError("demo schematic does not exist")
-        schematic["parameters"].update(parameters)
-        semantic_names = (
-            ("device_width_um", "length_um", "load_resistance_ohm")
-            if task.circuit is CircuitKind.COMMON_SOURCE
-            else ("nmos_width_um", "pmos_width_um", "length_um")
-        )
-        for name in semantic_names:
-            if name in parameters:
-                schematic["semantic_parameters"][name] = float(parameters[name])
+        result_data: dict[str, Any] = {}
+        if parameters:
+            schematic["parameters"].update(parameters)
+            semantic_names = (
+                ("device_width_um", "length_um", "load_resistance_ohm")
+                if task.circuit is CircuitKind.COMMON_SOURCE
+                else (
+                    ()
+                    if task.circuit is CircuitKind.EXISTING_SCHEMATIC
+                    else ("nmos_width_um", "pmos_width_um", "length_um")
+                )
+            )
+            for name in semantic_names:
+                if name in parameters:
+                    schematic["semantic_parameters"][name] = float(parameters[name])
+            result_data.update(
+                {
+                    "applied": dict(parameters),
+                    "semantic_parameters": dict(schematic["semantic_parameters"]),
+                }
+            )
+        if task.instance_parameter_updates:
+            requested = {
+                update.instance: dict(update.parameters)
+                for update in task.instance_parameter_updates
+            }
+            applied = self._applied_instance_parameters(requested)
+            missing = sorted(set(applied) - set(schematic["instance_parameters"]))
+            if missing:
+                raise RuntimeError(
+                    "explicit parameter write targets missing instances: "
+                    + ", ".join(missing)
+                )
+            before = {
+                instance: {
+                    name: schematic["instance_parameters"][instance].get(name)
+                    for name in parameters
+                }
+                for instance, parameters in applied.items()
+            }
+            for instance, parameters in applied.items():
+                schematic["instance_parameters"][instance].update(parameters)
+            confirmed = {
+                instance: {
+                    name: schematic["instance_parameters"][instance][name]
+                    for name in parameters
+                }
+                for instance, parameters in applied.items()
+            }
+            result_data.update(
+                {
+                    "requested_instance_parameters": requested,
+                    "requested_evidence_source": "user_input",
+                    "applied_instance_parameters": applied,
+                    "before_instance_parameters": before,
+                    "confirmed_instance_parameters": confirmed,
+                    "confirmed_evidence_source": "software_inference",
+                    "confirmation_method": "demo_exact_value_equality",
+                }
+            )
         return AdapterResult(
-            data={
-                "applied": dict(parameters),
-                "semantic_parameters": dict(schematic["semantic_parameters"]),
-            },
+            data=result_data,
             evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
         )
 

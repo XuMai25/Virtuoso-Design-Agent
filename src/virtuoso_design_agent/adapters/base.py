@@ -27,6 +27,10 @@ class DesignAdapter(Protocol):
 
     def inspect_schematic(self, task: TaskSpec) -> AdapterResult: ...
 
+    def verify_parameters(
+        self, task: TaskSpec, expected: dict[str, dict[str, str]]
+    ) -> AdapterResult: ...
+
     def apply_parameters(
         self, task: TaskSpec, parameters: dict[str, float]
     ) -> AdapterResult: ...

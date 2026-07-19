@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from virtuoso_design_agent.adapters.base import AdapterResult
 from virtuoso_design_agent.adapters.demo import DeterministicDemoAdapter
 from virtuoso_design_agent.adapters.subprocess_bridge import BridgeWorkerError
 from virtuoso_design_agent.executor import (
@@ -39,6 +40,172 @@ def _close_loop(delay_limit: float = 45.0) -> TaskSpec:
             "limits": {"max_iterations": 9, "timeout_seconds": 600},
         }
     )
+
+
+def _explicit_parameter_apply() -> TaskSpec:
+    return TaskSpec.model_validate(
+        {
+            "id": "explicit-parameter-apply",
+            "operation": "parameters.apply",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "instance_parameter_updates": [
+                {
+                    "instance": "MN0",
+                    "parameters": {"fingers": "2", "m": "1"},
+                },
+                {"instance": "RD0", "parameters": {"r": "22k"}},
+            ],
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+
+
+def test_explicit_instance_parameter_apply_is_independently_read_back() -> None:
+    task = _explicit_parameter_apply()
+    adapter = DeterministicDemoAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert record.selected_parameters is None
+    applied = next(
+        action for action in record.actions if action.action == "parameters.apply"
+    )
+    assert applied.details["requested_evidence_source"] == "user_input"
+    assert applied.details["confirmed_evidence_source"] == "software_inference"
+    assert applied.details["confirmed_instance_parameters"] == {
+        "MN0": {"fingers": "2", "m": "1"},
+        "RD0": {"r": "22k"},
+    }
+    readback = adapter.inspect_schematic(task).data["instance_parameters"]
+    assert readback["MN0"]["fingers"] == "2"
+    assert readback["RD0"]["r"] == "22k"
+
+
+def test_explicit_parameter_apply_fails_on_untrusted_adapter_confirmation() -> None:
+    class MismatchedConfirmationAdapter(DeterministicDemoAdapter):
+        def apply_parameters(self, task, parameters):
+            result = super().apply_parameters(task, parameters)
+            data = dict(result.data)
+            data["confirmed_instance_parameters"] = {
+                "MN0": {"fingers": "3", "m": "1"},
+                "RD0": {"r": "22k"},
+            }
+            return AdapterResult(data=data, evidence_source=result.evidence_source)
+
+    task = _explicit_parameter_apply()
+    adapter = MismatchedConfirmationAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.FAILED
+    assert any("confirmation mismatch" in note for note in record.notes)
+
+
+def test_semantic_and_explicit_instance_parameters_are_both_applied() -> None:
+    task = _explicit_parameter_apply().model_copy(
+        update={"parameters": {"device_width_um": 0.5}}
+    )
+    adapter = DeterministicDemoAdapter()
+    adapter.create_schematic(task.model_copy(update={"parameters": {}}))
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert record.selected_parameters == {"device_width_um": 0.5}
+    readback = adapter.inspect_schematic(task).data
+    assert readback["semantic_parameters"]["device_width_um"] == pytest.approx(0.5)
+    assert readback["instance_parameters"]["MN0"]["fingers"] == "2"
+
+
+def test_existing_schematic_parameter_surface_preserves_empty_and_long_values() -> None:
+    long_value = "x" * 256
+    task = TaskSpec.model_validate(
+        {
+            "id": "existing-schematic-params",
+            "operation": "parameters.apply",
+            "circuit": "existing_schematic",
+            "target": {"library": "vda_test", "cell": "vda_existing"},
+            "instance_parameter_updates": [
+                {
+                    "instance": "I0<3>",
+                    "parameters": {"empty": "", "long": long_value},
+                }
+            ],
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+    adapter = DeterministicDemoAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    confirmed = next(
+        action.details["confirmed_instance_parameters"]
+        for action in record.actions
+        if action.action == "schematic.inspect.after"
+    )
+    assert confirmed == {"I0<3>": {"empty": "", "long": long_value}}
+
+
+def test_explicit_parameters_preserve_bridge_wf_and_nf_shorthands() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "bridge-parameter-shorthands",
+            "operation": "parameters.apply",
+            "circuit": "inverter",
+            "target": {"library": "vda_test", "cell": "vda_inv"},
+            "instance_parameter_updates": [
+                {"instance": "MN0", "parameters": {"wf": "0.6u", "nf": "2"}}
+            ],
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+    adapter = DeterministicDemoAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    applied = next(
+        action.details
+        for action in record.actions
+        if action.action == "parameters.apply"
+    )
+    assert applied["requested_instance_parameters"] == {
+        "MN0": {"wf": "0.6u", "nf": "2"}
+    }
+    assert applied["applied_instance_parameters"] == {
+        "MN0": {"Wfg": "0.6u", "fingers": "2"}
+    }
 
 
 def test_demo_close_loop_selects_and_applies_feasible_candidate() -> None:

@@ -10,6 +10,7 @@ Virtuoso Design Agent 是 `virtuoso-bridge-lite` 之上的受控设计编排层�
 - 单独规划或执行：`schematic.create`、`schematic.inspect`、`parameters.apply`、`simulation.run`、`design.tune`、`design.close_loop`。
 - 用确定性 demo adapter 离线验证闭环、规格判定和参数选择；结果明确标为 `software_inference`。
 - 通过独立 worker 调用本机 `virtuoso-bridge-lite` 环境。反相器支持 `OA -> si -> Spectre transient` 的 timing、过冲/欠冲和周期供电能量；共源级支持 `OA -> si -> Spectre DC OP` 的 `Id/VGS/VDS/VDSAT/gm/gds`、KCL、饱和余量和输出摆幅余量。
+- `existing_schematic` 提供不依赖固定电路模板的 Bridge 能力面：`schematic.inspect` 保留 Bridge 的完整结构结果和所有可回读 CDF 参数；`parameters.apply` 可按实例透传 Bridge 接受的参数字符串，写入后用定向 CDF 读取再次核对。反相器/共源模板仍可在同一任务中组合 semantic parameters 与原始实例参数。
 - 对远端计算和 OA 写入分别授权；真实执行还需要计划 token，避免一句模糊指令直接改库。
 - 将动作、候选点、指标、约束判定、最终选择和证据来源写入本地 JSON run record；调优任务还会在候选边界原子保存 checkpoint，并可在独立 OA 回读后续跑。
 
@@ -37,6 +38,8 @@ py -3.13 -m venv .venv
 .\.venv\Scripts\vda.exe catalog
 .\.venv\Scripts\vda.exe plan examples\tasks\inverter-close-loop.demo.json
 .\.venv\Scripts\vda.exe plan examples\tasks\common-source-dc-tune.bridge.json
+.\.venv\Scripts\vda.exe plan examples\tasks\common-source-create-parameter-surface.bridge.json
+.\.venv\Scripts\vda.exe plan examples\tasks\common-source-apply-instance-parameters.bridge.json
 ```
 
 计划会打印确认 token。复制该 token 后运行离线闭环：
@@ -77,6 +80,8 @@ C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe 
 
 `simulation.run` 不写 OA：省略器件尺寸时直接采用目标 OA 回读值；如果任务显式给出尺寸，则必须与 OA 一致，否则停止，不会用请求值覆盖 schematic。`design.tune` 和 `design.close_loop` 为保证每个候选都来自真实 OA 状态，会在已授权写入的前提下逐点暂存参数并回读；无可行候选或可恢复中断时恢复搜索前参数。该暂存行为会明确出现在计划和 run record 中。
 
+人工指定实例参数时使用 `instance_parameter_updates`，例如 `MN0.fingers="2"` 或 `RD0.r="22k"`。VDA 保留原始字符串，不猜单位、别名、枚举或布尔编码，也不因通用 reader 对空值/长值的摘要策略而提前拒绝 Bridge 可接受的请求；写后改用独立的目标 CDF 值相等检查。该路径目前属于 `parameters.apply`，可以单独使用，也可以与模板 semantic parameters 组合；请求标为 `user_input`，真实 OA 确认标为 `bridge_readback`，demo 结果仍只标为 `software_inference`。CDF callback 引起的其他参数联动会保留在完整 Bridge 回读里，但只有任务明确请求的字段会逐项宣称确认。任意实例参数尚未自动进入搜索空间，这是下一步拟合能力而不是永久限制。
+
 ## 安全模型
 
 真实写入需同时满足：
@@ -104,3 +109,4 @@ C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe 
 - [首个决策记录](docs/decisions/0001-l5a-first.md)
 - [2026-07-19 反相器 L5A smoke](docs/validation/2026-07-19-inverter-l5a-smoke.md)
 - [2026-07-19 共源放大器 Gate 2A DC smoke](docs/validation/2026-07-19-common-source-gate2a-dc-smoke.md)
+- [2026-07-19 显式实例参数能力验证](docs/validation/2026-07-19-explicit-instance-parameters.md)

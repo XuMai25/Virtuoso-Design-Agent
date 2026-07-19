@@ -78,3 +78,115 @@ def test_common_source_gate_accepts_only_implemented_dc_parameters() -> None:
     )
     with pytest.raises(UnsupportedCapability, match="load_ff"):
         build_plan(invalid)
+
+
+def test_parameters_apply_accepts_exact_instance_parameter_strings() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "raw-params",
+            "operation": "parameters.apply",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "instance_parameter_updates": [
+                {
+                    "instance": "MN0",
+                    "parameters": {"fingers": "2", "m": "1"},
+                },
+                {"instance": "RD0", "parameters": {"r": "22k"}},
+            ],
+        }
+    )
+
+    assert task.instance_parameter_updates[0].parameters["fingers"] == "2"
+    assert build_plan(task).requires_remote_write
+
+
+def test_instance_parameter_updates_preserve_bridge_string_values() -> None:
+    long_value = "x" * 256
+    task = TaskSpec.model_validate(
+        {
+            "id": "raw-params-pass-through",
+            "operation": "parameters.apply",
+            "circuit": "existing_schematic",
+            "target": {"library": "vda_test", "cell": "vda_existing"},
+            "instance_parameter_updates": [
+                {
+                    "instance": "I0<3>",
+                    "parameters": {
+                        "empty_value": "",
+                        "long_value": long_value,
+                        "display-mode": "layout dependent",
+                    },
+                }
+            ],
+        }
+    )
+
+    assert task.instance_parameter_updates[0].parameters == {
+        "empty_value": "",
+        "long_value": long_value,
+        "display-mode": "layout dependent",
+    }
+    assert build_plan(task).requires_remote_write
+
+
+def test_instance_parameter_updates_still_require_string_values() -> None:
+    with pytest.raises(ValidationError):
+        TaskSpec.model_validate(
+            {
+                "id": "raw-params-invalid",
+                "operation": "parameters.apply",
+                "circuit": "inverter",
+                "target": {"library": "vda_test", "cell": "vda_inv"},
+                "instance_parameter_updates": [
+                    {"instance": "MN0", "parameters": {"m": 2}}
+                ],
+            }
+        )
+
+
+def test_instance_parameter_updates_are_apply_only_and_can_mix_semantics() -> None:
+    base = {
+        "id": "raw-params-invalid-scope",
+        "circuit": "inverter",
+        "target": {"library": "vda_test", "cell": "vda_inv"},
+        "instance_parameter_updates": [
+            {"instance": "MN0", "parameters": {"m": "2"}}
+        ],
+    }
+    with pytest.raises(ValidationError, match="only by parameters.apply"):
+        TaskSpec.model_validate(
+            base
+            | {
+                "operation": "simulation.run",
+                "parameters": {"vdd_v": 0.9},
+            }
+        )
+    combined = TaskSpec.model_validate(
+        base
+        | {
+            "operation": "parameters.apply",
+            "parameters": {"nmos_width_um": 0.5},
+        }
+    )
+    assert combined.parameters == {"nmos_width_um": 0.5}
+    assert combined.instance_parameter_updates[0].parameters == {"m": "2"}
+
+
+def test_existing_schematic_exposes_only_read_and_manual_parameter_write() -> None:
+    inspect = TaskSpec.model_validate(
+        {
+            "id": "inspect-existing",
+            "operation": "schematic.inspect",
+            "circuit": "existing_schematic",
+            "target": {"library": "vda_test", "cell": "vda_existing"},
+        }
+    )
+    assert build_plan(inspect).operation.value == "schematic.inspect"
+
+    invalid = TaskSpec.model_validate(
+        inspect.model_dump(mode="json")
+        | {"operation": "simulation.run", "parameters": {"vdd_v": 0.9}}
+    )
+    with pytest.raises(UnsupportedCapability, match="manual OA surface"):
+        build_plan(invalid)

@@ -63,6 +63,8 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
         print(f"{item['circuit']}: {item['stage']} [{state}]")
         if item["operations"]:
             print(f"  operations: {', '.join(item['operations'])}")
+        if item["explicit_instance_parameters"]:
+            print("  explicit instance parameters: parameters.apply + OA readback")
         print(f"  evidence gate: {item['evidence_gate']}")
     return 0
 

@@ -18,12 +18,24 @@ class CircuitCapability:
     executable: bool
     operations: tuple[Operation, ...]
     parameters: tuple[str, ...]
+    explicit_instance_parameters: bool
     evidence_gate: str
 
 
 _ALL_OPERATIONS = tuple(Operation)
 
 CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
+    CircuitKind.EXISTING_SCHEMATIC: CircuitCapability(
+        circuit=CircuitKind.EXISTING_SCHEMATIC,
+        stage="Bridge-preserving manual OA surface",
+        executable=True,
+        operations=(Operation.SCHEMATIC_INSPECT, Operation.PARAMETERS_APPLY),
+        parameters=(),
+        explicit_instance_parameters=True,
+        evidence_gate=(
+            "unfiltered Bridge schematic readback + targeted CDF value verification"
+        ),
+    ),
     CircuitKind.INVERTER: CircuitCapability(
         circuit=CircuitKind.INVERTER,
         stage="L5A vertical slice",
@@ -36,6 +48,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "load_ff",
             "vdd_v",
         ),
+        explicit_instance_parameters=True,
         evidence_gate=(
             "OA readback + si netlist consistency + transient timing/supply energy + "
             "bounded search"
@@ -53,6 +66,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "bias_v",
             "vdd_v",
         ),
+        explicit_instance_parameters=True,
         evidence_gate=(
             "OA readback + si netlist consistency + DC Id/VGS/VDS/VDSAT/gm/gds "
             "before AC gain/bandwidth"
@@ -70,6 +84,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "source_resistance_ohm",
             "load_ff",
         ),
+        explicit_instance_parameters=False,
         evidence_gate="DC operating point + AC gain/bandwidth + degeneration check",
     ),
     CircuitKind.DIFFERENTIAL_PAIR: CircuitCapability(
@@ -78,6 +93,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
         executable=False,
         operations=(),
         parameters=("input_width_um", "length_um", "tail_current_ua", "load_ff"),
+        explicit_instance_parameters=False,
         evidence_gate="DC balance/common-mode range + differential AC + CMRR",
     ),
 }

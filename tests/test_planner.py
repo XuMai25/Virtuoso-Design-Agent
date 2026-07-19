@@ -41,6 +41,30 @@ def test_apply_plan_has_before_and_after_readback() -> None:
     assert "parameters.apply" in capabilities
 
 
+def test_explicit_instance_parameter_plan_discloses_raw_cdf_readback() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "raw-cdf-apply",
+            "operation": "parameters.apply",
+            "circuit": "inverter",
+            "target": {"library": "vda_test", "cell": "vda_inv"},
+            "instance_parameter_updates": [
+                {"instance": "MN0", "parameters": {"fingers": "2"}}
+            ],
+        }
+    )
+
+    apply = next(
+        step
+        for step in build_plan(task).steps
+        if step.capability == "parameters.apply"
+    )
+
+    assert apply.side_effect is SideEffect.REMOTE_WRITE
+    assert "CDF/OA" in apply.description
+    assert "定向回读" in apply.description
+
+
 def test_tuning_plan_discloses_candidate_oa_staging() -> None:
     plan = build_plan(
         _task(

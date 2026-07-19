@@ -77,13 +77,24 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             persist.model_copy(update={"id": "03-persist"}),
         ]
     if task.operation is Operation.PARAMETERS_APPLY:
+        if task.instance_parameter_updates and task.parameters:
+            apply_description = (
+                "应用器件语义参数及按实例给出的原始 CDF/OA 字符串，"
+                "并逐项定向回读"
+            )
+        elif task.instance_parameter_updates:
+            apply_description = (
+                "按实例应用明确给出的原始 CDF/OA 参数字符串并逐项定向回读"
+            )
+        else:
+            apply_description = "应用明确给出的器件语义参数"
         return [
             probe,
             inspect.model_copy(update={"id": "02-before"}),
             _step(
                 "03-apply",
                 "parameters.apply",
-                "应用明确给出的器件参数",
+                apply_description,
                 SideEffect.REMOTE_WRITE,
             ),
             inspect.model_copy(update={"id": "04-after"}),
