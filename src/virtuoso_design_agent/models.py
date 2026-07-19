@@ -202,6 +202,7 @@ class CandidateEvaluation(StrictModel):
     total_violation: float
     objective_value: float | None = None
     evidence_source: EvidenceSource
+    metric_sources: dict[str, EvidenceSource] = Field(default_factory=dict)
 
 
 class ActionRecord(StrictModel):
@@ -228,6 +229,22 @@ class RunRecord(StrictModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class ExecutionCheckpoint(StrictModel):
+    schema_version: int = 1
+    task_id: str
+    plan_token: str
+    adapter: str
+    started_at: datetime
+    initial_parameters: dict[str, float]
+    expected_oa_parameters: dict[str, float]
+    pending_oa_parameters: dict[str, float] | None = None
+    next_candidate_index: int = Field(ge=1)
+    actions: list[ActionRecord] = Field(default_factory=list)
+    candidates: list[CandidateEvaluation] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    complete: bool = False
+
+
 class PdkProfile(StrictModel):
     name: str
     tech_library: str
@@ -235,6 +252,17 @@ class PdkProfile(StrictModel):
     pmos_cell: str
     model_include: str
     model_section: str
+    cds_lib_path: str
+    cadence_cshrc: str
+    remote_run_root: str
     default_vdd_v: float = Field(gt=0)
     default_load_ff: float = Field(gt=0)
     default_length_um: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_remote_write_paths(self) -> "PdkProfile":
+        for name in ("cds_lib_path", "remote_run_root"):
+            value = getattr(self, name)
+            if not value.startswith("/data/xum/"):
+                raise ValueError(f"{name} must stay under /data/xum")
+        return self

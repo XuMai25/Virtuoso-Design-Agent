@@ -10,7 +10,7 @@ from typing import Any
 
 from ..models import EvidenceSource, TaskSpec
 from ..profiles import load_pdk_profile
-from .base import AdapterResult
+from .base import AdapterInterrupted, AdapterResult
 
 
 DEFAULT_BRIDGE_PYTHON = Path(
@@ -19,7 +19,7 @@ DEFAULT_BRIDGE_PYTHON = Path(
 _MARKER = "VDA_RESULT="
 
 
-class BridgeWorkerError(RuntimeError):
+class BridgeWorkerError(AdapterInterrupted):
     pass
 
 
@@ -74,6 +74,8 @@ class SubprocessBridgeAdapter:
     @staticmethod
     def _task_payload(task: TaskSpec) -> dict[str, Any]:
         return {
+            "task_id": task.id,
+            "operation": task.operation.value,
             "target": task.target.model_dump(mode="json"),
             "profile": load_pdk_profile(task.pdk_profile).model_dump(mode="json"),
             "parameters": task.parameters,
@@ -124,6 +126,6 @@ class SubprocessBridgeAdapter:
         data = self._request(
             "simulate_inverter",
             payload,
-            timeout=task.limits.timeout_seconds + 60,
+            timeout=task.limits.timeout_seconds + 240,
         )
         return AdapterResult(data=data, evidence_source=EvidenceSource.EDA_RESULT)

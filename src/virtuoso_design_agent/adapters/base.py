@@ -8,6 +8,10 @@ from typing import Any, Protocol
 from ..models import EvidenceSource, TaskSpec
 
 
+class AdapterInterrupted(RuntimeError):
+    """Adapter execution stopped before producing trustworthy candidate evidence."""
+
+
 @dataclass(frozen=True)
 class AdapterResult:
     data: dict[str, Any]

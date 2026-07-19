@@ -36,7 +36,10 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "load_ff",
             "vdd_v",
         ),
-        evidence_gate="OA readback + transient waveform metrics + bounded search",
+        evidence_gate=(
+            "OA readback + si netlist consistency + transient timing/supply energy + "
+            "bounded search"
+        ),
     ),
     CircuitKind.COMMON_SOURCE: CircuitCapability(
         circuit=CircuitKind.COMMON_SOURCE,

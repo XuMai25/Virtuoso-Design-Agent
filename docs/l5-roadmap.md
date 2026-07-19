@@ -16,6 +16,10 @@
 
 L5A 不允许自行发明无限搜索范围、修改 PDK、覆盖未知 cell、把 demo 模型当 EDA 结果，或在缺少证据时宣布 closure。
 
+当前实现状态：`OA schematic -> si -> Spectre -> metrics`、供电能量积分、失败注入和候选级 checkpoint/resume 已通过本地测试。2026-07-19 live 结果覆盖 OA/`si` 参数一致性、非空 timing/current 波形、收紧规格、不可行 + 预算耗尽恢复，以及一个经历 3 次 tunnel 中断后仍完成 9/9 候选、最佳参数写回和独立 OA 回读的恢复任务。反相器 L5A 的同源有限闭环与显式恢复 Gate 已通过；Bridge 本地隔离补丁又通过强制断链只读 smoke，闭合 Windows stale state 与调用边界自动重建。运行中传输的随机 reset/timeout 仍是跨 Gate 的底层可靠性债务。
+
+Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发送前的 tunnel 自愈。新的 9 点压力任务仍在候选 8 发生一次本地端口拒绝，但 OA 恢复、候选前缀和续跑均正确，最终 9/9 与最佳写回成功；确定性同-client smoke 已覆盖 pre-send 自愈。payload 发送后的不确定错误仍不自动重放，这是保留的可靠性边界而不是跳过的工作。
+
 ## L5B：单模块设计代理（产品目标）
 
 面向反相器、单管放大器、差分对等单模块，由规格驱动完成更完整的设计过程：
@@ -53,3 +57,5 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
 ```
 
 每一级只有在真实 Bridge smoke、结构回读、指标解析和失败注入均通过后才升级状态。
+
+反相器可靠性 Gate 1R 已通过 VDA 显式 checkpoint/resume 路径：Bridge 恢复后能核对 OA、继续剩余候选、保留原始基线，并在最终写回中断时只重试 finalize。Bridge 本地补丁 `9e52844` 已让 stale state/调用边界自动重建通过确定性测试和 live smoke，但不能外推为运行中 transport 永不掉线。下一道硬门转为 Gate 2 单 MOS 放大器，先做共源与源极退化的 DC operating point，再进入 AC gain/bandwidth；新 target/library 仍需单独授权。`gate_area_proxy_um2` 仍只是尺寸代价；真实供电能量/平均功率已经加入，但尚无 corner、输入电容或版图面积。

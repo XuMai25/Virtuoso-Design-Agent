@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import pytest
+
 from virtuoso_design_agent.adapters.demo import DeterministicDemoAdapter
-from virtuoso_design_agent.executor import TaskExecutor
+from virtuoso_design_agent.adapters.subprocess_bridge import BridgeWorkerError
+from virtuoso_design_agent.executor import (
+    TaskExecutor,
+    load_execution_checkpoint,
+)
 from virtuoso_design_agent.models import RunStatus, TaskSpec
 from virtuoso_design_agent.planner import build_plan
 
@@ -51,18 +57,52 @@ def test_demo_close_loop_selects_and_applies_feasible_candidate() -> None:
         candidate.evidence_source.value == "software_inference"
         for candidate in record.candidates
     )
+    assert all(
+        candidate.metric_sources["gate_area_proxy_um2"].value
+        == "software_inference"
+        for candidate in record.candidates
+    )
+
+
+def test_simulation_record_uses_actual_schematic_parameters_when_omitted() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "simulate-current-oa",
+            "operation": "simulation.run",
+            "circuit": "inverter",
+            "target": {"library": "vda_test", "cell": "vda_inv"},
+            "parameters": {"load_ff": 2.0, "vdd_v": 0.9},
+            "safety": {"allow_remote_compute": True},
+        }
+    )
+    adapter = DeterministicDemoAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+    assert record.candidates[0].parameters["nmos_width_um"] == 0.5
+    assert record.candidates[0].parameters["pmos_width_um"] == 1.0
+    assert record.candidates[0].parameters["length_um"] == 0.03
 
 
 def test_infeasible_search_does_not_write_best_attempt_to_oa() -> None:
     task = _close_loop(delay_limit=1.0)
     plan = build_plan(task)
-    record = TaskExecutor(DeterministicDemoAdapter()).execute(
+    adapter = DeterministicDemoAdapter()
+    record = TaskExecutor(adapter).execute(
         task, plan, token=plan.confirmation_token
     )
     assert record.status is RunStatus.PARTIAL
     assert record.selected_parameters is not None
     assert not any(action.action == "parameters.apply.best" for action in record.actions)
-    assert "no parameters were written back" in record.notes[0]
+    assert any(action.action == "parameters.restore" for action in record.actions)
+    assert adapter.inspect_schematic(task).data["semantic_parameters"] == {
+        "nmos_width_um": 0.5,
+        "pmos_width_um": 1.0,
+        "length_um": 0.03,
+    }
+    assert any("no feasible candidate was committed" in note for note in record.notes)
 
 
 def test_missing_objective_metric_blocks_writeback() -> None:
@@ -90,5 +130,239 @@ def test_partial_candidate_failure_downgrades_run_status() -> None:
         task, plan, token=plan.confirmation_token
     )
     assert record.status is RunStatus.PARTIAL
-    assert any("candidate simulation(s) failed" in note for note in record.notes)
+    assert any("candidate evaluation(s) failed" in note for note in record.notes)
     assert any(action.action == "parameters.apply.best" for action in record.actions)
+
+
+def test_search_budget_exhaustion_is_explicit() -> None:
+    data = _close_loop().model_dump(mode="json")
+    data["limits"]["max_iterations"] = 2
+    task = TaskSpec.model_validate(data)
+    plan = build_plan(task)
+    record = TaskExecutor(DeterministicDemoAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+    assert len(record.candidates) == 2
+    assert record.status is RunStatus.PARTIAL
+    assert any("search budget exhausted" in note for note in record.notes)
+
+
+def test_interrupted_search_restores_initial_oa_parameters() -> None:
+    class InterruptingAdapter(DeterministicDemoAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.simulations = 0
+
+        def simulate(self, task, parameters):
+            self.simulations += 1
+            if self.simulations == 2:
+                raise KeyboardInterrupt
+            return super().simulate(task, parameters)
+
+    task = _close_loop()
+    plan = build_plan(task)
+    adapter = InterruptingAdapter()
+    executor = TaskExecutor(adapter)
+    with pytest.raises(KeyboardInterrupt):
+        executor.execute(task, plan, token=plan.confirmation_token)
+
+    assert adapter.inspect_schematic(task).data["semantic_parameters"] == {
+        "nmos_width_um": 0.5,
+        "pmos_width_um": 1.0,
+        "length_um": 0.03,
+    }
+    assert any(
+        action.action == "parameters.restore.interrupted"
+        for action in executor.actions
+    )
+    assert any(
+        action.action == "simulation.candidate.2" and action.status == "failed"
+        for action in executor.actions
+    )
+
+
+class _RecoveringBridgeAdapter(DeterministicDemoAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.simulations: list[tuple[float, float]] = []
+        self.interrupted = False
+
+    def simulate(self, task, parameters):
+        point = (
+            parameters["nmos_width_um"],
+            parameters["pmos_width_um"],
+        )
+        self.simulations.append(point)
+        if point == (0.4, 1.0) and not self.interrupted:
+            self.interrupted = True
+            raise BridgeWorkerError("injected SSH reset")
+        return super().simulate(task, parameters)
+
+
+def _incomplete_checkpoint(tmp_path):
+    task = _close_loop()
+    plan = build_plan(task)
+    adapter = _RecoveringBridgeAdapter()
+    checkpoint_path = tmp_path / "loop.checkpoint.json"
+    first = TaskExecutor(adapter).execute(
+        task,
+        plan,
+        token=plan.confirmation_token,
+        checkpoint_path=checkpoint_path,
+    )
+    return task, plan, adapter, checkpoint_path, first
+
+
+def test_bridge_interruption_resumes_without_repeating_completed_prefix(
+    tmp_path,
+) -> None:
+    task, plan, adapter, checkpoint_path, first = _incomplete_checkpoint(tmp_path)
+    checkpoint = load_execution_checkpoint(checkpoint_path)
+
+    assert first.status is RunStatus.FAILED
+    assert checkpoint.complete is False
+    assert checkpoint.next_candidate_index == 2
+    assert [candidate.index for candidate in checkpoint.candidates] == [1]
+    assert adapter.inspect_schematic(task).data["semantic_parameters"] == {
+        "nmos_width_um": 0.5,
+        "pmos_width_um": 1.0,
+        "length_um": 0.03,
+    }
+
+    resumed = TaskExecutor(adapter).execute(
+        task,
+        plan,
+        token=plan.confirmation_token,
+        checkpoint_path=checkpoint_path,
+        resume_checkpoint=checkpoint,
+    )
+    completed = load_execution_checkpoint(checkpoint_path)
+
+    assert resumed.status is RunStatus.SUCCEEDED
+    assert completed.complete is True
+    assert completed.next_candidate_index == 10
+    assert len(resumed.candidates) == 9
+    assert adapter.simulations.count((0.4, 0.8)) == 1
+    assert adapter.simulations.count((0.4, 1.0)) == 2
+    assert any("resumed candidate search at index 2" in note for note in resumed.notes)
+    assert adapter.inspect_schematic(task).data["semantic_parameters"] == {
+        "nmos_width_um": 0.6,
+        "pmos_width_um": 1.2,
+        "length_um": 0.03,
+    }
+
+
+def test_resume_rejects_changed_task_plan_before_adapter_actions(tmp_path) -> None:
+    task, _, adapter, checkpoint_path, _ = _incomplete_checkpoint(tmp_path)
+    checkpoint = load_execution_checkpoint(checkpoint_path)
+    changed = task.model_copy(
+        update={
+            "constraints": [
+                task.constraints[0].model_copy(update={"value": 44.0}),
+                *task.constraints[1:],
+            ]
+        }
+    )
+    changed_plan = build_plan(changed)
+    executor = TaskExecutor(adapter)
+
+    with pytest.raises(ValueError, match="plan token"):
+        executor.execute(
+            changed,
+            changed_plan,
+            token=changed_plan.confirmation_token,
+            checkpoint_path=checkpoint_path,
+            resume_checkpoint=checkpoint,
+        )
+    assert executor.actions == []
+
+
+def test_resume_refuses_unrecognized_current_oa_parameters(tmp_path) -> None:
+    task, plan, adapter, checkpoint_path, _ = _incomplete_checkpoint(tmp_path)
+    checkpoint = load_execution_checkpoint(checkpoint_path)
+    adapter.apply_parameters(
+        task,
+        {
+            "nmos_width_um": 0.7,
+            "pmos_width_um": 1.4,
+            "length_um": 0.03,
+        },
+    )
+
+    resumed = TaskExecutor(adapter).execute(
+        task,
+        plan,
+        token=plan.confirmation_token,
+        checkpoint_path=checkpoint_path,
+        resume_checkpoint=checkpoint,
+    )
+
+    assert resumed.status is RunStatus.FAILED
+    assert any("refusing automatic resume" in note for note in resumed.notes)
+    assert not any(
+        action.action.startswith("parameters.stage.")
+        for action in resumed.actions[len(checkpoint.actions) :]
+    )
+    assert adapter.inspect_schematic(task).data["semantic_parameters"] == {
+        "nmos_width_um": 0.7,
+        "pmos_width_um": 1.4,
+        "length_um": 0.03,
+    }
+
+
+def test_resume_after_final_write_interruption_does_not_repeat_simulations(
+    tmp_path,
+) -> None:
+    class FinalizeInterruptingAdapter(DeterministicDemoAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.simulations = 0
+            self.interrupted = False
+
+        def simulate(self, task, parameters):
+            self.simulations += 1
+            return super().simulate(task, parameters)
+
+        def apply_parameters(self, task, parameters):
+            final_best = (
+                parameters.get("nmos_width_um") == 0.6
+                and parameters.get("pmos_width_um") == 1.2
+                and self.simulations == 9
+            )
+            if final_best and not self.interrupted:
+                self.interrupted = True
+                raise BridgeWorkerError("injected final write reset")
+            return super().apply_parameters(task, parameters)
+
+    task = _close_loop()
+    plan = build_plan(task)
+    adapter = FinalizeInterruptingAdapter()
+    checkpoint_path = tmp_path / "finalize.checkpoint.json"
+    first = TaskExecutor(adapter).execute(
+        task,
+        plan,
+        token=plan.confirmation_token,
+        checkpoint_path=checkpoint_path,
+    )
+    checkpoint = load_execution_checkpoint(checkpoint_path)
+
+    assert first.status is RunStatus.FAILED
+    assert checkpoint.next_candidate_index == 10
+    assert len(checkpoint.candidates) == 9
+    assert adapter.simulations == 9
+
+    resumed = TaskExecutor(adapter).execute(
+        task,
+        plan,
+        token=plan.confirmation_token,
+        checkpoint_path=checkpoint_path,
+        resume_checkpoint=checkpoint,
+    )
+
+    assert resumed.status is RunStatus.SUCCEEDED
+    assert adapter.simulations == 9
+    assert load_execution_checkpoint(checkpoint_path).complete is True
+    assert any(
+        action.action == "parameters.apply.best" and action.status == "succeeded"
+        for action in resumed.actions
+    )

@@ -5,6 +5,9 @@
   "pmos_cell": "pch_lvt_mac",
   "model_include": "/data/technique/tsmcn28_lo_0v9_1p10m_5X2Y2Z/models/spectre/toplevel.scs",
   "model_section": "top_tt",
+  "cds_lib_path": "/data/xum/virtuoso_bridge_smoke/cds.lib",
+  "cadence_cshrc": "/data/cshrc/.cshrc.cadence",
+  "remote_run_root": "/data/xum/virtuoso_bridge_smoke",
   "default_vdd_v": 0.9,
   "default_load_ff": 2.0,
   "default_length_um": 0.03

@@ -39,6 +39,12 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         "把动作、判定和证据写入本地 run record",
         SideEffect.LOCAL_WRITE,
     )
+    netlist = _step(
+        "netlist",
+        "netlist.generate",
+        "从目标 OA schematic 生成 si Spectre 网表并核对参数一致性",
+        SideEffect.REMOTE_COMPUTE,
+    )
 
     if task.operation is Operation.SCHEMATIC_CREATE:
         return [
@@ -74,44 +80,58 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
     if task.operation is Operation.SIMULATION_RUN:
         return [
             probe,
+            inspect.model_copy(update={"id": "02-inspect"}),
+            netlist.model_copy(update={"id": "03-netlist"}),
             _step(
-                "02-simulate",
+                "04-simulate",
                 "simulation.run",
-                "运行一个候选点的 Spectre transient",
+                "用 OA 导出网表和受控 testbench 运行 Spectre transient",
                 SideEffect.REMOTE_COMPUTE,
             ),
             _step(
-                "03-evaluate",
+                "05-evaluate",
                 "results.evaluate",
                 "从波形指标逐条判断规格",
                 SideEffect.READ_ONLY,
             ),
-            persist.model_copy(update={"id": "04-persist"}),
+            persist.model_copy(update={"id": "06-persist"}),
         ]
     if task.operation is Operation.DESIGN_TUNE:
         return [
             probe,
             inspect.model_copy(update={"id": "02-before"}),
             _step(
-                "03-sweep",
+                "03-stage",
+                "parameters.stage",
+                "逐候选暂存 OA 参数并回读；失败或无可行点时恢复初始参数",
+                SideEffect.REMOTE_WRITE,
+            ),
+            netlist.model_copy(update={"id": "04-netlist"}),
+            _step(
+                "05-sweep",
                 "simulation.sweep",
-                "在 max_iterations 内运行有限参数候选",
+                "在 max_iterations 内运行 OA 同源网表候选",
                 SideEffect.REMOTE_COMPUTE,
             ),
             _step(
-                "04-select",
+                "06-select",
                 "results.select",
                 "按规格违例与 objective 选择候选",
                 SideEffect.READ_ONLY,
             ),
             _step(
-                "05-apply-best",
-                "parameters.apply",
-                "把最佳候选应用回 schematic",
+                "07-finalize",
+                "parameters.finalize",
+                "提交最佳可行参数，或恢复搜索前 OA 参数",
                 SideEffect.REMOTE_WRITE,
             ),
-            inspect.model_copy(update={"id": "06-after"}),
-            persist.model_copy(update={"id": "07-persist"}),
+            inspect.model_copy(update={"id": "08-after"}),
+            persist.model_copy(
+                update={
+                    "id": "09-persist",
+                    "description": "逐候选原子保存 checkpoint，并写入最终 run record",
+                }
+            ),
         ]
     return [
         probe,
@@ -122,25 +142,37 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             SideEffect.REMOTE_WRITE,
         ),
         _step(
-            "03-sweep",
+            "03-stage",
+            "parameters.stage",
+            "逐候选暂存 OA 参数并回读；失败或无可行点时恢复初始参数",
+            SideEffect.REMOTE_WRITE,
+        ),
+        netlist.model_copy(update={"id": "04-netlist"}),
+        _step(
+            "05-sweep",
             "simulation.sweep",
-            "在 max_iterations 内运行有限参数候选",
+            "在 max_iterations 内运行 OA 同源网表候选",
             SideEffect.REMOTE_COMPUTE,
         ),
         _step(
-            "04-select",
+            "06-select",
             "results.select",
             "按规格违例与 objective 选择候选",
             SideEffect.READ_ONLY,
         ),
         _step(
-            "05-apply-best",
-            "parameters.apply",
-            "把最佳候选应用回 schematic",
+            "07-finalize",
+            "parameters.finalize",
+            "提交最佳可行参数，或恢复搜索前 OA 参数",
             SideEffect.REMOTE_WRITE,
         ),
-        inspect.model_copy(update={"id": "06-after"}),
-        persist.model_copy(update={"id": "07-persist"}),
+        inspect.model_copy(update={"id": "08-after"}),
+        persist.model_copy(
+            update={
+                "id": "09-persist",
+                "description": "逐候选原子保存 checkpoint，并写入最终 run record",
+            }
+        ),
     ]
 
 

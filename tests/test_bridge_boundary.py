@@ -5,7 +5,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from virtuoso_design_agent.adapters.bridge_worker import _inverter_deck, _schematic_exists
+from virtuoso_design_agent.adapters.bridge_worker import (
+    _assert_parameter_consistency,
+    _complete_si_env,
+    _generate_oa_netlist,
+    _inverter_testbench_deck,
+    _parse_inverter_netlist,
+    _read_nonempty_text,
+    _schematic_exists,
+    _signal,
+    _validate_si_log,
+)
 from virtuoso_design_agent.adapters.subprocess_bridge import (
     BridgeWorkerError,
     SubprocessBridgeAdapter,
@@ -17,11 +27,13 @@ def test_pdk_profile_contains_verified_nics4304_paths() -> None:
     profile = load_pdk_profile("nics4304_tsmc28")
     assert profile.tech_library == "tsmcN28"
     assert profile.model_include.startswith("/data/technique/")
+    assert profile.cds_lib_path.startswith("/data/xum/")
+    assert profile.remote_run_root.startswith("/data/xum/")
 
 
-def test_inverter_deck_uses_profile_and_semantic_parameters() -> None:
+def test_inverter_testbench_deck_includes_oa_netlist_without_device_topology() -> None:
     profile = load_pdk_profile("nics4304_tsmc28").model_dump()
-    deck = _inverter_deck(
+    deck = _inverter_testbench_deck(
         profile,
         {
             "nmos_width_um": 0.5,
@@ -30,11 +42,117 @@ def test_inverter_deck_uses_profile_and_semantic_parameters() -> None:
             "load_ff": 2.0,
             "vdd_v": 0.9,
         },
+        "/data/xum/virtuoso_bridge_smoke/vda_run/netlist",
     )
-    assert "nch_lvt_mac" in deck
-    assert "pch_lvt_mac" in deck
-    assert "save VIN VOUT VDD" in deck
-    assert "w=wn" in deck and "w=wp" in deck
+    assert 'include "/data/xum/virtuoso_bridge_smoke/vda_run/netlist"' in deck
+    assert "VIN_SRC (IN 0)" in deck
+    assert "VSS_SRC (VSS 0)" in deck
+    assert "save IN OUT VDD VSS VDD_SRC:p" in deck
+    assert "MN0 (" not in deck
+    assert "MP0 (" not in deck
+
+
+def test_si_env_completion_adds_verified_spectre_formatter_context_once() -> None:
+    completed = _complete_si_env(
+        'simLibName = "vb_pdk_smoke"\n'
+        'simViewList = \'("schematic")\n'
+    )
+    assert completed.count("simViewList =") == 1
+    assert 'simViewList = \'("spectre" "config" "schematic" "veriloga")' in completed
+    assert "nlFormatterClass = 'spectreFormatter" in completed
+    assert "simNotIncremental = 't" in completed
+
+
+def test_oa_netlist_parameters_are_parsed_and_checked() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump()
+    parsed = _parse_inverter_netlist(
+        """
+MN0 (OUT IN VSS VSS) nch_lvt_mac l=30n w=500n nf=1 multi=1
+MP0 (OUT IN VDD VDD) pch_lvt_mac l=30n w=1u nf=1 multi=1
+""",
+        profile,
+    )
+    assert parsed["semantic_parameters"] == {
+        "nmos_width_um": pytest.approx(0.5),
+        "pmos_width_um": pytest.approx(1.0),
+        "length_um": pytest.approx(0.03),
+    }
+    assert parsed["instances"]["MN0"]["nodes"] == ["OUT", "IN", "VSS", "VSS"]
+    _assert_parameter_consistency(
+        {
+            "nmos_width_um": 0.5,
+            "pmos_width_um": 1.0,
+            "length_um": 0.03,
+        },
+        parsed["semantic_parameters"],
+        expected_label="OA readback",
+        actual_label="si netlist",
+    )
+
+
+def test_parameter_mismatch_is_not_silently_simulated() -> None:
+    with pytest.raises(RuntimeError, match="parameter mismatch.*nmos_width_um"):
+        _assert_parameter_consistency(
+            {"nmos_width_um": 0.5},
+            {"nmos_width_um": 0.6},
+            expected_label="requested",
+            actual_label="OA readback",
+        )
+
+
+def test_empty_netlist_and_empty_waveform_are_rejected(tmp_path) -> None:
+    netlist = tmp_path / "netlist"
+    netlist.write_text("", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="netlist is empty"):
+        _read_nonempty_text(netlist, "si netlist")
+    with pytest.raises(RuntimeError, match="signal time is empty"):
+        _signal({"time": []}, "time")
+
+
+def test_si_netlisting_rejects_empty_generated_output(tmp_path) -> None:
+    success = SimpleNamespace(ok=True, errors=[])
+
+    class FakeClient:
+        def execute_skill(self, *args, **kwargs):
+            return success
+
+        def upload_file(self, *args, **kwargs):
+            return success
+
+        def run_shell_command(self, *args, **kwargs):
+            return success
+
+        def download_file(self, remote_path, local_path, **kwargs):
+            if str(remote_path).endswith("/si.env"):
+                text = 'simLibName = "vb_pdk_smoke"\n'
+            elif str(remote_path).endswith("si_batch_stdout.log"):
+                text = "Begin Incremental Netlisting\nEnd netlisting\n"
+            else:
+                text = ""
+            local_path.write_text(text, encoding="utf-8")
+            return success
+
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump()
+    with pytest.raises(RuntimeError, match="si netlist is empty"):
+        _generate_oa_netlist(
+            FakeClient(),
+            {
+                "task_id": "netlist-failure",
+                "target": {
+                    "library": "vb_pdk_smoke",
+                    "cell": "vda_inv",
+                    "view": "schematic",
+                },
+                "profile": profile,
+            },
+            tmp_path,
+            timeout=60,
+        )
+
+
+def test_si_log_requires_a_real_completion_marker() -> None:
+    with pytest.raises(RuntimeError, match="no completion marker"):
+        _validate_si_log("SI_RC=0 but no netlisting completion evidence")
 
 
 @pytest.mark.parametrize(("output", "expected"), [("t", True), ('"nil"', False)])

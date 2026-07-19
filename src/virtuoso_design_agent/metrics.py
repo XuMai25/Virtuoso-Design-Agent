@@ -61,6 +61,46 @@ def _sample_window(
     return float(median(samples))
 
 
+def _interpolate_at(
+    time_s: Sequence[float], values: Sequence[float], target_s: float
+) -> float:
+    if target_s < float(time_s[0]) or target_s > float(time_s[-1]):
+        raise MetricExtractionError("integration boundary is outside waveform range")
+    for index in range(1, len(time_s)):
+        t0 = float(time_s[index - 1])
+        t1 = float(time_s[index])
+        if target_s == t0:
+            return float(values[index - 1])
+        if target_s <= t1:
+            fraction = (target_s - t0) / (t1 - t0)
+            return float(values[index - 1]) + fraction * (
+                float(values[index]) - float(values[index - 1])
+            )
+    if target_s == float(time_s[-1]):
+        return float(values[-1])
+    raise MetricExtractionError("integration boundary is outside waveform range")
+
+
+def _integrate_window(
+    time_s: Sequence[float], values: Sequence[float], start_s: float, end_s: float
+) -> float:
+    if end_s <= start_s:
+        raise MetricExtractionError("invalid integration window")
+    points = [(start_s, _interpolate_at(time_s, values, start_s))]
+    points.extend(
+        (float(time), float(value))
+        for time, value in zip(time_s, values, strict=True)
+        if start_s < float(time) < end_s
+    )
+    points.append((end_s, _interpolate_at(time_s, values, end_s)))
+    return sum(
+        0.5 * (before_value + after_value) * (after_time - before_time)
+        for (before_time, before_value), (after_time, after_value) in zip(
+            points, points[1:]
+        )
+    )
+
+
 def extract_inverter_metrics(
     time_s: Sequence[float],
     vin_v: Sequence[float],
@@ -129,6 +169,52 @@ def extract_inverter_metrics(
         "vol_v": vol_v,
         "overshoot_v": max(peak - vdd_v, 0.0),
         "undershoot_v": max(-trough, 0.0),
+    }
+
+
+def extract_supply_metrics(
+    time_s: Sequence[float],
+    vin_v: Sequence[float],
+    supply_current_a: Sequence[float],
+    *,
+    vdd_v: float,
+) -> dict[str, float]:
+    """Integrate total supply energy between two consecutive VIN rising edges.
+
+    The result includes leakage during the cycle; it is not pure switching energy.
+    """
+    if vdd_v <= 0:
+        raise MetricExtractionError("vdd_v must be positive")
+    if (
+        len(time_s) < 4
+        or len(time_s) != len(vin_v)
+        or len(time_s) != len(supply_current_a)
+    ):
+        raise MetricExtractionError(
+            "time, VIN, and supply current must have equal non-trivial length"
+        )
+    if any(float(time_s[i]) <= float(time_s[i - 1]) for i in range(1, len(time_s))):
+        raise MetricExtractionError("time values must be strictly increasing")
+
+    input_rises = _crossings(time_s, vin_v, 0.5 * vdd_v, rising=True)
+    if len(input_rises) < 2:
+        raise MetricExtractionError(
+            "VIN does not contain two rising crossings for a complete supply cycle"
+        )
+    start_s, end_s = input_rises[:2]
+    period_s = end_s - start_s
+    source_charge_c = -_integrate_window(
+        time_s, supply_current_a, start_s, end_s
+    )
+    if source_charge_c <= 0:
+        raise MetricExtractionError(
+            "integrated supply current has unexpected polarity or zero energy"
+        )
+    energy_j = source_charge_c * vdd_v
+    return {
+        "supply_cycle_period_ps": period_s * 1e12,
+        "supply_energy_per_cycle_fj": energy_j * 1e15,
+        "average_supply_power_uw": energy_j / period_s * 1e6,
     }
 
 
