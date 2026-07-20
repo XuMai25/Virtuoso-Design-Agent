@@ -1112,6 +1112,58 @@ def test_si_netlisting_rejects_empty_generated_output(tmp_path) -> None:
         )
 
 
+def test_si_command_failure_reports_the_retained_remote_run(tmp_path) -> None:
+    success = SimpleNamespace(ok=True, errors=[])
+    failure = SimpleNamespace(
+        ok=False,
+        errors=["Socket error: WinError 10054"],
+        output="",
+    )
+
+    class FakeClient:
+        def execute_skill(self, *args, **kwargs):
+            return success
+
+        def upload_file(self, *args, **kwargs):
+            return success
+
+        def run_shell_command(self, *args, **kwargs):
+            return failure
+
+        def download_file(self, remote_path, local_path, **kwargs):
+            text = (
+                'simLibName = "vb_pdk_smoke"\n'
+                if str(remote_path).endswith("/si.env")
+                else ""
+            )
+            local_path.write_text(text, encoding="utf-8")
+            return success
+
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump()
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"si batch command failed: Socket error: WinError 10054.*"
+            r"remote si run retained at /data/xum/virtuoso_bridge_smoke/"
+            r"vda_netlist-failure_"
+        ),
+    ):
+        _generate_oa_netlist(
+            FakeClient(),
+            {
+                "task_id": "netlist-failure",
+                "target": {
+                    "library": "vb_pdk_smoke",
+                    "cell": "vda_inv",
+                    "view": "schematic",
+                },
+                "profile": profile,
+            },
+            tmp_path,
+            timeout=60,
+        )
+
+
 def test_si_log_requires_a_real_completion_marker() -> None:
     with pytest.raises(RuntimeError, match="no completion marker"):
         _validate_si_log("SI_RC=0 but no netlisting completion evidence")

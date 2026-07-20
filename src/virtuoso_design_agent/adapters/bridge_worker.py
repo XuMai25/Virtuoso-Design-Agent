@@ -1792,9 +1792,12 @@ def _generate_oa_netlist(
         raise RuntimeError(
             f"si batch command failed: {_bridge_result_error(shell_result)}"
             + (f"; log tail: {tail}" if tail else "")
+            + f"; remote si run retained at {run_dir}"
         )
     if not log_text:
-        raise RuntimeError("si netlisting log was not created")
+        raise RuntimeError(
+            f"si netlisting log was not created; remote si run retained at {run_dir}"
+        )
     _validate_si_log(log_text)
 
     local_netlist = work_dir / "oa_netlist.scs"
