@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from virtuoso_design_agent.adapters.base import merge_analysis_bundle
 from virtuoso_design_agent.metrics import (
     aggregate_common_source_linearity_metrics,
     extract_common_source_ac_metrics,
@@ -2462,13 +2463,85 @@ def simulate_inverter(payload: dict[str, Any]) -> dict[str, Any]:
         }
 
 
-def simulate_common_source(payload: dict[str, Any]) -> dict[str, Any]:
+def _merge_common_source_quality_results(
+    payload: dict[str, Any], results: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    merged = merge_analysis_bundle(results)
+    raw_results = merged.pop("analysis_results")
+    first = raw_results[next(iter(raw_results))]
+    first_evidence = first.get("evidence", {})
+    shared_schematic = first_evidence.get("schematic_readback")
+    shared_netlist = first_evidence.get("netlist")
+    analysis_evidence: dict[str, Any] = {}
+    runner_warnings: list[str] = []
+    tool_versions: dict[str, str] = {}
+    scalar_count = 0
+
+    for analysis, data in raw_results.items():
+        evidence = data.get("evidence", {})
+        if evidence.get("schematic_readback") != shared_schematic:
+            raise RuntimeError(
+                f"quality bundle schematic evidence changed during {analysis}"
+            )
+        if evidence.get("netlist") != shared_netlist:
+            raise RuntimeError(
+                f"quality bundle netlist evidence changed during {analysis}"
+            )
+        scalar_count += int(data.get("scalar_count", 0))
+        tool_versions[analysis] = str(data.get("tool_version", "unknown"))
+        runner_warnings.extend(
+            f"{analysis}: {value}" for value in data.get("warnings", [])
+        )
+        analysis_evidence[analysis] = {
+            "analysis_complete": bool(data.get("analysis_complete", True)),
+            "analysis_issues": list(data.get("analysis_issues", [])),
+            "analysis_warnings": list(data.get("analysis_warnings", [])),
+            "tool_version": data.get("tool_version"),
+            "scalar_count": data.get("scalar_count", 0),
+            **{
+                name: value
+                for name, value in evidence.items()
+                if name not in {"schematic_readback", "netlist"}
+            },
+        }
+
+    bundle = dict(merged["analysis_bundle"])
+    bundle.update(
+        {
+            "source": "software_inference",
+            "requested_analysis": "quality",
+            "requested_analysis_source": str(
+                payload.get("analysis_source", "software_inference")
+            ),
+            "oa_netlist_reuse": "one_verified_netlist",
+        }
+    )
+    merged.update(
+        {
+            "analysis_bundle": bundle,
+            "scalar_count": scalar_count,
+            "tool_versions": tool_versions,
+            "warnings": runner_warnings,
+            "evidence": {
+                "schematic_readback": shared_schematic,
+                "netlist": shared_netlist,
+                "analysis_bundle": bundle,
+                "analyses": analysis_evidence,
+            },
+        }
+    )
+    return merged
+
+
+def simulate_common_source(
+    payload: dict[str, Any], *, _bundle_cache: dict[str, Any] | None = None
+) -> dict[str, Any]:
     from virtuoso_bridge.spectre.runner import SpectreSimulator
 
     profile = payload["profile"]
     timeout = int(payload.get("timeout_seconds", 600))
     analysis = str(payload.get("analysis", "dc"))
-    if analysis not in {"dc", "ac", "transient", "noise"}:
+    if analysis not in {"dc", "ac", "transient", "noise", "quality"}:
         raise RuntimeError(f"unsupported common-source analysis: {analysis}")
     ac_sweep = payload.get("ac_sweep")
     linearity_sweep = payload.get("linearity_sweep")
@@ -2481,12 +2554,52 @@ def simulate_common_source(payload: dict[str, Any]) -> dict[str, Any]:
         )
     if analysis == "noise" and not isinstance(noise_sweep, dict):
         raise RuntimeError("common-source noise simulation requires noise_sweep")
-    client = _client()
-    library, cell = _target(payload)
-    schematic = _read_schematic(client, library, cell)
-    topology_variant = _assert_common_source(schematic, profile)
-    oa_parameters = _common_source_semantic_parameters_from_schematic(schematic)
-    oa_geometry = _common_source_device_geometry_from_schematic(schematic)
+    if analysis == "quality":
+        missing = [
+            name
+            for name, value in (
+                ("ac_sweep", ac_sweep),
+                ("linearity_sweep", linearity_sweep),
+                ("noise_sweep", noise_sweep),
+            )
+            if not isinstance(value, dict)
+        ]
+        if missing:
+            raise RuntimeError(
+                "common-source quality simulation requires " + ", ".join(missing)
+            )
+        cache: dict[str, Any] = {}
+        results: dict[str, dict[str, Any]] = {}
+        for member in ("ac", "transient", "noise"):
+            member_payload = dict(payload)
+            member_payload["analysis"] = member
+            member_payload["analysis_source"] = "software_inference"
+            results[member] = simulate_common_source(
+                member_payload, _bundle_cache=cache
+            )
+        return _merge_common_source_quality_results(payload, results)
+
+    if _bundle_cache is not None and "client" in _bundle_cache:
+        client = _bundle_cache["client"]
+        topology_variant = str(_bundle_cache["topology_variant"])
+        oa_parameters = dict(_bundle_cache["oa_parameters"])
+        oa_geometry = dict(_bundle_cache["oa_geometry"])
+    else:
+        client = _client()
+        library, cell = _target(payload)
+        schematic = _read_schematic(client, library, cell)
+        topology_variant = _assert_common_source(schematic, profile)
+        oa_parameters = _common_source_semantic_parameters_from_schematic(schematic)
+        oa_geometry = _common_source_device_geometry_from_schematic(schematic)
+        if _bundle_cache is not None:
+            _bundle_cache.update(
+                {
+                    "client": client,
+                    "topology_variant": topology_variant,
+                    "oa_parameters": dict(oa_parameters),
+                    "oa_geometry": dict(oa_geometry),
+                }
+            )
     requested_oa_parameters = {
         name: float(payload.get("parameters", {})[name])
         for name in (
@@ -2506,9 +2619,14 @@ def simulate_common_source(payload: dict[str, Any]) -> dict[str, Any]:
     parameters = _resolved_common_source_parameters(payload, oa_parameters)
     with tempfile.TemporaryDirectory(prefix="vda_common_source_") as temp_dir:
         work_dir = Path(temp_dir)
-        netlist_evidence = _generate_oa_netlist(
-            client, payload, work_dir, timeout=timeout
-        )
+        if _bundle_cache is not None and "netlist_evidence" in _bundle_cache:
+            netlist_evidence = _bundle_cache["netlist_evidence"]
+        else:
+            netlist_evidence = _generate_oa_netlist(
+                client, payload, work_dir, timeout=timeout
+            )
+            if _bundle_cache is not None:
+                _bundle_cache["netlist_evidence"] = netlist_evidence
         netlist_parameters = netlist_evidence["parsed"]["semantic_parameters"]
         netlist_geometry = netlist_evidence["parsed"]["device_geometry"]
         try:
@@ -2546,7 +2664,12 @@ def simulate_common_source(payload: dict[str, Any]) -> dict[str, Any]:
             noise_sweep=noise_sweep,
         )
         netlist.write_text(deck, encoding="utf-8")
-        remote_wrapper = f"{netlist_evidence['remote_run_dir']}/input_from_oa.scs"
+        wrapper_name = (
+            f"input_from_oa_{analysis}.scs"
+            if _bundle_cache is not None
+            else "input_from_oa.scs"
+        )
+        remote_wrapper = f"{netlist_evidence['remote_run_dir']}/{wrapper_name}"
         _upload_file(client, netlist, remote_wrapper, timeout=min(timeout, 60))
         simulator = SpectreSimulator.from_env(
             timeout=timeout,

@@ -36,10 +36,14 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         common_source and analysis is AnalysisKind.TRANSIENT
     )
     common_source_noise = common_source and analysis is AnalysisKind.NOISE
+    common_source_quality = common_source and analysis is AnalysisKind.QUALITY
     candidate_oa_write = task_requests_oa_parameter_write(task)
     template_name = "共源放大器" if common_source else "反相器"
     simulation_description = (
-        "用 OA 导出网表，先核对 DC operating point，再运行 Spectre 复数 AC sweep"
+        "从同一次 OA/si 参数与拓扑核对生成的网表，分别运行 Spectre 复数 AC、"
+        "相干 transient 线性度和 noise；三项均完整才接受候选"
+        if common_source_quality
+        else "用 OA 导出网表，先核对 DC operating point，再运行 Spectre 复数 AC sweep"
         if common_source_ac
         else (
             "用 OA 导出网表，先核对 DC operating point，再用 Spectre transient "
@@ -56,7 +60,10 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         else "用 OA 导出网表和受控 testbench 运行 Spectre transient"
     )
     sweep_description = (
-        "在 max_iterations 内运行 OA 同源 DC + 复数 AC 候选"
+        "在 max_iterations 内对每个候选运行一次 OA 同源网表核对及 AC + "
+        "transient 线性度 + noise 质量组合"
+        if common_source_quality
+        else "在 max_iterations 内运行 OA 同源 DC + 复数 AC 候选"
         if common_source_ac
         else "在 max_iterations 内运行 OA 同源 DC + transient 线性度候选"
         if common_source_linearity
@@ -67,7 +74,10 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         else "在 max_iterations 内运行 OA 同源网表候选"
     )
     evaluation_description = (
-        "从复数 VOUT/VIN 提取低频增益、首个 -3 dB 带宽、GBW、"
+        "联合判断 DC 工作区、增益、首个 -3 dB 带宽、GBW、unity-gain、"
+        "P1dB、THD、真实 VDD 功耗和积分输入参考噪声；任一分析缺证据即拒绝候选"
+        if common_source_quality
+        else "从复数 VOUT/VIN 提取低频增益、首个 -3 dB 带宽、GBW、"
         "unity-gain frequency，并结合 DC 工作区逐条判断规格"
         if common_source_ac
         else (
@@ -249,8 +259,12 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         _step(
             "03-stage",
             "parameters.stage",
-            "逐候选暂存 OA 参数并回读；失败或无可行点时恢复初始参数",
-            SideEffect.REMOTE_WRITE,
+            (
+                "逐候选暂存 OA 参数并回读；失败或无可行点时恢复初始参数"
+                if candidate_oa_write
+                else "候选只改变显式 testbench 条件；每点复用同一 OA readback，不写 OA"
+            ),
+            SideEffect.REMOTE_WRITE if candidate_oa_write else SideEffect.READ_ONLY,
         ),
         netlist.model_copy(update={"id": "04-netlist"}),
         _step(
@@ -268,8 +282,12 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         _step(
             "07-finalize",
             "parameters.finalize",
-            "提交最佳可行参数，或恢复搜索前 OA 参数",
-            SideEffect.REMOTE_WRITE,
+            (
+                "提交最佳可行参数，或恢复搜索前 OA 参数"
+                if candidate_oa_write
+                else "记录最佳 testbench 条件，并再次确认 OA 参数保持不变"
+            ),
+            SideEffect.REMOTE_WRITE if candidate_oa_write else SideEffect.READ_ONLY,
         ),
         inspect.model_copy(update={"id": "08-after"}),
         persist.model_copy(

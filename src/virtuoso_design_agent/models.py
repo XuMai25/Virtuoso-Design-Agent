@@ -44,6 +44,7 @@ class AnalysisKind(str, Enum):
     DC = "dc"
     AC = "ac"
     NOISE = "noise"
+    QUALITY = "quality"
 
 
 class Relation(str, Enum):
@@ -290,44 +291,62 @@ class TaskSpec(StrictModel):
                     AnalysisKind.AC,
                     AnalysisKind.TRANSIENT,
                     AnalysisKind.NOISE,
+                    AnalysisKind.QUALITY,
                 }:
                     raise ValueError(
-                        "common_source supports dc, ac, transient, or noise analysis"
+                        "common_source supports dc, ac, transient, noise, or quality "
+                        "analysis"
                     )
             elif analysis_settings:
                 raise ValueError(
                     "analysis settings are not implemented for this circuit"
                 )
             if self.circuit is CircuitKind.COMMON_SOURCE:
-                required_settings = {
-                    AnalysisKind.AC: ("ac_sweep", self.ac_sweep),
-                    AnalysisKind.TRANSIENT: (
-                        "linearity_sweep",
-                        self.linearity_sweep,
-                    ),
-                    AnalysisKind.NOISE: ("noise_sweep", self.noise_sweep),
-                }
-                required = required_settings.get(resolved_analysis)
-                settings = {
-                    "ac_sweep": self.ac_sweep,
-                    "linearity_sweep": self.linearity_sweep,
-                    "noise_sweep": self.noise_sweep,
-                }
-                allowed_setting = required[0] if required is not None else None
-                unexpected = [
-                    name
-                    for name, value in settings.items()
-                    if value is not None and name != allowed_setting
-                ]
-                if unexpected:
-                    raise ValueError(
-                        f"{', '.join(unexpected)} requires its matching analysis"
-                    )
-                if required is not None and required[1] is None:
-                    raise ValueError(
-                        f"common-source {resolved_analysis.value} analysis requires "
-                        f"{required[0]}"
-                    )
+                if resolved_analysis is AnalysisKind.QUALITY:
+                    missing = [
+                        name
+                        for name, value in (
+                            ("ac_sweep", self.ac_sweep),
+                            ("linearity_sweep", self.linearity_sweep),
+                            ("noise_sweep", self.noise_sweep),
+                        )
+                        if value is None
+                    ]
+                    if missing:
+                        raise ValueError(
+                            "common-source quality analysis requires "
+                            + ", ".join(missing)
+                        )
+                else:
+                    required_settings = {
+                        AnalysisKind.AC: ("ac_sweep", self.ac_sweep),
+                        AnalysisKind.TRANSIENT: (
+                            "linearity_sweep",
+                            self.linearity_sweep,
+                        ),
+                        AnalysisKind.NOISE: ("noise_sweep", self.noise_sweep),
+                    }
+                    required = required_settings.get(resolved_analysis)
+                    settings = {
+                        "ac_sweep": self.ac_sweep,
+                        "linearity_sweep": self.linearity_sweep,
+                        "noise_sweep": self.noise_sweep,
+                    }
+                    allowed_setting = required[0] if required is not None else None
+                    unexpected = [
+                        name
+                        for name, value in settings.items()
+                        if value is not None and name != allowed_setting
+                    ]
+                    if unexpected:
+                        raise ValueError(
+                            f"{', '.join(unexpected)} requires its matching analysis"
+                        )
+                    if required is not None and required[1] is None:
+                        raise ValueError(
+                            f"common-source {resolved_analysis.value} analysis requires "
+                            f"{required[0]}"
+                        )
         if self.instance_parameter_updates:
             if self.operation is not Operation.PARAMETERS_APPLY:
                 raise ValueError(
@@ -371,6 +390,16 @@ class TaskSpec(StrictModel):
         if self.circuit is CircuitKind.INVERTER:
             return AnalysisKind.TRANSIENT
         return AnalysisKind.DC
+
+    def resolved_analyses(self) -> tuple[AnalysisKind, ...]:
+        analysis = self.resolved_analysis()
+        if analysis is AnalysisKind.QUALITY:
+            return (
+                AnalysisKind.AC,
+                AnalysisKind.TRANSIENT,
+                AnalysisKind.NOISE,
+            )
+        return (analysis,)
 
 
 class PlanStep(StrictModel):

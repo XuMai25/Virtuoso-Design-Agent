@@ -239,6 +239,73 @@ def test_common_source_noise_plan_discloses_density_integration() -> None:
     assert not plan.requires_remote_write
 
 
+def test_common_source_quality_plan_discloses_atomic_evidence_gate() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "common-source-quality",
+            "operation": "simulation.run",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "analysis": "quality",
+            "ac_sweep": {"start_hz": 1e4, "stop_hz": 1e11},
+            "linearity_sweep": {
+                "frequency_hz": 100e6,
+                "amplitudes_v": [0.005, 0.05, 0.15],
+            },
+            "noise_sweep": {"start_hz": 1e3, "stop_hz": 1e10},
+            "parameters": {"bias_v": 0.35, "vdd_v": 0.9, "load_ff": 1.0},
+        }
+    )
+    plan = build_plan(task)
+    simulation = next(
+        step for step in plan.steps if step.capability == "simulation.run"
+    )
+    evaluation = next(
+        step for step in plan.steps if step.capability == "results.evaluate"
+    )
+
+    assert "同一次 OA/si" in simulation.description
+    assert "三项均完整" in simulation.description
+    assert "GBW" in evaluation.description
+    assert "P1dB" in evaluation.description
+    assert "输入参考噪声" in evaluation.description
+    assert not plan.requires_remote_write
+
+
+def test_quality_close_loop_does_not_claim_candidate_oa_writes_for_testbench_only_search() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "common-source-quality-close-loop",
+            "operation": "design.close_loop",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "analysis": "quality",
+            "ac_sweep": {"start_hz": 1e4, "stop_hz": 1e11},
+            "linearity_sweep": {
+                "frequency_hz": 100e6,
+                "amplitudes_v": [0.005, 0.05, 0.15],
+            },
+            "noise_sweep": {"start_hz": 1e3, "stop_hz": 1e10},
+            "parameters": {"vdd_v": 0.9},
+            "parameter_space": {"bias_v": [0.32, 0.35], "load_ff": [1.0, 4.0]},
+            "constraints": [
+                {"metric": "saturation_margin_v", "relation": ">=", "value": 0.05}
+            ],
+            "create_if_missing": True,
+        }
+    )
+    plan = build_plan(task)
+    stage = next(step for step in plan.steps if step.capability == "parameters.stage")
+    finalize = next(
+        step for step in plan.steps if step.capability == "parameters.finalize"
+    )
+
+    assert plan.requires_remote_write  # schematic.ensure may create the target
+    assert stage.side_effect is SideEffect.READ_ONLY
+    assert finalize.side_effect is SideEffect.READ_ONLY
+    assert "不写 OA" in stage.description
+
+
 def test_source_degeneration_plan_discloses_minimal_in_place_delta() -> None:
     task = TaskSpec.model_validate(
         {

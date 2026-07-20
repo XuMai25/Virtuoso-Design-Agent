@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from ..models import CircuitKind, EvidenceSource, TaskSpec
+from ..models import AnalysisKind, CircuitKind, EvidenceSource, TaskSpec
 from ..profiles import load_pdk_profile
 from .base import AdapterInterrupted, AdapterResult
 
@@ -192,6 +192,10 @@ class SubprocessBridgeAdapter:
         data = self._request(
             _WORKER_ACTIONS[task.circuit]["simulate"],
             payload,
-            timeout=task.limits.timeout_seconds + 240,
+            timeout=(
+                task.limits.timeout_seconds * 3 + 240
+                if task.resolved_analysis() is AnalysisKind.QUALITY
+                else task.limits.timeout_seconds + 240
+            ),
         )
         return AdapterResult(data=data, evidence_source=EvidenceSource.EDA_RESULT)

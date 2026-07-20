@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from virtuoso_design_agent.adapters.base import merge_analysis_bundle
 from virtuoso_design_agent.adapters.bridge_worker import (
     _apply_explicit_instance_parameters,
     _assert_common_source,
@@ -1521,6 +1522,201 @@ def test_common_source_quality_worker_routes_metrics_and_evidence(
         )
 
 
+def test_common_source_quality_bundle_reuses_one_verified_oa_netlist(
+    monkeypatch,
+) -> None:
+    import sys
+    from types import ModuleType
+
+    runner_module = ModuleType("virtuoso_bridge.spectre.runner")
+    simulation_calls: list[str] = []
+
+    class Simulator:
+        _ssh_runner = None
+
+        @classmethod
+        def from_env(cls, **kwargs):
+            return cls()
+
+        def run_simulation(self, netlist, parameters):
+            simulation_calls.append(netlist.read_text(encoding="utf-8"))
+            return SimpleNamespace(
+                ok=True,
+                data={"fixture": 1.0},
+                metadata={},
+                tool_version="test-spectre-quality-bundle",
+                warnings=[],
+            )
+
+    runner_module.SpectreSimulator = Simulator
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.spectre.runner", runner_module)
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._common_source_dc_data_from_result",
+        lambda result: (result.data, {"selection": "test fixture"}),
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._common_source_metrics_from_result",
+        lambda data, parameters: (
+            {"shared_dc_metric": 1.0, "saturation_region": 1.0},
+            {"fixture": True},
+        ),
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._common_source_ac_metrics_from_result",
+        lambda *args, **kwargs: (
+            {"bundle_ac_metric": 2.0},
+            {"analysis_complete": True, "issues": [], "warnings": []},
+        ),
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._common_source_linearity_metrics_from_result",
+        lambda *args, **kwargs: (
+            {"bundle_linearity_metric": 3.0},
+            {"analysis_complete": True, "issues": [], "warnings": []},
+        ),
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._common_source_noise_metrics_from_result",
+        lambda *args, **kwargs: (
+            {"bundle_noise_metric": 4.0},
+            {"analysis_complete": True, "issues": [], "warnings": []},
+        ),
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._client",
+        lambda: SimpleNamespace(ssh_runner=None),
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._read_schematic",
+        lambda *args: {},
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._assert_common_source",
+        lambda *args: "common_source",
+    )
+    oa_parameters = {
+        "device_width_um": 1.0,
+        "length_um": 0.03,
+        "load_resistance_ohm": 20_000.0,
+    }
+    geometry = {
+        "finger_width_um": 1.0,
+        "fingers": 1.0,
+        "multiplicity": 1.0,
+        "total_width_um": 1.0,
+    }
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._common_source_semantic_parameters_from_schematic",
+        lambda data: oa_parameters,
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._common_source_device_geometry_from_schematic",
+        lambda data: geometry,
+    )
+    netlist_calls = 0
+
+    def generate_netlist(*args, **kwargs):
+        nonlocal netlist_calls
+        netlist_calls += 1
+        return {
+            "remote_run_dir": "/data/xum/virtuoso_bridge_smoke/vda_cs_bundle",
+            "remote_netlist_path": (
+                "/data/xum/virtuoso_bridge_smoke/vda_cs_bundle/netlist"
+            ),
+            "netlist_sha256": "3" * 64,
+            "parsed": {
+                "semantic_parameters": oa_parameters,
+                "device_geometry": geometry,
+                "topology_variant": "common_source",
+                "instances": {},
+            },
+            "si_log_tail": ["End netlisting"],
+        }
+
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._generate_oa_netlist",
+        generate_netlist,
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._upload_file",
+        lambda *args, **kwargs: None,
+    )
+
+    result = simulate_common_source(
+        {
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "profile": load_pdk_profile("nics4304_tsmc28").model_dump(
+                mode="json"
+            ),
+            "analysis": "quality",
+            "analysis_source": "user_input",
+            "ac_sweep": {
+                "start_hz": 1e4,
+                "stop_hz": 1e11,
+                "points_per_decade": 20,
+                "reference_points": 5,
+                "max_reference_variation_db": 0.5,
+            },
+            "linearity_sweep": {
+                "frequency_hz": 100e6,
+                "amplitudes_v": [0.005, 0.05, 0.15],
+                "settling_cycles": 4,
+                "measurement_cycles": 8,
+                "points_per_cycle": 128,
+                "max_harmonic": 5,
+                "compression_db": 1.0,
+            },
+            "noise_sweep": {
+                "start_hz": 1e3,
+                "stop_hz": 1e10,
+                "points_per_decade": 20,
+            },
+            "parameters": {"bias_v": 0.35, "vdd_v": 0.9, "load_ff": 1.0},
+            "timeout_seconds": 60,
+        }
+    )
+
+    assert netlist_calls == 1
+    assert len(simulation_calls) == 3
+    assert result["analysis_complete"] is True
+    assert result["analysis_bundle"]["analyses"] == [
+        "ac",
+        "transient",
+        "noise",
+    ]
+    assert result["analysis_bundle"]["oa_netlist_reuse"] == "one_verified_netlist"
+    assert result["analysis_bundle"]["requested_analysis_source"] == "user_input"
+    assert result["metrics"]["bundle_ac_metric"] == pytest.approx(2.0)
+    assert result["metrics"]["bundle_linearity_metric"] == pytest.approx(3.0)
+    assert result["metrics"]["bundle_noise_metric"] == pytest.approx(4.0)
+    assert result["evidence"]["analysis_bundle"]["source"] == "software_inference"
+    assert set(result["evidence"]["analyses"]) == {"ac", "transient", "noise"}
+    for evidence in result["evidence"]["analyses"].values():
+        assert evidence["testbench"]["value_sources"]["analysis"] == (
+            "software_inference"
+        )
+
+
+def test_analysis_bundle_rejects_parameter_or_shared_metric_mismatch() -> None:
+    baseline = {
+        "parameters": {"bias_v": 0.35},
+        "metrics": {"dc_metric": 1.0},
+        "metric_sources": {"dc_metric": "eda_result"},
+        "analysis_complete": True,
+    }
+    mismatched_parameters = dict(baseline)
+    mismatched_parameters["parameters"] = {"bias_v": 0.36}
+    with pytest.raises(RuntimeError, match="parameter mismatch"):
+        merge_analysis_bundle(
+            {"ac": baseline, "noise": mismatched_parameters}
+        )
+
+    mismatched_metric = dict(baseline)
+    mismatched_metric["metrics"] = {"dc_metric": 1.1}
+    with pytest.raises(RuntimeError, match="shared metric mismatch"):
+        merge_analysis_bundle({"ac": baseline, "noise": mismatched_metric})
+
+
 def test_subprocess_boundary_parses_only_structured_marker(tmp_path, monkeypatch) -> None:
     bridge_python = tmp_path / "python.exe"
     bridge_python.touch()
@@ -1629,6 +1825,34 @@ def test_subprocess_payload_preserves_linearity_and_noise_sweep_sources() -> Non
     noise_payload = SubprocessBridgeAdapter._task_payload(noise_task)
     assert noise_payload["noise_sweep"]["points_per_decade"] == 20
     assert noise_payload["noise_sweep_user_fields"] == ["start_hz", "stop_hz"]
+
+    quality_task = TaskSpec.model_validate(
+        {
+            "id": "payload-quality",
+            "operation": "simulation.run",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "analysis": "quality",
+            "ac_sweep": {"start_hz": 1e4, "stop_hz": 1e11},
+            "linearity_sweep": {
+                "frequency_hz": 100e6,
+                "amplitudes_v": [0.005, 0.05, 0.15],
+            },
+            "noise_sweep": {"start_hz": 1e3, "stop_hz": 1e10},
+            "parameters": {"bias_v": 0.35, "load_ff": 1.0},
+        }
+    )
+    quality_payload = SubprocessBridgeAdapter._task_payload(quality_task)
+    assert quality_payload["analysis"] == "quality"
+    assert quality_payload["analysis_source"] == "user_input"
+    assert set(quality_payload) >= {
+        "ac_sweep",
+        "linearity_sweep",
+        "noise_sweep",
+        "ac_sweep_user_fields",
+        "linearity_sweep_user_fields",
+        "noise_sweep_user_fields",
+    }
 
 
 def test_subprocess_boundary_rejects_unstructured_output(tmp_path, monkeypatch) -> None:

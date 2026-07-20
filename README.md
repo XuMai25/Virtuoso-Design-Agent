@@ -2,14 +2,14 @@
 
 Virtuoso Design Agent 是 `virtuoso-bridge-lite` 之上的受控设计编排层。它把“建原理图、读回、应用参数、跑仿真、判定规格、有限调优”组织成可单独执行、可组合、可审计的任务，而不是再造一套 Bridge。
 
-当前版本从 **L5A** 起步：在已知 PDK、固定电路模板、显式规格和有限搜索空间内完成闭环。TSMC28 反相器 Gate 1、电阻负载 NMOS 共源级 nominal DC，以及同一已有 cellview 上的源极退化 transform/DC/RS 有限调优均有真实 OA/`si`/Spectre 证据。2026-07-20 又真实通过共源 nominal/退化复数 AC、12 点不写 OA 的 bias/load 条件搜索、专用 cell 上的 W/RD/RS 调优，以及同一 cell 的 5 点相干 transient 线性度/真实 VDD 功耗和 211 点普通 noise PSF。质量指标尚未共同驱动参数闭环，L/VDD 联合搜索和 corner 也未闭合，因此仍不能称为完整 L5B 设计质量闭环。
+当前版本从 **L5A** 起步：在已知 PDK、固定电路模板、显式规格和有限搜索空间内完成闭环。TSMC28 反相器 Gate 1、电阻负载 NMOS 共源级 nominal DC，以及同一已有 cellview 上的源极退化 transform/DC/RS 有限调优均有真实 OA/`si`/Spectre 证据。2026-07-20 又真实通过共源 nominal/退化复数 AC、12 点不写 OA 的 bias/load 条件搜索、专用 cell 上的 W/RD/RS 调优，以及同一 cell 的 5 点相干 transient 线性度/真实 VDD 功耗和 211 点普通 noise PSF。2026-07-21 已在 VDA 层加入固定 `quality` 组合，使同一候选的 AC、线性度和 noise 共同进入 constraints/objective，并在 worker 内复用一次 OA/`si` 网表；该组合目前只有本地回归，尚无真实多候选 Spectre 证据。L/VDD 联合搜索和 corner 也未闭合，因此仍不能称为完整 L5B 设计质量闭环。
 
 ## 当前能做什么
 
 - 将任务编译为带副作用标记的稳定执行计划。
 - 单独规划或执行：`schematic.create`、`schematic.inspect`、`schematic.transform`、`parameters.apply`、`simulation.run`、`design.tune`、`design.close_loop`。当前 `schematic.transform` 只开放共源级的受控源极退化补丁。
 - 用确定性 demo adapter 离线验证闭环、规格判定和参数选择；结果明确标为 `software_inference`。
-- 通过独立 worker 调用本机 `virtuoso-bridge-lite` 环境。反相器支持 `OA -> si -> Spectre transient` 的 timing、过冲/欠冲和周期供电能量；共源级支持同一 `OA -> si` 网表上的 DC OP、复数 AC、相干正弦 transient 幅度 sweep 和普通 noise sweep。可提取 `Id/VGS/VDS/VDSAT/gm/gds`、真实 VDD 功耗与 KCL、低频增益、首个 −3 dB 带宽、GBW、unity、HD2/HD3、THD、P1dB，以及频带积分的输出/输入参考噪声；这些执行与提取路径均已有 live 证据，跨 analysis 质量调优仍待完成。
+- 通过独立 worker 调用本机 `virtuoso-bridge-lite` 环境。反相器支持 `OA -> si -> Spectre transient` 的 timing、过冲/欠冲和周期供电能量；共源级支持同一 `OA -> si` 网表上的 DC OP、复数 AC、相干正弦 transient 幅度 sweep 和普通 noise sweep。可提取 `Id/VGS/VDS/VDSAT/gm/gds`、真实 VDD 功耗与 KCL、低频增益、首个 −3 dB 带宽、GBW、unity、HD2/HD3、THD、P1dB，以及频带积分的输出/输入参考噪声；单项执行与提取均有 live 证据。`analysis: "quality"` 已能在一次 OA/`si` 核对后依次运行 AC、linearity、noise，并把联合指标送入原有有限搜索，但远端质量调优仍待验证。
 - 源极退化不新建第二套模板或仿真器：在同一 common-source cellview 中把 `MN0.S: VSS -> NSRC`，只新增 `RS0(NSRC,VSS)`；随后由同一 inspect、参数应用、`si` 网表解析、DC 指标和有限搜索路径动态识别该变体。
 - `existing_schematic` 提供不依赖固定电路模板的 Bridge 能力面：`schematic.inspect` 保留 Bridge 的完整结构结果和所有可回读 CDF 参数；`parameters.apply` 可按实例透传 Bridge 接受的参数字符串，写入后用定向 CDF 读取再次核对。反相器/共源模板仍可在同一任务中组合 semantic parameters 与原始实例参数。
 - 对远端计算和 OA 写入分别授权；真实执行还需要计划 token，避免一句模糊指令直接改库。
@@ -53,6 +53,8 @@ py -3.13 -m venv .venv
 .\.venv\Scripts\vda.exe plan examples\tasks\common-source-ac-tune.demo.json
 .\.venv\Scripts\vda.exe plan examples\tasks\common-source-linearity-verify.bridge.json
 .\.venv\Scripts\vda.exe plan examples\tasks\common-source-noise-verify.bridge.json
+.\.venv\Scripts\vda.exe plan examples\tasks\common-source-quality-tune.demo.json
+.\.venv\Scripts\vda.exe plan examples\tasks\common-source-quality-bias-load-tune.bridge.json
 ```
 
 计划会打印确认 token。复制该 token 后运行离线闭环：
@@ -93,7 +95,7 @@ C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe 
 
 `simulation.run` 不写 OA：省略器件尺寸时直接采用目标 OA 回读值；如果任务显式给出尺寸，则必须与 OA 一致，否则停止，不会用请求值覆盖 schematic。包含 OA 设计参数的 `design.tune` 和 `design.close_loop` 会在已授权写入的前提下逐点暂存参数并回读；无可行候选或可恢复中断时恢复搜索前参数。该暂存行为会明确出现在计划和 run record 中。
 
-共源任务省略 `analysis` 时保持向后兼容的 `dc`。AC 必须显式设置 `analysis: "ac"` 与 `ac_sweep`；线性度使用 `analysis: "transient"` 与 `linearity_sweep`；普通噪声使用 `analysis: "noise"` 与 `noise_sweep`。所有显式和默认 sweep 字段都进入 token 与证据。线性度在一个 Spectre nested sweep 中运行按幅度递增的相干正弦，P1dB 未被声明范围包围时只报告 unresolved；noise 对 Bridge 已下载的普通 noise PSF 做频带积分，不把 AC 或 transient 数据包装成噪声。`load_ff` 是动态分析的可选 testbench 负载，不写 OA。若 `design.tune` 的搜索维度只有 `bias_v/vdd_v/load_ff` 这类 testbench 条件，计划和 executor 不要求或执行 OA 写入；若搜索包含 W/L/RD/RS，则仍逐候选写入、回读、checkpoint，并只提交最佳可行 OA 参数。
+共源任务省略 `analysis` 时保持向后兼容的 `dc`。AC 必须显式设置 `analysis: "ac"` 与 `ac_sweep`；线性度使用 `analysis: "transient"` 与 `linearity_sweep`；普通噪声使用 `analysis: "noise"` 与 `noise_sweep`。固定质量组合使用 `analysis: "quality"`，并强制同时声明上述三种 sweep；任一子分析不完整、参数不一致或共享 DC 指标不一致都会拒绝整个候选。worker 只做一次 OA 回读与 `si` 网表生成，再从同一网表分别运行三种 Spectre wrapper；组合逻辑标为 `software_inference`，连续指标仍保持 `eda_result`。所有显式和默认 sweep 字段都进入 token 与证据。线性度在一个 Spectre nested sweep 中运行按幅度递增的相干正弦，P1dB 未被声明范围包围时只报告 unresolved；noise 对 Bridge 已下载的普通 noise PSF 做频带积分，不把 AC 或 transient 数据包装成噪声。`load_ff` 是动态分析的可选 testbench 负载，不写 OA。若 `design.tune` 的搜索维度只有 `bias_v/vdd_v/load_ff` 这类 testbench 条件，计划和 executor 不要求或执行 OA 写入；若搜索包含 W/L/RD/RS，则仍逐候选写入、回读、checkpoint，并只提交最佳可行 OA 参数。
 
 人工指定实例参数时使用 `instance_parameter_updates`，例如 `MN0.fingers="2"` 或 `RD0.r="22k"`。VDA 保留原始字符串，不猜单位、别名、枚举或布尔编码，也不因通用 reader 对空值/长值的摘要策略而提前拒绝 Bridge 可接受的请求；写后改用独立的目标 CDF 值相等检查。该路径目前属于 `parameters.apply`，可以单独使用，也可以与模板 semantic parameters 组合；请求标为 `user_input`，真实 OA 确认标为 `bridge_readback`，demo 结果仍只标为 `software_inference`。首次不一致时至多按声明顺序重放一次，计划会明确披露；仍不一致则失败。CDF 的 `editable`/`display` 元数据只作诊断，不能作为 allowlist，因为真实 smoke 已出现 `RD0.r` 报告不可编辑但能持久化的情况。CDF callback 引起的其他参数联动会保留在完整 Bridge 回读里，但只有任务明确请求且真实保持的字段会宣称确认。任意实例参数尚未自动进入搜索空间，这是下一步拟合能力而不是永久限制。
 
@@ -101,7 +103,7 @@ C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe 
 
 源极退化的增量实现不会重置未点名参数：共源 semantic 写入只向 Bridge 发送任务实际包含的 `W/L/RD/RS` 字段，不再附带 `fingers=1` 或 `m=1`。transform 强制用 append mode 打开已有 cellview，拒绝已有未保存改动，编辑 batch 失败时 purge 本次未保存缓存；前后独立回读再逐项核对 MN0/RD0 的完整参数、master、位置、pins 和 nets。只有 MN0.S 改接 NSRC、增加 RS0/NSRC 以及任务给定的 RS0.r 被允许。重复 transform 幂等；已退化拓扑上改变阻值只写 RS0。
 
-2026-07-20 的 `vda_param_surface_001` live smoke 已由正式 `schematic.transform` 完成同一 cellview 原位退化，并复用同一 OA→`si`→Spectre DC 与 6 点 `Vbias×RS` 搜索。随后 nominal/退化复数 AC、两个 6 点 bias/load 搜索和专用 cell 的 W/RD/RS AC design tuning 均已通过；同一专用 cell 又完成 5 点线性度/真实 VDD 功耗和 1 kHz–10 GHz ordinary noise PSF。多次 `WinError 10054`、upload/download timeout 都被保留并在 OA 回读或 tunnel 重建后恢复；这验证了恢复边界，也说明底层 transport 债务仍存在。corner、质量驱动联合调优和自动逆变换仍未闭合。DC 事故与恢复见 `docs/validation/2026-07-20-source-degeneration-live.md`，AC 实现见 `docs/validation/2026-07-20-common-source-ac-implementation.md`，只读 AC 见 `docs/validation/2026-07-20-common-source-ac-live.md`，设计参数调优见 `docs/validation/2026-07-20-common-source-ac-design-tuning-live.md`，设计质量 live 证据见 `docs/validation/2026-07-20-common-source-quality-live.md`。
+2026-07-20 的 `vda_param_surface_001` live smoke 已由正式 `schematic.transform` 完成同一 cellview 原位退化，并复用同一 OA→`si`→Spectre DC 与 6 点 `Vbias×RS` 搜索。随后 nominal/退化复数 AC、两个 6 点 bias/load 搜索和专用 cell 的 W/RD/RS AC design tuning 均已通过；同一专用 cell 又完成 5 点线性度/真实 VDD 功耗和 1 kHz–10 GHz ordinary noise PSF。多次 `WinError 10054`、upload/download timeout 都被保留并在 OA 回读或 tunnel 重建后恢复；这验证了恢复边界，也说明底层 transport 债务仍存在。2026-07-21 的质量组合已通过本地可行、不完整分析、参数/共享指标不一致、预算耗尽和纯 testbench 不写 OA 测试，但远端组合与 transport resume 尚未执行。corner、L/VDD 联合调优和自动逆变换仍未闭合。DC 事故与恢复见 `docs/validation/2026-07-20-source-degeneration-live.md`，AC 实现见 `docs/validation/2026-07-20-common-source-ac-implementation.md`，只读 AC 见 `docs/validation/2026-07-20-common-source-ac-live.md`，设计参数调优见 `docs/validation/2026-07-20-common-source-ac-design-tuning-live.md`，设计质量 live 证据见 `docs/validation/2026-07-20-common-source-quality-live.md`，组合实现见 `docs/validation/2026-07-21-common-source-quality-bundle-local.md`。
 
 ## 安全模型
 
@@ -138,3 +140,4 @@ C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe 
 - [2026-07-20 共源 AC 控制变量与 W/RD/RS 真实调优](docs/validation/2026-07-20-common-source-ac-design-tuning-live.md)
 - [2026-07-20 共源功耗、线性度与 noise 实现](docs/validation/2026-07-20-common-source-quality-local.md)
 - [2026-07-20 共源功耗、线性度与 noise 只读真实验证](docs/validation/2026-07-20-common-source-quality-live.md)
+- [2026-07-21 共源多 analysis 质量组合本地验证](docs/validation/2026-07-21-common-source-quality-bundle-local.md)

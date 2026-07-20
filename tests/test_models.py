@@ -180,6 +180,47 @@ def test_common_source_noise_requires_an_explicit_valid_sweep() -> None:
         TaskSpec.model_validate(mismatch)
 
 
+def test_common_source_quality_requires_all_three_bounded_sweeps() -> None:
+    data = {
+        "id": "cs-quality",
+        "operation": "simulation.run",
+        "circuit": "common_source",
+        "target": {"library": "vda_test", "cell": "vda_cs"},
+        "analysis": "quality",
+        "ac_sweep": {"start_hz": 1e4, "stop_hz": 1e11},
+        "linearity_sweep": {
+            "frequency_hz": 100e6,
+            "amplitudes_v": [0.005, 0.05, 0.15],
+        },
+        "noise_sweep": {"start_hz": 1e3, "stop_hz": 1e10},
+        "parameters": {"bias_v": 0.35, "vdd_v": 0.9, "load_ff": 1.0},
+    }
+
+    task = TaskSpec.model_validate(data)
+
+    assert task.resolved_analysis() is AnalysisKind.QUALITY
+    assert task.resolved_analyses() == (
+        AnalysisKind.AC,
+        AnalysisKind.TRANSIENT,
+        AnalysisKind.NOISE,
+    )
+    assert build_plan(task).requires_remote_compute
+
+    missing_noise = dict(data)
+    missing_noise.pop("noise_sweep")
+    with pytest.raises(ValidationError, match="quality analysis requires noise_sweep"):
+        TaskSpec.model_validate(missing_noise)
+
+    missing_all = dict(data)
+    for field in ("ac_sweep", "linearity_sweep", "noise_sweep"):
+        missing_all.pop(field)
+    with pytest.raises(
+        ValidationError,
+        match="requires ac_sweep, linearity_sweep, noise_sweep",
+    ):
+        TaskSpec.model_validate(missing_all)
+
+
 def test_ac_settings_cannot_leak_into_unrelated_operations_or_analyses() -> None:
     with pytest.raises(ValidationError, match="only by simulation"):
         TaskSpec.model_validate(

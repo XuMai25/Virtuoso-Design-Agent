@@ -12,7 +12,7 @@ from ..metrics import (
     extract_common_source_noise_metrics,
 )
 from ..models import AnalysisKind, CircuitKind, EvidenceSource, TaskSpec
-from .base import AdapterResult
+from .base import AdapterResult, merge_analysis_bundle
 
 
 class DeterministicDemoAdapter:
@@ -385,6 +385,19 @@ class DeterministicDemoAdapter:
     def simulate(
         self, task: TaskSpec, parameters: dict[str, float]
     ) -> AdapterResult:
+        if task.resolved_analysis() is AnalysisKind.QUALITY:
+            results = {
+                analysis.value: self.simulate(
+                    task.model_copy(update={"analysis": analysis}), parameters
+                ).data
+                for analysis in task.resolved_analyses()
+            }
+            data = merge_analysis_bundle(results)
+            data["warning"] = "analytical demo only; not an EDA result"
+            return AdapterResult(
+                data=data,
+                evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+            )
         schematic = self._schematics.get(self._key(task))
         if schematic is None:
             raise RuntimeError("demo schematic does not exist")

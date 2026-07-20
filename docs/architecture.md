@@ -47,7 +47,7 @@ VDA 不嵌入一个新的通用 LLM。Codex 负责开放式推理，VDA 负责�
 
 因此上层 agent 可以只要求“建原理图”“把这组参数应用进去”或“只跑仿真”，无需伪装成完整设计任务。
 
-`analysis` 与电路参数分离。反相器省略时解析为 `transient`，共源级省略时解析为 `dc`；共源 AC 必须显式声明 `analysis: "ac"` 以及 `ac_sweep.start_hz/stop_hz`。扫频点密度、低频参考点数和参考窗最大变化也属于任务与 plan token。这样换 analysis 或改变带宽定义不会复用旧 token，也不会把默认设置伪装成 `user_input`。
+`analysis` 与电路参数分离。反相器省略时解析为 `transient`，共源级省略时解析为 `dc`；共源 AC 必须显式声明 `analysis: "ac"` 以及 `ac_sweep.start_hz/stop_hz`。固定多 analysis 质量门使用 `analysis: "quality"`，并要求 `ac_sweep`、`linearity_sweep`、`noise_sweep` 同时存在。扫频点密度、低频参考点数、参考窗变化、线性度窗口和噪声频带都属于任务与 plan token。这样换 analysis 或改变指标定义不会复用旧 token，也不会把默认设置伪装成 `user_input`。
 
 `schematic.transform` 不等同于重建模板。当前唯一 transform 要求目标先通过 VDA common-source 结构检查，然后在同一 cellview 中把 MN0 源极标签从 VSS 改为内部网 `NSRC`，新增 `analogLib/RS0(NSRC,VSS)` 并设置 `source_resistance_ohm`。已有对象编辑强制使用 Bridge editor append mode；preflight 拒绝带未保存改动的目标，编辑 batch 失败时只 purge 未保存的目标缓存且不保存。前后回读必须证明 MN0/RD0 的完整实例参数、master、位置、顶层 pins 都保持不变，nets 只增加 NSRC。已是该拓扑时重复调用不会增加第二个电阻；改变阻值只更新 RS0。为了避免把任意图编辑伪装成安全能力，当前没有通用图重写 DSL，也没有自动逆变换。若保存已成功而后置审计失败，目前会保留失败和真实 OA 状态，尚没有通用 snapshot 回滚。
 
@@ -143,6 +143,8 @@ AC 核心结果只有在 DC 工作点为饱和、低频参考足够平坦且扫�
 真实 nested sweep 还证明通用目录合并数据不能作为跨 analysis DC OP 的唯一来源：递归的 sweep `dcOpInfo` 可能覆盖根文件，而 `dcOp.dc` 节点仍来自根 analysis。VDA 因此从 Bridge 已下载目录显式选择相对深度最小的根 `dcOp.dc`/`dcOpInfo.info`，分别调用 Bridge 单文件 parser，并把两个 SHA-256 写入 operating-point evidence；不以放宽节点/器件一致性容差掩盖来源混淆。
 
 2026-07-20 的同一专用 OA cell 已通过 5 点 100 MHz transient linearity 和 211 点 1 kHz–10 GHz ordinary noise 只读 smoke：P1dB 被 50/100 mV 点真实包围，输入 P1dB 为 88.32 mV peak，150 mV 点 THD 为 13.16%；输出/输入参考积分噪声为 3.304/0.983 mV RMS。两次 `si` 网表 SHA 相同，OA/网表 W/L/RD/RS 一致且没有 OA write action。该结果升级的是单点执行与提取能力，不是跨 analysis 质量驱动调优或 corner 闭环。
+
+`analysis: "quality"` 在 VDA worker 内把 AC、transient linearity 和 noise 组成一个固定原子证据门，而不复制 executor 或修改 Bridge。每个候选只读取一次 OA、生成并核对一次 `si` 结构网表；三个独立 wrapper 都引用这一远端网表。合并前要求实际参数表完全一致，重复 DC 指标在数值容差内一致，且同名指标的证据来源一致。任一子分析 `analysis_complete=false` 会使整个候选不可行；参数或共享指标不一致则停止合并，不平均、不以后一次结果覆盖。run record 顶层保存组合完成状态，并在 `evidence.analyses` 下分别保留 testbench、DC OP、响应诊断和工具版本。组合选择和一致性判断是 `software_inference`，OA 是 `bridge_readback`，`si`/Spectre 连续指标仍是 `eda_result`。该路径已通过本地 worker 假件证明一次 netlist、三次分析与失败门，真实远端组合尚未执行。
 
 ## 证据链
 

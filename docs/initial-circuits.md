@@ -15,7 +15,7 @@
 
 ## Gate 2：单 MOS 共源与源极退化
 
-状态：Gate 2A 电阻负载 NMOS 共源与源极退化的 DC、复数 AC、bias/load 条件搜索和 W/RD/RS 写入调优已真实通过。专用 cell 还完成同参数只加 RS 的控制变量比较、3/8 预算耗尽、2 点不可行恢复、多次 transport checkpoint/resume、最佳 OA 写回，以及 5 点 transient 线性度/真实功耗和 211 点 ordinary noise 只读 live smoke。质量指标尚未共同驱动调优，corner 和 L/VDD 联合搜索仍未闭合，因此尚不是完整 L5B 单模块设计代理。
+状态：Gate 2A 电阻负载 NMOS 共源与源极退化的 DC、复数 AC、bias/load 条件搜索和 W/RD/RS 写入调优已真实通过。专用 cell 还完成同参数只加 RS 的控制变量比较、3/8 预算耗尽、2 点不可行恢复、多次 transport checkpoint/resume、最佳 OA 写回，以及 5 点 transient 线性度/真实功耗和 211 点 ordinary noise 只读 live smoke。AC+linearity+noise 的固定质量组合已通过本地调优与失败门回归，但尚未运行真实多候选 Spectre；corner 和 L/VDD 联合搜索仍未闭合，因此尚不是完整 L5B 单模块设计代理。
 
 - OA：`MN0` 与 `analogLib/RD0`，连接 `IN/OUT/VDD/VSS`，W/L/R 创建后结构化回读。
 - 同源：`si` 网表中的 MN0/RD0/可选 RS0 master、端口和 W/L/R 与 OA 一致；DC wrapper 只提供 VDD/VIN/VSS。AC 复用同一网表和 DC OP，额外提供 unit AC input、显式 sweep 和可选 `load_ff`，不复制器件 topology。
@@ -30,7 +30,8 @@
 - 控制变量与设计调优：专用 cell 在同一 W=0.5 µm、L=0.03 µm、RD=20 kΩ、bias=0.35 V、load=1 fF 下只加入 RS=2 kΩ，得到 gain −36.98%、BW −20.12%、GBW −49.66%。随后 8 点 W/RD/RS 搜索选择 W=1.0 µm、RD=20 kΩ、RS=1 kΩ，GBW=30.306 GHz，并完成预算和不可行保护。
 - 设计质量 live：DC/各动态分析都保存实际 `VDD_SRC:p`；100 MHz 相干 nested sweep 的 5 个输入幅度均有完整样本，得到 `P1dB=88.32 mV peak`、150 mV 点 `THD=13.16%`；1 kHz–10 GHz ordinary noise PSF 有 211 点，输出/输入参考积分噪声为 3.304/0.983 mV RMS。P1dB 未跨越、空 sweep、幅度/PSF 形状不一致仍会显式失败或 unresolved。
 - 调优边界：W/L/RD/RS 维度仍逐候选写 OA 和回读；纯 bias/load 条件搜索不写 OA。两种路径都复用原有 constraints/objective、预算和 checkpoint 语义。
-- 当前最近的硬门：把已验证的 DC+AC+linearity+noise 组合成受预算的多 analysis 质量评估和参数调优，覆盖可行、不可行、预算耗尽与 transport 恢复；随后加入有限 corner，并补 L/VDD。不能用单点 live 数值或当前 GBW 网格代替完整放大器设计质量。
+- 质量组合：`analysis: quality` 强制声明 AC、linearity、noise 三组 sweep；每候选复用一次 OA/`si` 网表，任一子分析不完整或共享证据不一致即拒绝。该契约和离线搜索已通过，本条尚无真实组合 run。
+- 当前最近的硬门：在现有专用 cell 上运行不写 OA 的 bias/load 质量搜索，覆盖可行、不可行、预算耗尽与 transport 恢复；随后才做少量 W/L/RD/RS/VDD 质量写回和有限 corner。不能用单点 live 数值或当前 GBW 网格代替完整放大器设计质量。
 
 跨拓扑的参数基础：`existing_schematic` 可以不依赖固定模板读取已有 schematic，并用 `instance_parameter_updates` 人工指定实例原始 CDF 参数和值字符串；固定模板还可把它与 W/L/R semantic parameters 组合。写入必须经过 callback、立即定向 OA 回读和独立再次回读。通用只读 live smoke 已保留完整 Bridge 结构并枚举 MN0 的 233 个 CDF 字段；专用新 cell 上又真实闭合 `MN0.fingers=2` 和 `RD0.r=22K` 的双重回读。`MN0.m=2` 被当前 PDK callback 恢复为 `1`，因此保留为字段不可持久化边界。它只证明“按名字尝试修改并以 OA 值确认”，不证明 VDA 理解任意参数的物理作用，也不自动允许该参数参与调优。
 

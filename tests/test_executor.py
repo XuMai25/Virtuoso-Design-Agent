@@ -9,7 +9,7 @@ from virtuoso_design_agent.executor import (
     TaskExecutor,
     load_execution_checkpoint,
 )
-from virtuoso_design_agent.models import RunStatus, TaskSpec
+from virtuoso_design_agent.models import AnalysisKind, RunStatus, TaskSpec
 from virtuoso_design_agent.planner import build_plan
 
 
@@ -806,6 +806,148 @@ def test_common_source_noise_is_a_formal_simulation_run_capability() -> None:
         source.value == "software_inference"
         for source in candidate.metric_sources.values()
     )
+
+
+def _common_source_quality_task(**updates) -> TaskSpec:
+    data = {
+        "id": "cs-quality-run",
+        "operation": "simulation.run",
+        "circuit": "common_source",
+        "target": {"library": "vda_test", "cell": "vda_cs_quality"},
+        "analysis": "quality",
+        "ac_sweep": {
+            "start_hz": 1e4,
+            "stop_hz": 1e11,
+            "points_per_decade": 20,
+        },
+        "linearity_sweep": {
+            "frequency_hz": 100e6,
+            "amplitudes_v": [0.005, 0.05, 0.15],
+        },
+        "noise_sweep": {
+            "start_hz": 1e3,
+            "stop_hz": 1e10,
+            "points_per_decade": 20,
+        },
+        "parameters": {
+            "device_width_um": 1.0,
+            "length_um": 0.03,
+            "load_resistance_ohm": 20_000.0,
+            "bias_v": 0.35,
+            "vdd_v": 0.9,
+            "load_ff": 1.0,
+        },
+        "constraints": [
+            {"metric": "saturation_margin_v", "relation": ">=", "value": 0.01},
+            {
+                "metric": "gain_bandwidth_product_hz",
+                "relation": ">=",
+                "value": 1e9,
+            },
+            {"metric": "input_1db_compression_v_peak", "relation": ">=", "value": 0.01},
+            {"metric": "max_thd_percent", "relation": "<=", "value": 100.0},
+            {
+                "metric": "integrated_input_referred_noise_uv_rms",
+                "relation": "<=",
+                "value": 1e6,
+            },
+        ],
+        "safety": {"allow_remote_compute": True},
+    }
+    data.update(updates)
+    return TaskSpec.model_validate(data)
+
+
+def test_common_source_quality_combines_all_required_metrics() -> None:
+    task = _common_source_quality_task()
+    adapter = DeterministicDemoAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    candidate = record.candidates[0]
+    assert candidate.analysis_complete is True
+    assert candidate.analysis_issues == []
+    for metric in (
+        "gain_bandwidth_product_hz",
+        "input_1db_compression_v_peak",
+        "max_thd_percent",
+        "integrated_input_referred_noise_uv_rms",
+        "dc_supply_power_uw",
+    ):
+        assert metric in candidate.metrics
+    action = next(
+        item for item in record.actions if item.action == "simulation.candidate.1"
+    )
+    assert action.details["analysis_bundle"]["analyses"] == [
+        "ac",
+        "transient",
+        "noise",
+    ]
+
+
+def test_common_source_quality_rejects_one_incomplete_member() -> None:
+    class MissingNoiseAdapter(DeterministicDemoAdapter):
+        def simulate(self, task, parameters):
+            result = super().simulate(task, parameters)
+            if task.resolved_analysis() is AnalysisKind.NOISE:
+                data = dict(result.data)
+                data["analysis_complete"] = False
+                data["analysis_issues"] = ["noise waveform is empty"]
+                return AdapterResult(data=data, evidence_source=result.evidence_source)
+            return result
+
+    task = _common_source_quality_task(constraints=[])
+    adapter = MissingNoiseAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.PARTIAL
+    assert record.candidates[0].analysis_complete is False
+    assert record.candidates[0].feasible is False
+    assert "noise: noise waveform is empty" in record.candidates[0].analysis_issues
+
+
+def test_common_source_quality_testbench_tuning_is_bounded_and_does_not_write_oa() -> None:
+    task = _common_source_quality_task(
+        id="cs-quality-tune",
+        operation="design.tune",
+        parameters={"vdd_v": 0.9},
+        parameter_space={"bias_v": [0.32, 0.35], "load_ff": [1.0, 4.0]},
+        objective={
+            "metric": "integrated_input_referred_noise_uv_rms",
+            "goal": "minimize",
+        },
+        limits={"max_iterations": 2, "timeout_seconds": 600},
+    )
+    adapter = DeterministicDemoAdapter()
+    adapter.create_schematic(task)
+    before = adapter.inspect_schematic(task).data["semantic_parameters"]
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+    after = adapter.inspect_schematic(task).data["semantic_parameters"]
+
+    assert record.status is RunStatus.PARTIAL
+    assert len(record.candidates) == 2
+    assert all(candidate.analysis_complete for candidate in record.candidates)
+    assert before == after
+    assert not any(
+        action.action.startswith("parameters.stage")
+        or action.action in {"parameters.finalize", "parameters.restore"}
+        for action in record.actions
+    )
+    assert any("budget exhausted" in note for note in record.notes)
 
 
 def test_common_source_ac_short_sweep_is_partial_not_a_fake_bandwidth() -> None:
