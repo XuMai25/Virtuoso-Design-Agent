@@ -39,18 +39,23 @@ VDA 不嵌入一个新的通用 LLM。Codex 负责开放式推理，VDA 负责�
 | --- | --- | --- |
 | `schematic.create` | 建图并结构回读 | OA 写入 |
 | `schematic.inspect` | 读取拓扑、参数、pins | 只读 |
+| `schematic.transform` | 对已知拓扑应用可审计的小变更；当前仅共源源极退化 | OA 写入 |
 | `parameters.apply` | 应用指定参数并回读 | OA 写入 |
 | `simulation.run` | 单点仿真并判规格 | scratch/计算 |
-| `design.tune` | 有限搜索，选择并应用最佳参数 | 计算 + OA 写入 |
+| `design.tune` | 有限搜索；设计参数提交 OA，纯 testbench 条件只记录选择 | 计算；按维度决定是否写 OA |
 | `design.close_loop` | 建图、搜索、应用、回读 | 计算 + OA 写入 |
 
 因此上层 agent 可以只要求“建原理图”“把这组参数应用进去”或“只跑仿真”，无需伪装成完整设计任务。
+
+`analysis` 与电路参数分离。反相器省略时解析为 `transient`，共源级省略时解析为 `dc`；共源 AC 必须显式声明 `analysis: "ac"` 以及 `ac_sweep.start_hz/stop_hz`。扫频点密度、低频参考点数和参考窗最大变化也属于任务与 plan token。这样换 analysis 或改变带宽定义不会复用旧 token，也不会把默认设置伪装成 `user_input`。
+
+`schematic.transform` 不等同于重建模板。当前唯一 transform 要求目标先通过 VDA common-source 结构检查，然后在同一 cellview 中把 MN0 源极标签从 VSS 改为内部网 `NSRC`，新增 `analogLib/RS0(NSRC,VSS)` 并设置 `source_resistance_ohm`。已有对象编辑强制使用 Bridge editor append mode；preflight 拒绝带未保存改动的目标，编辑 batch 失败时只 purge 未保存的目标缓存且不保存。前后回读必须证明 MN0/RD0 的完整实例参数、master、位置、顶层 pins 都保持不变，nets 只增加 NSRC。已是该拓扑时重复调用不会增加第二个电阻；改变阻值只更新 RS0。为了避免把任意图编辑伪装成安全能力，当前没有通用图重写 DSL，也没有自动逆变换。若保存已成功而后置审计失败，目前会保留失败和真实 OA 状态，尚没有通用 snapshot 回滚。
 
 ## 两层参数契约
 
 VDA 保留两种用途不同的参数表示：
 
-- `parameters` / `parameter_space` 是电路模板已定义的 canonical semantic parameters，例如 `device_width_um`、`load_resistance_ohm` 和 `bias_v`。它们可参与仿真、规格判定和有限搜索。
+- `parameters` / `parameter_space` 是电路模板已定义的 canonical semantic parameters，例如 `device_width_um`、`load_resistance_ohm`、`bias_v` 和 AC `load_ff`。它们可参与仿真、规格判定和有限搜索，但并非都写 OA：W/L/RD/RS 是设计参数，bias/VDD/外部负载是 testbench 条件。当前 MOS width semantic 指单指宽 `Wfg`；多指 OA/`si` 一致性另外核对 `finger_width`、`fingers/nf`、`m/multi` 和总有效宽度，不能把网表 `w` 无条件当成 `Wfg`。
 - `instance_parameter_updates` 是人工明确指定的实例级 CDF/OA 写入，例如 `MN0.fingers="2"`、`MN0.m="1"` 或 `RD0.r="22k"`。参数名和值按 Bridge 字符串契约原样传递，不做单位、别名或枚举推断。
 
 `existing_schematic` 是不依赖固定拓扑模板的通用 circuit kind，只开放 `schematic.inspect` 与 `parameters.apply`：前者保留 Bridge reader 的完整结构对象、geometry、notes、nets/pins 细节和所有可回读 CDF 参数；后者允许人工指定任意已有实例。反相器和共源模板也能使用相同原始参数路径，并可在一个任务中与 semantic parameters 组合；semantic 写入先执行，原始 CDF callback 后执行，最终 OA 必须同时满足所有已声明 semantic 值和原始字段值。
@@ -88,13 +93,13 @@ CDF 的 `display` 和 `editable` 元数据不是写入 allowlist。2026-07-20 �
 
 同日长 sweep 暴露了 transport 边界：transport 不可用期间既不能继续仿真，也不能保证 OA 恢复。VDA 现在把 Bridge worker 中断视为搜索暂停，不把该候选伪装成不可行点，也不继续消耗后续候选。调优在初始 OA 回读、每次待写入/确认写入以及每个候选完成边界原子更新本地 checkpoint，保存 task/token/adapter、原始 OA 基线、最后确认与待确认 OA 状态、已完成候选前缀、actions 和 notes。
 
-恢复时先拒绝 completed checkpoint、task/token/adapter 不一致和非前缀候选；Bridge 外部恢复后重新 probe，并用 `schematic.inspect.resume` 独立回读 OA。只有当前参数属于原始基线、最后确认/待确认写入或任务声明候选时才继续。已完成索引直接跳过；全部候选完成后若最终写回中断，`next_candidate_index` 保持在末尾，只重试选优、写回和最终回读。checkpoint 只有在最佳点提交或基线恢复且 `schematic.inspect.after` 一致后才标记 `complete=true`。
+恢复时先拒绝 completed checkpoint、task/token/adapter 不一致和非前缀候选；Bridge 外部恢复后重新 probe，并用 `schematic.inspect.resume` 独立回读 OA。candidate record 的任务声明字段必须精确匹配；允许额外保存仿真实际使用的 canonical OA 补全字段，但字段名只能来自 checkpoint 初始 OA 基线且值必须匹配，未知或被篡改字段仍拒绝。只有当前 OA 参数属于原始基线、最后确认/待确认写入或任务声明候选时才继续。已完成索引直接跳过；全部候选完成后若最终写回中断，`next_candidate_index` 保持在末尾，只重试选优、写回和最终回读。checkpoint 只有在最佳点提交或基线恢复且 `schematic.inspect.after` 一致后才标记 `complete=true`。
 
 2026-07-19 的 Gate 1R live 任务经历 3 次随机 SSH/tunnel 中断，分别从候选 2、4 和 `next_candidate_index=10` 恢复，最终形成单一的 1–9 候选前缀、成功最佳写回和独立 OA 回读。VDA 的显式恢复语义因此已验证。随后在 Bridge 的备份隔离分支 `codex/vda-transport-recovery` 上用原子提交 `9e52844` 修复 Windows stale PID 判断与 `VirtuosoClient.from_env` 遗漏的 `warm()`；保留 stale state、强制终止精确 listener PID 后，第二次只读 OA inspect 自动建立新 tunnel 并得到一致回读。该结果只闭合“调用边界发现 tunnel 已死后的重建”，不证明运行中 SSH 上传/仿真的随机 reset 已消失。VDA 不删除或复制 Bridge 的 SSH/SCP 实现，补丁范围和上游兼容流程见 `docs/third-party/virtuoso-bridge-local-patch.md`。
 
 后续 Bridge 提交 `f8fdb9e` 对已有幂等 SSH command/upload/download 重试加入 1 秒、3 秒有界退避，`2f41293` 则把 `connect()` 在 `sendall()` 前的拒绝标成私有 pre-send 错误，允许 managed client warm 并重试一次。安全边界取决于“payload 是否可能已发送”：pre-send 可自动恢复；send/recv 之后一律不重放 SKILL，由 VDA checkpoint 暂停并在新进程中核对 OA 后恢复。9 点压力任务在候选 8 的 pre-send connect refusal 处暂停并成功恢复到 9/9；同-client 强制断链 smoke 又直接验证了 pre-send 自动恢复。单次证据不外推为网络永不掉线。
 
-## 共源 Gate 2A DC 路径
+## 共源 Gate 2 DC 与 AC 路径
 
 共源级沿用同一个 adapter port、worker 边界和 checkpoint 状态机，没有增加第二套执行框架：
 
@@ -113,10 +118,34 @@ CDF 的 `display` 和 `editable` 元数据不是写入 allowlist。2026-07-20 �
 
 Spectre 的通用 `dcOpInfo` 在当前 Bridge parser 中以器件聚合对象出现。VDA 没有修改或复制 Bridge parser，而是在 wrapper 中显式 `save MN0:ids/vgs/vds/vdsat/gm/gds`，使 Bridge 已有 PSFASCII 标量路径直接返回所需量。第一次未显式 save 的失败记录被保留；不会把存在 `dcOpInfo_MN0` 聚合对象误当成完整标量证据。
 
-工作区分类不读取一个未验证的模型枚举值：`saturation_region` 由 Spectre 给出的 `VDS`、`VDSAT` 和 `IDS` 按显式规则推导，标为 `software_inference`；原始器件量、节点量和从它们计算的连续指标标为 `eda_result`。Gate 2A 已在 `vb_pdk_smoke/vda_cs_gate2a_001/schematic` 完成 6 点真实搜索和最终独立 OA→si→DC OP 复核。当前开发优先级先转向受控拓扑变更，并让新拓扑重新通过 DC；AC gain/bandwidth 仍是随后不可跳过的放大器性能 Gate。现阶段尚不能把 Gate 2A 称为完整放大器闭环。
+工作区分类不读取一个未验证的模型枚举值：`saturation_region` 由 Spectre 给出的 `VDS`、`VDSAT` 和 `IDS` 按显式规则推导，标为 `software_inference`；原始器件量、节点量和从它们计算的连续指标标为 `eda_result`。Gate 2A 已在 `vb_pdk_smoke/vda_cs_gate2a_001/schematic` 完成 6 点真实搜索和最终独立 OA→si→DC OP 复核。
+
+源极退化沿用该路径而不复制 executor：结构回读动态返回 `topology_variant`；`si` parser 在同一 common-source action 中要求 `MN0(OUT IN NSRC VSS)` 与 `RS0(NSRC VSS)`，并把 RS0.r 纳入 OA/网表参数一致性；DC wrapper 额外保存 NSRC，器件 VGS/VDS 改由 NSRC 计算，同时核对 MN0/RD0 与 MN0/RS0 两组 KCL。`source_resistance_ohm` 可直接进入原有有限 `parameter_space`。2026-07-20 的真实 smoke 已完成原位 transform、DC/AC、有限搜索、W/RD/RS AC design tuning、checkpoint 恢复和最佳回读；尚未闭合的是更完整的设计质量与 corner，而不是基本 gain/bandwidth 执行路径。
+
+AC 没有第二套 topology、netlister 或 executor。相同 wrapper 保留 `dcOp/info`，把 VIN 设为 DC bias + unit AC source，可选加入任务声明的 `CL0=load_ff`，再运行对数 AC sweep。Bridge 现有 PSFASCII parser 原样返回 `ac_freq/ac_IN/ac_OUT` 的复数向量；VDA 不修改 Bridge，也不把幅度解析复制回第三方库，而是在 worker 内计算复数传递函数 `H(f)=VOUT/VIN`。
+
+低频参考定义为前 `reference_points` 个复数 H 的均值，并要求该窗口的幅度变化不超过 `max_reference_variation_db`。带宽是相对该参考下降半功率（`10 log10(2)` dB）的首个向下交点，按 dB 对 `log10(f)` 插值；`gain_bandwidth_product_hz` 明确定义为低频线性增益乘该带宽。`unity_gain_frequency_hz` 则是首个向下 0 dB 交点，单独报告，不能与 GBW 混用。非单调响应若有多个 −3 dB 交点，保留“采用首个下降交点”和再次穿越警告。
+
+AC 核心结果只有在 DC 工作点为饱和、低频参考足够平坦且扫频内存在 −3 dB 交点时才标为 `analysis_complete=true`。空/非有限/长度不一致的复数波形直接失败；扫频上限不足或参考窗不平坦则保留已有 gain/phase 和诊断，但候选为不完整、run 至少为 `partial`，不会用 stop frequency 伪造 bandwidth/GBW。unity-gain 不在扫频内只作为独立警告；若任务把它列为 constraint/objective，则缺失指标仍使候选不可行。
+
+2026-07-20 的两次只读 live smoke 均返回 271 点复数 AC，参考窗平坦且 −3 dB/0 dB 各只有一个向下交点。nominal 得到 `gain=4.022 V/V`、`bandwidth=5.632 GHz`、`GBW=22.653 GHz`、`unity=21.970 GHz`；退化点得到 `gain=3.238 V/V`、`bandwidth=4.175 GHz`、`GBW=13.519 GHz`、`unity=12.948 GHz`。两点均通过 DC 饱和、KCL、OA/`si` topology 与参数一致性。两点 W/RD 不同，因此该数据只验证执行链，不作为 RS 的控制变量因果比较。
+
+有限搜索继续使用同一 candidate/checkpoint 状态机。搜索含 W/L/RD/RS 时逐候选写 OA、回读、重新 netlist，并提交最佳可行点；若维度只有 bias/VDD/load 等 testbench 条件，planner 把 stage/finalize 标成只读，executor 不调用 OA 参数写入，只在最终独立 inspect 中证明 schematic 未变。这既保留局部仿真/条件搜索，也避免为纯分析条件索取不必要的 OA 写授权。
+
+该只读分支已在 nominal 与退化 cell 上各完成 6 点 `bias×load` live 搜索。12 个候选均重新生成一致的 OA/`si` 网表并得到完整 AC 指标，最终都选择 `0.35 V/1 fF`；before/after semantic parameters 相同。退化任务在候选 4、5 前两次失去 tunnel，并从 checkpoint index 4、5 恢复，证明 testbench-only 搜索也使用同一可审计恢复语义。
+
+含 OA 设计参数的分支随后在专用 `vda_cs_ac_tradeoff_001` 上真实验证。相同 W/L/RD/bias/load 的 nominal 控制点保存后，固定 transform 只加入 RS，避免把不同 W/RD 的历史 cell 误作因果对比。W/RD/RS 8 点搜索逐候选写入、回读、重新 `si`、运行 DC+AC，并按 GBW 选择 W=1.0 µm、RD=20 kΩ、RS=1 kΩ；最佳立即回读和独立 after-inspect 相同。3/8 预算任务只在完成前缀选点并标为 partial；人为不可行任务恢复初始 OA。upload/download 中断不产生候选证据，恢复前先执行参数恢复或核对 expected OA。
+
+设计质量分析继续复用这一 worker。DC/AC/transient/noise wrapper 均保存 `VDD_SRC:p`；DC 功耗由实际电源源电流计算，并与 MN0 `ids` 做独立 KCL 检查，不以器件 Id 直接代替电源功耗。`analysis: transient` 要求结构化 `linearity_sweep`：VIN 为以 bias 为中心的正弦，一个 Spectre nested parameter sweep 覆盖全部声明幅度；稳态整数周期上以梯形积分做傅里叶投影，提取 fundamental、HD2/HD3、THD、平均 VDD 功耗和 P1dB。若幅度范围没有包围目标压缩量，P1dB 保持 unresolved，不用最大幅度冒充。wrapper 比声明 measurement 边界多运行一个 strobe interval，以适配 Spectre 不保证返回 stop 闭区间端点的行为；指标窗口本身不缩短。
+
+`analysis: noise` 要求结构化 `noise_sweep`，wrapper 使用 `VIN_SRC` 作为 input probe 并保存普通 noise PSF。Bridge runner 原样负责 Spectre、远端目录和完整 PSF 下载；其通用目录合并器目前不返回普通 noise trace，因此 VDA worker 从 Bridge 已下载的唯一 `noise.noise` 文件调用 Bridge 自身单文件 PSF parser，再对 `out` 与 `in` 电压噪声密度平方积分。解析后的 PSFASCII 通过 Bridge 上传到本次保留的 netlist scratch，远端路径和 SHA-256 进入证据。该实现没有改 Bridge，也没有另写 SSH/文件传输。
+
+真实 nested sweep 还证明通用目录合并数据不能作为跨 analysis DC OP 的唯一来源：递归的 sweep `dcOpInfo` 可能覆盖根文件，而 `dcOp.dc` 节点仍来自根 analysis。VDA 因此从 Bridge 已下载目录显式选择相对深度最小的根 `dcOp.dc`/`dcOpInfo.info`，分别调用 Bridge 单文件 parser，并把两个 SHA-256 写入 operating-point evidence；不以放宽节点/器件一致性容差掩盖来源混淆。
+
+2026-07-20 的同一专用 OA cell 已通过 5 点 100 MHz transient linearity 和 211 点 1 kHz–10 GHz ordinary noise 只读 smoke：P1dB 被 50/100 mV 点真实包围，输入 P1dB 为 88.32 mV peak，150 mV 点 THD 为 13.16%；输出/输入参考积分噪声为 3.304/0.983 mV RMS。两次 `si` 网表 SHA 相同，OA/网表 W/L/RD/RS 一致且没有 OA write action。该结果升级的是单点执行与提取能力，不是跨 analysis 质量驱动调优或 corner 闭环。
 
 ## 证据链
 
 每次运行至少保存任务和计划 token、adapter 与证据来源、动作状态、候选参数、仿真指标、逐条规格判定、最终选择、OA 回读摘要，以及错误和未验证边界。显式实例写入还保存请求、写入前目标字段、立即确认和独立 inspect 的完整参数表。调优 checkpoint 保留历史失败 actions，但恢复后只有完成的候选证据参与选择；最终 run 可以在完整证据和最终回读成立时成功，同时仍显式留下已恢复的 transport 事件。自动 netlisting 还保存远端网表/wrapper 路径、SHA-256、解析后的实例参数和一致性结论。
 
-timing、过冲/欠冲、`supply_energy_per_cycle_fj`、`average_supply_power_uw` 和共源 DC 连续指标标为 `eda_result`；OA 结构和参数标为 `bridge_readback`；任务显式给出的 VDD、负载或偏置标为 `user_input`；`gate_area_proxy_um2=(Wn+Wp)L` 与共源饱和区分类是 `software_inference`。供电能量在相邻两次 VIN 50% 上升沿间积分，包含该周期泄漏，不称为纯动态开关能量；饱和区分类也不冒充 PDK 模型直接输出。后续 Maestro、Calibre 和 PEX 沿用同一证据模型。
+timing、过冲/欠冲、`supply_energy_per_cycle_fj`、`average_supply_power_uw`、共源 DC/供电连续指标，以及从 AC、相干 transient 或 noise PSF 提取的连续量标为 `eda_result`；OA 结构和参数标为 `bridge_readback`；任务显式给出的 VDD、负载、偏置、analysis 或 sweep 字段标为 `user_input`；默认 analysis/sweep 字段、`gate_area_proxy_um2=(Wn+Wp)L`、饱和区分类、交点/压缩点规则和指标完整性判断是 `software_inference`。供电能量或功耗保留积分窗口和源电流方向，不能称为纯动态开关能量；AC、linearity 和 noise 指标也必须保存提取公式、范围和 unresolved 诊断，不能只保存一个无来源标量。后续 Maestro、Calibre 和 PEX 沿用同一证据模型。

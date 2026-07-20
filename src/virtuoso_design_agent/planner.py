@@ -5,8 +5,16 @@ from __future__ import annotations
 import hashlib
 import json
 
-from .catalog import validate_task_capability
-from .models import CircuitKind, ExecutionPlan, Operation, PlanStep, SideEffect, TaskSpec
+from .catalog import task_requests_oa_parameter_write, validate_task_capability
+from .models import (
+    AnalysisKind,
+    CircuitKind,
+    ExecutionPlan,
+    Operation,
+    PlanStep,
+    SideEffect,
+    TaskSpec,
+)
 
 
 def _step(
@@ -22,16 +30,57 @@ def _step(
 
 def _steps_for(task: TaskSpec) -> list[PlanStep]:
     common_source = task.circuit is CircuitKind.COMMON_SOURCE
+    analysis = task.resolved_analysis()
+    common_source_ac = common_source and analysis is AnalysisKind.AC
+    common_source_linearity = (
+        common_source and analysis is AnalysisKind.TRANSIENT
+    )
+    common_source_noise = common_source and analysis is AnalysisKind.NOISE
+    candidate_oa_write = task_requests_oa_parameter_write(task)
     template_name = "共源放大器" if common_source else "反相器"
     simulation_description = (
-        "用 OA 导出网表和受控 testbench 运行 Spectre DC operating point"
+        "用 OA 导出网表，先核对 DC operating point，再运行 Spectre 复数 AC sweep"
+        if common_source_ac
+        else (
+            "用 OA 导出网表，先核对 DC operating point，再用 Spectre transient "
+            "参数 sweep 运行相干正弦幅度扫描"
+        )
+        if common_source_linearity
+        else (
+            "用 OA 导出网表，先核对 DC operating point，再运行 Spectre "
+            "小信号 noise sweep"
+        )
+        if common_source_noise
+        else "用 OA 导出网表和受控 testbench 运行 Spectre DC operating point"
         if common_source
         else "用 OA 导出网表和受控 testbench 运行 Spectre transient"
     )
     sweep_description = (
-        "在 max_iterations 内运行 OA 同源 DC operating-point 候选"
+        "在 max_iterations 内运行 OA 同源 DC + 复数 AC 候选"
+        if common_source_ac
+        else "在 max_iterations 内运行 OA 同源 DC + transient 线性度候选"
+        if common_source_linearity
+        else "在 max_iterations 内运行 OA 同源 DC + noise 候选"
+        if common_source_noise
+        else "在 max_iterations 内运行 OA 同源 DC operating-point 候选"
         if common_source
         else "在 max_iterations 内运行 OA 同源网表候选"
+    )
+    evaluation_description = (
+        "从复数 VOUT/VIN 提取低频增益、首个 -3 dB 带宽、GBW、"
+        "unity-gain frequency，并结合 DC 工作区逐条判断规格"
+        if common_source_ac
+        else (
+            "从相干稳态窗口提取增益、HD2/HD3、THD、P1dB 和真实 VDD "
+            "功耗，并结合 DC 工作区逐条判断规格"
+        )
+        if common_source_linearity
+        else (
+            "积分输出与输入参考噪声密度，并结合真实 VDD 功耗和 DC "
+            "工作区逐条判断规格"
+        )
+        if common_source_noise
+        else "从波形指标逐条判断规格"
     )
     probe = _step(
         "01-probe",
@@ -59,12 +108,17 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
     )
 
     if task.operation is Operation.SCHEMATIC_CREATE:
+        create_description = (
+            f"显式删除并按受控模板替换已有{template_name} schematic"
+            if task.safety.replace_existing
+            else f"按受控模板创建{template_name} schematic；已有对象保持不变"
+        )
         return [
             probe,
             _step(
                 "02-create",
                 "schematic.create",
-                f"按受控模板创建{template_name} schematic",
+                create_description,
                 SideEffect.REMOTE_WRITE,
             ),
             inspect.model_copy(update={"id": "03-inspect"}),
@@ -75,6 +129,23 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             probe,
             inspect.model_copy(update={"id": "02-inspect"}),
             persist.model_copy(update={"id": "03-persist"}),
+        ]
+    if task.operation is Operation.SCHEMATIC_TRANSFORM:
+        return [
+            probe,
+            inspect.model_copy(update={"id": "02-before"}),
+            _step(
+                "03-transform",
+                "schematic.transform.source-degeneration",
+                (
+                    "在同一 cellview 内仅把 MN0.S 的 VSS 标签改为 NSRC，"
+                    "新增 RS0(NSRC, VSS) 并设置退化电阻；保留 MN0、RD0、"
+                    "pins 与已有实例参数，不新建或替换 cellview"
+                ),
+                SideEffect.REMOTE_WRITE,
+            ),
+            inspect.model_copy(update={"id": "04-after"}),
+            persist.model_copy(update={"id": "05-persist"}),
         ]
     if task.operation is Operation.PARAMETERS_APPLY:
         if task.instance_parameter_updates and task.parameters:
@@ -115,20 +186,30 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             _step(
                 "05-evaluate",
                 "results.evaluate",
-                "从波形指标逐条判断规格",
+                evaluation_description,
                 SideEffect.READ_ONLY,
             ),
             persist.model_copy(update={"id": "06-persist"}),
         ]
     if task.operation is Operation.DESIGN_TUNE:
+        stage_description = (
+            "逐候选暂存 OA 参数并回读；失败或无可行点时恢复初始参数"
+            if candidate_oa_write
+            else "候选只改变显式 testbench 条件；每点复用同一 OA readback，不写 OA"
+        )
+        finalize_description = (
+            "提交最佳可行参数，或恢复搜索前 OA 参数"
+            if candidate_oa_write
+            else "记录最佳 testbench 条件，并再次确认 OA 参数保持不变"
+        )
         return [
             probe,
             inspect.model_copy(update={"id": "02-before"}),
             _step(
                 "03-stage",
                 "parameters.stage",
-                "逐候选暂存 OA 参数并回读；失败或无可行点时恢复初始参数",
-                SideEffect.REMOTE_WRITE,
+                stage_description,
+                SideEffect.REMOTE_WRITE if candidate_oa_write else SideEffect.READ_ONLY,
             ),
             netlist.model_copy(update={"id": "04-netlist"}),
             _step(
@@ -146,8 +227,8 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             _step(
                 "07-finalize",
                 "parameters.finalize",
-                "提交最佳可行参数，或恢复搜索前 OA 参数",
-                SideEffect.REMOTE_WRITE,
+                finalize_description,
+                SideEffect.REMOTE_WRITE if candidate_oa_write else SideEffect.READ_ONLY,
             ),
             inspect.model_copy(update={"id": "08-after"}),
             persist.model_copy(

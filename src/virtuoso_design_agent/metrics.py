@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import cmath
 import math
 from collections.abc import Sequence
 from statistics import median
@@ -219,6 +220,388 @@ def extract_supply_metrics(
     }
 
 
+def extract_dc_supply_metrics(
+    *, vdd_v: float, supply_source_current_a: float
+) -> dict[str, float]:
+    """Convert the actual VDD source current into consumed DC power.
+
+    ``VDD_SRC`` is oriented from VDD to ground in the generated testbench, so a
+    circuit drawing power produces a negative source-terminal current.
+    """
+    if not math.isfinite(float(vdd_v)) or vdd_v <= 0:
+        raise MetricExtractionError("DC supply voltage must be finite and positive")
+    if not math.isfinite(float(supply_source_current_a)):
+        raise MetricExtractionError("DC supply source current must be finite")
+    consumed_current_a = -float(supply_source_current_a)
+    if consumed_current_a <= 0:
+        raise MetricExtractionError(
+            "DC supply source current has unexpected polarity or zero power"
+        )
+    return {
+        "supply_current_ua": consumed_current_a * 1e6,
+        "dc_supply_power_uw": consumed_current_a * float(vdd_v) * 1e6,
+    }
+
+
+def _window_with_boundaries(
+    time_s: Sequence[float],
+    values: Sequence[float],
+    start_s: float,
+    end_s: float,
+) -> tuple[list[float], list[float]]:
+    points_time = [float(start_s)]
+    points_value = [_interpolate_at(time_s, values, start_s)]
+    for time, value in zip(time_s, values, strict=True):
+        numeric_time = float(time)
+        if start_s < numeric_time < end_s:
+            points_time.append(numeric_time)
+            points_value.append(float(value))
+    points_time.append(float(end_s))
+    points_value.append(_interpolate_at(time_s, values, end_s))
+    return points_time, points_value
+
+
+def _fourier_peak_amplitude(
+    time_s: Sequence[float],
+    values: Sequence[float],
+    *,
+    frequency_hz: float,
+    harmonic: int,
+    start_s: float,
+    end_s: float,
+) -> float:
+    window_time, window_values = _window_with_boundaries(
+        time_s, values, start_s, end_s
+    )
+    angular_frequency = 2.0 * math.pi * frequency_hz * harmonic
+    samples = [
+        value * cmath.exp(-1j * angular_frequency * time)
+        for time, value in zip(window_time, window_values, strict=True)
+    ]
+    integral = sum(
+        0.5 * (before_value + after_value) * (after_time - before_time)
+        for before_time, after_time, before_value, after_value in zip(
+            window_time[:-1],
+            window_time[1:],
+            samples[:-1],
+            samples[1:],
+            strict=True,
+        )
+    )
+    return 2.0 * abs(integral / (end_s - start_s))
+
+
+def extract_common_source_linearity_point_metrics(
+    time_s: Sequence[float],
+    vin_v: Sequence[float],
+    vout_v: Sequence[float],
+    supply_current_a: Sequence[float],
+    *,
+    vdd_v: float,
+    frequency_hz: float,
+    settling_cycles: int,
+    measurement_cycles: int,
+    max_harmonic: int,
+) -> tuple[dict[str, float], dict[str, object]]:
+    """Measure coherent sine gain, harmonics, THD, and VDD power for one amplitude."""
+    lengths = {len(time_s), len(vin_v), len(vout_v), len(supply_current_a)}
+    if len(lengths) != 1 or len(time_s) < 8:
+        raise MetricExtractionError(
+            "linearity time, VIN, VOUT, and supply current must have equal non-trivial length"
+        )
+    if frequency_hz <= 0 or not math.isfinite(frequency_hz):
+        raise MetricExtractionError("linearity frequency must be finite and positive")
+    if settling_cycles < 1 or measurement_cycles < 2 or max_harmonic < 2:
+        raise MetricExtractionError("invalid linearity cycle or harmonic settings")
+
+    times = [float(value) for value in time_s]
+    inputs = [float(value) for value in vin_v]
+    outputs = [float(value) for value in vout_v]
+    currents = [float(value) for value in supply_current_a]
+    if any(
+        not math.isfinite(value)
+        for value in times + inputs + outputs + currents
+    ):
+        raise MetricExtractionError("linearity waveforms must be finite")
+    if any(times[index] <= times[index - 1] for index in range(1, len(times))):
+        raise MetricExtractionError("linearity time values must be strictly increasing")
+
+    period_s = 1.0 / frequency_hz
+    start_s = settling_cycles * period_s
+    end_s = (settling_cycles + measurement_cycles) * period_s
+    if times[0] > start_s or times[-1] < end_s:
+        raise MetricExtractionError(
+            "linearity waveform does not cover the declared coherent measurement window"
+        )
+
+    input_fundamental = _fourier_peak_amplitude(
+        times,
+        inputs,
+        frequency_hz=frequency_hz,
+        harmonic=1,
+        start_s=start_s,
+        end_s=end_s,
+    )
+    output_harmonics = {
+        harmonic: _fourier_peak_amplitude(
+            times,
+            outputs,
+            frequency_hz=frequency_hz,
+            harmonic=harmonic,
+            start_s=start_s,
+            end_s=end_s,
+        )
+        for harmonic in range(1, max_harmonic + 1)
+    }
+    output_fundamental = output_harmonics[1]
+    if input_fundamental <= 1e-15 or output_fundamental <= 1e-15:
+        raise MetricExtractionError(
+            "linearity fundamental amplitude is missing or below the numeric floor"
+        )
+
+    harmonic_floor = output_fundamental * 1e-15
+    harmonic_power = sum(
+        amplitude * amplitude
+        for harmonic, amplitude in output_harmonics.items()
+        if harmonic >= 2
+    )
+    source_charge_c = -_integrate_window(times, currents, start_s, end_s)
+    if source_charge_c <= 0:
+        raise MetricExtractionError(
+            "linearity supply current has unexpected polarity or zero energy"
+        )
+    duration_s = end_s - start_s
+    energy_j = source_charge_c * vdd_v
+    window_time, window_output = _window_with_boundaries(
+        times, outputs, start_s, end_s
+    )
+    metrics: dict[str, float] = {
+        "input_fundamental_v_peak": input_fundamental,
+        "output_fundamental_v_peak": output_fundamental,
+        "large_signal_gain_v_per_v": output_fundamental / input_fundamental,
+        "thd_percent": math.sqrt(harmonic_power) / output_fundamental * 100.0,
+        "average_supply_power_uw": energy_j / duration_s * 1e6,
+        "supply_energy_per_cycle_fj": energy_j / measurement_cycles * 1e15,
+        "output_dc_v": _integrate_window(
+            times, outputs, start_s, end_s
+        )
+        / duration_s,
+        "output_min_v": min(window_output),
+        "output_max_v": max(window_output),
+        "output_peak_to_peak_v": max(window_output) - min(window_output),
+    }
+    for harmonic, amplitude in output_harmonics.items():
+        metrics[f"output_harmonic_{harmonic}_v_peak"] = amplitude
+        if harmonic >= 2:
+            metrics[f"hd{harmonic}_dbc"] = 20.0 * math.log10(
+                max(amplitude, harmonic_floor) / output_fundamental
+            )
+    return metrics, {
+        "analysis_complete": True,
+        "frequency_hz": frequency_hz,
+        "measurement_window_s": [start_s, end_s],
+        "settling_cycles": settling_cycles,
+        "measurement_cycles": measurement_cycles,
+        "sample_count": len(window_time),
+        "max_harmonic": max_harmonic,
+        "harmonic_numeric_floor_dbc": -300.0,
+        "fourier_method": "trapezoidal coherent-window projection",
+        "supply_power_method": "-integral(VDD_SRC:p) * VDD / measurement_time",
+    }
+
+
+def aggregate_common_source_linearity_metrics(
+    amplitudes_v: Sequence[float],
+    point_metrics: Sequence[dict[str, float]],
+    *,
+    compression_db: float = 1.0,
+) -> tuple[dict[str, float], dict[str, object]]:
+    """Aggregate an ordered amplitude sweep without inventing a missing P1dB."""
+    if len(amplitudes_v) < 2 or len(amplitudes_v) != len(point_metrics):
+        raise MetricExtractionError(
+            "linearity amplitudes and point metrics must have equal length of at least two"
+        )
+    amplitudes = [float(value) for value in amplitudes_v]
+    if any(
+        not math.isfinite(value) or value <= 0 for value in amplitudes
+    ) or any(
+        amplitudes[index] <= amplitudes[index - 1]
+        for index in range(1, len(amplitudes))
+    ):
+        raise MetricExtractionError(
+            "linearity amplitudes must be finite, positive, and strictly increasing"
+        )
+    if compression_db <= 0 or not math.isfinite(compression_db):
+        raise MetricExtractionError("compression_db must be finite and positive")
+
+    required = {
+        "large_signal_gain_v_per_v",
+        "output_fundamental_v_peak",
+        "thd_percent",
+        "average_supply_power_uw",
+        "output_peak_to_peak_v",
+    }
+    if any(not required <= metrics.keys() for metrics in point_metrics):
+        raise MetricExtractionError("linearity point metrics are incomplete")
+    gains = [float(metrics["large_signal_gain_v_per_v"]) for metrics in point_metrics]
+    if any(not math.isfinite(value) or value <= 0 for value in gains):
+        raise MetricExtractionError("linearity gains must be finite and positive")
+    gain_db = [20.0 * math.log10(value) for value in gains]
+    compression = [gain_db[0] - value for value in gain_db]
+    last = point_metrics[-1]
+    metrics = {
+        "small_signal_gain_v_per_v": gains[0],
+        "small_signal_gain_db": gain_db[0],
+        "gain_at_max_amplitude_v_per_v": gains[-1],
+        "gain_compression_at_max_db": compression[-1],
+        "input_amplitude_max_v_peak": amplitudes[-1],
+        "output_at_max_amplitude_v_peak": float(
+            last["output_fundamental_v_peak"]
+        ),
+        "output_peak_to_peak_at_max_amplitude_v": float(
+            last["output_peak_to_peak_v"]
+        ),
+        "thd_at_max_amplitude_percent": float(last["thd_percent"]),
+        "max_thd_percent": max(
+            float(item["thd_percent"]) for item in point_metrics
+        ),
+        "small_signal_supply_power_uw": float(
+            point_metrics[0]["average_supply_power_uw"]
+        ),
+        "large_signal_supply_power_uw": float(last["average_supply_power_uw"]),
+        "max_average_supply_power_uw": max(
+            float(item["average_supply_power_uw"]) for item in point_metrics
+        ),
+    }
+    for name in ("hd2_dbc", "hd3_dbc"):
+        if name in last:
+            metrics[f"{name[:-4]}_at_max_amplitude_dbc"] = float(last[name])
+
+    crossing: dict[str, object] = {
+        "status": "unresolved",
+        "reason": "declared amplitude sweep does not reach gain compression",
+        "target_compression_db": compression_db,
+    }
+    for index in range(1, len(amplitudes)):
+        if compression[index] < compression_db:
+            continue
+        before = compression[index - 1]
+        after = compression[index]
+        fraction = 1.0 if after == before else (compression_db - before) / (after - before)
+        fraction = min(max(fraction, 0.0), 1.0)
+        input_compression = amplitudes[index - 1] + fraction * (
+            amplitudes[index] - amplitudes[index - 1]
+        )
+        before_output = float(point_metrics[index - 1]["output_fundamental_v_peak"])
+        after_output = float(point_metrics[index]["output_fundamental_v_peak"])
+        output_compression = before_output + fraction * (
+            after_output - before_output
+        )
+        metrics["input_1db_compression_v_peak"] = input_compression
+        metrics["output_1db_compression_v_peak"] = output_compression
+        crossing = {
+            "status": "resolved",
+            "target_compression_db": compression_db,
+            "bracket_amplitudes_v_peak": [
+                amplitudes[index - 1],
+                amplitudes[index],
+            ],
+            "interpolation_fraction": fraction,
+            "interpolation": "linear input amplitude versus gain compression dB",
+        }
+        break
+
+    warnings: list[str] = []
+    if crossing["status"] != "resolved":
+        warnings.append(
+            "input_1db_compression_v_peak unresolved within declared amplitudes"
+        )
+    if any(value < -1e-6 for value in compression[1:]):
+        warnings.append("gain expansion appears before compression")
+    return metrics, {
+        "analysis_complete": True,
+        "reference": "first declared amplitude",
+        "p1db": crossing,
+        "warnings": warnings,
+        "points": [
+            {
+                "input_amplitude_v_peak": amplitude,
+                "gain_v_per_v": gain,
+                "gain_compression_db": compression_value,
+                "thd_percent": float(point["thd_percent"]),
+                "average_supply_power_uw": float(
+                    point["average_supply_power_uw"]
+                ),
+            }
+            for amplitude, gain, compression_value, point in zip(
+                amplitudes, gains, compression, point_metrics, strict=True
+            )
+        ],
+    }
+
+
+def extract_common_source_noise_metrics(
+    frequency_hz: Sequence[float],
+    output_noise_v_per_sqrt_hz: Sequence[float],
+    input_noise_v_per_sqrt_hz: Sequence[float],
+) -> tuple[dict[str, float], dict[str, object]]:
+    """Integrate output and input-referred voltage-noise densities over the sweep."""
+    if (
+        len(frequency_hz) < 2
+        or len(frequency_hz) != len(output_noise_v_per_sqrt_hz)
+        or len(frequency_hz) != len(input_noise_v_per_sqrt_hz)
+    ):
+        raise MetricExtractionError(
+            "noise frequency, output density, and input density must have equal non-trivial length"
+        )
+    frequencies = [float(value) for value in frequency_hz]
+    output_density = [float(value) for value in output_noise_v_per_sqrt_hz]
+    input_density = [float(value) for value in input_noise_v_per_sqrt_hz]
+    if any(
+        not math.isfinite(value) or value <= 0 for value in frequencies
+    ):
+        raise MetricExtractionError("noise frequencies must be finite and positive")
+    if any(
+        frequencies[index] <= frequencies[index - 1]
+        for index in range(1, len(frequencies))
+    ):
+        raise MetricExtractionError("noise frequencies must be strictly increasing")
+    if any(
+        not math.isfinite(value) or value < 0
+        for value in output_density + input_density
+    ):
+        raise MetricExtractionError("noise densities must be finite and non-negative")
+    start_hz, stop_hz = frequencies[0], frequencies[-1]
+    output_variance = _integrate_window(
+        frequencies,
+        [value * value for value in output_density],
+        start_hz,
+        stop_hz,
+    )
+    input_variance = _integrate_window(
+        frequencies,
+        [value * value for value in input_density],
+        start_hz,
+        stop_hz,
+    )
+    return {
+        "integrated_output_noise_v_rms": math.sqrt(output_variance),
+        "integrated_output_noise_uv_rms": math.sqrt(output_variance) * 1e6,
+        "integrated_input_referred_noise_v_rms": math.sqrt(input_variance),
+        "integrated_input_referred_noise_uv_rms": math.sqrt(input_variance) * 1e6,
+        "output_noise_density_start_nv_per_sqrt_hz": output_density[0] * 1e9,
+        "output_noise_density_stop_nv_per_sqrt_hz": output_density[-1] * 1e9,
+        "input_noise_density_start_nv_per_sqrt_hz": input_density[0] * 1e9,
+        "input_noise_density_stop_nv_per_sqrt_hz": input_density[-1] * 1e9,
+    }, {
+        "analysis_complete": True,
+        "sample_count": len(frequencies),
+        "integration_band_hz": [start_hz, stop_hz],
+        "integration_method": "trapezoidal integral of voltage-noise density squared",
+        "density_units": "V/sqrt(Hz)",
+    }
+
+
 def extract_common_source_dc_metrics(
     *,
     vdd_v: float,
@@ -284,6 +667,268 @@ def extract_common_source_dc_metrics(
             drain_current_a > 0.0 and saturation_margin_v >= 0.0
         ),
     }
+
+
+def _log_frequency_crossing(
+    frequency_before_hz: float,
+    frequency_after_hz: float,
+    value_before: float,
+    value_after: float,
+    target: float,
+) -> tuple[float, float]:
+    if value_after == value_before:
+        return frequency_after_hz, 1.0
+    fraction = (target - value_before) / (value_after - value_before)
+    fraction = min(max(fraction, 0.0), 1.0)
+    log_frequency = math.log10(frequency_before_hz) + fraction * (
+        math.log10(frequency_after_hz) - math.log10(frequency_before_hz)
+    )
+    return 10.0**log_frequency, fraction
+
+
+def _unwrapped_phase_degrees(values: Sequence[complex]) -> list[float]:
+    phases = [cmath.phase(value) for value in values]
+    for index in range(1, len(phases)):
+        delta = phases[index] - phases[index - 1]
+        while delta > math.pi:
+            phases[index] -= 2.0 * math.pi
+            delta -= 2.0 * math.pi
+        while delta < -math.pi:
+            phases[index] += 2.0 * math.pi
+            delta += 2.0 * math.pi
+    return [math.degrees(value) for value in phases]
+
+
+def extract_common_source_ac_metrics(
+    frequency_hz: Sequence[float],
+    vin_v: Sequence[complex | float],
+    vout_v: Sequence[complex | float],
+    *,
+    reference_points: int = 5,
+    max_reference_variation_db: float = 0.5,
+) -> tuple[dict[str, float], dict[str, object]]:
+    """Extract common-source small-signal gain and bandwidth from complex AC data.
+
+    Bandwidth is the first downward half-power crossing relative to the complex
+    mean of the first ``reference_points`` transfer samples. Crossing frequency
+    is interpolated linearly in dB over log-frequency. GBW is deliberately kept
+    distinct from unity-gain frequency.
+    """
+    if reference_points < 2:
+        raise MetricExtractionError("AC reference_points must be at least 2")
+    if max_reference_variation_db <= 0 or not math.isfinite(
+        max_reference_variation_db
+    ):
+        raise MetricExtractionError(
+            "AC max_reference_variation_db must be finite and positive"
+        )
+    if (
+        len(frequency_hz) < max(3, reference_points + 1)
+        or len(frequency_hz) != len(vin_v)
+        or len(frequency_hz) != len(vout_v)
+    ):
+        raise MetricExtractionError(
+            "frequency, VIN, and VOUT must have equal length beyond the reference window"
+        )
+
+    try:
+        frequencies = [float(value) for value in frequency_hz]
+    except (TypeError, ValueError) as exc:
+        raise MetricExtractionError("AC frequencies must be numeric") from exc
+    if any(not math.isfinite(value) or value <= 0 for value in frequencies):
+        raise MetricExtractionError("AC frequencies must be finite and positive")
+    if any(
+        frequencies[index] <= frequencies[index - 1]
+        for index in range(1, len(frequencies))
+    ):
+        raise MetricExtractionError("AC frequencies must be strictly increasing")
+
+    try:
+        inputs = [complex(value) for value in vin_v]
+        outputs = [complex(value) for value in vout_v]
+    except (TypeError, ValueError) as exc:
+        raise MetricExtractionError("AC VIN and VOUT values must be numeric") from exc
+    if any(
+        not math.isfinite(value.real) or not math.isfinite(value.imag)
+        for value in inputs + outputs
+    ):
+        raise MetricExtractionError("AC VIN and VOUT values must be finite")
+    if any(abs(value) <= 1e-30 for value in inputs):
+        raise MetricExtractionError("AC VIN contains a zero small-signal value")
+
+    transfer = [output / input_value for input_value, output in zip(inputs, outputs)]
+    reference_transfer = sum(transfer[:reference_points], 0j) / reference_points
+    reference_gain = abs(reference_transfer)
+    if not math.isfinite(reference_gain) or reference_gain <= 1e-30:
+        raise MetricExtractionError("AC low-frequency reference gain is zero or invalid")
+
+    floor = 1e-300
+    gain_db = [20.0 * math.log10(max(abs(value), floor)) for value in transfer]
+    phase_deg = _unwrapped_phase_degrees(transfer)
+    reference_gain_db = 20.0 * math.log10(reference_gain)
+    reference_phase_deg = math.degrees(cmath.phase(reference_transfer))
+    reference_window_db = gain_db[:reference_points]
+    reference_variation_db = max(reference_window_db) - min(reference_window_db)
+    threshold_db = reference_gain_db - 10.0 * math.log10(2.0)
+    peak_gain_db = max(gain_db)
+    peak_index = gain_db.index(peak_gain_db)
+
+    metrics: dict[str, float] = {
+        "low_frequency_gain_v_per_v": reference_gain,
+        "low_frequency_gain_db": reference_gain_db,
+        "low_frequency_phase_deg": reference_phase_deg,
+        "peak_gain_db": peak_gain_db,
+        "peak_gain_frequency_hz": frequencies[peak_index],
+        "gain_peaking_db": peak_gain_db - reference_gain_db,
+    }
+    diagnostics: dict[str, object] = {
+        "analysis_complete": False,
+        "issues": [],
+        "warnings": [],
+        "sample_count": len(frequencies),
+        "sweep_start_hz": frequencies[0],
+        "sweep_stop_hz": frequencies[-1],
+        "reference": {
+            "method": "complex_mean_of_first_points",
+            "points": reference_points,
+            "variation_db": reference_variation_db,
+            "variation_limit_db": max_reference_variation_db,
+            "status": (
+                "flat"
+                if reference_variation_db <= max_reference_variation_db
+                else "not_flat"
+            ),
+        },
+        "bandwidth": {
+            "definition": "first downward half-power crossing from low-frequency reference",
+            "threshold_db": threshold_db,
+            "interpolation": "linear_dB_over_log10_frequency",
+            "status": "unresolved",
+        },
+        "unity_gain": {
+            "definition": "first downward |VOUT/VIN| = 1 crossing",
+            "interpolation": "linear_dB_over_log10_frequency",
+            "status": "unresolved",
+        },
+        "gbw": {
+            "definition": "low_frequency_gain_v_per_v * bandwidth_3db_hz",
+            "status": "unresolved",
+        },
+    }
+    issues = diagnostics["issues"]
+    warnings = diagnostics["warnings"]
+    assert isinstance(issues, list)
+    assert isinstance(warnings, list)
+    bandwidth = diagnostics["bandwidth"]
+    unity_gain = diagnostics["unity_gain"]
+    gbw = diagnostics["gbw"]
+    assert isinstance(bandwidth, dict)
+    assert isinstance(unity_gain, dict)
+    assert isinstance(gbw, dict)
+
+    if reference_variation_db > max_reference_variation_db:
+        reason = "low_frequency_reference_not_flat"
+        bandwidth["reason"] = reason
+        unity_gain["reason"] = reason
+        gbw["reason"] = "bandwidth_unresolved"
+        issues.append(f"bandwidth_3db_hz unresolved: {reason}")
+        return metrics, diagnostics
+
+    def downward_crossings(level_db: float) -> list[tuple[int, float, float]]:
+        crossings: list[tuple[int, float, float]] = []
+        for index in range(reference_points, len(gain_db)):
+            before = gain_db[index - 1]
+            after = gain_db[index]
+            if not (
+                before >= level_db
+                and after <= level_db
+                and (before > level_db or after < level_db)
+            ):
+                continue
+            crossing_hz, fraction = _log_frequency_crossing(
+                frequencies[index - 1],
+                frequencies[index],
+                before,
+                after,
+                level_db,
+            )
+            crossings.append((index, crossing_hz, fraction))
+        return crossings
+
+    bandwidth_crossings = downward_crossings(threshold_db)
+    if bandwidth_crossings:
+        index, crossing_hz, fraction = bandwidth_crossings[0]
+        crossing_phase_deg = phase_deg[index - 1] + fraction * (
+            phase_deg[index] - phase_deg[index - 1]
+        )
+        metrics["bandwidth_3db_hz"] = crossing_hz
+        metrics["phase_at_bandwidth_deg"] = crossing_phase_deg
+        metrics["gain_bandwidth_product_hz"] = reference_gain * crossing_hz
+        bandwidth.update(
+            {
+                "status": "resolved",
+                "frequency_hz": crossing_hz,
+                "crossing_count": len(bandwidth_crossings),
+                "bracket_hz": [frequencies[index - 1], frequencies[index]],
+            }
+        )
+        gbw.update(
+            {
+                "status": "resolved",
+                "value_hz": metrics["gain_bandwidth_product_hz"],
+            }
+        )
+        diagnostics["analysis_complete"] = True
+        if len(bandwidth_crossings) > 1:
+            warnings.append(
+                "multiple downward half-power crossings; first crossing used"
+            )
+        if any(
+            gain_db[index - 1] < threshold_db <= gain_db[index]
+            for index in range(bandwidth_crossings[0][0] + 1, len(gain_db))
+        ):
+            warnings.append(
+                "response re-crosses the half-power threshold after bandwidth"
+            )
+    else:
+        reason = (
+            "sweep_stop_below_first_minus_3db_crossing"
+            if gain_db[-1] > threshold_db
+            else "no_downward_crossing_after_reference"
+        )
+        bandwidth["reason"] = reason
+        gbw["reason"] = "bandwidth_unresolved"
+        issues.append(f"bandwidth_3db_hz unresolved: {reason}")
+
+    if reference_gain > 1.0:
+        unity_crossings = downward_crossings(0.0)
+        if unity_crossings:
+            index, crossing_hz, fraction = unity_crossings[0]
+            metrics["unity_gain_frequency_hz"] = crossing_hz
+            metrics["phase_at_unity_gain_deg"] = phase_deg[index - 1] + fraction * (
+                phase_deg[index] - phase_deg[index - 1]
+            )
+            unity_gain.update(
+                {
+                    "status": "resolved",
+                    "frequency_hz": crossing_hz,
+                    "crossing_count": len(unity_crossings),
+                    "bracket_hz": [frequencies[index - 1], frequencies[index]],
+                }
+            )
+        else:
+            reason = "sweep_stop_below_unity_gain_crossing"
+            unity_gain["reason"] = reason
+            warnings.append(f"unity_gain_frequency_hz unresolved: {reason}")
+    else:
+        unity_gain.update(
+            {
+                "status": "not_applicable",
+                "reason": "low_frequency_gain_at_or_below_unity",
+            }
+        )
+
+    return metrics, diagnostics
 
 
 def evaluate_constraints(

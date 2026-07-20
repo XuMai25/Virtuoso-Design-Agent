@@ -109,4 +109,4 @@
 
 ## 下一道 Gate
 
-显式实例参数面现在可称为：**writable-field execution and double OA readback verified; arbitrary-field persistence remains PDK-conditional**。下一步进入受控拓扑变更：新建源极退化共源 cellview，明确新增实例、网络、参数和逆操作，先重新通过 DC 工作区，再进入 AC gain/bandwidth；不得从现有共源 DC 结果直接外推。
+显式实例参数面现在可称为：**writable-field execution and double OA readback verified; arbitrary-field persistence remains PDK-conditional**。用户随后明确把源极退化定义为“对刚才 schematic 的微调”，因此实现改为在已有专用 common-source cellview 上应用固定、可审计的原位 delta，不再把新建 cellview 或第二套模板作为前提。该变更后续已真实通过结构保留、OA/si 一致性、DC 工作区和只读 AC gain/bandwidth；AC design tuning 仍不能从这些单点结果直接外推。

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from .adapters.base import AdapterInterrupted, AdapterResult, DesignAdapter
+from .catalog import task_requests_oa_parameter_write
 from .metrics import evaluate_constraints
 from .models import (
     ActionRecord,
@@ -36,6 +37,8 @@ _OA_SEMANTIC_PARAMETERS = {
         "load_resistance_ohm",
     ),
 }
+
+_COMMON_SOURCE_OPTIONAL_OA_PARAMETERS = ("source_resistance_ohm",)
 
 
 class TaskExecutor:
@@ -105,6 +108,15 @@ class TaskExecutor:
             metrics.get(task.objective.metric) if task.objective is not None else None
         )
         objective_missing = task.objective is not None and objective_value is None
+        analysis_complete = bool(simulation.data.get("analysis_complete", True))
+        analysis_issues = [
+            str(value) for value in simulation.data.get("analysis_issues", [])
+        ]
+        analysis_warnings = [
+            str(value) for value in simulation.data.get("analysis_warnings", [])
+        ]
+        if not analysis_complete and not analysis_issues:
+            analysis_issues = ["analysis did not produce its required core metrics"]
         raw_sources = simulation.data.get("metric_sources", {})
         metric_sources = {
             name: EvidenceSource(raw_sources.get(name, simulation.evidence_source))
@@ -119,12 +131,20 @@ class TaskExecutor:
             parameters=evaluated_parameters,
             metrics=metrics,
             constraints=constraints,
-            feasible=all(item.passed for item in constraints) and not objective_missing,
+            feasible=(
+                all(item.passed for item in constraints)
+                and not objective_missing
+                and analysis_complete
+            ),
             total_violation=sum(item.normalized_violation for item in constraints)
-            + (1_000_000.0 if objective_missing else 0.0),
+            + (1_000_000.0 if objective_missing else 0.0)
+            + (1_000_000.0 if not analysis_complete else 0.0),
             objective_value=objective_value,
             evidence_source=simulation.evidence_source,
             metric_sources=metric_sources,
+            analysis_complete=analysis_complete,
+            analysis_issues=analysis_issues,
+            analysis_warnings=analysis_warnings,
         )
 
     @staticmethod
@@ -148,7 +168,143 @@ class TaskExecutor:
             raise RuntimeError(
                 "schematic inspection did not return canonical semantic parameters"
             )
-        return {name: float(raw[name]) for name in required}
+        names = list(required)
+        if task.circuit is CircuitKind.COMMON_SOURCE:
+            names.extend(
+                name
+                for name in _COMMON_SOURCE_OPTIONAL_OA_PARAMETERS
+                if name in raw
+            )
+        return {name: float(raw[name]) for name in names}
+
+    @staticmethod
+    def _instances_by_name(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        raw = data.get("instances")
+        if not isinstance(raw, list):
+            raise RuntimeError("schematic inspection did not return structured instances")
+        instances: dict[str, dict[str, Any]] = {}
+        for item in raw:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                raise RuntimeError("schematic inspection returned an invalid instance")
+            name = str(item["name"])
+            if name in instances:
+                raise RuntimeError(f"schematic inspection repeated instance {name}")
+            instances[name] = item
+        return instances
+
+    @classmethod
+    def _assert_source_degeneration_delta(
+        cls,
+        before: AdapterResult,
+        after: AdapterResult,
+        source_resistance_ohm: float,
+    ) -> None:
+        before_data = before.data
+        after_data = after.data
+        before_instances = cls._instances_by_name(before_data)
+        after_instances = cls._instances_by_name(after_data)
+        base_names = {"MN0", "RD0"}
+        degenerated_names = base_names | {"RS0"}
+        before_names = set(before_instances)
+        if before_names != base_names and before_names != degenerated_names:
+            raise RuntimeError(
+                "source-degeneration transform requires the exact VDA common-source "
+                f"instance set; got {sorted(before_names)}"
+            )
+        if set(after_instances) != degenerated_names:
+            raise RuntimeError(
+                "source-degeneration transform did not produce exactly MN0/RD0/RS0"
+            )
+
+        before_mn_terms = before_instances["MN0"].get("terminals")
+        expected_before_mn_terms = {
+            "D": "OUT",
+            "G": "IN",
+            "S": "VSS" if before_names == base_names else "NSRC",
+            "B": "VSS",
+        }
+        if before_mn_terms != expected_before_mn_terms:
+            raise RuntimeError(
+                "source-degeneration transform found an unexpected MN0 topology"
+            )
+        if before_instances["RD0"].get("terminals") != {
+            "PLUS": "VDD",
+            "MINUS": "OUT",
+        }:
+            raise RuntimeError(
+                "source-degeneration transform found an unexpected RD0 topology"
+            )
+        if after_instances["MN0"].get("terminals") != {
+            "D": "OUT",
+            "G": "IN",
+            "S": "NSRC",
+            "B": "VSS",
+        } or after_instances["RD0"].get("terminals") != {
+            "PLUS": "VDD",
+            "MINUS": "OUT",
+        }:
+            raise RuntimeError(
+                "source-degeneration transform changed the common-source core topology"
+            )
+        if after_instances["RS0"].get("terminals") != {
+            "PLUS": "NSRC",
+            "MINUS": "VSS",
+        }:
+            raise RuntimeError("RS0 is not connected between NSRC and VSS")
+
+        for field in ("pins",):
+            if before_data.get(field) != after_data.get(field):
+                raise RuntimeError(
+                    f"source-degeneration transform unexpectedly changed {field}"
+                )
+        before_nets = set(before_data.get("nets", []))
+        after_nets = set(after_data.get("nets", []))
+        if after_nets != before_nets | {"NSRC"}:
+            raise RuntimeError(
+                "source-degeneration transform changed nets beyond adding NSRC"
+            )
+
+        before_parameters = before_data.get("instance_parameters")
+        after_parameters = after_data.get("instance_parameters")
+        if not isinstance(before_parameters, dict) or not isinstance(
+            after_parameters, dict
+        ):
+            raise RuntimeError(
+                "source-degeneration transform is missing full instance parameter readback"
+            )
+        for name in sorted(base_names):
+            if before_parameters.get(name) != after_parameters.get(name):
+                raise RuntimeError(
+                    f"source-degeneration transform unexpectedly changed {name} parameters"
+                )
+
+        immutable_fields = (
+            "library",
+            "cell",
+            "xy",
+            "orient",
+            "bBox",
+            "numInst",
+            "view",
+            "parameters",
+        )
+        for name in sorted(base_names):
+            for field in immutable_fields:
+                if before_instances[name].get(field) != after_instances[name].get(field):
+                    raise RuntimeError(
+                        "source-degeneration transform unexpectedly changed "
+                        f"{name}.{field}"
+                    )
+
+        semantic = after_data.get("semantic_parameters")
+        if not isinstance(semantic, dict) or "source_resistance_ohm" not in semantic:
+            raise RuntimeError("RS0 resistance is missing from semantic OA readback")
+        actual = float(semantic["source_resistance_ohm"])
+        tolerance = max(abs(float(source_resistance_ohm)) * 1e-6, 1e-9)
+        if abs(actual - float(source_resistance_ohm)) > tolerance:
+            raise RuntimeError(
+                "RS0 resistance does not match the requested source degeneration"
+            )
 
     @classmethod
     def _applied_semantic_parameters(
@@ -175,6 +331,25 @@ class TaskExecutor:
             abs(float(expected[name]) - float(actual[name]))
             <= max(abs(float(expected[name])) * 1e-6, 1e-9)
             for name in expected
+        )
+
+    @staticmethod
+    def _checkpoint_candidate_matches(
+        declared: dict[str, float],
+        actual: dict[str, float],
+        initial_oa: dict[str, float],
+    ) -> bool:
+        """Match declared task inputs plus only canonical OA-derived extras."""
+        if not declared.keys() <= actual.keys():
+            return False
+        if not actual.keys() <= declared.keys() | initial_oa.keys():
+            return False
+        expected = dict(initial_oa)
+        expected.update(declared)
+        return all(
+            abs(float(actual[name]) - float(expected[name]))
+            <= max(abs(float(expected[name])) * 1e-6, 1e-9)
+            for name in actual
         )
 
     @staticmethod
@@ -246,7 +421,11 @@ class TaskExecutor:
         if [candidate.index for candidate in checkpoint.candidates] != expected_indexes:
             raise ValueError("checkpoint candidates are not a completed search prefix")
         for candidate in checkpoint.candidates:
-            if candidate.parameters != declared[candidate.index - 1]:
+            if not cls._checkpoint_candidate_matches(
+                declared[candidate.index - 1],
+                candidate.parameters,
+                checkpoint.initial_parameters,
+            ):
                 raise ValueError(
                     f"checkpoint candidate {candidate.index} parameters do not match task"
                 )
@@ -367,7 +546,18 @@ class TaskExecutor:
                 f"{failures} candidate evaluation(s) failed during staging or simulation; "
                 "selection used completed evidence only"
             )
-            return RunStatus.PARTIAL
+            status = RunStatus.PARTIAL
+        incomplete = sum(
+            not candidate.analysis_complete
+            and candidate.evidence_source is not EvidenceSource.SYSTEM_EVENT
+            for candidate in candidates
+        )
+        if incomplete:
+            notes.append(
+                f"{incomplete} candidate analysis result(s) lacked required core metrics; "
+                "selection used analysis-complete evidence only"
+            )
+            status = RunStatus.PARTIAL
         return status
 
     def _note_budget_exhaustion(
@@ -396,6 +586,7 @@ class TaskExecutor:
     ) -> RunRecord:
         authorize_execution(task, plan, token)
         tuning = task.operation in {Operation.DESIGN_TUNE, Operation.DESIGN_CLOSE_LOOP}
+        candidate_oa_write = tuning and task_requests_oa_parameter_write(task)
         if resume_checkpoint is not None:
             if not tuning:
                 raise ValueError("only tuning operations can resume from a checkpoint")
@@ -482,7 +673,9 @@ class TaskExecutor:
             nonlocal next_candidate_index
             nonlocal pending_oa_parameters
             if event == "started":
-                pending_oa_parameters = semantic_candidate(parameters)
+                pending_oa_parameters = (
+                    semantic_candidate(parameters) if candidate_oa_write else None
+                )
             elif event == "staged":
                 if readback is None:
                     raise RuntimeError("candidate stage did not return OA readback")
@@ -526,6 +719,25 @@ class TaskExecutor:
                 self._action(
                     "schematic.inspect", lambda: self.adapter.inspect_schematic(task)
                 )
+            elif operation is Operation.SCHEMATIC_TRANSFORM:
+                before = self._action(
+                    "schematic.inspect.before",
+                    lambda: self.adapter.inspect_schematic(task),
+                )
+                self._action(
+                    "schematic.transform.source-degeneration",
+                    lambda: self.adapter.transform_schematic(task),
+                )
+                after = self._action(
+                    "schematic.inspect.after",
+                    lambda: self.adapter.inspect_schematic(task),
+                )
+                self._assert_source_degeneration_delta(
+                    before,
+                    after,
+                    float(task.parameters["source_resistance_ohm"]),
+                )
+                selected_parameters = dict(task.parameters)
             elif operation is Operation.PARAMETERS_APPLY:
                 self._action(
                     "schematic.inspect.before",
@@ -590,7 +802,15 @@ class TaskExecutor:
                         notes.append("simulation produced no completed EDA result")
                     elif not selected.feasible:
                         status = RunStatus.PARTIAL
-                        notes.append("simulation completed but one or more constraints failed")
+                        if selected.analysis_issues:
+                            notes.append(
+                                "simulation completed but required analysis metrics were "
+                                "incomplete: " + "; ".join(selected.analysis_issues)
+                            )
+                        else:
+                            notes.append(
+                                "simulation completed but one or more constraints failed"
+                            )
             else:
                 if operation is Operation.DESIGN_CLOSE_LOOP and task.create_if_missing:
                     self._action(
@@ -623,7 +843,7 @@ class TaskExecutor:
                 try:
                     candidates = self._run_candidates(
                         task,
-                        stage_parameters=True,
+                        stage_parameters=candidate_oa_write,
                         evaluations=candidates,
                         start_index=next_candidate_index,
                         progress=candidate_progress,
@@ -641,19 +861,35 @@ class TaskExecutor:
                             )
                             selected_parameters = best_attempt.parameters
                             selected_metrics = best_attempt.metrics
-                        apply_with_checkpoint("parameters.restore", initial_parameters)
-                        notes.append(
-                            "no feasible candidate was committed; initial OA parameters "
-                            "were restored"
-                        )
+                        if candidate_oa_write:
+                            apply_with_checkpoint(
+                                "parameters.restore", initial_parameters
+                            )
+                            notes.append(
+                                "no feasible candidate was committed; initial OA "
+                                "parameters were restored"
+                            )
+                        else:
+                            expected_oa_parameters = current_parameters
+                            notes.append(
+                                "no feasible testbench condition was selected; OA "
+                                "parameters remained unchanged"
+                            )
                         parameters_finalized = True
                     else:
                         selected = min(feasible, key=lambda item: self._rank(task, item))
                         selected_parameters = selected.parameters
                         selected_metrics = selected.metrics
-                        apply_with_checkpoint(
-                            "parameters.apply.best", selected.parameters
-                        )
+                        if candidate_oa_write:
+                            apply_with_checkpoint(
+                                "parameters.apply.best", selected.parameters
+                            )
+                        else:
+                            expected_oa_parameters = current_parameters
+                            notes.append(
+                                "selected the best testbench condition without changing "
+                                "OA parameters"
+                            )
                         parameters_finalized = True
                     after = self._action(
                         "schematic.inspect.after",
@@ -670,7 +906,7 @@ class TaskExecutor:
                     persist_checkpoint(complete=True)
                 except BaseException:
                     persist_checkpoint()
-                    if not parameters_finalized:
+                    if not parameters_finalized and candidate_oa_write:
                         try:
                             apply_with_checkpoint(
                                 "parameters.restore.interrupted", initial_parameters

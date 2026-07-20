@@ -32,6 +32,7 @@ _WORKER_ACTIONS = {
     CircuitKind.COMMON_SOURCE: {
         "create": "create_common_source",
         "inspect": "inspect_common_source",
+        "transform": "transform_common_source_source_degeneration",
         "apply": "apply_common_source_parameters",
         "simulate": "simulate_common_source",
     },
@@ -92,10 +93,14 @@ class SubprocessBridgeAdapter:
 
     @staticmethod
     def _task_payload(task: TaskSpec) -> dict[str, Any]:
-        return {
+        payload = {
             "task_id": task.id,
             "operation": task.operation.value,
             "circuit": task.circuit.value,
+            "analysis": task.resolved_analysis().value,
+            "analysis_source": (
+                "user_input" if task.analysis is not None else "software_inference"
+            ),
             "target": task.target.model_dump(mode="json"),
             "profile": load_pdk_profile(task.pdk_profile).model_dump(mode="json"),
             "parameters": task.parameters,
@@ -106,6 +111,22 @@ class SubprocessBridgeAdapter:
             "replace_existing": task.safety.replace_existing,
             "timeout_seconds": task.limits.timeout_seconds,
         }
+        if task.ac_sweep is not None:
+            payload["ac_sweep"] = task.ac_sweep.model_dump(mode="json")
+            payload["ac_sweep_user_fields"] = sorted(
+                task.ac_sweep.model_fields_set
+            )
+        if task.linearity_sweep is not None:
+            payload["linearity_sweep"] = task.linearity_sweep.model_dump(mode="json")
+            payload["linearity_sweep_user_fields"] = sorted(
+                task.linearity_sweep.model_fields_set
+            )
+        if task.noise_sweep is not None:
+            payload["noise_sweep"] = task.noise_sweep.model_dump(mode="json")
+            payload["noise_sweep_user_fields"] = sorted(
+                task.noise_sweep.model_fields_set
+            )
+        return payload
 
     def probe(self, pdk_profile: str) -> AdapterResult:
         profile = load_pdk_profile(pdk_profile)
@@ -127,6 +148,14 @@ class SubprocessBridgeAdapter:
             _WORKER_ACTIONS[task.circuit]["inspect"],
             self._task_payload(task),
             timeout=min(task.limits.timeout_seconds, 120),
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
+
+    def transform_schematic(self, task: TaskSpec) -> AdapterResult:
+        data = self._request(
+            _WORKER_ACTIONS[task.circuit]["transform"],
+            self._task_payload(task),
+            timeout=min(task.limits.timeout_seconds, 180),
         )
         return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
 

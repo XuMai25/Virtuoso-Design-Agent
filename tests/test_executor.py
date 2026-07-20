@@ -444,6 +444,36 @@ def test_resume_rejects_changed_task_plan_before_adapter_actions(tmp_path) -> No
     assert executor.actions == []
 
 
+def test_checkpoint_candidate_allows_only_matching_oa_derived_extras() -> None:
+    declared = {
+        "vdd_v": 0.9,
+        "bias_v": 0.35,
+        "source_resistance_ohm": 500.0,
+    }
+    initial_oa = {
+        "device_width_um": 1.0,
+        "length_um": 0.03,
+        "load_resistance_ohm": 22_000.0,
+        "source_resistance_ohm": 1_000.0,
+    }
+    actual = {
+        **declared,
+        "device_width_um": 1.0,
+        "length_um": 0.03,
+        "load_resistance_ohm": 22_000.0,
+    }
+
+    assert TaskExecutor._checkpoint_candidate_matches(
+        declared, actual, initial_oa
+    )
+    assert not TaskExecutor._checkpoint_candidate_matches(
+        declared, actual | {"untrusted_extra": 1.0}, initial_oa
+    )
+    assert not TaskExecutor._checkpoint_candidate_matches(
+        declared, actual | {"device_width_um": 1.1}, initial_oa
+    )
+
+
 def test_resume_refuses_unrecognized_current_oa_parameters(tmp_path) -> None:
     task, plan, adapter, checkpoint_path, _ = _incomplete_checkpoint(tmp_path)
     checkpoint = load_execution_checkpoint(checkpoint_path)
@@ -602,6 +632,406 @@ def test_common_source_demo_closes_dc_operating_point_with_oa_readback() -> None
     )
 
 
+def _common_source_ac_run(*, stop_hz: float = 1e11) -> TaskSpec:
+    return TaskSpec.model_validate(
+        {
+            "id": f"cs-ac-{int(stop_hz)}",
+            "operation": "simulation.run",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs_ac"},
+            "analysis": "ac",
+            "ac_sweep": {
+                "start_hz": 1e4,
+                "stop_hz": stop_hz,
+                "points_per_decade": 20,
+            },
+            "parameters": {
+                "device_width_um": 1.0,
+                "length_um": 0.03,
+                "load_resistance_ohm": 20_000.0,
+                "bias_v": 0.35,
+                "vdd_v": 0.9,
+                "load_ff": 2.0,
+            },
+            "constraints": [
+                {
+                    "metric": "low_frequency_gain_v_per_v",
+                    "relation": ">=",
+                    "value": 2.0,
+                },
+                {
+                    "metric": "bandwidth_3db_hz",
+                    "relation": ">=",
+                    "value": 1e9,
+                },
+                {
+                    "metric": "gain_bandwidth_product_hz",
+                    "relation": ">=",
+                    "value": 5e9,
+                },
+            ],
+            "safety": {"allow_remote_compute": True},
+        }
+    )
+
+
+def test_common_source_ac_is_a_formal_simulation_run_capability() -> None:
+    task = _common_source_ac_run()
+    adapter = DeterministicDemoAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert len(record.candidates) == 1
+    candidate = record.candidates[0]
+    assert candidate.analysis_complete is True
+    assert candidate.analysis_issues == []
+    assert candidate.metrics["low_frequency_gain_v_per_v"] >= 2.0
+    assert candidate.metrics["bandwidth_3db_hz"] >= 1e9
+    assert candidate.metrics["gain_bandwidth_product_hz"] >= 5e9
+    assert candidate.metrics["unity_gain_frequency_hz"] > 0
+    assert all(
+        source.value == "software_inference"
+        for source in candidate.metric_sources.values()
+    )
+
+
+def test_common_source_linearity_is_a_formal_simulation_run_capability() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "cs-linearity-run",
+            "operation": "simulation.run",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs_linearity"},
+            "analysis": "transient",
+            "linearity_sweep": {
+                "frequency_hz": 100e6,
+                "amplitudes_v": [0.005, 0.05, 0.15],
+            },
+            "parameters": {
+                "device_width_um": 1.0,
+                "length_um": 0.03,
+                "load_resistance_ohm": 20_000.0,
+                "bias_v": 0.35,
+                "vdd_v": 0.9,
+                "load_ff": 1.0,
+            },
+            "constraints": [
+                {
+                    "metric": "max_thd_percent",
+                    "relation": "<=",
+                    "value": 10.0,
+                },
+                {
+                    "metric": "max_average_supply_power_uw",
+                    "relation": "<=",
+                    "value": 100.0,
+                },
+            ],
+            "safety": {"allow_remote_compute": True},
+        }
+    )
+    adapter = DeterministicDemoAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    candidate = record.candidates[0]
+    assert candidate.analysis_complete is True
+    assert candidate.metrics["small_signal_gain_v_per_v"] > 0
+    assert candidate.metrics["input_1db_compression_v_peak"] > 0
+    assert candidate.metrics["max_thd_percent"] <= 10.0
+    assert candidate.metrics["dc_supply_power_uw"] > 0
+    assert candidate.metrics["max_average_supply_power_uw"] > 0
+    assert all(
+        source.value == "software_inference"
+        for source in candidate.metric_sources.values()
+    )
+
+
+def test_common_source_noise_is_a_formal_simulation_run_capability() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "cs-noise-run",
+            "operation": "simulation.run",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs_noise"},
+            "analysis": "noise",
+            "noise_sweep": {
+                "start_hz": 1e3,
+                "stop_hz": 1e9,
+                "points_per_decade": 20,
+            },
+            "parameters": {
+                "device_width_um": 1.0,
+                "length_um": 0.03,
+                "load_resistance_ohm": 20_000.0,
+                "bias_v": 0.35,
+                "vdd_v": 0.9,
+                "load_ff": 1.0,
+            },
+            "constraints": [
+                {
+                    "metric": "integrated_input_referred_noise_uv_rms",
+                    "relation": "<=",
+                    "value": 1e6,
+                }
+            ],
+            "safety": {"allow_remote_compute": True},
+        }
+    )
+    adapter = DeterministicDemoAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    candidate = record.candidates[0]
+    assert candidate.analysis_complete is True
+    assert candidate.metrics["integrated_output_noise_uv_rms"] > 0
+    assert candidate.metrics["integrated_input_referred_noise_uv_rms"] > 0
+    assert candidate.metrics["dc_supply_power_uw"] > 0
+    assert all(
+        source.value == "software_inference"
+        for source in candidate.metric_sources.values()
+    )
+
+
+def test_common_source_ac_short_sweep_is_partial_not_a_fake_bandwidth() -> None:
+    task = _common_source_ac_run(stop_hz=1e8).model_copy(
+        update={"constraints": []}
+    )
+    adapter = DeterministicDemoAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.PARTIAL
+    candidate = record.candidates[0]
+    assert candidate.analysis_complete is False
+    assert "bandwidth_3db_hz" not in candidate.metrics
+    assert any("sweep_stop" in issue for issue in candidate.analysis_issues)
+    assert any("required analysis metrics" in note for note in record.notes)
+
+
+def test_common_source_ac_metrics_participate_in_bounded_design_tuning() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "cs-ac-tune",
+            "operation": "design.tune",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs_ac_tune"},
+            "analysis": "ac",
+            "ac_sweep": {
+                "start_hz": 1e4,
+                "stop_hz": 1e11,
+                "points_per_decade": 20,
+            },
+            "parameters": {
+                "length_um": 0.03,
+                "load_resistance_ohm": 20_000.0,
+                "bias_v": 0.35,
+                "vdd_v": 0.9,
+                "load_ff": 2.0,
+            },
+            "parameter_space": {"device_width_um": [0.5, 1.0, 1.5]},
+            "constraints": [
+                {
+                    "metric": "saturation_margin_v",
+                    "relation": ">=",
+                    "value": 0.05,
+                },
+                {
+                    "metric": "low_frequency_gain_v_per_v",
+                    "relation": ">=",
+                    "value": 1.5,
+                },
+                {
+                    "metric": "bandwidth_3db_hz",
+                    "relation": ">=",
+                    "value": 2e9,
+                },
+            ],
+            "objective": {
+                "metric": "gain_bandwidth_product_hz",
+                "goal": "maximize",
+            },
+            "safety": {
+                "allow_remote_compute": True,
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+            "limits": {"max_iterations": 3, "timeout_seconds": 600},
+        }
+    )
+    adapter = DeterministicDemoAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert len(record.candidates) == 3
+    assert all(candidate.analysis_complete for candidate in record.candidates)
+    assert record.selected_parameters is not None
+    assert record.selected_parameters["device_width_um"] == pytest.approx(1.5)
+    assert adapter.inspect_schematic(task).data["semantic_parameters"][
+        "device_width_um"
+    ] == pytest.approx(1.5)
+
+
+def test_common_source_ac_can_tune_testbench_conditions_without_oa_write() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "cs-ac-testbench-tune",
+            "operation": "design.tune",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs_ac_conditions"},
+            "analysis": "ac",
+            "ac_sweep": {
+                "start_hz": 1e4,
+                "stop_hz": 1e11,
+                "points_per_decade": 20,
+            },
+            "parameters": {"vdd_v": 0.9},
+            "parameter_space": {
+                "bias_v": [0.3, 0.35],
+                "load_ff": [1.0, 4.0],
+            },
+            "constraints": [
+                {
+                    "metric": "saturation_margin_v",
+                    "relation": ">=",
+                    "value": 0.05,
+                },
+                {
+                    "metric": "low_frequency_gain_v_per_v",
+                    "relation": ">=",
+                    "value": 2.0,
+                },
+                {
+                    "metric": "bandwidth_3db_hz",
+                    "relation": ">=",
+                    "value": 1e9,
+                },
+            ],
+            "objective": {
+                "metric": "gain_bandwidth_product_hz",
+                "goal": "maximize",
+            },
+            "safety": {"allow_remote_compute": True},
+            "limits": {"max_iterations": 4, "timeout_seconds": 600},
+        }
+    )
+    adapter = DeterministicDemoAdapter()
+    adapter.create_schematic(task)
+    before = adapter.inspect_schematic(task).data["semantic_parameters"]
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+    after = adapter.inspect_schematic(task).data["semantic_parameters"]
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert plan.requires_remote_write is False
+    assert len(record.candidates) == 4
+    assert record.selected_parameters is not None
+    assert record.selected_parameters["load_ff"] == pytest.approx(1.0)
+    assert before == after
+    assert not any(
+        action.action.startswith("parameters.stage") for action in record.actions
+    )
+    assert not any(
+        action.action == "parameters.apply.best" for action in record.actions
+    )
+    assert any("without changing OA" in note for note in record.notes)
+
+
+def test_ac_tuning_marks_mixed_complete_and_incomplete_candidates_partial() -> None:
+    class IncompleteFirstCandidateAdapter(DeterministicDemoAdapter):
+        def simulate(self, task, parameters):
+            result = super().simulate(task, parameters)
+            if float(parameters["device_width_um"]) != 0.5:
+                return result
+            data = dict(result.data)
+            data["analysis_complete"] = False
+            data["analysis_issues"] = [
+                "bandwidth_3db_hz unresolved: injected_short_sweep"
+            ]
+            metrics = dict(data["metrics"])
+            metrics.pop("bandwidth_3db_hz", None)
+            metrics.pop("gain_bandwidth_product_hz", None)
+            data["metrics"] = metrics
+            return AdapterResult(data=data, evidence_source=result.evidence_source)
+
+    task = TaskSpec.model_validate(
+        {
+            "id": "cs-ac-mixed-completeness",
+            "operation": "design.close_loop",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs_ac_mixed"},
+            "analysis": "ac",
+            "ac_sweep": {"start_hz": 1e4, "stop_hz": 1e11},
+            "parameters": {
+                "length_um": 0.03,
+                "load_resistance_ohm": 20_000.0,
+                "bias_v": 0.35,
+                "vdd_v": 0.9,
+                "load_ff": 2.0,
+            },
+            "parameter_space": {"device_width_um": [0.5, 1.0]},
+            "constraints": [
+                {
+                    "metric": "low_frequency_gain_v_per_v",
+                    "relation": ">=",
+                    "value": 1.5,
+                }
+            ],
+            "objective": {
+                "metric": "gain_bandwidth_product_hz",
+                "goal": "maximize",
+            },
+            "create_if_missing": True,
+            "safety": {
+                "allow_remote_compute": True,
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+            "limits": {"max_iterations": 2, "timeout_seconds": 600},
+        }
+    )
+    adapter = IncompleteFirstCandidateAdapter()
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.PARTIAL
+    assert record.candidates[0].analysis_complete is False
+    assert record.candidates[1].analysis_complete is True
+    assert record.selected_parameters is not None
+    assert record.selected_parameters["device_width_um"] == pytest.approx(1.0)
+    assert any("lacked required core metrics" in note for note in record.notes)
+
+
 def test_common_source_infeasible_search_restores_oa_parameters() -> None:
     task = _common_source_loop().model_copy(
         update={
@@ -704,3 +1134,162 @@ def test_common_source_checkpoint_resumes_completed_prefix(tmp_path) -> None:
     assert adapter.widths.count(0.5) == 1
     assert adapter.widths.count(1.0) == 2
     assert load_execution_checkpoint(checkpoint_path).complete is True
+
+
+def _source_degeneration_transform(resistance_ohm: float = 1_000.0) -> TaskSpec:
+    return TaskSpec.model_validate(
+        {
+            "id": f"source-degeneration-{resistance_ohm:g}",
+            "operation": "schematic.transform",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "parameters": {"source_resistance_ohm": resistance_ohm},
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+
+
+def test_source_degeneration_is_an_in_place_audited_delta() -> None:
+    task = _source_degeneration_transform()
+    adapter = DeterministicDemoAdapter()
+    adapter.create_schematic(task)
+    adapter.apply_parameters(_explicit_parameter_apply(), {})
+    before = adapter.inspect_schematic(task).data
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+    after = adapter.inspect_schematic(task).data
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert record.selected_parameters == {"source_resistance_ohm": 1_000.0}
+    assert before["pins"] == after["pins"]
+    assert set(after["nets"]) == set(before["nets"]) | {"NSRC"}
+    assert set(after["instance_parameters"]) == {"MN0", "RD0", "RS0"}
+    assert after["instance_parameters"]["MN0"] == before["instance_parameters"]["MN0"]
+    assert after["instance_parameters"]["RD0"] == before["instance_parameters"]["RD0"]
+    assert after["instance_parameters"]["MN0"]["fingers"] == "2"
+    assert after["instance_parameters"]["RD0"]["r"] == "22k"
+    assert after["instance_parameters"]["RS0"]["r"] == "1000"
+    assert after["topology_variant"] == "source_degenerated_common_source"
+    assert next(
+        item for item in after["instances"] if item["name"] == "MN0"
+    )["terminals"]["S"] == "NSRC"
+
+
+def test_source_degeneration_transform_is_idempotent_and_can_retarget_only_rs0() -> None:
+    adapter = DeterministicDemoAdapter()
+    first = _source_degeneration_transform()
+    adapter.create_schematic(first)
+    first_plan = build_plan(first)
+    TaskExecutor(adapter).execute(
+        first, first_plan, token=first_plan.confirmation_token
+    )
+    baseline = adapter.inspect_schematic(first).data
+
+    repeated = _source_degeneration_transform()
+    repeated_plan = build_plan(repeated)
+    repeated_record = TaskExecutor(adapter).execute(
+        repeated, repeated_plan, token=repeated_plan.confirmation_token
+    )
+    assert repeated_record.status is RunStatus.SUCCEEDED
+    repeated_action = next(
+        action
+        for action in repeated_record.actions
+        if action.action == "schematic.transform.source-degeneration"
+    )
+    assert repeated_action.details["already_transformed"] is True
+    assert repeated_action.details["resistance_changed"] is False
+
+    retarget = _source_degeneration_transform(2_000.0)
+    retarget_plan = build_plan(retarget)
+    retarget_record = TaskExecutor(adapter).execute(
+        retarget, retarget_plan, token=retarget_plan.confirmation_token
+    )
+    after = adapter.inspect_schematic(retarget).data
+    assert retarget_record.status is RunStatus.SUCCEEDED
+    assert after["instance_parameters"]["MN0"] == baseline["instance_parameters"]["MN0"]
+    assert after["instance_parameters"]["RD0"] == baseline["instance_parameters"]["RD0"]
+    assert after["instance_parameters"]["RS0"]["r"] == "2000"
+
+
+def test_executor_rejects_transform_that_changes_an_existing_instance() -> None:
+    class CorruptingTransformAdapter(DeterministicDemoAdapter):
+        def transform_schematic(self, task):
+            result = super().transform_schematic(task)
+            self._schematics[self._key(task)]["instance_parameters"]["MN0"][
+                "fingers"
+            ] = "9"
+            return result
+
+    task = _source_degeneration_transform()
+    adapter = CorruptingTransformAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.FAILED
+    assert any("unexpectedly changed MN0 parameters" in note for note in record.notes)
+
+
+def test_source_resistance_uses_the_existing_dc_tuning_path() -> None:
+    adapter = DeterministicDemoAdapter()
+    transform = _source_degeneration_transform()
+    adapter.create_schematic(transform)
+    adapter.apply_parameters(_explicit_parameter_apply(), {})
+    transform_plan = build_plan(transform)
+    TaskExecutor(adapter).execute(
+        transform, transform_plan, token=transform_plan.confirmation_token
+    )
+    tune = TaskSpec.model_validate(
+        {
+            "id": "tune-source-resistance",
+            "operation": "design.tune",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "parameters": {"bias_v": 0.45, "vdd_v": 0.9},
+            "parameter_space": {"source_resistance_ohm": [500.0, 1_000.0]},
+            "constraints": [
+                {
+                    "metric": "saturation_margin_v",
+                    "relation": ">=",
+                    "value": 0.05,
+                },
+                {
+                    "metric": "source_current_mismatch_percent",
+                    "relation": "<=",
+                    "value": 1.0,
+                },
+            ],
+            "objective": {"metric": "drain_current_ua", "goal": "maximize"},
+            "safety": {
+                "allow_remote_compute": True,
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+            "limits": {"max_iterations": 2, "timeout_seconds": 600},
+        }
+    )
+    tune_plan = build_plan(tune)
+    record = TaskExecutor(adapter).execute(
+        tune, tune_plan, token=tune_plan.confirmation_token
+    )
+    readback = adapter.inspect_schematic(tune).data
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert len(record.candidates) == 2
+    assert record.selected_parameters is not None
+    assert record.selected_parameters["source_resistance_ohm"] == pytest.approx(500.0)
+    assert readback["semantic_parameters"]["source_resistance_ohm"] == pytest.approx(
+        500.0
+    )
+    assert readback["instance_parameters"]["MN0"]["fingers"] == "2"
+    assert all(
+        "source_voltage_v" in candidate.metrics for candidate in record.candidates
+    )

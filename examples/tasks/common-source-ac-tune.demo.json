@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "id": "common-source-ac-tune-demo",
+  "operation": "design.close_loop",
+  "circuit": "common_source",
+  "target": {
+    "library": "vda_demo",
+    "cell": "vda_cs_ac_tune",
+    "view": "schematic"
+  },
+  "analysis": "ac",
+  "ac_sweep": {
+    "start_hz": 10000.0,
+    "stop_hz": 100000000000.0,
+    "points_per_decade": 20
+  },
+  "parameters": {
+    "length_um": 0.03,
+    "load_resistance_ohm": 20000.0,
+    "bias_v": 0.35,
+    "vdd_v": 0.9,
+    "load_ff": 2.0
+  },
+  "parameter_space": {
+    "device_width_um": [0.5, 1.0, 1.5]
+  },
+  "constraints": [
+    {"metric": "saturation_margin_v", "relation": ">=", "value": 0.05},
+    {"metric": "low_frequency_gain_v_per_v", "relation": ">=", "value": 1.5},
+    {"metric": "bandwidth_3db_hz", "relation": ">=", "value": 2000000000.0}
+  ],
+  "objective": {
+    "metric": "gain_bandwidth_product_hz",
+    "goal": "maximize"
+  },
+  "create_if_missing": true,
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": true,
+    "allowed_library": "vda_demo",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 3, "timeout_seconds": 600}
+}

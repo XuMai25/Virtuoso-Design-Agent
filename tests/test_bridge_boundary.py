@@ -1,21 +1,36 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 from types import SimpleNamespace
 
 import pytest
 
 from virtuoso_design_agent.adapters.bridge_worker import (
     _apply_explicit_instance_parameters,
+    _assert_common_source,
+    _assert_common_source_transform_preserved,
     _assert_parameter_consistency,
+    _common_source_ac_metrics_from_result,
+    _common_source_dc_data_from_result,
+    _common_source_linearity_metrics_from_result,
+    _common_source_noise_metrics_from_result,
+    _common_source_instance_parameter_updates,
+    _common_source_device_geometry_from_schematic,
     _common_source_metrics_from_result,
     _common_source_testbench_deck,
+    _complex_signal,
     _complete_si_env,
+    _discard_failed_existing_schematic_edit,
+    _edit_existing_schematic,
     _generate_oa_netlist,
     _inverter_testbench_deck,
     _instance_parameters_from_schematic,
     _parse_common_source_netlist,
     _parse_inverter_netlist,
+    _preflight_mn0_source_label,
+    _rename_mn0_source_label_operation,
     ParameterReadbackMismatch,
     _read_nonempty_text,
     _requested_instance_parameters,
@@ -23,6 +38,8 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     _signal,
     _validate_si_log,
     _verify_instance_parameter_values,
+    simulate_common_source,
+    simulate_inverter,
 )
 from virtuoso_design_agent.adapters.subprocess_bridge import (
     BridgeWorkerError,
@@ -82,6 +99,277 @@ def test_common_source_deck_uses_oa_topology_and_requests_dc_op() -> None:
     assert "RD0 (" not in deck
 
 
+def test_common_source_ac_deck_reuses_oa_topology_and_adds_only_testbench() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump()
+    deck = _common_source_testbench_deck(
+        profile,
+        {
+            "device_width_um": 1.0,
+            "length_um": 0.03,
+            "load_resistance_ohm": 20_000.0,
+            "bias_v": 0.45,
+            "vdd_v": 0.9,
+            "load_ff": 2.0,
+        },
+        "/data/xum/virtuoso_bridge_smoke/vda_cs_ac/netlist",
+        analysis="ac",
+        ac_sweep={
+            "start_hz": 1e3,
+            "stop_hz": 1e11,
+            "points_per_decade": 20,
+        },
+    )
+
+    assert "VIN_SRC (IN 0) vsource dc=vbias mag=1 type=dc" in deck
+    assert "CL0 (OUT 0) capacitor c=2f" in deck
+    assert "dcOp dc" in deck
+    assert "ac ac start=1000 stop=100000000000 dec=20" in deck
+    assert "save IN OUT VDD VSS" in deck
+    assert "MN0 (" not in deck
+    assert "RD0 (" not in deck
+
+
+def test_common_source_linearity_deck_uses_one_nested_transient_sweep() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump()
+    deck = _common_source_testbench_deck(
+        profile,
+        {
+            "device_width_um": 1.0,
+            "length_um": 0.03,
+            "load_resistance_ohm": 20_000.0,
+            "bias_v": 0.35,
+            "vdd_v": 0.9,
+            "load_ff": 1.0,
+        },
+        "/data/xum/virtuoso_bridge_smoke/vda_cs_linearity/netlist",
+        analysis="transient",
+        linearity_sweep={
+            "frequency_hz": 100e6,
+            "amplitudes_v": [0.005, 0.02, 0.05],
+            "settling_cycles": 4,
+            "measurement_cycles": 8,
+            "points_per_cycle": 128,
+        },
+    )
+
+    assert "type=sine sinedc=vbias ampl=vinamp freq=flinearity" in deck
+    assert "sw1 sweep param=vinamp values=[0.005 0.02 0.05]" in deck
+    assert "tran tran stop=1.20078125e-07" in deck
+    assert "strobeoutput=all" in deck
+    assert "CL0 (OUT 0) capacitor c=1f" in deck
+    assert "MN0 (" not in deck
+    assert "RD0 (" not in deck
+
+
+def test_common_source_noise_deck_uses_vin_source_as_input_probe() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump()
+    deck = _common_source_testbench_deck(
+        profile,
+        {
+            "device_width_um": 1.0,
+            "length_um": 0.03,
+            "load_resistance_ohm": 20_000.0,
+            "bias_v": 0.35,
+            "vdd_v": 0.9,
+            "load_ff": 1.0,
+        },
+        "/data/xum/virtuoso_bridge_smoke/vda_cs_noise/netlist",
+        analysis="noise",
+        noise_sweep={
+            "start_hz": 1e3,
+            "stop_hz": 1e10,
+            "points_per_decade": 20,
+        },
+    )
+
+    assert "VIN_SRC (IN 0) vsource dc=vbias mag=1 type=dc" in deck
+    assert "noise (OUT 0) noise start=1000 stop=10000000000 dec=20" in deck
+    assert "iprobe=VIN_SRC" in deck
+    assert "CL0 (OUT 0) capacitor c=1f" in deck
+    assert "MN0 (" not in deck
+
+
+def test_common_source_ac_result_uses_complex_vout_over_vin() -> None:
+    frequency_hz = [10.0 ** (2.0 + index / 10.0) for index in range(61)]
+    vin = [0.5 + 0.5j for _ in frequency_hz]
+    transfer = [-10.0 / (1.0 + 1j * frequency / 1e6) for frequency in frequency_hz]
+    vout = [input_value * gain for input_value, gain in zip(vin, transfer)]
+
+    metrics, diagnostics = _common_source_ac_metrics_from_result(
+        {"ac_freq": frequency_hz, "ac_IN": vin, "ac_OUT": vout},
+        {"reference_points": 5, "max_reference_variation_db": 0.5},
+    )
+
+    assert metrics["low_frequency_gain_v_per_v"] == pytest.approx(10.0, rel=1e-5)
+    assert metrics["bandwidth_3db_hz"] == pytest.approx(1e6, rel=0.01)
+    assert metrics["gain_bandwidth_product_hz"] == pytest.approx(1e7, rel=0.01)
+    assert diagnostics["analysis_complete"] is True
+    assert diagnostics["transfer"] == "VOUT/VIN complex ratio"
+
+    with pytest.raises(RuntimeError, match="complex signal ac_OUT is empty"):
+        _complex_signal({"ac_OUT": []}, "ac_OUT")
+
+
+def test_common_source_linearity_sweep_maps_declared_amplitudes_to_psf_points() -> None:
+    frequency_hz = 1e6
+    points_per_cycle = 64
+    amplitudes = [0.005, 0.02, 0.05]
+    gains = [4.0, 3.9, 3.4]
+    time_s = [
+        index / (frequency_hz * points_per_cycle)
+        for index in range(3 * points_per_cycle + 1)
+    ]
+    sweep_points = {}
+    for index, (amplitude, gain) in enumerate(zip(amplitudes, gains), start=1):
+        sweep_points[index] = {
+            "time": time_s,
+            "IN": [
+                0.35 + amplitude * math.sin(2.0 * math.pi * frequency_hz * time)
+                for time in time_s
+            ],
+            "OUT": [
+                0.5 - amplitude * gain * math.sin(2.0 * math.pi * frequency_hz * time)
+                for time in time_s
+            ],
+            "VDD_SRC:p": [-20e-6] * len(time_s),
+        }
+
+    metrics, diagnostics = _common_source_linearity_metrics_from_result(
+        {"sweep_points": sweep_points},
+        {
+            "frequency_hz": frequency_hz,
+            "amplitudes_v": amplitudes,
+            "settling_cycles": 1,
+            "measurement_cycles": 2,
+            "points_per_cycle": points_per_cycle,
+            "max_harmonic": 5,
+            "compression_db": 1.0,
+        },
+        vdd_v=0.9,
+    )
+
+    assert metrics["small_signal_gain_v_per_v"] == pytest.approx(4.0, rel=1e-3)
+    assert 0.02 < metrics["input_1db_compression_v_peak"] < 0.05
+    assert diagnostics["sweep_point_count"] == 3
+    assert diagnostics["point_details"][0]["signals"] == [
+        "time",
+        "IN",
+        "OUT",
+        "VDD_SRC:p",
+    ]
+
+
+def test_common_source_noise_reads_the_downloaded_bridge_psf(
+    tmp_path, monkeypatch
+) -> None:
+    import sys
+    from types import ModuleType
+
+    output_dir = tmp_path / "common_source_from_oa.raw"
+    output_dir.mkdir()
+    noise_file = output_dir / "noise.noise"
+    noise_file.write_text("test noise psf", encoding="utf-8")
+    parser_module = ModuleType("virtuoso_bridge.spectre.parsers")
+    parser_module.parse_spectre_psf_ascii = lambda path: SimpleNamespace(
+        data={
+            "freq": [1e3, 1.001e6],
+            "out": [10e-9, 10e-9],
+            "in": [2e-9, 2e-9],
+        }
+    )
+    monkeypatch.setitem(
+        sys.modules, "virtuoso_bridge.spectre.parsers", parser_module
+    )
+
+    metrics, diagnostics = _common_source_noise_metrics_from_result(
+        SimpleNamespace(metadata={"output_dir": str(output_dir)}),
+        {"start_hz": 1e3, "stop_hz": 1.001e6},
+    )
+
+    assert metrics["integrated_output_noise_uv_rms"] == pytest.approx(10.0)
+    assert metrics["integrated_input_referred_noise_uv_rms"] == pytest.approx(2.0)
+    assert diagnostics["signals"] == ["freq", "out", "in"]
+    assert diagnostics["psf_sha256"] == hashlib.sha256(
+        noise_file.read_bytes()
+    ).hexdigest()
+
+
+def test_common_source_dc_reads_root_psf_instead_of_sweep_point(
+    tmp_path, monkeypatch
+) -> None:
+    import sys
+    from types import ModuleType
+
+    output_dir = tmp_path / "common_source_from_oa.raw"
+    sweep_dir = output_dir / "sw1.sweep1" / "1"
+    sweep_dir.mkdir(parents=True)
+    root_dc = output_dir / "dcOp.dc"
+    root_op = output_dir / "dcOpInfo.info"
+    sweep_dc = sweep_dir / "dcOp.dc"
+    sweep_op = sweep_dir / "dcOpInfo.info"
+    root_dc.write_text("root-dc", encoding="utf-8")
+    root_op.write_text("root-op", encoding="utf-8")
+    sweep_dc.write_text("sweep-dc", encoding="utf-8")
+    sweep_op.write_text("sweep-op", encoding="utf-8")
+
+    source_v = 0.02481892891792441
+    node_vds = 0.37880220789412217
+    root_dc_data = {
+        "IN": 0.35,
+        "OUT": source_v + node_vds,
+        "VDD": 0.9,
+        "VSS": 0.0,
+        "NSRC": source_v,
+        "VDD_SRC:p": -24.81960477308248e-6,
+    }
+    root_op_data = {
+        "MN0:ids": 24.81960477308248e-6,
+        "MN0:vgs": 0.35 - source_v,
+        "MN0:vds": node_vds,
+        "MN0:vdsat": 0.09612096152765043,
+        "MN0:gm": 421.88045498791746e-6,
+        "MN0:gds": 39.635511355790435e-6,
+    }
+    parsed_paths = []
+    data_by_marker = {
+        "root-dc": root_dc_data,
+        "root-op": root_op_data,
+        "sweep-dc": root_dc_data | {"OUT": 0.4},
+        "sweep-op": root_op_data | {"MN0:vds": 0.379024248172},
+    }
+
+    def parse_psf(path):
+        parsed_paths.append(path)
+        return SimpleNamespace(
+            data=data_by_marker[path.read_text(encoding="utf-8")]
+        )
+
+    parser_module = ModuleType("virtuoso_bridge.spectre.parsers")
+    parser_module.parse_spectre_psf_ascii = parse_psf
+    monkeypatch.setitem(
+        sys.modules, "virtuoso_bridge.spectre.parsers", parser_module
+    )
+
+    dc_data, diagnostics = _common_source_dc_data_from_result(
+        SimpleNamespace(metadata={"output_dir": str(output_dir)})
+    )
+    metrics, evidence = _common_source_metrics_from_result(
+        dc_data,
+        {
+            "vdd_v": 0.9,
+            "bias_v": 0.35,
+            "load_resistance_ohm": 20_000.0,
+            "source_resistance_ohm": 1_000.0,
+        },
+    )
+
+    assert parsed_paths == [root_dc, root_op]
+    assert metrics["vds_v"] == pytest.approx(node_vds)
+    assert evidence["node_device_consistency"] == "matched"
+    assert diagnostics["dc"]["relative_path"] == "dcOp.dc"
+    assert diagnostics["operating_point"]["relative_path"] == "dcOpInfo.info"
+
+
 def test_si_env_completion_adds_verified_spectre_formatter_context_once() -> None:
     completed = _complete_si_env(
         'simLibName = "vb_pdk_smoke"\n'
@@ -135,6 +423,275 @@ RD0 (VDD OUT) resistor r=20k
         "load_resistance_ohm": pytest.approx(20_000.0),
     }
     assert parsed["instances"]["RD0"]["nodes"] == ["VDD", "OUT"]
+    assert parsed["device_geometry"] == {
+        "finger_width_um": pytest.approx(1.0),
+        "fingers": pytest.approx(1.0),
+        "multiplicity": pytest.approx(1.0),
+        "total_width_um": pytest.approx(1.0),
+    }
+    assert parsed["topology_variant"] == "common_source"
+
+
+def test_source_degenerated_oa_netlist_is_parsed_without_a_second_pipeline() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump()
+    parsed = _parse_common_source_netlist(
+        """
+MN0 (OUT IN NSRC VSS) nch_lvt_mac l=30n w=2u nf=2 multi=1
+RD0 (VDD OUT) resistor r=22k
+RS0 (NSRC VSS) resistor r=1k
+""",
+        profile,
+    )
+    assert parsed["topology_variant"] == "source_degenerated_common_source"
+    assert parsed["instances"]["MN0"]["nodes"] == ["OUT", "IN", "NSRC", "VSS"]
+    assert parsed["instances"]["RS0"]["nodes"] == ["NSRC", "VSS"]
+    assert parsed["semantic_parameters"] == {
+        "device_width_um": pytest.approx(1.0),
+        "length_um": pytest.approx(0.03),
+        "load_resistance_ohm": pytest.approx(22_000.0),
+        "source_resistance_ohm": pytest.approx(1_000.0),
+    }
+    assert parsed["device_geometry"] == {
+        "finger_width_um": pytest.approx(1.0),
+        "fingers": pytest.approx(2.0),
+        "multiplicity": pytest.approx(1.0),
+        "total_width_um": pytest.approx(2.0),
+    }
+
+
+def test_multifinger_oa_and_si_geometry_use_the_same_width_semantics() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump()
+    oa_geometry = _common_source_device_geometry_from_schematic(
+        _common_source_readback(degenerated=True)
+    )
+    parsed = _parse_common_source_netlist(
+        """
+MN0 (OUT IN NSRC VSS) nch_lvt_mac l=30n w=2u nf=2 multi=1
+RD0 (VDD OUT) resistor r=22k
+RS0 (NSRC VSS) resistor r=1k
+""",
+        profile,
+    )
+
+    assert oa_geometry == parsed["device_geometry"]
+    _assert_parameter_consistency(
+        oa_geometry,
+        parsed["device_geometry"],
+        expected_label="OA device geometry",
+        actual_label="si netlist geometry",
+    )
+
+
+def test_source_degenerated_dc_uses_nsrc_and_checks_both_resistors() -> None:
+    metrics, evidence = _common_source_metrics_from_result(
+        {
+            "dc_IN": 0.45,
+            "dc_OUT": 0.5,
+            "dc_VDD": 0.9,
+            "dc_VSS": 0.0,
+            "dc_NSRC": 0.02,
+            "dc_VDD_SRC:p": -20e-6,
+            "dcOpInfo_MN0:ids": 20e-6,
+            "dcOpInfo_MN0:vgs": 0.43,
+            "dcOpInfo_MN0:vds": 0.48,
+            "dcOpInfo_MN0:vdsat": 0.12,
+            "dcOpInfo_MN0:gm": 200e-6,
+            "dcOpInfo_MN0:gds": 10e-6,
+        },
+        {
+            "vdd_v": 0.9,
+            "bias_v": 0.45,
+            "load_resistance_ohm": 20_000.0,
+            "source_resistance_ohm": 1_000.0,
+        },
+    )
+    assert metrics["vgs_v"] == pytest.approx(0.43)
+    assert metrics["vds_v"] == pytest.approx(0.48)
+    assert metrics["source_voltage_v"] == pytest.approx(0.02)
+    assert metrics["source_resistor_current_ua"] == pytest.approx(20.0)
+    assert metrics["source_current_mismatch_percent"] == pytest.approx(0.0)
+    assert evidence["source_degeneration_consistency"] == "matched"
+
+    with pytest.raises(RuntimeError, match="missing scalar dc_NSRC"):
+        _common_source_metrics_from_result(
+            {
+                "dc_IN": 0.45,
+                "dc_OUT": 0.5,
+                "dc_VDD": 0.9,
+                "dc_VSS": 0.0,
+            },
+            {
+                "vdd_v": 0.9,
+                "bias_v": 0.45,
+                "load_resistance_ohm": 20_000.0,
+                "source_resistance_ohm": 1_000.0,
+            },
+        )
+
+
+def test_source_degenerated_deck_saves_internal_source_node() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump()
+    deck = _common_source_testbench_deck(
+        profile,
+        {
+            "device_width_um": 1.0,
+            "length_um": 0.03,
+            "load_resistance_ohm": 20_000.0,
+            "source_resistance_ohm": 1_000.0,
+            "bias_v": 0.45,
+            "vdd_v": 0.9,
+        },
+        "/data/xum/virtuoso_bridge_smoke/vda_cs_deg/netlist",
+    )
+    assert "save IN OUT VDD VSS NSRC" in deck
+
+
+def _common_source_readback(*, degenerated: bool) -> dict:
+    instances = [
+        {
+            "name": "MN0",
+            "lib": "tsmcN28",
+            "cell": "nch_lvt_mac",
+            "params": {"Wfg": "1u", "l": "30n", "fingers": "2", "m": "1"},
+            "terms": {
+                "D": "OUT",
+                "G": "IN",
+                "S": "NSRC" if degenerated else "VSS",
+                "B": "VSS",
+            },
+            "xy": [0.0, 0.0],
+            "orient": "R0",
+        },
+        {
+            "name": "RD0",
+            "lib": "analogLib",
+            "cell": "res",
+            "params": {"r": "22k"},
+            "terms": {"PLUS": "VDD", "MINUS": "OUT"},
+            "xy": [0.0, 1.3],
+            "orient": "R0",
+        },
+    ]
+    if degenerated:
+        instances.append(
+            {
+                "name": "RS0",
+                "lib": "analogLib",
+                "cell": "res",
+                "params": {"r": "1k"},
+                "terms": {"PLUS": "NSRC", "MINUS": "VSS"},
+                "xy": [0.0, -1.3],
+                "orient": "R0",
+            }
+        )
+    nets = {name: {} for name in ("IN", "OUT", "VDD", "VSS")}
+    if degenerated:
+        nets["NSRC"] = {}
+    return {
+        "instances": instances,
+        "nets": nets,
+        "pins": {name: {} for name in ("IN", "OUT", "VDD", "VSS")},
+    }
+
+
+def test_source_degeneration_delta_preserves_existing_oa_objects() -> None:
+    before = _common_source_readback(degenerated=False)
+    after = _common_source_readback(degenerated=True)
+    assert _assert_common_source(before) == "common_source"
+    assert _assert_common_source(after) == "source_degenerated_common_source"
+    _assert_common_source_transform_preserved(before, after, 1_000.0)
+
+    after["instances"][0]["params"]["fingers"] = "1"
+    with pytest.raises(RuntimeError, match="changed MN0 beyond its S net"):
+        _assert_common_source_transform_preserved(before, after, 1_000.0)
+
+
+def test_source_label_edit_is_strict_and_parameter_updates_are_partial() -> None:
+    operation = _rename_mn0_source_label_operation()
+    assert 'x~>theLabel == "VSS"' in operation
+    assert "dx * dx + dy * dy <= 0.02" in operation
+    assert "length(rbLabels) == 1" in operation
+    assert 'rbLabel~>theLabel = "NSRC"' in operation
+
+    updates = _common_source_instance_parameter_updates(
+        {"source_resistance_ohm": 1_000.0}
+    )
+    assert updates == {"RS0": {"r": "1000"}}
+    mos_updates = _common_source_instance_parameter_updates(
+        {"device_width_um": 0.5}
+    )
+    assert mos_updates == {"MN0": {"wf": "0.5u"}}
+    assert "nf" not in mos_updates["MN0"]
+    assert "m" not in mos_updates["MN0"]
+
+
+def test_existing_schematic_transform_is_forced_to_append_mode() -> None:
+    captured = {}
+
+    class Schematic:
+        def edit(self, library, cell, **kwargs):
+            captured.update({"library": library, "cell": cell, **kwargs})
+            return object()
+
+    client = SimpleNamespace(schematic=Schematic())
+    editor = _edit_existing_schematic(
+        client, "vda_test", "vda_existing", timeout=123
+    )
+
+    assert editor is not None
+    assert captured == {
+        "library": "vda_test",
+        "cell": "vda_existing",
+        "mode": "a",
+        "timeout": 123,
+    }
+
+
+def test_transform_preflight_rejects_unsaved_target_edits(monkeypatch) -> None:
+    import sys
+    from types import ModuleType
+
+    ops_module = ModuleType("virtuoso_bridge.virtuoso.ops")
+    ops_module.escape_skill_string = lambda value: value
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.virtuoso.ops", ops_module)
+    captured = {}
+
+    class Client:
+        def execute_skill(self, skill, timeout):
+            captured.update({"skill": skill, "timeout": timeout})
+            return SimpleNamespace(output="t", errors=[])
+
+    _preflight_mn0_source_label(Client(), "vda_test", "vda_existing")
+
+    assert '"schematic" "schematic" "r"' in captured["skill"]
+    assert 'cv~>modified error("target schematic has unsaved changes")' in captured[
+        "skill"
+    ]
+    assert captured["timeout"] == 60
+
+
+def test_failed_transform_cleanup_purges_only_unsaved_target_view(monkeypatch) -> None:
+    import sys
+    from types import ModuleType
+
+    ops_module = ModuleType("virtuoso_bridge.virtuoso.ops")
+    ops_module.escape_skill_string = lambda value: value
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.virtuoso.ops", ops_module)
+    captured = {}
+
+    class Client:
+        def execute_skill(self, skill, timeout):
+            captured.update({"skill": skill, "timeout": timeout})
+            return SimpleNamespace(output="t", errors=[])
+
+    _discard_failed_existing_schematic_edit(
+        Client(), "vda_test", "vda_existing"
+    )
+
+    assert "when(rbCv~>modified" in captured["skill"]
+    assert "dbPurge(rbCv)" in captured["skill"]
+    assert "dbSave" not in captured["skill"]
+    assert captured["timeout"] == 60
 
 
 def test_common_source_operating_point_requires_consistent_eda_scalars() -> None:
@@ -144,6 +701,7 @@ def test_common_source_operating_point_requires_consistent_eda_scalars() -> None
             "dc_OUT": 0.5,
             "dc_VDD": 0.9,
             "dc_VSS": 0.0,
+            "dc_VDD_SRC:p": -20e-6,
             "dcOpInfo_MN0:ids": 20e-6,
             "dcOpInfo_MN0:vgs": 0.45,
             "dcOpInfo_MN0:vds": 0.5,
@@ -158,6 +716,8 @@ def test_common_source_operating_point_requires_consistent_eda_scalars() -> None
         },
     )
     assert metrics["drain_current_ua"] == pytest.approx(20.0)
+    assert metrics["dc_supply_power_uw"] == pytest.approx(18.0)
+    assert metrics["supply_current_mismatch_percent"] == pytest.approx(0.0)
     assert evidence["operating_region"] == "saturation"
     assert evidence["node_device_consistency"] == "matched"
     assert evidence["kcl_consistency"] == "matched"
@@ -169,6 +729,7 @@ def test_common_source_operating_point_requires_consistent_eda_scalars() -> None
                 "dc_OUT": 0.5,
                 "dc_VDD": 0.9,
                 "dc_VSS": 0.0,
+                "dc_VDD_SRC:p": -20e-6,
                 "dcOpInfo_MN0:ids": 20e-6,
                 "dcOpInfo_MN0:vgs": 0.45,
                 "dcOpInfo_MN0:vds": 0.5,
@@ -187,6 +748,7 @@ def test_common_source_operating_point_requires_consistent_eda_scalars() -> None
         "dc_OUT": 0.5,
         "dc_VDD": 0.9,
         "dc_VSS": 0.0,
+        "dc_VDD_SRC:p": -20e-6,
         "dcOpInfo_MN0:ids": 30e-6,
         "dcOpInfo_MN0:vgs": 0.45,
         "dcOpInfo_MN0:vds": 0.5,
@@ -207,6 +769,18 @@ def test_common_source_operating_point_requires_consistent_eda_scalars() -> None
     inconsistent["dcOpInfo_MN0:ids"] = 20e-6
     inconsistent["dcOpInfo_MN0:vds"] = 0.4
     with pytest.raises(RuntimeError, match="node/device mismatch for vds_v"):
+        _common_source_metrics_from_result(
+            inconsistent,
+            {
+                "vdd_v": 0.9,
+                "bias_v": 0.45,
+                "load_resistance_ohm": 20_000.0,
+            },
+        )
+
+    inconsistent["dcOpInfo_MN0:vds"] = 0.5
+    inconsistent["dc_VDD_SRC:p"] = -10e-6
+    with pytest.raises(RuntimeError, match="VDD source current"):
         _common_source_metrics_from_result(
             inconsistent,
             {
@@ -550,6 +1124,403 @@ def test_schematic_existence_uses_lightweight_skill(output, expected) -> None:
     assert _schematic_exists(client, "vda_test", "vda_inv") is expected
 
 
+def test_inverter_simulation_worker_returns_structured_evidence(
+    monkeypatch,
+) -> None:
+    import sys
+    from types import ModuleType
+
+    runner_module = ModuleType("virtuoso_bridge.spectre.runner")
+
+    class Simulator:
+        _ssh_runner = None
+
+        @classmethod
+        def from_env(cls, **kwargs):
+            return cls()
+
+        def run_simulation(self, netlist, parameters):
+            return SimpleNamespace(
+                ok=True,
+                data={
+                    "time": [0.0, 1e-9],
+                    "IN": [0.0, 0.9],
+                    "OUT": [0.9, 0.0],
+                    "VDD_SRC:p": [0.0, -1e-6],
+                },
+                tool_version="test-spectre",
+                warnings=[],
+            )
+
+    runner_module.SpectreSimulator = Simulator
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.spectre.runner", runner_module)
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._client",
+        lambda: SimpleNamespace(ssh_runner=None),
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._read_schematic",
+        lambda *args: {},
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._assert_inverter",
+        lambda *args: None,
+    )
+    oa = {"nmos_width_um": 0.5, "pmos_width_um": 1.0, "length_um": 0.03}
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._semantic_parameters_from_schematic",
+        lambda data: oa,
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._resolved_parameters",
+        lambda payload, readback: oa | {"vdd_v": 0.9, "load_ff": 2.0},
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._generate_oa_netlist",
+        lambda *args, **kwargs: {
+            "remote_run_dir": "/data/xum/virtuoso_bridge_smoke/vda_test",
+            "remote_netlist_path": "/data/xum/virtuoso_bridge_smoke/vda_test/netlist",
+            "netlist_sha256": "0" * 64,
+            "parsed": {"semantic_parameters": oa, "instances": {}},
+            "si_log_tail": ["End netlisting"],
+        },
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._upload_file",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker.extract_inverter_metrics",
+        lambda *args, **kwargs: {"delay_ps": 10.0},
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker.extract_supply_metrics",
+        lambda *args, **kwargs: {"supply_energy_per_cycle_fj": 1.0},
+    )
+
+    result = simulate_inverter(
+        {
+            "target": {"library": "vda_test", "cell": "vda_inv"},
+            "profile": {"model_include": "/data/model.scs", "model_section": "tt"},
+            "parameters": {"vdd_v": 0.9, "load_ff": 2.0},
+            "timeout_seconds": 60,
+        }
+    )
+
+    assert result["tool_version"] == "test-spectre"
+    assert result["evidence"]["netlist"]["parameter_consistency"] == "matched"
+    assert result["metric_sources"]["delay_ps"] == "eda_result"
+    assert result["metric_sources"]["gate_area_proxy_um2"] == "software_inference"
+
+
+def test_common_source_ac_worker_returns_dc_and_complex_ac_evidence(
+    monkeypatch,
+) -> None:
+    import sys
+    from types import ModuleType
+
+    frequency_hz = [10.0 ** (4.0 + index / 20.0) for index in range(141)]
+    vin = [1.0 + 0.0j for _ in frequency_hz]
+    vout = [-3.0 / (1.0 + 1j * frequency / 2e9) for frequency in frequency_hz]
+    runner_module = ModuleType("virtuoso_bridge.spectre.runner")
+
+    class Simulator:
+        _ssh_runner = None
+
+        @classmethod
+        def from_env(cls, **kwargs):
+            return cls()
+
+        def run_simulation(self, netlist, parameters):
+            return SimpleNamespace(
+                ok=True,
+                data={
+                    "dc_IN": 0.35,
+                    "dc_OUT": 0.68,
+                        "dc_VDD": 0.9,
+                        "dc_VSS": 0.0,
+                        "dc_VDD_SRC:p": -10e-6,
+                    "dcOpInfo_MN0:ids": 10e-6,
+                    "dcOpInfo_MN0:vgs": 0.35,
+                    "dcOpInfo_MN0:vds": 0.68,
+                    "dcOpInfo_MN0:vdsat": 0.1,
+                    "dcOpInfo_MN0:gm": 200e-6,
+                    "dcOpInfo_MN0:gds": 10e-6,
+                    "ac_freq": frequency_hz,
+                    "ac_IN": vin,
+                    "ac_OUT": vout,
+                },
+                tool_version="test-spectre-ac",
+                warnings=[],
+            )
+
+    runner_module.SpectreSimulator = Simulator
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.spectre.runner", runner_module)
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._common_source_dc_data_from_result",
+        lambda result: (result.data, {"selection": "test fixture"}),
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._client",
+        lambda: SimpleNamespace(ssh_runner=None),
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._read_schematic",
+        lambda *args: {},
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._assert_common_source",
+        lambda *args: "common_source",
+    )
+    oa_parameters = {
+        "device_width_um": 1.0,
+        "length_um": 0.03,
+        "load_resistance_ohm": 22_000.0,
+    }
+    geometry = {
+        "finger_width_um": 1.0,
+        "fingers": 2.0,
+        "multiplicity": 1.0,
+        "total_width_um": 2.0,
+    }
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._common_source_semantic_parameters_from_schematic",
+        lambda data: oa_parameters,
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._common_source_device_geometry_from_schematic",
+        lambda data: geometry,
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._generate_oa_netlist",
+        lambda *args, **kwargs: {
+            "remote_run_dir": "/data/xum/virtuoso_bridge_smoke/vda_cs_ac",
+            "remote_netlist_path": (
+                "/data/xum/virtuoso_bridge_smoke/vda_cs_ac/netlist"
+            ),
+            "netlist_sha256": "1" * 64,
+            "parsed": {
+                "semantic_parameters": oa_parameters,
+                "device_geometry": geometry,
+                "topology_variant": "common_source",
+                "instances": {},
+            },
+            "si_log_tail": ["End netlisting"],
+        },
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._upload_file",
+        lambda *args, **kwargs: None,
+    )
+
+    result = simulate_common_source(
+        {
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "profile": load_pdk_profile("nics4304_tsmc28").model_dump(
+                mode="json"
+            ),
+            "analysis": "ac",
+            "ac_sweep": {
+                "start_hz": 1e4,
+                "stop_hz": 1e11,
+                "points_per_decade": 20,
+                "reference_points": 5,
+                "max_reference_variation_db": 0.5,
+            },
+            "ac_sweep_user_fields": [
+                "start_hz",
+                "stop_hz",
+                "points_per_decade",
+            ],
+            "parameters": {"bias_v": 0.35, "vdd_v": 0.9, "load_ff": 2.0},
+            "timeout_seconds": 60,
+        }
+    )
+
+    assert result["tool_version"] == "test-spectre-ac"
+    assert result["analysis_complete"] is True
+    assert result["metrics"]["saturation_region"] == 1.0
+    assert result["metrics"]["low_frequency_gain_v_per_v"] == pytest.approx(
+        3.0, rel=1e-5
+    )
+    assert result["metrics"]["bandwidth_3db_hz"] == pytest.approx(2e9, rel=0.01)
+    assert result["metrics"]["gain_bandwidth_product_hz"] == pytest.approx(
+        6e9, rel=0.01
+    )
+    assert result["metric_sources"]["bandwidth_3db_hz"] == "eda_result"
+    assert result["metric_sources"]["saturation_region"] == "software_inference"
+    assert result["evidence"]["ac_response"]["source"] == "eda_result"
+    assert result["evidence"]["ac_response"]["bandwidth"]["status"] == "resolved"
+    sources = result["evidence"]["testbench"]["value_sources"]["ac_sweep"]
+    assert sources["start_hz"] == "user_input"
+    assert sources["reference_points"] == "software_inference"
+
+
+@pytest.mark.parametrize(
+    ("analysis", "sweep_field", "sweep", "helper", "metric", "evidence_key"),
+    [
+        (
+            "transient",
+            "linearity_sweep",
+            {
+                "frequency_hz": 100e6,
+                "amplitudes_v": [0.005, 0.02],
+                "settling_cycles": 4,
+                "measurement_cycles": 8,
+                "points_per_cycle": 128,
+                "max_harmonic": 5,
+                "compression_db": 1.0,
+            },
+            "_common_source_linearity_metrics_from_result",
+            "max_thd_percent",
+            "linearity_response",
+        ),
+        (
+            "noise",
+            "noise_sweep",
+            {"start_hz": 1e3, "stop_hz": 1e9, "points_per_decade": 20},
+            "_common_source_noise_metrics_from_result",
+            "integrated_input_referred_noise_uv_rms",
+            "noise_response",
+        ),
+    ],
+)
+def test_common_source_quality_worker_routes_metrics_and_evidence(
+    monkeypatch,
+    analysis,
+    sweep_field,
+    sweep,
+    helper,
+    metric,
+    evidence_key,
+) -> None:
+    import sys
+    from types import ModuleType
+
+    runner_module = ModuleType("virtuoso_bridge.spectre.runner")
+
+    class Simulator:
+        _ssh_runner = None
+
+        @classmethod
+        def from_env(cls, **kwargs):
+            return cls()
+
+        def run_simulation(self, netlist, parameters):
+            return SimpleNamespace(
+                ok=True,
+                data={
+                    "dc_IN": 0.35,
+                    "dc_OUT": 0.7,
+                    "dc_VDD": 0.9,
+                    "dc_VSS": 0.0,
+                    "dc_VDD_SRC:p": -10e-6,
+                    "dcOpInfo_MN0:ids": 10e-6,
+                    "dcOpInfo_MN0:vgs": 0.35,
+                    "dcOpInfo_MN0:vds": 0.7,
+                    "dcOpInfo_MN0:vdsat": 0.1,
+                    "dcOpInfo_MN0:gm": 200e-6,
+                    "dcOpInfo_MN0:gds": 10e-6,
+                },
+                metadata={},
+                tool_version="test-spectre-quality",
+                warnings=[],
+            )
+
+    runner_module.SpectreSimulator = Simulator
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.spectre.runner", runner_module)
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._common_source_dc_data_from_result",
+        lambda result: (result.data, {"selection": "test fixture"}),
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._client",
+        lambda: SimpleNamespace(ssh_runner=None),
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._read_schematic",
+        lambda *args: {},
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._assert_common_source",
+        lambda *args: "common_source",
+    )
+    oa_parameters = {
+        "device_width_um": 1.0,
+        "length_um": 0.03,
+        "load_resistance_ohm": 20_000.0,
+    }
+    geometry = {
+        "finger_width_um": 1.0,
+        "fingers": 1.0,
+        "multiplicity": 1.0,
+        "total_width_um": 1.0,
+    }
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._common_source_semantic_parameters_from_schematic",
+        lambda data: oa_parameters,
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._common_source_device_geometry_from_schematic",
+        lambda data: geometry,
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._generate_oa_netlist",
+        lambda *args, **kwargs: {
+            "remote_run_dir": "/data/xum/virtuoso_bridge_smoke/vda_cs_quality",
+            "remote_netlist_path": "/data/xum/virtuoso_bridge_smoke/vda_cs_quality/netlist",
+            "netlist_sha256": "2" * 64,
+            "parsed": {
+                "semantic_parameters": oa_parameters,
+                "device_geometry": geometry,
+                "topology_variant": "common_source",
+                "instances": {},
+            },
+            "si_log_tail": ["End netlisting"],
+        },
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._upload_file",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        f"virtuoso_design_agent.adapters.bridge_worker.{helper}",
+        lambda *args, **kwargs: (
+            {metric: 1.0},
+            {
+                "analysis_complete": True,
+                "warnings": [],
+                **(
+                    {"temporary_psf_file": "C:/temp/noise.noise"}
+                    if analysis == "noise"
+                    else {}
+                ),
+            },
+        ),
+    )
+    payload = {
+        "target": {"library": "vda_test", "cell": "vda_cs"},
+        "profile": load_pdk_profile("nics4304_tsmc28").model_dump(mode="json"),
+        "analysis": analysis,
+        sweep_field: sweep,
+        f"{sweep_field}_user_fields": list(sweep),
+        "parameters": {"bias_v": 0.35, "vdd_v": 0.9, "load_ff": 1.0},
+        "timeout_seconds": 60,
+    }
+
+    result = simulate_common_source(payload)
+
+    assert result["analysis_complete"] is True
+    assert result["metrics"][metric] == pytest.approx(1.0)
+    assert result["metrics"]["dc_supply_power_uw"] == pytest.approx(9.0)
+    assert result["evidence"][evidence_key]["source"] == "eda_result"
+    assert result["evidence"]["testbench"]["values"][sweep_field] == sweep
+    if analysis == "noise":
+        assert result["evidence"][evidence_key]["remote_psf_path"].endswith(
+            "/noise.noise.psfascii"
+        )
+
+
 def test_subprocess_boundary_parses_only_structured_marker(tmp_path, monkeypatch) -> None:
     bridge_python = tmp_path / "python.exe"
     bridge_python.touch()
@@ -566,6 +1537,98 @@ def test_subprocess_boundary_parses_only_structured_marker(tmp_path, monkeypatch
     result = SubprocessBridgeAdapter(bridge_python).probe("nics4304_tsmc28")
     assert result.data == {"connected": True}
     assert result.evidence_source.value == "bridge_readback"
+
+
+def test_subprocess_payload_preserves_ac_sweep_and_user_input_fields() -> None:
+    from virtuoso_design_agent.models import TaskSpec
+
+    task = TaskSpec.model_validate(
+        {
+            "id": "payload-ac",
+            "operation": "simulation.run",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "analysis": "ac",
+            "ac_sweep": {
+                "start_hz": 1e3,
+                "stop_hz": 1e11,
+                "points_per_decade": 40,
+            },
+            "parameters": {"bias_v": 0.45, "load_ff": 2.0},
+        }
+    )
+
+    payload = SubprocessBridgeAdapter._task_payload(task)
+
+    assert payload["analysis"] == "ac"
+    assert payload["analysis_source"] == "user_input"
+    assert payload["ac_sweep"] == {
+        "start_hz": 1e3,
+        "stop_hz": 1e11,
+        "points_per_decade": 40,
+        "reference_points": 5,
+        "max_reference_variation_db": 0.5,
+    }
+    assert payload["ac_sweep_user_fields"] == [
+        "points_per_decade",
+        "start_hz",
+        "stop_hz",
+    ]
+
+    dc_task = TaskSpec.model_validate(
+        {
+            "id": "payload-default-dc",
+            "operation": "simulation.run",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "parameters": {"bias_v": 0.45},
+        }
+    )
+    dc_payload = SubprocessBridgeAdapter._task_payload(dc_task)
+    assert dc_payload["analysis"] == "dc"
+    assert dc_payload["analysis_source"] == "software_inference"
+
+
+def test_subprocess_payload_preserves_linearity_and_noise_sweep_sources() -> None:
+    from virtuoso_design_agent.models import TaskSpec
+
+    linearity_task = TaskSpec.model_validate(
+        {
+            "id": "payload-linearity",
+            "operation": "simulation.run",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "analysis": "transient",
+            "linearity_sweep": {
+                "frequency_hz": 100e6,
+                "amplitudes_v": [0.005, 0.02],
+                "measurement_cycles": 6,
+            },
+            "parameters": {"bias_v": 0.35},
+        }
+    )
+    linearity_payload = SubprocessBridgeAdapter._task_payload(linearity_task)
+    assert linearity_payload["linearity_sweep"]["settling_cycles"] == 4
+    assert linearity_payload["linearity_sweep_user_fields"] == [
+        "amplitudes_v",
+        "frequency_hz",
+        "measurement_cycles",
+    ]
+
+    noise_task = TaskSpec.model_validate(
+        {
+            "id": "payload-noise",
+            "operation": "simulation.run",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "analysis": "noise",
+            "noise_sweep": {"start_hz": 1e3, "stop_hz": 1e9},
+            "parameters": {"bias_v": 0.35},
+        }
+    )
+    noise_payload = SubprocessBridgeAdapter._task_payload(noise_task)
+    assert noise_payload["noise_sweep"]["points_per_decade"] == 20
+    assert noise_payload["noise_sweep_user_fields"] == ["start_hz", "stop_hz"]
 
 
 def test_subprocess_boundary_rejects_unstructured_output(tmp_path, monkeypatch) -> None:

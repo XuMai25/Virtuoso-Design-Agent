@@ -65,3 +65,19 @@ def test_remote_compute_needs_separate_permission() -> None:
     plan = build_plan(task)
     with pytest.raises(SafetyViolation, match="remote compute"):
         authorize_execution(task, plan, plan.confirmation_token)
+
+
+def test_in_place_transform_still_requires_explicit_remote_write_permission() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "transform",
+            "operation": "schematic.transform",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "parameters": {"source_resistance_ohm": 1_000.0},
+            "safety": {"allowed_library": "vda_test"},
+        }
+    )
+    plan = build_plan(task)
+    with pytest.raises(SafetyViolation, match="remote OA write"):
+        authorize_execution(task, plan, plan.confirmation_token)

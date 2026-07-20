@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
-from .models import CircuitKind, Operation, TaskSpec
+from .models import AnalysisKind, CircuitKind, Operation, TaskSpec
 
 
 class UnsupportedCapability(ValueError):
@@ -22,7 +22,28 @@ class CircuitCapability:
     evidence_gate: str
 
 
-_ALL_OPERATIONS = tuple(Operation)
+_STANDARD_OPERATIONS = (
+    Operation.SCHEMATIC_CREATE,
+    Operation.SCHEMATIC_INSPECT,
+    Operation.PARAMETERS_APPLY,
+    Operation.SIMULATION_RUN,
+    Operation.DESIGN_TUNE,
+    Operation.DESIGN_CLOSE_LOOP,
+)
+
+OA_SEMANTIC_PARAMETER_NAMES: dict[CircuitKind, frozenset[str]] = {
+    CircuitKind.INVERTER: frozenset(
+        {"nmos_width_um", "pmos_width_um", "length_um"}
+    ),
+    CircuitKind.COMMON_SOURCE: frozenset(
+        {
+            "device_width_um",
+            "length_um",
+            "load_resistance_ohm",
+            "source_resistance_ohm",
+        }
+    ),
+}
 
 CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     CircuitKind.EXISTING_SCHEMATIC: CircuitCapability(
@@ -40,7 +61,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
         circuit=CircuitKind.INVERTER,
         stage="L5A vertical slice",
         executable=True,
-        operations=_ALL_OPERATIONS,
+        operations=_STANDARD_OPERATIONS,
         parameters=(
             "nmos_width_um",
             "pmos_width_um",
@@ -56,20 +77,23 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     ),
     CircuitKind.COMMON_SOURCE: CircuitCapability(
         circuit=CircuitKind.COMMON_SOURCE,
-        stage="Gate 2A DC operating point",
+        stage="Gate 2 bounded DC+AC design tuning verified",
         executable=True,
-        operations=_ALL_OPERATIONS,
+        operations=_STANDARD_OPERATIONS + (Operation.SCHEMATIC_TRANSFORM,),
         parameters=(
             "device_width_um",
             "length_um",
             "load_resistance_ohm",
+            "source_resistance_ohm",
             "bias_v",
             "vdd_v",
+            "load_ff",
         ),
         explicit_instance_parameters=True,
         evidence_gate=(
-            "OA readback + si netlist consistency + DC Id/VGS/VDS/VDSAT/gm/gds "
-            "before AC gain/bandwidth"
+            "OA readback + si netlist consistency + DC region + complex AC + "
+            "bounded W/RD/RS tuning/recovery and one-point live "
+            "linearity/noise; quality-driven tuning/corner pending"
         ),
     ),
     CircuitKind.SOURCE_DEGENERATED_COMMON_SOURCE: CircuitCapability(
@@ -113,16 +137,47 @@ def validate_task_capability(task: TaskSpec) -> None:
         raise UnsupportedCapability(
             f"unsupported parameters for {task.circuit.value}: {', '.join(unknown)}"
         )
+    if task.operation is Operation.SCHEMATIC_TRANSFORM:
+        expected = {"source_resistance_ohm"}
+        if supplied != expected:
+            raise UnsupportedCapability(
+                "schematic.transform for common_source requires exactly "
+                "source_resistance_ohm"
+            )
     if (
         task.circuit is CircuitKind.COMMON_SOURCE
         and task.operation in {Operation.SCHEMATIC_CREATE, Operation.PARAMETERS_APPLY}
     ):
-        testbench_only = sorted(supplied & {"bias_v", "vdd_v"})
+        testbench_only = sorted(supplied & {"bias_v", "vdd_v", "load_ff"})
         if testbench_only:
             raise UnsupportedCapability(
                 f"{task.operation.value} cannot persist testbench-only parameters: "
                 + ", ".join(testbench_only)
             )
+    if (
+        task.circuit is CircuitKind.COMMON_SOURCE
+        and "load_ff" in supplied
+        and task.resolved_analysis() is AnalysisKind.DC
+    ):
+        raise UnsupportedCapability(
+            "load_ff is a common-source dynamic-analysis testbench parameter and "
+            "cannot be used with analysis='dc'"
+        )
+    if (
+        task.circuit is CircuitKind.COMMON_SOURCE
+        and task.operation is Operation.SCHEMATIC_CREATE
+        and "source_resistance_ohm" in supplied
+    ):
+        raise UnsupportedCapability(
+            "schematic.create builds the nominal common-source topology; use "
+            "schematic.transform to add source degeneration to an existing cellview"
+        )
+
+
+def task_requests_oa_parameter_write(task: TaskSpec) -> bool:
+    names = OA_SEMANTIC_PARAMETER_NAMES.get(task.circuit, frozenset())
+    supplied = set(task.parameters) | set(task.parameter_space)
+    return bool(names & supplied)
 
 
 def catalog_as_dicts() -> list[dict]:

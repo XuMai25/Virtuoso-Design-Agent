@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -23,6 +24,7 @@ class StrictModel(BaseModel):
 class Operation(str, Enum):
     SCHEMATIC_CREATE = "schematic.create"
     SCHEMATIC_INSPECT = "schematic.inspect"
+    SCHEMATIC_TRANSFORM = "schematic.transform"
     PARAMETERS_APPLY = "parameters.apply"
     SIMULATION_RUN = "simulation.run"
     DESIGN_TUNE = "design.tune"
@@ -35,6 +37,13 @@ class CircuitKind(str, Enum):
     COMMON_SOURCE = "common_source"
     SOURCE_DEGENERATED_COMMON_SOURCE = "source_degenerated_common_source"
     DIFFERENTIAL_PAIR = "differential_pair"
+
+
+class AnalysisKind(str, Enum):
+    TRANSIENT = "transient"
+    DC = "dc"
+    AC = "ac"
+    NOISE = "noise"
 
 
 class Relation(str, Enum):
@@ -114,6 +123,75 @@ class ExecutionLimits(StrictModel):
     timeout_seconds: int = Field(default=600, ge=10, le=7200)
 
 
+class AcSweep(StrictModel):
+    start_hz: float = Field(gt=0)
+    stop_hz: float = Field(gt=0)
+    points_per_decade: int = Field(default=20, ge=1, le=1000)
+    reference_points: int = Field(default=5, ge=2, le=20)
+    max_reference_variation_db: float = Field(default=0.5, gt=0, le=3.0)
+
+    @model_validator(mode="after")
+    def stop_must_exceed_start(self) -> "AcSweep":
+        if self.stop_hz <= self.start_hz:
+            raise ValueError("AC sweep stop_hz must be greater than start_hz")
+        return self
+
+
+class LinearitySweep(StrictModel):
+    frequency_hz: float = Field(gt=0)
+    amplitudes_v: list[float] = Field(min_length=2, max_length=12)
+    settling_cycles: int = Field(default=4, ge=1, le=100)
+    measurement_cycles: int = Field(default=8, ge=2, le=100)
+    points_per_cycle: int = Field(default=128, ge=32, le=1000)
+    max_harmonic: int = Field(default=5, ge=3, le=10)
+    compression_db: float = Field(default=1.0, gt=0, le=6.0)
+
+    @model_validator(mode="after")
+    def validate_linearity_sweep(self) -> "LinearitySweep":
+        if not math.isfinite(self.frequency_hz) or not math.isfinite(
+            self.compression_db
+        ):
+            raise ValueError("linearity frequency and compression must be finite")
+        if any(
+            not math.isfinite(float(value)) or value <= 0
+            for value in self.amplitudes_v
+        ):
+            raise ValueError(
+                "linearity amplitudes_v must contain finite positive values"
+            )
+        if any(
+            self.amplitudes_v[index] <= self.amplitudes_v[index - 1]
+            for index in range(1, len(self.amplitudes_v))
+        ):
+            raise ValueError("linearity amplitudes_v must be strictly increasing")
+        if self.points_per_cycle < 8 * self.max_harmonic:
+            raise ValueError(
+                "linearity points_per_cycle must be at least 8 * max_harmonic"
+            )
+        total_points = (
+            len(self.amplitudes_v)
+            * (self.settling_cycles + self.measurement_cycles)
+            * self.points_per_cycle
+        )
+        if total_points > 2_000_000:
+            raise ValueError("linearity sweep exceeds the 2,000,000 point budget")
+        return self
+
+
+class NoiseSweep(StrictModel):
+    start_hz: float = Field(gt=0)
+    stop_hz: float = Field(gt=0)
+    points_per_decade: int = Field(default=20, ge=1, le=1000)
+
+    @model_validator(mode="after")
+    def stop_must_exceed_start(self) -> "NoiseSweep":
+        if not math.isfinite(self.start_hz) or not math.isfinite(self.stop_hz):
+            raise ValueError("noise sweep frequencies must be finite")
+        if self.stop_hz <= self.start_hz:
+            raise ValueError("noise sweep stop_hz must be greater than start_hz")
+        return self
+
+
 class SafetyPolicy(StrictModel):
     allow_remote_compute: bool = False
     allow_remote_write: bool = False
@@ -130,6 +208,7 @@ class SafetyPolicy(StrictModel):
 
 
 _TUNING_OPERATIONS = {Operation.DESIGN_TUNE, Operation.DESIGN_CLOSE_LOOP}
+_SIMULATION_OPERATIONS = _TUNING_OPERATIONS | {Operation.SIMULATION_RUN}
 
 
 class TaskSpec(StrictModel):
@@ -139,6 +218,10 @@ class TaskSpec(StrictModel):
     circuit: CircuitKind
     target: DesignTarget
     pdk_profile: str = Field(default="nics4304_tsmc28", min_length=1)
+    analysis: AnalysisKind | None = None
+    ac_sweep: AcSweep | None = None
+    linearity_sweep: LinearitySweep | None = None
+    noise_sweep: NoiseSweep | None = None
     parameters: dict[str, float] = Field(default_factory=dict)
     instance_parameter_updates: list[InstanceParameterUpdate] = Field(
         default_factory=list
@@ -174,6 +257,77 @@ class TaskSpec(StrictModel):
 
     @model_validator(mode="after")
     def validate_operation_inputs(self) -> "TaskSpec":
+        analysis_settings = (
+            self.analysis is not None
+            or self.ac_sweep is not None
+            or self.linearity_sweep is not None
+            or self.noise_sweep is not None
+        )
+        if self.operation not in _SIMULATION_OPERATIONS:
+            if analysis_settings:
+                raise ValueError(
+                    "analysis settings are supported only by simulation and tuning operations"
+                )
+        else:
+            resolved_analysis = self.resolved_analysis()
+            if self.circuit is CircuitKind.INVERTER:
+                if resolved_analysis is not AnalysisKind.TRANSIENT:
+                    raise ValueError("inverter currently supports only transient analysis")
+                if any(
+                    setting is not None
+                    for setting in (
+                        self.ac_sweep,
+                        self.linearity_sweep,
+                        self.noise_sweep,
+                    )
+                ):
+                    raise ValueError(
+                        "inverter does not accept common-source analysis settings"
+                    )
+            elif self.circuit is CircuitKind.COMMON_SOURCE:
+                if resolved_analysis not in {
+                    AnalysisKind.DC,
+                    AnalysisKind.AC,
+                    AnalysisKind.TRANSIENT,
+                    AnalysisKind.NOISE,
+                }:
+                    raise ValueError(
+                        "common_source supports dc, ac, transient, or noise analysis"
+                    )
+            elif analysis_settings:
+                raise ValueError(
+                    "analysis settings are not implemented for this circuit"
+                )
+            if self.circuit is CircuitKind.COMMON_SOURCE:
+                required_settings = {
+                    AnalysisKind.AC: ("ac_sweep", self.ac_sweep),
+                    AnalysisKind.TRANSIENT: (
+                        "linearity_sweep",
+                        self.linearity_sweep,
+                    ),
+                    AnalysisKind.NOISE: ("noise_sweep", self.noise_sweep),
+                }
+                required = required_settings.get(resolved_analysis)
+                settings = {
+                    "ac_sweep": self.ac_sweep,
+                    "linearity_sweep": self.linearity_sweep,
+                    "noise_sweep": self.noise_sweep,
+                }
+                allowed_setting = required[0] if required is not None else None
+                unexpected = [
+                    name
+                    for name, value in settings.items()
+                    if value is not None and name != allowed_setting
+                ]
+                if unexpected:
+                    raise ValueError(
+                        f"{', '.join(unexpected)} requires its matching analysis"
+                    )
+                if required is not None and required[1] is None:
+                    raise ValueError(
+                        f"common-source {resolved_analysis.value} analysis requires "
+                        f"{required[0]}"
+                    )
         if self.instance_parameter_updates:
             if self.operation is not Operation.PARAMETERS_APPLY:
                 raise ValueError(
@@ -193,6 +347,15 @@ class TaskSpec(StrictModel):
             raise ValueError(
                 "parameters.apply requires parameters or instance_parameter_updates"
             )
+        if self.operation is Operation.SCHEMATIC_TRANSFORM:
+            if not self.parameters:
+                raise ValueError("schematic.transform requires parameters")
+            if self.instance_parameter_updates:
+                raise ValueError(
+                    "schematic.transform does not accept instance_parameter_updates"
+                )
+            if self.parameter_space:
+                raise ValueError("schematic.transform does not accept parameter_space")
         if self.operation in _TUNING_OPERATIONS:
             if not self.parameter_space:
                 raise ValueError(f"{self.operation.value} requires parameter_space")
@@ -201,6 +364,13 @@ class TaskSpec(StrictModel):
         if self.operation is Operation.SIMULATION_RUN and not self.parameters:
             raise ValueError("simulation.run requires parameters")
         return self
+
+    def resolved_analysis(self) -> AnalysisKind:
+        if self.analysis is not None:
+            return self.analysis
+        if self.circuit is CircuitKind.INVERTER:
+            return AnalysisKind.TRANSIENT
+        return AnalysisKind.DC
 
 
 class PlanStep(StrictModel):
@@ -247,6 +417,9 @@ class CandidateEvaluation(StrictModel):
     objective_value: float | None = None
     evidence_source: EvidenceSource
     metric_sources: dict[str, EvidenceSource] = Field(default_factory=dict)
+    analysis_complete: bool = True
+    analysis_issues: list[str] = Field(default_factory=list)
+    analysis_warnings: list[str] = Field(default_factory=list)
 
 
 class ActionRecord(StrictModel):
