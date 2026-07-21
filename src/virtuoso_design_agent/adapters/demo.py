@@ -382,6 +382,12 @@ class DeterministicDemoAdapter:
             evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
         )
 
+    def prepare_ade(self, task: TaskSpec) -> AdapterResult:
+        raise RuntimeError(
+            "ade.prepare requires the real Bridge; the demo adapter cannot create "
+            "or verify a persistent Maestro view"
+        )
+
     def capture_ade(self, task: TaskSpec) -> AdapterResult:
         raise RuntimeError(
             "ade.capture requires the real Bridge; the demo adapter cannot "

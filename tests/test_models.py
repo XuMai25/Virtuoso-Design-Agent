@@ -374,6 +374,82 @@ def test_existing_schematic_exposes_only_read_and_manual_parameter_write() -> No
         build_plan(invalid)
 
 
+def test_ade_prepare_is_a_non_overwrite_persistent_handoff_contract() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "prepare-manual-ade",
+            "operation": "ade.prepare",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_prepare": {
+                "backend": "maestro",
+                "test_name": "VDA_AC",
+                "design_view": "schematic",
+                "simulator": "spectre",
+            },
+        }
+    )
+
+    plan = build_plan(task)
+
+    assert task.ade_prepare is not None
+    assert task.ade_prepare.test_name == "VDA_AC"
+    assert plan.requires_remote_write
+    assert not plan.requires_remote_compute
+
+
+@pytest.mark.parametrize(
+    ("update", "message"),
+    [
+        ({"ade_prepare": None}, "requires ade_prepare settings"),
+        (
+            {"target": {"library": "vda_test", "cell": "vda_manual_tb"}},
+            "target.view='maestro'",
+        ),
+        ({"parameters": {"vdd_v": 0.9}}, "only creates a new persistent ADE setup"),
+        (
+            {"safety": {"replace_existing": True}},
+            "never replaces an existing Maestro view",
+        ),
+    ],
+)
+def test_ade_prepare_rejects_automation_or_overwrite_requests(
+    update: dict, message: str
+) -> None:
+    data = {
+        "id": "prepare-manual-ade",
+        "operation": "ade.prepare",
+        "circuit": "existing_schematic",
+        "target": {
+            "library": "vda_test",
+            "cell": "vda_manual_tb",
+            "view": "maestro",
+        },
+        "ade_prepare": {"backend": "maestro"},
+    }
+    data.update(update)
+
+    with pytest.raises(ValidationError, match=message):
+        TaskSpec.model_validate(data)
+
+
+def test_ade_prepare_settings_cannot_leak_into_other_operations() -> None:
+    with pytest.raises(ValidationError, match="require operation='ade.prepare'"):
+        TaskSpec.model_validate(
+            {
+                "id": "wrong-prepare-operation",
+                "operation": "schematic.inspect",
+                "circuit": "existing_schematic",
+                "target": {"library": "vda_test", "cell": "vda_manual_tb"},
+                "ade_prepare": {"backend": "maestro"},
+            }
+        )
+
+
 def test_ade_capture_is_a_read_only_human_handoff_contract() -> None:
     task = TaskSpec.model_validate(
         {

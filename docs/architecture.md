@@ -42,6 +42,7 @@ VDA 不嵌入一个新的通用 LLM。Codex 负责开放式推理，VDA 负责�
 | `schematic.inspect` | 读取拓扑、参数、pins | 只读 |
 | `schematic.transform` | 对已知拓扑应用可审计的小变更；当前仅共源源极退化 | OA 写入 |
 | `parameters.apply` | 应用指定参数并回读 | OA 写入 |
+| `ade.prepare` | 为已有 design 新建持久化 Spectre-backed Maestro view/test；拒绝已有 view | Maestro OA 写入 |
 | `ade.capture` | 捕获人工聚焦并已保存的 Maestro setup、history 和已有真实结果 | 远端只读 + 本地证据写入 |
 | `simulation.run` | 单点仿真并判规格 | scratch/计算 |
 | `design.tune` | 有限搜索；设计参数提交 OA，纯 testbench 条件只记录选择 | 计算；按维度决定是否写 OA |
@@ -60,7 +61,7 @@ VDA 保留两种用途不同的参数表示：
 - `parameters` / `parameter_space` 是电路模板已定义的 canonical semantic parameters，例如 `device_width_um`、`load_resistance_ohm`、`bias_v` 和 AC `load_ff`。它们可参与仿真、规格判定和有限搜索，但并非都写 OA：W/L/RD/RS 是设计参数，bias/VDD/外部负载是 testbench 条件。当前 MOS width semantic 指单指宽 `Wfg`；多指 OA/`si` 一致性另外核对 `finger_width`、`fingers/nf`、`m/multi` 和总有效宽度，不能把网表 `w` 无条件当成 `Wfg`。
 - `instance_parameter_updates` 是人工明确指定的实例级 CDF/OA 写入，例如 `MN0.fingers="2"`、`MN0.m="1"` 或 `RD0.r="22k"`。参数名和值按 Bridge 字符串契约原样传递，不做单位、别名或枚举推断。
 
-`existing_schematic` 是不依赖固定拓扑模板的通用 circuit kind，开放 `schematic.inspect`、`parameters.apply` 与 `ade.capture`：前者保留 Bridge reader 的完整结构对象、geometry、notes、nets/pins 细节和所有可回读 CDF 参数；参数操作允许人工指定任意已有实例；ADE 操作则读取目标 Maestro view，不要求 VDA 理解 DUT 拓扑。反相器和共源模板也能使用相同原始参数与 ADE 捕获路径，并可在一个参数任务中组合 semantic parameters 与原始实例参数；semantic 写入先执行，原始 CDF callback 后执行，最终 OA 必须同时满足所有已声明 semantic 值和原始字段值。
+`existing_schematic` 是不依赖固定拓扑模板的通用 circuit kind，开放 `schematic.inspect`、`parameters.apply`、`ade.prepare` 与 `ade.capture`：前者保留 Bridge reader 的完整结构对象、geometry、notes、nets/pins 细节和所有可回读 CDF 参数；参数操作允许人工指定任意已有实例；ADE 操作则为已有 design 准备新的 Maestro 人工入口或读取目标 Maestro view，不要求 VDA 理解 DUT 拓扑。反相器和共源模板也能使用相同原始参数与 ADE 交接路径，并可在一个参数任务中组合 semantic parameters 与原始实例参数；semantic 写入先执行，原始 CDF callback 后执行，最终 OA 必须同时满足所有已声明 semantic 值和原始字段值。
 
 执行路径先结构化回读目标 schematic 并确认实例存在，再复用 Bridge 的 `set_instance_params(..., param_filters=None)` 触发 CDF callback、`schCheck` 和 `dbSave`。通用 reader 为控制输出会省略空值和超长值，因此 VDA 不用摘要缺失来限制 Bridge：写入后另发只读 SKILL，直接打开目标 OA、定位实例 CDF，并逐字段比较真实 `p~>value` 与请求字符串；executor 的 `schematic.inspect.after` 再独立执行一次同样的定向读取。首次值不一致时，worker 至多按任务声明顺序逐字段重放一次；计划必须披露该副作用，最终仍不一致则整个 run 失败。
 
@@ -74,11 +75,15 @@ CDF 的 `display` 和 `editable` 元数据不是写入 allowlist。2026-07-20 �
 
 ADE 兼容是当前架构约束，不是 UI 附加项。VDA 可以规划、搜索、判规格和选优，但可复核的 ADE setup/history 必须继续允许人类打开、调整、运行和保存；VDA 不能把唯一真源藏在一次性 wrapper 或内存状态里。自动路径和人工路径通过显式 operation 交接，不能在一次运行中暗中互相覆盖。
 
-首个纵向切片是 `ade.capture`，当前只使用 Bridge 已有的 ADE Explorer/Assembler Maestro 公共接口，不修改 Bridge，也不复制 SKILL、结果导出或文件传输。执行前由用户自行打开、调整、运行、保存并聚焦目标 `library/cell/maestro`。worker 先做一次轻量 snapshot，拒绝无焦点、目标不匹配或会话中途切换；默认也拒绝带 `*` 的未保存 setup。随后 Bridge 捕获 setup 文件、指定或按 mtime 选择的最新 history、Spectre netlist、PSF 和日志，并读取 ADE Detail 表中的每个 sweep point、变量、output、spec 和 pass/fail。
+首个纵向切片由 `ade.prepare` 和 `ade.capture` 组成，当前只使用 Bridge 已有的 ADE Explorer/Assembler Maestro 公共接口，不修改 Bridge，也不复制 SKILL、结果导出或文件传输。`prepare` 要求 design view 已存在并预检相邻 Maestro view 不存在，然后创建一个持久化 Spectre test、保存、关闭并重新打开核对 test 名称。它不配置 analysis、stimulus、sweep 或 output；这些状态留给人工调整。若 Maestro view 已存在，无论 `replace_existing` 如何都在模型或 worker 边界拒绝，不覆盖也不尝试合并。
+
+`prepare` 不是跨 OA/transport 的事务：若 `save_setup` 已落盘而 close、独立回读或连接随后失败，新 Maestro view 可能真实存在但本次 run 失败。下一次执行会因 view 已存在而停止，要求人工检查；VDA 不自动删除这个可能包含有效状态的 view。
+
+执行 `capture` 前由用户自行打开、调整、运行、保存并聚焦目标 `library/cell/maestro`。worker 先做一次轻量 snapshot，拒绝无焦点、目标不匹配或会话中途切换；默认也拒绝带 `*` 的未保存 setup。随后 Bridge 捕获 setup 文件、指定或按 mtime 选择的最新 history、Spectre netlist、PSF 和日志，并读取 ADE Detail 表中的每个 sweep point、变量、output、spec 和 pass/fail。
 
 本地 manifest 对每个文件记录相对路径、大小、SHA-256、类别与来源。Maestro setup 属于 `bridge_readback`；实际 simulator input、PSF/log 和 ADE output/spec 属于 `eda_result`；任务固定的 history 属于 `user_input`，自动选取最新 history 的规则属于 `software_inference`。setup 和 simulation artifacts 分别形成聚合指纹，供后续人工前后对比与冲突检查。`ade.capture` 不调用 run/save/close，不写 OA；其成功只说明“人工 ADE 状态和已有结果已被完整捕获”，不等于这些结果满足 VDA 规格。
 
-当前受支持的持久化后端是 `maestro`，因为这是 Bridge 已公开并带 setup/history/result API 的路径。Bridge 同时提供 ADE L state 到 Maestro 的迁移原语，但 VDA 尚未把迁移包装成 operation，也不会在没有备份、目标冲突检查和 live smoke 时改写旧 state。下一步是在新建的专用 Maestro view 上验证捕获，然后实现非覆盖式 setup/变量 patch、原生 sweep/corner run 与结果回收；人工改动必须通过 setup 指纹或重新 snapshot 被发现，而不是被 VDA 静默覆盖。
+当前受支持的持久化后端是 `maestro`，因为这是 Bridge 已公开并带 setup/history/result API 的路径。Bridge 同时提供 ADE L state 到 Maestro 的迁移原语，但 VDA 尚未把迁移包装成 operation，也不会在没有备份、目标冲突检查和 live smoke 时改写旧 state。下一步是在专用 schematic 上真实执行 `prepare`，由人工补 AC/sweep/output 并运行，再用 `capture` 收回；之后实现带 setup 指纹前置条件的非覆盖式变量 patch、原生 sweep/corner run 与结果回收。人工改动必须通过 setup 指纹或重新 snapshot 被发现，而不是被 VDA 静默覆盖。
 
 ## 反相器同源仿真路径
 
@@ -164,6 +169,6 @@ AC 核心结果只有在 DC 工作点为饱和、低频参考足够平坦且扫�
 
 ## 证据链
 
-每次运行至少保存任务和计划 token、adapter 与证据来源、动作状态、候选参数、仿真指标、逐条规格判定、最终选择、OA 回读摘要，以及错误和未验证边界。显式实例写入还保存请求、写入前目标字段、立即确认和独立 inspect 的完整参数表。ADE 人工交接保存焦点目标、是否已保存、setup/simulation 聚合指纹、逐文件 manifest、history 选择来源以及可用时的逐点 output/spec；它明确记录 VDA 没有运行仿真或写 OA。调优 checkpoint 保留历史失败 actions，但恢复后只有完成的候选证据参与选择；最终 run 可以在完整证据和最终回读成立时成功，同时仍显式留下已恢复的 transport 事件。自动 netlisting 还保存远端网表/wrapper 路径、SHA-256、解析后的实例参数和一致性结论。
+每次运行至少保存任务和计划 token、adapter 与证据来源、动作状态、候选参数、仿真指标、逐条规格判定、最终选择、OA 回读摘要，以及错误和未验证边界。显式实例写入还保存请求、写入前目标字段、立即确认和独立 inspect 的完整参数表。ADE `prepare` 保存 design/test/simulator 请求、持久化 view/test 回读、未覆盖既有 view 以及没有设置 analysis/sweep 的范围；`capture` 保存焦点目标、是否已保存、setup/simulation 聚合指纹、逐文件 manifest、history 选择来源以及可用时的逐点 output/spec，并明确记录 VDA 没有运行仿真或写 OA。调优 checkpoint 保留历史失败 actions，但恢复后只有完成的候选证据参与选择；最终 run 可以在完整证据和最终回读成立时成功，同时仍显式留下已恢复的 transport 事件。自动 netlisting 还保存远端网表/wrapper 路径、SHA-256、解析后的实例参数和一致性结论。
 
 timing、过冲/欠冲、`supply_energy_per_cycle_fj`、`average_supply_power_uw`、共源 DC/供电连续指标，以及从 AC、相干 transient 或 noise PSF 提取的连续量标为 `eda_result`；OA 结构和参数标为 `bridge_readback`；任务显式给出的 VDD、负载、偏置、analysis 或 sweep 字段标为 `user_input`；默认 analysis/sweep 字段、`gate_area_proxy_um2=(Wn+Wp)L`、饱和区分类、交点/压缩点规则和指标完整性判断是 `software_inference`。供电能量或功耗保留积分窗口和源电流方向，不能称为纯动态开关能量；AC、linearity 和 noise 指标也必须保存提取公式、范围和 unresolved 诊断，不能只保存一个无来源标量。后续 Maestro、Calibre 和 PEX 沿用同一证据模型。

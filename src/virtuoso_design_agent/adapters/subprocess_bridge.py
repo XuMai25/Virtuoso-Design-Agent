@@ -118,7 +118,7 @@ class SubprocessBridgeAdapter:
             "replace_existing": task.safety.replace_existing,
             "timeout_seconds": task.limits.timeout_seconds,
         }
-        if task.operation is not Operation.ADE_CAPTURE:
+        if task.operation not in {Operation.ADE_PREPARE, Operation.ADE_CAPTURE}:
             payload["analysis"] = task.resolved_analysis().value
             payload["analysis_source"] = (
                 "user_input" if task.analysis is not None else "software_inference"
@@ -142,6 +142,11 @@ class SubprocessBridgeAdapter:
             payload["ade_capture"] = task.ade_capture.model_dump(mode="json")
             payload["ade_capture_user_fields"] = sorted(
                 task.ade_capture.model_fields_set
+            )
+        if task.ade_prepare is not None:
+            payload["ade_prepare"] = task.ade_prepare.model_dump(mode="json")
+            payload["ade_prepare_user_fields"] = sorted(
+                task.ade_prepare.model_fields_set
             )
         return payload
 
@@ -210,6 +215,14 @@ class SubprocessBridgeAdapter:
             "capture_focused_maestro",
             payload,
             timeout=task.limits.timeout_seconds + 240,
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
+
+    def prepare_ade(self, task: TaskSpec) -> AdapterResult:
+        data = self._request(
+            "prepare_maestro",
+            self._task_payload(task),
+            timeout=min(task.limits.timeout_seconds, 180),
         )
         return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
 

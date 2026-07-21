@@ -786,6 +786,25 @@ class TaskExecutor:
                         lambda: self.adapter.inspect_schematic(task),
                     )
                     selected_parameters = dict(task.parameters)
+            elif operation is Operation.ADE_PREPARE:
+                prepared = self._action(
+                    "ade.prepare", lambda: self.adapter.prepare_ade(task)
+                )
+                if (
+                    prepared.data.get("persistent_view_confirmed") is not True
+                    or prepared.data.get("existing_maestro_overwritten") is not False
+                    or prepared.data.get("schematic_oa_write_performed") is not False
+                    or prepared.data.get("maestro_oa_write_performed") is not True
+                ):
+                    raise RuntimeError(
+                        "ADE prepare did not prove a new persistent Maestro-only write "
+                        "with existing manual and schematic state preserved"
+                    )
+                notes.append(
+                    "prepared a new persistent Spectre-backed Maestro test for manual "
+                    "editing; no analysis, sweep, simulation, or schematic write was "
+                    "performed"
+                )
             elif operation is Operation.ADE_CAPTURE:
                 captured = self._action(
                     "ade.capture", lambda: self.adapter.capture_ade(task)

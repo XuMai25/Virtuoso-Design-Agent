@@ -18,6 +18,7 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     _assert_common_source_transform_preserved,
     _assert_parameter_consistency,
     _assert_focused_maestro,
+    _cellview_exists,
     _common_source_ac_metrics_from_result,
     _common_source_dc_data_from_result,
     _common_source_linearity_metrics_from_result,
@@ -46,6 +47,7 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     _signal,
     _validate_si_log,
     _verify_instance_parameter_values,
+    prepare_maestro,
     simulate_common_source,
     simulate_inverter,
 )
@@ -55,6 +57,23 @@ from virtuoso_design_agent.adapters.subprocess_bridge import (
 )
 from virtuoso_design_agent.profiles import load_pdk_profile
 from virtuoso_design_agent.models import EvidenceSource, TaskSpec
+
+
+def _install_fake_maestro_module(
+    monkeypatch: pytest.MonkeyPatch, **attributes
+) -> None:
+    maestro = ModuleType("virtuoso_bridge.virtuoso.maestro")
+    for name, value in attributes.items():
+        setattr(maestro, name, value)
+    virtuoso = ModuleType("virtuoso_bridge.virtuoso")
+    virtuoso.__path__ = []
+    virtuoso.maestro = maestro
+    bridge = ModuleType("virtuoso_bridge")
+    bridge.__path__ = []
+    bridge.virtuoso = virtuoso
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge", bridge)
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.virtuoso", virtuoso)
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.virtuoso.maestro", maestro)
 
 
 def test_pdk_profile_contains_verified_nics4304_paths() -> None:
@@ -140,6 +159,113 @@ def test_structured_ade_outputs_require_a_nonempty_point_output_table() -> None:
     )
 
 
+def test_prepare_maestro_creates_new_persistent_test_and_reads_it_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = {"maestro_exists": False}
+    calls: list[tuple] = []
+
+    class Client:
+        def execute_skill(self, expression, **kwargs):
+            if "ddGetObj" in expression and '"schematic"' in expression:
+                return SimpleNamespace(output="t", errors=[])
+            if "ddGetObj" in expression and '"maestro"' in expression:
+                return SimpleNamespace(
+                    output="t" if state["maestro_exists"] else "nil", errors=[]
+                )
+            if "maeGetSetup" in expression:
+                return SimpleNamespace(output='("VDA_AC")', errors=[])
+            raise AssertionError(expression)
+
+    sessions = iter(["fnxSession1", "fnxSession2"])
+
+    def fake_open_session(_client, library, cell):
+        calls.append(("open", library, cell))
+        return next(sessions)
+
+    def fake_create_test(_client, test, **kwargs):
+        calls.append(("create_test", test, kwargs))
+
+    def fake_save_setup(_client, library, cell, **kwargs):
+        calls.append(("save", library, cell, kwargs))
+        state["maestro_exists"] = True
+
+    def fake_close_session(_client, session):
+        calls.append(("close", session))
+
+    _install_fake_maestro_module(
+        monkeypatch,
+        open_session=fake_open_session,
+        close_session=fake_close_session,
+        create_test=fake_create_test,
+        save_setup=fake_save_setup,
+    )
+    monkeypatch.setattr(bridge_worker, "_client", Client)
+
+    prepared = prepare_maestro(
+        {
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_prepare": {
+                "backend": "maestro",
+                "test_name": "VDA_AC",
+                "design_view": "schematic",
+                "simulator": "spectre",
+            },
+        }
+    )
+
+    create_call = next(call for call in calls if call[0] == "create_test")
+    assert create_call[1] == "VDA_AC"
+    assert create_call[2]["view"] == "schematic"
+    assert create_call[2]["simulator"] == "spectre"
+    assert prepared["persistent_view_confirmed"] is True
+    assert prepared["tests_readback"] == ["VDA_AC"]
+    assert prepared["existing_maestro_overwritten"] is False
+    assert prepared["schematic_oa_write_performed"] is False
+    assert prepared["maestro_oa_write_performed"] is True
+    assert prepared["configured_analyses"] == []
+    assert [call[0] for call in calls].count("open") == 2
+    assert [call[0] for call in calls].count("close") == 2
+
+
+def test_prepare_maestro_refuses_an_existing_manual_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Client:
+        def execute_skill(self, expression, **kwargs):
+            if "ddGetObj" in expression:
+                return SimpleNamespace(output="t", errors=[])
+            raise AssertionError(expression)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("existing Maestro view must not be opened or changed")
+
+    _install_fake_maestro_module(
+        monkeypatch,
+        open_session=unexpected,
+        close_session=unexpected,
+        create_test=unexpected,
+        save_setup=unexpected,
+    )
+    monkeypatch.setattr(bridge_worker, "_client", Client)
+
+    with pytest.raises(RuntimeError, match="refusing to modify existing Maestro"):
+        prepare_maestro(
+            {
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "ade_prepare": {"backend": "maestro"},
+            }
+        )
+
+
 def test_focused_maestro_capture_keeps_manual_state_and_real_result_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -191,18 +317,9 @@ def test_focused_maestro_capture_keeps_manual_state_and_real_result_evidence(
             ],
         }
 
-    maestro = ModuleType("virtuoso_bridge.virtuoso.maestro")
-    maestro.snapshot = fake_snapshot
-    maestro.read_results = fake_read_results
-    virtuoso = ModuleType("virtuoso_bridge.virtuoso")
-    virtuoso.__path__ = []
-    virtuoso.maestro = maestro
-    bridge = ModuleType("virtuoso_bridge")
-    bridge.__path__ = []
-    bridge.virtuoso = virtuoso
-    monkeypatch.setitem(sys.modules, "virtuoso_bridge", bridge)
-    monkeypatch.setitem(sys.modules, "virtuoso_bridge.virtuoso", virtuoso)
-    monkeypatch.setitem(sys.modules, "virtuoso_bridge.virtuoso.maestro", maestro)
+    _install_fake_maestro_module(
+        monkeypatch, snapshot=fake_snapshot, read_results=fake_read_results
+    )
     monkeypatch.setattr(bridge_worker, "_client", lambda: object())
 
     captured = bridge_worker.capture_focused_maestro(
@@ -239,6 +356,44 @@ def test_focused_maestro_capture_keeps_manual_state_and_real_result_evidence(
     assert captured["oa_write_performed"] is False
     assert captured["setup_fingerprint_sha256"]
     assert captured["simulation_fingerprint_sha256"]
+
+
+def test_subprocess_ade_prepare_payload_has_no_invented_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "prepare-manual-ade",
+            "operation": "ade.prepare",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_prepare": {"test_name": "VDA_AC"},
+        }
+    )
+    adapter = SubprocessBridgeAdapter(tmp_path / "bridge-python.exe")
+    request: dict[str, object] = {}
+
+    def fake_request(action, payload, *, timeout):
+        request.update(action=action, payload=payload, timeout=timeout)
+        return {"existing_maestro_overwritten": False}
+
+    monkeypatch.setattr(adapter, "_request", fake_request)
+
+    result = adapter.prepare_ade(task)
+
+    assert result.evidence_source is EvidenceSource.BRIDGE_READBACK
+    assert request["action"] == "prepare_maestro"
+    payload = request["payload"]
+    assert isinstance(payload, dict)
+    assert "analysis" not in payload
+    assert "analysis_source" not in payload
+    assert payload["ade_prepare"]["test_name"] == "VDA_AC"
+    assert payload["ade_prepare"]["simulator"] == "spectre"
+    assert payload["ade_prepare_user_fields"] == ["test_name"]
 
 
 def test_subprocess_ade_capture_payload_and_artifact_root_are_explicit(

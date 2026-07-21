@@ -95,6 +95,96 @@ def test_explicit_instance_parameter_apply_is_independently_read_back() -> None:
     assert readback["RD0"]["r"] == "22k"
 
 
+def test_ade_prepare_creates_only_new_manual_setup_without_simulating() -> None:
+    class PreparingAdapter(DeterministicDemoAdapter):
+        def prepare_ade(self, task):
+            return AdapterResult(
+                data={
+                    "target": task.target.model_dump(mode="json"),
+                    "persistent_view_confirmed": True,
+                    "confirmed_setup_evidence_source": "bridge_readback",
+                    "existing_maestro_overwritten": False,
+                    "schematic_oa_write_performed": False,
+                    "maestro_oa_write_performed": True,
+                    "configured_analyses": [],
+                    "configured_sweeps": [],
+                    "configured_outputs": [],
+                },
+                evidence_source=EvidenceSource.BRIDGE_READBACK,
+            )
+
+    task = TaskSpec.model_validate(
+        {
+            "id": "prepare-manual-ade",
+            "operation": "ade.prepare",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_prepare": {"test_name": "VDA_AC"},
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+    plan = build_plan(task)
+
+    record = TaskExecutor(PreparingAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert [action.action for action in record.actions] == [
+        "bridge.probe",
+        "ade.prepare",
+    ]
+    prepared = record.actions[-1]
+    assert prepared.details["existing_maestro_overwritten"] is False
+    assert prepared.details["schematic_oa_write_performed"] is False
+    assert prepared.details["maestro_oa_write_performed"] is True
+    assert prepared.details["configured_analyses"] == []
+    assert record.candidates == []
+    assert any("manual editing" in note for note in record.notes)
+
+
+def test_ade_prepare_rejects_incomplete_adapter_write_evidence() -> None:
+    class UntrustedPreparingAdapter(DeterministicDemoAdapter):
+        def prepare_ade(self, task):
+            return AdapterResult(
+                data={"existing_maestro_overwritten": False},
+                evidence_source=EvidenceSource.BRIDGE_READBACK,
+            )
+
+    task = TaskSpec.model_validate(
+        {
+            "id": "prepare-manual-ade-untrusted",
+            "operation": "ade.prepare",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_prepare": {},
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+    plan = build_plan(task)
+
+    record = TaskExecutor(UntrustedPreparingAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.FAILED
+    assert any("new persistent Maestro-only write" in note for note in record.notes)
+
+
 def test_ade_capture_records_manual_handoff_without_simulating_or_writing_oa() -> None:
     class CapturingAdapter(DeterministicDemoAdapter):
         def capture_ade(self, task):

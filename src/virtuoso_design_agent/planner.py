@@ -117,6 +117,40 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         SideEffect.REMOTE_COMPUTE,
     )
 
+    if task.operation is Operation.ADE_PREPARE:
+        assert task.ade_prepare is not None
+        return [
+            probe,
+            _step(
+                "02-preflight",
+                "ade.prepare.preflight",
+                (
+                    f"确认 {task.target.library}/{task.target.cell}/"
+                    f"{task.ade_prepare.design_view} 已存在且目标 maestro view 不存在；"
+                    "已有 Maestro 状态一律拒绝，不覆盖、不合并"
+                ),
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "03-prepare",
+                "ade.prepare",
+                (
+                    f"新建持久化 Maestro view 与 test={task.ade_prepare.test_name}，"
+                    f"design view={task.ade_prepare.design_view}，"
+                    f"simulator={task.ade_prepare.simulator}；不设置 analysis、"
+                    "stimulus、sweep 或 output，交由人工继续调整"
+                ),
+                SideEffect.REMOTE_WRITE,
+            ),
+            _step(
+                "04-readback",
+                "ade.prepare.readback",
+                "重新打开持久化 setup，核对 Maestro view 和 test 名称",
+                SideEffect.READ_ONLY,
+            ),
+            persist.model_copy(update={"id": "05-persist"}),
+        ]
+
     if task.operation is Operation.ADE_CAPTURE:
         assert task.ade_capture is not None
         history = task.ade_capture.history or "当前可用的最新 history"

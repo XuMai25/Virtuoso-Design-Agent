@@ -26,6 +26,7 @@ class Operation(str, Enum):
     SCHEMATIC_INSPECT = "schematic.inspect"
     SCHEMATIC_TRANSFORM = "schematic.transform"
     PARAMETERS_APPLY = "parameters.apply"
+    ADE_PREPARE = "ade.prepare"
     ADE_CAPTURE = "ade.capture"
     SIMULATION_RUN = "simulation.run"
     DESIGN_TUNE = "design.tune"
@@ -212,6 +213,23 @@ class AdeCaptureSpec(StrictModel):
     require_structured_outputs: bool = False
 
 
+class AdePrepareSpec(StrictModel):
+    """Create a new persistent Maestro view without touching an existing one."""
+
+    backend: AdeBackend = AdeBackend.MAESTRO
+    test_name: str = Field(
+        default="VDA",
+        min_length=1,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_$.-]*$",
+    )
+    design_view: str = Field(
+        default="schematic",
+        min_length=1,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$",
+    )
+    simulator: str = Field(default="spectre", pattern=r"^spectre$")
+
+
 class SafetyPolicy(StrictModel):
     allow_remote_compute: bool = False
     allow_remote_write: bool = False
@@ -243,6 +261,7 @@ class TaskSpec(StrictModel):
     linearity_sweep: LinearitySweep | None = None
     noise_sweep: NoiseSweep | None = None
     ade_capture: AdeCaptureSpec | None = None
+    ade_prepare: AdePrepareSpec | None = None
     parameters: dict[str, float] = Field(default_factory=dict)
     instance_parameter_updates: list[InstanceParameterUpdate] = Field(
         default_factory=list
@@ -388,6 +407,28 @@ class TaskSpec(StrictModel):
                 raise ValueError("ade.capture cannot replace an existing view")
         elif self.ade_capture is not None:
             raise ValueError("ade_capture settings require operation='ade.capture'")
+        if self.operation is Operation.ADE_PREPARE:
+            if self.ade_prepare is None:
+                raise ValueError("ade.prepare requires ade_prepare settings")
+            if self.target.view != "maestro":
+                raise ValueError("ade.prepare currently requires target.view='maestro'")
+            if (
+                self.parameters
+                or self.instance_parameter_updates
+                or self.parameter_space
+                or self.constraints
+                or self.objective is not None
+                or self.create_if_missing
+            ):
+                raise ValueError(
+                    "ade.prepare only creates a new persistent ADE setup and does not "
+                    "accept parameters, search, constraints, objective, or schematic "
+                    "creation requests"
+                )
+            if self.safety.replace_existing:
+                raise ValueError("ade.prepare never replaces an existing Maestro view")
+        elif self.ade_prepare is not None:
+            raise ValueError("ade_prepare settings require operation='ade.prepare'")
         if self.instance_parameter_updates:
             if self.operation is not Operation.PARAMETERS_APPLY:
                 raise ValueError(

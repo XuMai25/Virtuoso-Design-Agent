@@ -1,19 +1,21 @@
-# 2026-07-21 ADE 人工交接捕获本地实现
+# 2026-07-21 ADE 双向人工交接本地实现
 
 ## 目标
 
-把“人工仍可在 ADE 中调整并把真实结果交回 VDA”提升为正式 operation，而不是依赖口头约定。首个纵向切片只接收已经存在、由用户保存并聚焦的 ADE Explorer/Assembler Maestro view；不在本 Gate 创建 setup、修改变量、运行仿真或写 OA。
+把“VDA 给出可人工继续操作的 ADE 入口，人工调整后再把真实结果交回 VDA”提升为正式 operation，而不是依赖口头约定。首个纵向切片可以为已有 design 新建一个明确不存在的 ADE Explorer/Assembler Maestro view/test，也可以接收由用户保存、运行并聚焦的 view；不修改任何已有 Maestro 状态，不在本 Gate 自动配置 analysis/sweep 或运行仿真。
 
 ## 已实现范围
 
-- 新增正交 operation `ade.capture`，可用于 `existing_schematic`、反相器和共源任务。
+- 新增正交 operation `ade.prepare` 与 `ade.capture`，均可用于 `existing_schematic`、反相器和共源任务。
+- `ade.prepare` 要求 design view 已存在、目标 `maestro` 不存在；创建一个持久化 Spectre test，保存/关闭后重新打开并回读 test 名称。
+- `ade.prepare` 在模型、planner 和 worker 三层拒绝覆盖已有 Maestro view，不设置 analysis、stimulus、sweep 或 output，也不改 schematic。
 - 任务必须显式使用 `target.view: "maestro"` 和 `ade_capture.backend: "maestro"`。
 - 可固定 `ade_capture.history`；省略时由 Bridge 按最新可用 history 规则选择。
 - 默认要求 setup 已保存并存在非空 EDA result artifacts；可进一步要求 ADE Detail 表提供结构化 output/spec。
 - 先用轻量 snapshot 核对当前聚焦窗口的 library/cell/view/session；无焦点、目标不符、捕获中切换 session 或默认模式下有未保存改动都会失败。
 - 复用 Bridge 公共 `snapshot` 与 `read_results`，捕获 Maestro setup、Spectre netlist、PSF、日志和逐 sweep point 的变量、output、spec/pass-fail。
 - 本地 manifest 保存每个文件的相对路径、字节数、SHA-256、类别和证据来源；setup 与 simulation artifacts 另有独立聚合指纹。
-- executor 只记录 `bridge.probe` 和 `ade.capture`，并明确 `automated_simulation_performed=false`、`oa_write_performed=false`。
+- executor 对 `prepare` 只记录新 Maestro view 写入和持久化 test 回读；对 `capture` 明确 `automated_simulation_performed=false`、`oa_write_performed=false`。
 - demo adapter 明确拒绝伪造 ADE 会话或 EDA 结果。
 
 ## 证据分类
@@ -24,13 +26,15 @@
 - 未指定 history 时的最新 history 选择：`software_inference`
 - 焦点、session、结果缺失等失败：`system_event`
 
-`ade.capture` 的成功只代表人工 setup/history 和已有结果被捕获，不代表结果满足 VDA constraints，也不代表 VDA 已经打通 ADE 原生 sweep/corner 执行。
+`ade.prepare` 的成功只代表存在一个可由人工继续编辑的持久化 Spectre test；`ade.capture` 的成功只代表人工 setup/history 和已有结果被捕获。两者都不代表结果满足 VDA constraints，也不代表 VDA 已经打通 ADE 原生 sweep/corner 执行。
 
 ## 本地验证
 
 测试覆盖：
 
-- 任务拒绝缺少 `ade_capture`、非 Maestro target、参数/搜索/constraints 混入和设置泄漏到其他 operation。
+- `prepare` 任务拒绝缺少设置、非 Maestro target、参数/搜索混入、`replace_existing=true` 和设置泄漏；`capture` 保留原有相应拒绝。
+- worker 模拟验证 design 存在 + Maestro 不存在时只创建一次 Spectre test、保存、关闭并独立回读；已有 Maestro view 时不会打开或修改。
+- planner 披露 `prepare` 的 Maestro OA 写入、无 remote compute，以及不配置 analysis/sweep；安全层仍要求 library 白名单和 cell 前缀。
 - planner 披露“不会打开、保存、关闭或运行 ADE”，且只有远端读取与本地证据写入，没有 remote compute/OA write。
 - executor 保留人工交接语义，不生成 candidate，不调用 simulation 或参数写入。
 - Bridge payload 不伪造默认 `analysis`，显式保留 history 与字段来源。
@@ -38,9 +42,9 @@
 - 无焦点、目标不匹配和 session 中途变化会失败。
 - 模拟的完整 focused Maestro capture 同时得到 setup 指纹、Spectre input/result 指纹和结构化逐点输出。
 
-仓库根目录执行 `.\.venv\Scripts\python.exe -m pytest`：`156 passed in 0.52s`。
+仓库根目录执行 `.\.venv\Scripts\python.exe -m pytest`：`168 passed in 0.57s`。
 
-全部 `examples/tasks/*.json` 重新生成计划：`47/47 example plans passed`；新增示例 token 正常包含 target、history 要求和本地 artifact 副作用。
+全部 `examples/tasks/*.json` 重新生成计划：`48/48 example plans passed`。`ade.prepare` 示例计划明确披露 Maestro OA 写入、既有 view 拒绝、无 remote compute；`ade.capture` 示例则保持远端只读与本地 artifact 写入。
 
 ## 第三方边界
 
@@ -48,13 +52,14 @@
 
 ## 尚未验证
 
-- nics4304/Virtuoso 6.1.8 上真实 focused Maestro view 的只读捕获。
+- nics4304/Virtuoso 6.1.8 上真实非覆盖 prepare 和 focused Maestro capture。
 - 人工修改变量、analysis、sweep 或 output 后，前后 setup 指纹能否稳定反映变化。
 - ADE Detail 表在当前环境的全部 sweep subpoint、表达式和 pass/fail 读取。
 - 旧 ADE L state 的备份后非破坏迁移及人工重开。
 - VDA 对现有 Maestro setup 的非覆盖式变量 patch、原生 parametric sweep/corner run 和结果回收。
 - ADE PSF 指标与当前 VDA `si` wrapper 指标的数值交叉核对。
+- `save_setup` 已落盘而随后 close/readback/transport 失败时可能留下一个新但未确认的 Maestro view；重试会因“已存在”而停止，必须先人工检查，当前没有删除式自动回滚。
 
 ## 下一道 Gate
 
-在 `vb_pdk_smoke` 下使用一个新建、不会覆盖已有对象的专用 testbench/Maestro view：人工打开并运行一个小型 Spectre AC sweep，保存 setup；VDA 只读捕获指定 history，核对 setup、design variables、每个 sweep point、input.scs、PSF 和结构化 output/spec。通过后再实现带 setup 指纹前置条件的非覆盖式变量 patch 和 ADE 原生批量 sweep。
+在 `vb_pdk_smoke/vda_manual_ade_handoff_001` 已有或新建的专用 design schematic 上执行 `ade.prepare`，确认只新增 `maestro` view；人工打开、补充一个小型 Spectre AC sweep/output 并运行，保存 setup；VDA 再用 `ade.capture` 固定 history，核对 setup、design variables、每个 sweep point、input.scs、PSF 和结构化 output/spec。通过后再实现带 setup 指纹前置条件的非覆盖式变量 patch 和 ADE 原生批量 sweep。

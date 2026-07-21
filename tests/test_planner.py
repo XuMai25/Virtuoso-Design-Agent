@@ -39,6 +39,38 @@ def test_create_plan_discloses_replace_existing() -> None:
     assert "替换已有" in create.description
 
 
+def test_ade_prepare_plan_refuses_existing_state_and_leaves_manual_configuration() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "prepare-manual-ade",
+            "operation": "ade.prepare",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_prepare": {"test_name": "VDA_AC"},
+        }
+    )
+
+    plan = build_plan(task)
+
+    assert [step.capability for step in plan.steps] == [
+        "bridge.probe",
+        "ade.prepare.preflight",
+        "ade.prepare",
+        "ade.prepare.readback",
+        "evidence.persist",
+    ]
+    assert plan.steps[1].side_effect is SideEffect.READ_ONLY
+    assert plan.steps[2].side_effect is SideEffect.REMOTE_WRITE
+    assert "已有 Maestro 状态一律拒绝" in plan.steps[1].description
+    assert "不设置 analysis" in plan.steps[2].description
+    assert plan.requires_remote_write
+    assert not plan.requires_remote_compute
+
+
 def test_ade_capture_plan_preserves_manual_session_and_discloses_local_artifacts() -> None:
     task = TaskSpec.model_validate(
         {

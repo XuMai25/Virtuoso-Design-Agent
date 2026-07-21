@@ -60,18 +60,22 @@ def _read_schematic(client, library: str, cell: str) -> dict[str, Any]:
     )
 
 
-def _schematic_exists(client, library: str, cell: str) -> bool:
+def _cellview_exists(client, library: str, cell: str, view: str) -> bool:
     result = client.execute_skill(
-        f'let((v) v=ddGetObj("{library}" "{cell}" "schematic") if(v t nil))',
+        f'let((v) v=ddGetObj("{library}" "{cell}" "{view}") if(v t nil))',
         timeout=15,
     )
     errors = getattr(result, "errors", None) or []
     if errors:
-        raise RuntimeError(f"schematic existence check failed: {errors[0]}")
+        raise RuntimeError(f"{view} existence check failed: {errors[0]}")
     output = str(getattr(result, "output", "")).strip().strip('"').lower()
     if output not in {"t", "nil"}:
-        raise RuntimeError(f"unexpected schematic existence result: {output!r}")
+        raise RuntimeError(f"unexpected {view} existence result: {output!r}")
     return output == "t"
+
+
+def _schematic_exists(client, library: str, cell: str) -> bool:
+    return _cellview_exists(client, library, cell, "schematic")
 
 
 def _try_read_schematic(client, library: str, cell: str) -> dict[str, Any] | None:
@@ -928,6 +932,98 @@ _ADE_RUN_INPUT_FILENAMES = {
     "variables_file",
 }
 _ADE_RUN_LOG_FILENAMES = {"logFile", "spectre.out"}
+
+
+def prepare_maestro(payload: dict[str, Any]) -> dict[str, Any]:
+    """Create one new persistent Maestro view and leave it for manual editing."""
+
+    from virtuoso_bridge.virtuoso.maestro import (
+        close_session,
+        create_test,
+        open_session,
+        save_setup,
+    )
+
+    settings = payload.get("ade_prepare") or {}
+    if settings.get("backend", "maestro") != "maestro":
+        raise RuntimeError("only the verified Bridge Maestro backend is supported")
+    library, cell = _target(payload)
+    target_view = str(payload["target"].get("view") or "")
+    if target_view != "maestro":
+        raise RuntimeError("ADE prepare target view must be maestro")
+    design_view = str(settings.get("design_view") or "schematic")
+    test_name = str(settings.get("test_name") or "VDA")
+    simulator = str(settings.get("simulator") or "spectre")
+    if simulator != "spectre":
+        raise RuntimeError("ADE prepare currently supports only the Spectre simulator")
+
+    client = _client()
+    if not _cellview_exists(client, library, cell, design_view):
+        raise RuntimeError(
+            f"ADE prepare requires existing design {library}/{cell}/{design_view}"
+        )
+    if _cellview_exists(client, library, cell, "maestro"):
+        raise RuntimeError(
+            f"refusing to modify existing Maestro view {library}/{cell}/maestro"
+        )
+
+    session = open_session(client, library, cell)
+    try:
+        create_test(
+            client,
+            test_name,
+            lib=library,
+            cell=cell,
+            view=design_view,
+            simulator=simulator,
+            session=session,
+        )
+        save_setup(client, library, cell, session=session)
+    finally:
+        close_session(client, session)
+
+    if not _cellview_exists(client, library, cell, "maestro"):
+        raise RuntimeError("Maestro save returned without a persistent view")
+
+    verify_session = open_session(client, library, cell)
+    try:
+        readback = client.execute_skill(
+            f'maeGetSetup(?session "{verify_session}")', timeout=30
+        )
+        errors = getattr(readback, "errors", None) or []
+        if errors:
+            raise RuntimeError(f"Maestro setup readback failed: {errors[0]}")
+        raw_tests = str(getattr(readback, "output", "") or "")
+        tests = re.findall(r'"([^"\\]+)"', raw_tests)
+        if tests != [test_name]:
+            raise RuntimeError(
+                "persistent Maestro setup did not read back exactly the requested "
+                f"test {test_name!r}; got {tests!r}"
+            )
+    finally:
+        close_session(client, verify_session)
+
+    return {
+        "backend": "maestro",
+        "target": {"library": library, "cell": cell, "view": "maestro"},
+        "design": {"library": library, "cell": cell, "view": design_view},
+        "test_name": test_name,
+        "simulator_requested": simulator,
+        "requested_setup_evidence_source": "user_input",
+        "persistent_view_confirmed": True,
+        "tests_readback": tests,
+        "confirmed_setup_evidence_source": "bridge_readback",
+        "existing_maestro_overwritten": False,
+        "schematic_oa_write_performed": False,
+        "maestro_oa_write_performed": True,
+        "configured_analyses": [],
+        "configured_sweeps": [],
+        "configured_outputs": [],
+        "completion_scope": (
+            "persistent Spectre-backed Maestro test prepared for manual editing; "
+            "no analysis, stimulus, sweep, output, or simulation was configured"
+        ),
+    }
 
 
 def _sha256_path(path: Path) -> str:
@@ -3186,6 +3282,7 @@ def simulate_common_source(
 
 _ACTIONS = {
     "probe": probe,
+    "prepare_maestro": prepare_maestro,
     "capture_focused_maestro": capture_focused_maestro,
     "inspect_existing_schematic": inspect_existing_schematic,
     "apply_existing_schematic_parameters": apply_existing_schematic_parameters,
