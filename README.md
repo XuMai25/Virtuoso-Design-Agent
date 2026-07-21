@@ -2,17 +2,17 @@
 
 Virtuoso Design Agent 是 `virtuoso-bridge-lite` 之上的受控设计编排层。它把“建原理图、读回、应用参数、跑仿真、判定规格、有限调优”组织成可单独执行、可组合、可审计的任务，而不是再造一套 Bridge。
 
-当前版本从 **L5A** 起步：在已知 PDK、固定电路模板、显式规格和有限搜索空间内完成闭环。TSMC28 反相器 Gate 1、电阻负载 NMOS 共源级 nominal DC，以及同一已有 cellview 上的源极退化 transform/DC/RS 有限调优均有真实 OA/`si`/Spectre 证据。2026-07-20 又真实通过共源 nominal/退化复数 AC、12 点不写 OA 的 bias/load 条件搜索、专用 cell 上的 W/RD/RS 调优，以及同一 cell 的 5 点相干 transient 线性度/真实 VDD 功耗和 211 点普通 noise PSF。2026-07-21 固定 `quality` 组合先通过真实只读 bias/load 搜索，随后又完成 8 点 W/RD/RS 三分析搜索、逐候选 OA 写入、transport checkpoint 恢复、最佳写回和全不可行恢复。一个线性度优先任务进一步自动把 RS 从 1 kΩ 改为 2 kΩ，以 29.30% GBW 损失换取 41.93% THD 降低、37.26% P1dB 提升和 17.27% DC 功耗降低。现在又加入首个 ADE 双向人工交接切片：VDA 可在确认目标不存在后新建持久化 Spectre-backed Maestro test，交给人工调整；也可只读捕获人工聚焦的 setup、history、Spectre 输入/结果和逐点 output/spec。两项能力均尚待 nics4304 live smoke。L/VDD 联合搜索和 corner 仍未闭合，因此仍不能称为完整 L5B 设计质量闭环。
+当前版本从 **L5A** 起步：在已知 PDK、固定电路模板、显式规格和有限搜索空间内完成闭环。TSMC28 反相器 Gate 1、电阻负载 NMOS 共源级 nominal DC，以及同一已有 cellview 上的源极退化 transform/DC/RS 有限调优均有真实 OA/`si`/Spectre 证据。2026-07-20 又真实通过共源 nominal/退化复数 AC、12 点不写 OA 的 bias/load 条件搜索、专用 cell 上的 W/RD/RS 调优，以及同一 cell 的 5 点相干 transient 线性度/真实 VDD 功耗和 211 点普通 noise PSF。2026-07-21 固定 `quality` 组合先通过真实只读 bias/load 搜索，随后又完成 8 点 W/RD/RS 三分析搜索、逐候选 OA 写入、transport checkpoint 恢复、最佳写回和全不可行恢复。一个线性度优先任务进一步自动把 RS 从 1 kΩ 改为 2 kΩ，以 29.30% GBW 损失换取 41.93% THD 降低、37.26% P1dB 提升和 17.27% DC 功耗降低。ADE 方向现有三个本地纵向 operation：非覆盖新建 Maestro test 的 `ade.prepare`、捕获人工聚焦 setup/history/产物的 `ade.capture`，以及不依赖 GUI 焦点、运行已保存原生 analysis/sweep 并读取逐点 output/spec 的 `ade.run`。三项均尚待 nics4304 live smoke；需要人工打开 ADE、旧 ADE L 迁移和数值交叉检查的 Gate 已明确延期。L/VDD 联合搜索和 corner 仍未闭合，因此仍不能称为完整 L5B 设计质量闭环。
 
 ## 当前能做什么
 
 - 将任务编译为带副作用标记的稳定执行计划。
-- 单独规划或执行：`schematic.create`、`schematic.inspect`、`schematic.transform`、`parameters.apply`、`ade.prepare`、`ade.capture`、`simulation.run`、`design.tune`、`design.close_loop`。当前 `schematic.transform` 只开放共源级的受控源极退化补丁。
+- 单独规划或执行：`schematic.create`、`schematic.inspect`、`schematic.transform`、`parameters.apply`、`ade.prepare`、`ade.capture`、`ade.run`、`simulation.run`、`design.tune`、`design.close_loop`。当前 `schematic.transform` 只开放共源级的受控源极退化补丁。
 - 用确定性 demo adapter 离线验证闭环、规格判定和参数选择；结果明确标为 `software_inference`。
 - 通过独立 worker 调用本机 `virtuoso-bridge-lite` 环境。反相器支持 `OA -> si -> Spectre transient` 的 timing、过冲/欠冲和周期供电能量；共源级支持同一 `OA -> si` 网表上的 DC OP、复数 AC、相干正弦 transient 幅度 sweep 和普通 noise sweep。可提取 `Id/VGS/VDS/VDSAT/gm/gds`、真实 VDD 功耗与 KCL、低频增益、首个 −3 dB 带宽、GBW、unity、HD2/HD3、THD、P1dB，以及频带积分的输出/输入参考噪声；单项执行与提取均有 live 证据。`analysis: "quality"` 已在一次 OA/`si` 核对后依次运行 AC、linearity、noise，并用真实联合指标完成 bias/load 条件搜索与 W/RD/RS 设计参数搜索、约束过滤、最佳 OA 写回和 checkpoint 恢复。
 - 源极退化不新建第二套模板或仿真器：在同一 common-source cellview 中把 `MN0.S: VSS -> NSRC`，只新增 `RS0(NSRC,VSS)`；随后由同一 inspect、参数应用、`si` 网表解析、DC 指标和有限搜索路径动态识别该变体。
 - `existing_schematic` 提供不依赖固定电路模板的 Bridge 能力面：`schematic.inspect` 保留 Bridge 的完整结构结果和所有可回读 CDF 参数；`parameters.apply` 可按实例透传 Bridge 接受的参数字符串，写入后用定向 CDF 读取再次核对。反相器/共源模板仍可在同一任务中组合 semantic parameters 与原始实例参数。
-- `ade.prepare` 与 `ade.capture` 组成显式人工介入边界，不是另一个仿真器。`prepare` 只在 design schematic 已存在且相邻 Maestro view 不存在时，使用 Bridge 新建持久化 Spectre test；已有 view 一律拒绝，不覆盖、不合并，也不预设 analysis/stimulus/sweep/output。用户随后在 ADE Explorer/Assembler Maestro 中手动调整并运行，保存、聚焦后由 `capture` 核对 library/cell/view/session，捕获 setup、指定或最新 history、真实 Spectre netlist/PSF/log 的大小与 SHA-256，并尝试读取全部 sweep point 的 output/spec 表。`capture` 不打开、保存、关闭或重跑 ADE，也不把捕获成功包装成规格闭环。当前 Bridge 的直接高层接口是 Maestro；旧 ADE L state 的非破坏迁移尚未纳入已验证 VDA operation。
+- `ade.prepare` 与 `ade.capture` 保留显式人工介入边界。`prepare` 只在 design schematic 已存在且相邻 Maestro view 不存在时新建持久化 Spectre test；已有 view 一律拒绝，也不预设 analysis/stimulus/sweep/output。`capture` 核对人工聚焦的目标，捕获 setup、history、真实 Spectre netlist/PSF/log 哈希和逐点 output/spec。`ade.run` 是独立自动分支：通过 Bridge background session 运行一个已保存 setup 的原生 analysis/parametric sweep，按本次确切 history 回收逐点 output/spec；它不要求 GUI、不保存 setup、不写 OA，默认缺少结构化输出即失败。`ade.run` 当前不捕获 netlist/PSF 哈希，也不自动判 VDA constraints，因此不能替代 `capture` 或规格闭环。旧 ADE L state 的非破坏迁移尚未纳入已验证 VDA operation。
 - 对远端计算和 OA 写入分别授权；真实执行还需要计划 token，避免一句模糊指令直接改库。
 - 将动作、候选点、指标、约束判定、最终选择和证据来源写入本地 JSON run record；调优任务还会在候选边界原子保存 checkpoint，并可在独立 OA 回读后续跑。
 
@@ -63,6 +63,7 @@ py -3.13 -m venv .venv
 .\.venv\Scripts\vda.exe plan examples\tasks\common-source-quality-linearity-priority.bridge.json
 .\.venv\Scripts\vda.exe plan examples\tasks\existing-maestro-prepare.bridge.json
 .\.venv\Scripts\vda.exe plan examples\tasks\existing-maestro-capture.bridge.json
+.\.venv\Scripts\vda.exe plan examples\tasks\existing-maestro-run.bridge.json
 ```
 
 计划会打印确认 token。复制该 token 后运行离线闭环：
@@ -103,7 +104,9 @@ C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe 
 
 `simulation.run` 不写 OA：省略器件尺寸时直接采用目标 OA 回读值；如果任务显式给出尺寸，则必须与 OA 一致，否则停止，不会用请求值覆盖 schematic。包含 OA 设计参数的 `design.tune` 和 `design.close_loop` 会在已授权写入的前提下逐点暂存参数并回读；无可行候选或可恢复中断时恢复搜索前参数。该暂存行为会明确出现在计划和 run record 中。
 
-人工 ADE 交接先用可选的 `ade.prepare`，再用 `ade.capture`。两者的 `target.view` 都必须为 `maestro`。`prepare` 需要 OA 写授权、library 白名单和 cell 前缀，只创建一个新 Maestro view/test；若目标已经存在则失败，因此不会覆盖人工状态。`capture` 默认要求 setup 已保存且存在非空 EDA result artifacts；可用 `ade_capture.history` 固定某个 `Interactive.N` 等 history，并用 `require_structured_outputs: true` 要求 ADE Detail output/spec 表可读。捕获前由用户自己打开、调整、运行、保存并聚焦目标窗口；VDA 不会抢焦点或修改它。setup 标为 `bridge_readback`，网表、PSF、Spectre log 和结构化 output/spec 标为 `eda_result`，自动选择最新 history 标为 `software_inference`，显式 history 标为 `user_input`。这一组合形成“VDA 准备持久化入口 → 人工配置/运行 → VDA 收回真实结果”；把 VDA 候选批量写入现有 setup、原生 sweep/corner 执行和最终 OA 提交仍是后续 Gate。
+人工 ADE 交接先用可选的 `ade.prepare`，再用 `ade.capture`。两者的 `target.view` 都必须为 `maestro`。`prepare` 需要 OA 写授权、library 白名单和 cell 前缀，只创建一个新 Maestro view/test；若目标已经存在则失败，因此不会覆盖人工状态。`capture` 默认要求 setup 已保存且存在非空 EDA result artifacts；可用 `ade_capture.history` 固定某个 `Interactive.N` 等 history，并用 `require_structured_outputs: true` 要求 ADE Detail output/spec 表可读。捕获前由用户自己打开、调整、运行、保存并聚焦目标窗口；VDA 不会抢焦点或修改它。setup 标为 `bridge_readback`，网表、PSF、Spectre log 和结构化 output/spec 标为 `eda_result`，自动选择最新 history 标为 `software_inference`，显式 history 标为 `user_input`。
+
+不需要人工窗口的已保存 setup 可用 `ade.run`。它要求 `target.view: "maestro"`、`ade_run` 设置和 `allow_remote_compute: true`，但不要求 `allow_remote_write`；worker 新开 background session，回读 tests，运行 setup，并用本次调用返回的 history 读取逐点 output/spec。默认 `require_structured_outputs: true`；显式设为 false 且没有输出时，run record 仍降为 `partial`。该 operation 不配置/保存 setup，不捕获 Spectre input/PSF 哈希，也不把 ADE output 自动映射成 VDA constraints。history 命名/覆盖策略由已保存 setup 决定，VDA 当前不能在后台 run 前证明名称唯一，计划会明确披露。自动变量 patch、analysis/output 配置与有限 corner 仍是后续 Gate；人工相关验证见 `docs/deferred-manual-gates.md`。
 
 共源任务省略 `analysis` 时保持向后兼容的 `dc`。AC 必须显式设置 `analysis: "ac"` 与 `ac_sweep`；线性度使用 `analysis: "transient"` 与 `linearity_sweep`；普通噪声使用 `analysis: "noise"` 与 `noise_sweep`。固定质量组合使用 `analysis: "quality"`，并强制同时声明上述三种 sweep；任一子分析不完整、参数不一致或共享 DC 指标不一致都会拒绝整个候选。worker 只做一次 OA 回读与 `si` 网表生成，再从同一网表分别运行三种 Spectre wrapper；组合逻辑标为 `software_inference`，连续指标仍保持 `eda_result`。所有显式和默认 sweep 字段都进入 token 与证据。线性度在一个 Spectre nested sweep 中运行按幅度递增的相干正弦，P1dB 未被声明范围包围时只报告 unresolved；noise 对 Bridge 已下载的普通 noise PSF 做频带积分，不把 AC 或 transient 数据包装成噪声。`load_ff` 是动态分析的可选 testbench 负载，不写 OA。若 `design.tune` 的搜索维度只有 `bias_v/vdd_v/load_ff` 这类 testbench 条件，计划和 executor 不要求或执行 OA 写入；若搜索包含 W/L/RD/RS，则仍逐候选写入、回读、checkpoint，并只提交最佳可行 OA 参数。
 
@@ -154,3 +157,5 @@ C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe 
 - [2026-07-21 共源多 analysis 质量组合真实验证](docs/validation/2026-07-21-common-source-quality-bundle-live.md)
 - [2026-07-21 共源质量驱动设计参数写回真实验证](docs/validation/2026-07-21-common-source-quality-design-tuning-live.md)
 - [2026-07-21 ADE 双向人工交接本地实现](docs/validation/2026-07-21-ade-human-handoff-local.md)
+- [2026-07-21 ADE 后台运行与结果回收本地实现](docs/validation/2026-07-21-ade-background-run-local.md)
+- [延期的人工 ADE Gate](docs/deferred-manual-gates.md)

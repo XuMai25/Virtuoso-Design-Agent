@@ -105,6 +105,39 @@ def test_ade_capture_plan_preserves_manual_session_and_discloses_local_artifacts
     assert not plan.requires_remote_compute
 
 
+def test_ade_run_plan_uses_background_compute_without_setup_write() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "run-saved-maestro",
+            "operation": "ade.run",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_run": {"require_structured_outputs": True},
+        }
+    )
+
+    plan = build_plan(task)
+
+    assert [step.capability for step in plan.steps] == [
+        "bridge.probe",
+        "ade.run.preflight",
+        "ade.run",
+        "ade.results.read",
+        "evidence.persist",
+    ]
+    assert plan.steps[2].side_effect is SideEffect.REMOTE_COMPUTE
+    assert "不要求或改变 GUI 焦点" in plan.steps[1].description
+    assert "原生 analysis/parametric sweep" in plan.steps[2].description
+    assert "不能证明名称唯一" in plan.steps[2].description
+    assert "不捕获网表/PSF" in plan.steps[3].description
+    assert plan.requires_remote_compute
+    assert not plan.requires_remote_write
+
+
 def test_inspect_plan_is_remote_read_only() -> None:
     plan = build_plan(_task("schematic.inspect"))
     assert all(step.side_effect is not SideEffect.REMOTE_WRITE for step in plan.steps)

@@ -525,6 +525,74 @@ def test_ade_capture_settings_cannot_leak_into_other_operations() -> None:
         )
 
 
+def test_ade_run_is_background_compute_without_oa_write() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "run-saved-maestro",
+            "operation": "ade.run",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_run": {"require_structured_outputs": True},
+        }
+    )
+
+    plan = build_plan(task)
+
+    assert task.ade_run is not None
+    assert task.ade_run.require_structured_outputs is True
+    assert plan.requires_remote_compute
+    assert not plan.requires_remote_write
+
+
+@pytest.mark.parametrize(
+    ("update", "message"),
+    [
+        ({"ade_run": None}, "requires ade_run settings"),
+        (
+            {"target": {"library": "vda_test", "cell": "vda_manual_tb"}},
+            "target.view='maestro'",
+        ),
+        ({"parameters": {"vdd_v": 0.9}}, "executes the saved Maestro setup"),
+        ({"safety": {"replace_existing": True}}, "never replaces"),
+    ],
+)
+def test_ade_run_rejects_configuration_or_overwrite_requests(
+    update: dict, message: str
+) -> None:
+    data = {
+        "id": "run-saved-maestro",
+        "operation": "ade.run",
+        "circuit": "existing_schematic",
+        "target": {
+            "library": "vda_test",
+            "cell": "vda_manual_tb",
+            "view": "maestro",
+        },
+        "ade_run": {},
+    }
+    data.update(update)
+
+    with pytest.raises(ValidationError, match=message):
+        TaskSpec.model_validate(data)
+
+
+def test_ade_run_settings_cannot_leak_into_other_operations() -> None:
+    with pytest.raises(ValidationError, match="require operation='ade.run'"):
+        TaskSpec.model_validate(
+            {
+                "id": "wrong-run-operation",
+                "operation": "schematic.inspect",
+                "circuit": "existing_schematic",
+                "target": {"library": "vda_test", "cell": "vda_manual_tb"},
+                "ade_run": {},
+            }
+        )
+
+
 def test_source_degeneration_is_an_exact_common_source_transform() -> None:
     task = TaskSpec.model_validate(
         {

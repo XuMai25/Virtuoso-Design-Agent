@@ -195,6 +195,56 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             ),
         ]
 
+    if task.operation is Operation.ADE_RUN:
+        assert task.ade_run is not None
+        output_requirement = (
+            "必须读回非空逐点 output/spec 表"
+            if task.ade_run.require_structured_outputs
+            else "允许没有逐点 output/spec，但 run record 只能记为 partial"
+        )
+        return [
+            probe,
+            _step(
+                "02-preflight",
+                "ade.run.preflight",
+                (
+                    "确认目标 Maestro view 已存在，以独立后台 session 回读 setup tests；"
+                    "不要求或改变 GUI 焦点，不保存或修改 setup"
+                ),
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "03-run",
+                "ade.run",
+                (
+                    "通过 Bridge run_and_wait 执行已保存的 Maestro 原生 analysis/"
+                    f"parametric sweep 并等待本次返回的 history；{output_requirement}；"
+                    "history 命名/覆盖策略沿用已保存 setup，VDA 不改写也尚不能"
+                    "证明名称唯一"
+                ),
+                SideEffect.REMOTE_COMPUTE,
+            ),
+            _step(
+                "04-results",
+                "ade.results.read",
+                (
+                    "按 run_and_wait 为本次调用返回的 history 回收每个 point 的"
+                    "变量、output、spec "
+                    "和 pass/fail；本 operation 不捕获网表/PSF 文件哈希"
+                ),
+                SideEffect.READ_ONLY,
+            ),
+            persist.model_copy(
+                update={
+                    "id": "05-persist",
+                    "description": (
+                        "记录 setup test=bridge_readback、history/output=eda_result；"
+                        "后台运行成功不等于已满足 VDA constraints"
+                    ),
+                }
+            ),
+        ]
+
     if task.operation is Operation.SCHEMATIC_CREATE:
         create_description = (
             f"显式删除并按受控模板替换已有{template_name} schematic"

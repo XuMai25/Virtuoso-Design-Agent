@@ -67,6 +67,33 @@ def test_remote_compute_needs_separate_permission() -> None:
         authorize_execution(task, plan, plan.confirmation_token)
 
 
+def test_background_ade_run_needs_compute_but_not_oa_write_permission() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "run-saved-maestro",
+            "operation": "ade.run",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "any_library",
+                "cell": "existing_tb",
+                "view": "maestro",
+            },
+            "ade_run": {},
+        }
+    )
+    plan = build_plan(task)
+    with pytest.raises(SafetyViolation, match="remote compute"):
+        authorize_execution(task, plan, plan.confirmation_token)
+
+    authorized = task.model_copy(
+        update={"safety": task.safety.model_copy(update={"allow_remote_compute": True})}
+    )
+    authorized_plan = build_plan(authorized)
+    authorize_execution(
+        authorized, authorized_plan, authorized_plan.confirmation_token
+    )
+
+
 def test_in_place_transform_still_requires_explicit_remote_write_permission() -> None:
     task = TaskSpec.model_validate(
         {

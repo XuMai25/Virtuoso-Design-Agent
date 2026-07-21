@@ -266,6 +266,127 @@ def test_prepare_maestro_refuses_an_existing_manual_view(
         )
 
 
+def test_background_maestro_run_uses_exact_new_history_and_closes_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+
+    class Client:
+        def execute_skill(self, expression, **kwargs):
+            if "ddGetObj" in expression:
+                return SimpleNamespace(output="t", errors=[])
+            if "maeGetSetup" in expression:
+                return SimpleNamespace(output='("AC")', errors=[])
+            raise AssertionError(expression)
+
+    def fake_open_session(_client, library, cell):
+        calls.append(("open", library, cell))
+        return "fnxBackground8"
+
+    def fake_run_and_wait(_client, **kwargs):
+        calls.append(("run", kwargs))
+        return '"Interactive.8"', "done"
+
+    def fake_read_results(_client, session, **kwargs):
+        calls.append(("results", session, kwargs))
+        return {
+            "history": "Interactive.8",
+            "points": [
+                {
+                    "point": 1,
+                    "parameters": {"c_val": "1p"},
+                    "outputs": {"BW": {"value": "1.2G", "pass_fail": "pass"}},
+                }
+            ],
+        }
+
+    def fake_close_session(_client, session):
+        calls.append(("close", session))
+
+    _install_fake_maestro_module(
+        monkeypatch,
+        open_session=fake_open_session,
+        close_session=fake_close_session,
+        run_and_wait=fake_run_and_wait,
+        read_results=fake_read_results,
+    )
+    monkeypatch.setattr(bridge_worker, "_client", Client)
+
+    result = bridge_worker.run_background_maestro(
+        {
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_run": {
+                "backend": "maestro",
+                "require_structured_outputs": True,
+            },
+            "timeout_seconds": 321,
+        }
+    )
+
+    assert result["session_mode"] == "background"
+    assert result["gui_focus_required"] is False
+    assert result["tests_readback"] == ["AC"]
+    assert result["history"] == "Interactive.8"
+    assert result["history_naming_policy"] == "saved_setup_unmodified"
+    assert result["history_uniqueness_verified"] is False
+    assert result["structured_results_available"] is True
+    assert result["automated_simulation_performed"] is True
+    assert result["oa_write_performed"] is False
+    assert result["maestro_setup_write_performed"] is False
+    assert result["artifacts_captured"] is False
+    assert ("run", {"session": "fnxBackground8", "timeout": 321}) in calls
+    read_call = next(call for call in calls if call[0] == "results")
+    assert read_call[2]["history"] == "Interactive.8"
+    assert calls[-1] == ("close", "fnxBackground8")
+
+
+def test_background_maestro_run_rejects_empty_structured_results_and_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+
+    class Client:
+        def execute_skill(self, expression, **kwargs):
+            if "ddGetObj" in expression:
+                return SimpleNamespace(output="t", errors=[])
+            if "maeGetSetup" in expression:
+                return SimpleNamespace(output='("AC")', errors=[])
+            raise AssertionError(expression)
+
+    def fake_close_session(_client, session):
+        calls.append(("close", session))
+
+    _install_fake_maestro_module(
+        monkeypatch,
+        open_session=lambda *_args: "fnxBackground9",
+        close_session=fake_close_session,
+        run_and_wait=lambda *_args, **_kwargs: ('"Interactive.9"', "done"),
+        read_results=lambda *_args, **_kwargs: {
+            "history": "Interactive.9",
+            "points": [],
+        },
+    )
+    monkeypatch.setattr(bridge_worker, "_client", Client)
+
+    with pytest.raises(RuntimeError, match="non-empty point/output/spec table"):
+        bridge_worker.run_background_maestro(
+            {
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "ade_run": {"require_structured_outputs": True},
+            }
+        )
+
+    assert calls == [("close", "fnxBackground9")]
+
+
 def test_focused_maestro_capture_keeps_manual_state_and_real_result_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -442,6 +563,48 @@ def test_subprocess_ade_capture_payload_and_artifact_root_are_explicit(
     }
     output_root = Path(payload["capture_output_root"])
     output_root.relative_to(tmp_path / "captures" / task.id)
+
+
+def test_subprocess_ade_run_payload_has_no_configuration_or_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "run-saved-maestro",
+            "operation": "ade.run",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_run": {"require_structured_outputs": True},
+            "safety": {"allow_remote_compute": True},
+            "limits": {"timeout_seconds": 321},
+        }
+    )
+    adapter = SubprocessBridgeAdapter(tmp_path / "bridge-python.exe")
+    request: dict[str, object] = {}
+
+    def fake_request(action, payload, *, timeout):
+        request.update(action=action, payload=payload, timeout=timeout)
+        return {"structured_results_available": True}
+
+    monkeypatch.setattr(adapter, "_request", fake_request)
+
+    result = adapter.run_ade(task)
+
+    assert result.evidence_source is EvidenceSource.EDA_RESULT
+    assert request["action"] == "run_background_maestro"
+    assert request["timeout"] == 561
+    payload = request["payload"]
+    assert isinstance(payload, dict)
+    assert "analysis" not in payload
+    assert "analysis_source" not in payload
+    assert "ade_prepare" not in payload
+    assert "ade_capture" not in payload
+    assert payload["ade_run"]["require_structured_outputs"] is True
+    assert payload["ade_run_user_fields"] == ["require_structured_outputs"]
 
 
 def test_inverter_testbench_deck_includes_oa_netlist_without_device_topology() -> None:

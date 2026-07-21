@@ -934,6 +934,17 @@ _ADE_RUN_INPUT_FILENAMES = {
 _ADE_RUN_LOG_FILENAMES = {"logFile", "spectre.out"}
 
 
+def _maestro_tests_readback(client, session: str) -> list[str]:
+    readback = client.execute_skill(
+        f'maeGetSetup(?session "{session}")', timeout=30
+    )
+    errors = getattr(readback, "errors", None) or []
+    if errors:
+        raise RuntimeError(f"Maestro setup readback failed: {errors[0]}")
+    raw_tests = str(getattr(readback, "output", "") or "")
+    return re.findall(r'"([^"\\]+)"', raw_tests)
+
+
 def prepare_maestro(payload: dict[str, Any]) -> dict[str, Any]:
     """Create one new persistent Maestro view and leave it for manual editing."""
 
@@ -987,14 +998,7 @@ def prepare_maestro(payload: dict[str, Any]) -> dict[str, Any]:
 
     verify_session = open_session(client, library, cell)
     try:
-        readback = client.execute_skill(
-            f'maeGetSetup(?session "{verify_session}")', timeout=30
-        )
-        errors = getattr(readback, "errors", None) or []
-        if errors:
-            raise RuntimeError(f"Maestro setup readback failed: {errors[0]}")
-        raw_tests = str(getattr(readback, "output", "") or "")
-        tests = re.findall(r'"([^"\\]+)"', raw_tests)
+        tests = _maestro_tests_readback(client, verify_session)
         if tests != [test_name]:
             raise RuntimeError(
                 "persistent Maestro setup did not read back exactly the requested "
@@ -1137,6 +1141,102 @@ def _has_structured_ade_outputs(results: dict[str, Any]) -> bool:
             for point in points
         )
     )
+
+
+def _normalized_maestro_history(value: Any) -> str:
+    history = str(value or "").strip()
+    if len(history) >= 2 and history.startswith('"') and history.endswith('"'):
+        history = history[1:-1]
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", history):
+        raise RuntimeError(f"Maestro returned an invalid history name: {value!r}")
+    return history
+
+
+def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
+    """Run a saved Maestro setup without opening or focusing a GUI window."""
+
+    from virtuoso_bridge.virtuoso.maestro import (
+        close_session,
+        open_session,
+        read_results,
+        run_and_wait,
+    )
+
+    settings = payload.get("ade_run") or {}
+    if settings.get("backend", "maestro") != "maestro":
+        raise RuntimeError("only the verified Bridge Maestro backend is supported")
+    library, cell = _target(payload)
+    view = str(payload["target"].get("view") or "")
+    if view != "maestro":
+        raise RuntimeError("ADE run target view must be maestro")
+
+    client = _client()
+    if not _cellview_exists(client, library, cell, view):
+        raise RuntimeError(f"ADE run requires existing {library}/{cell}/{view}")
+
+    session = open_session(client, library, cell)
+    try:
+        tests = _maestro_tests_readback(client, session)
+        if not tests:
+            raise RuntimeError("saved Maestro setup did not contain any tests")
+        raw_history, run_status = run_and_wait(
+            client,
+            session=session,
+            timeout=int(payload.get("timeout_seconds") or 600),
+        )
+        history = _normalized_maestro_history(raw_history)
+        if str(run_status).strip().lower() != "done":
+            raise RuntimeError(
+                f"Maestro background run did not reach done status: {run_status!r}"
+            )
+        results = read_results(
+            client,
+            session,
+            lib=library,
+            cell=cell,
+            history=history,
+        )
+    finally:
+        close_session(client, session)
+
+    result_history = str(results.get("history") or "")
+    if result_history and result_history != history:
+        raise RuntimeError(
+            "Maestro structured results history does not match the history created "
+            "by this run"
+        )
+    structured_outputs = _has_structured_ade_outputs(results)
+    if settings.get("require_structured_outputs", True) and not structured_outputs:
+        raise RuntimeError(
+            "Maestro background run completed but did not expose a non-empty "
+            "point/output/spec table"
+        )
+
+    return {
+        "backend": "maestro",
+        "target": {"library": library, "cell": cell, "view": view},
+        "session_mode": "background",
+        "gui_focus_required": False,
+        "tests_readback": tests,
+        "setup_evidence_source": "bridge_readback",
+        "history": history,
+        "history_evidence_source": "eda_result",
+        "history_naming_policy": "saved_setup_unmodified",
+        "history_uniqueness_verified": False,
+        "run_status": str(run_status).strip().lower(),
+        "structured_results_available": structured_outputs,
+        "structured_results": results,
+        "structured_results_evidence_source": "eda_result",
+        "automated_simulation_performed": True,
+        "oa_write_performed": False,
+        "maestro_setup_write_performed": False,
+        "artifacts_captured": False,
+        "completion_scope": (
+            "saved Maestro setup executed in a background session and the history "
+            "returned for this invocation was read; history uniqueness, simulator "
+            "input, and PSF artifacts were not captured by this operation"
+        ),
+    }
 
 
 def capture_focused_maestro(payload: dict[str, Any]) -> dict[str, Any]:
@@ -3284,6 +3384,7 @@ _ACTIONS = {
     "probe": probe,
     "prepare_maestro": prepare_maestro,
     "capture_focused_maestro": capture_focused_maestro,
+    "run_background_maestro": run_background_maestro,
     "inspect_existing_schematic": inspect_existing_schematic,
     "apply_existing_schematic_parameters": apply_existing_schematic_parameters,
     "create_inverter": create_inverter,

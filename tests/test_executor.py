@@ -233,6 +233,98 @@ def test_ade_capture_records_manual_handoff_without_simulating_or_writing_oa() -
     assert any("human-operated ADE" in note for note in record.notes)
 
 
+@pytest.mark.parametrize(
+    ("structured", "expected_status"),
+    [
+        (True, RunStatus.SUCCEEDED),
+        (False, RunStatus.PARTIAL),
+    ],
+)
+def test_ade_run_records_background_history_without_oa_write(
+    structured: bool, expected_status: RunStatus
+) -> None:
+    class RunningAdapter(DeterministicDemoAdapter):
+        def run_ade(self, task):
+            return AdapterResult(
+                data={
+                    "target": task.target.model_dump(mode="json"),
+                    "session_mode": "background",
+                    "setup_evidence_source": "bridge_readback",
+                    "history": "Interactive.8",
+                    "structured_results_available": structured,
+                    "structured_results_evidence_source": "eda_result",
+                    "automated_simulation_performed": True,
+                    "oa_write_performed": False,
+                    "maestro_setup_write_performed": False,
+                },
+                evidence_source=EvidenceSource.EDA_RESULT,
+            )
+
+    task = TaskSpec.model_validate(
+        {
+            "id": "run-saved-maestro",
+            "operation": "ade.run",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_run": {"require_structured_outputs": structured},
+            "safety": {"allow_remote_compute": True},
+        }
+    )
+    plan = build_plan(task)
+
+    record = TaskExecutor(RunningAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is expected_status
+    assert [action.action for action in record.actions] == [
+        "bridge.probe",
+        "ade.run",
+    ]
+    run = record.actions[-1]
+    assert run.evidence_source is EvidenceSource.EDA_RESULT
+    assert run.details["history"] == "Interactive.8"
+    assert run.details["oa_write_performed"] is False
+    assert record.candidates == []
+    assert any("background session" in note for note in record.notes)
+
+
+def test_ade_run_rejects_incomplete_adapter_evidence() -> None:
+    class UntrustedRunningAdapter(DeterministicDemoAdapter):
+        def run_ade(self, task):
+            return AdapterResult(
+                data={"history": "Interactive.8"},
+                evidence_source=EvidenceSource.EDA_RESULT,
+            )
+
+    task = TaskSpec.model_validate(
+        {
+            "id": "run-saved-maestro-untrusted",
+            "operation": "ade.run",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_run": {},
+            "safety": {"allow_remote_compute": True},
+        }
+    )
+    plan = build_plan(task)
+
+    record = TaskExecutor(UntrustedRunningAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.FAILED
+    assert any("exact background history" in note for note in record.notes)
+
+
 def test_explicit_parameter_apply_fails_on_untrusted_adapter_confirmation() -> None:
     class MismatchedConfirmationAdapter(DeterministicDemoAdapter):
         def apply_parameters(self, task, parameters):

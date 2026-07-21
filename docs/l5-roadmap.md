@@ -39,6 +39,10 @@ Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发�
 
 2026-07-21 又完成 `ade.prepare` + `ade.capture` 的本地纵向实现。`prepare` 只在已有 design schematic 且目标 Maestro view 不存在时新建持久化 Spectre test，保存后重新打开核对；已有 view 一律拒绝，不配置 analysis/stimulus/sweep/output。人工补全并运行后，`capture` 只读核对聚焦的 `library/cell/maestro`，默认要求 setup 已保存，捕获 setup、指定/最新 history、Spectre netlist、PSF/log 和 ADE 逐 sweep 点 output/spec，并生成逐文件及聚合 SHA-256。两者都不把准备或捕获成功算作 VDA 规格 closure。Bridge 当前公开的持久化后端是 Maestro；旧 ADE L state 非破坏迁移、VDA-managed variable sweep/corner 和 live nics4304 prepare/capture 仍待 Gate，因此此项当前只能称为 **local bidirectional human-operated ADE handoff contract implemented**。
 
+同日新增 `ade.run` 本地纵向能力：不打开或聚焦 GUI，以独立 background Maestro session 运行一个已保存 setup 中的原生 analysis/parametric sweep，并把本次调用返回的 history 中逐 point 参数、output、spec 和 pass/fail 作为 `eda_result` 回收。它不保存 setup、不写 OA，执行只需 remote-compute 授权；默认缺少结构化输出就失败，显式允许时也只记为 partial。history 命名/覆盖策略仍来自已保存 setup，当前不能在 run 前证明名称唯一。由于还没有 background netlist/PSF 哈希、VDA constraint 映射或 nics4304 live 证据，状态只升级为 **local background Maestro run/result-ingestion contract implemented**，没有升级 L5A/L5B closure。
+
+需要用户操作 Virtuoso/ADE 的验证已按用户决定延期，并集中记录在 [`deferred-manual-gates.md`](deferred-manual-gates.md)：包括人工修改/保存/重跑后的双向交接、旧 ADE L state 备份后迁移与重开，以及相同 history/output 的人工数值交叉检查。这些项目不阻塞后台自动化实现，但在真实完成前仍保留为未验证边界；延期记录本身不构成远端授权。
+
 ## L5B：单模块设计代理（产品目标）
 
 面向反相器、单管放大器、差分对等单模块，由规格驱动完成更完整的设计过程：
@@ -76,7 +80,7 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> 有限 AC trade-off 与失败/预算/恢复路径（已通过）
   -> 功耗 + transient 线性度 + noise（单点只读 live 已通过）
   -> 多 analysis 质量约束与受预算调优（W/RD/RS 写回、失败门与恢复已通过）
-  -> ADE 人工交接（本地非覆盖 prepare/capture 已实现；Maestro live、ADE L 迁移和变量 patch 待验证）
+  -> ADE 双路径（非覆盖 prepare/capture + background run 已本地实现；live、变量 patch 与 corner 待验证）
   -> L/VDD + 多 analysis + 有限 corner
   -> 差分对
   -> L5B 单模块闭环
@@ -85,4 +89,4 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
 
 每一级只有在真实 Bridge smoke、结构回读、指标解析和失败注入均通过后才升级状态。
 
-反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化原位 transform/DC tuning、只读 AC 条件搜索、W/RD/RS AC 与多 analysis 质量写回、单项功耗/linearity/noise，以及预算/不可行/transport 恢复均已有 live 证据。Gate 2A 现在可以让不同 objective 在同一候选证据上得到不同 OA 设计。下一道硬门先在专用 design 上执行“VDA 非覆盖 prepare → 人工调整/运行 → VDA capture → setup/history/结果指纹审计”，再把 VDA 候选以带指纹前置条件的变量 patch 接入 ADE 原生 sweep，并加入 L/VDD 与有限 corner；之后进入差分对。通过这些项前不能升级为可重复的 L5B 单模块规格闭环。
+反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化原位 transform/DC tuning、只读 AC 条件搜索、W/RD/RS AC 与多 analysis 质量写回、单项功耗/linearity/noise，以及预算/不可行/transport 恢复均已有 live 证据。Gate 2A 现在可以让不同 objective 在同一候选证据上得到不同 OA 设计。下一自动化硬门是把带 setup 指纹或逐项旧值前置条件的变量/analysis/output patch 接入 Maestro 原生 sweep，并让 background run 同时保留 netlist/PSF 证据；随后加入 L/VDD 与有限 corner。需要人工打开/修改/重跑、旧 ADE L 迁移和数值交叉检查的 Gate 已按用户决定延期，不再阻塞自动实现，但完成前仍不能升级为可重复的 L5B 单模块规格闭环。

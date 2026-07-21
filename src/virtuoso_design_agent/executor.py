@@ -818,6 +818,57 @@ class TaskExecutor:
                         "ADE result artifacts were retained, but no structured "
                         "output/spec table was available"
                     )
+            elif operation is Operation.ADE_RUN:
+                ran = self._action("ade.run", lambda: self.adapter.run_ade(task))
+                if (
+                    ran.evidence_source is not EvidenceSource.EDA_RESULT
+                    or ran.data.get("setup_evidence_source") != "bridge_readback"
+                    or ran.data.get("automated_simulation_performed") is not True
+                    or ran.data.get("oa_write_performed") is not False
+                    or ran.data.get("maestro_setup_write_performed") is not False
+                    or ran.data.get("session_mode") != "background"
+                    or not ran.data.get("history")
+                ):
+                    raise RuntimeError(
+                        "ADE run did not prove an exact background history without "
+                        "OA or Maestro setup writes"
+                    )
+                structured = bool(
+                    ran.data.get("structured_results_available", False)
+                )
+                if structured and (
+                    ran.data.get("structured_results_evidence_source")
+                    != "eda_result"
+                ):
+                    raise RuntimeError(
+                        "ADE run did not label structured output/spec values as "
+                        "eda_result"
+                    )
+                if task.ade_run is not None and (
+                    task.ade_run.require_structured_outputs and not structured
+                ):
+                    raise RuntimeError(
+                        "ADE run required structured output/spec results but the "
+                        "adapter did not provide them"
+                    )
+                notes.append(
+                    "executed the saved Maestro setup in a background session; no "
+                    "GUI focus, setup save, or OA write was performed"
+                )
+                notes.append(
+                    "ADE output/spec values are real EDA results but are not mapped "
+                    "to VDA constraints or netlist/PSF artifact hashes by ade.run"
+                )
+                notes.append(
+                    "history naming and overwrite behavior came from the saved "
+                    "Maestro setup; VDA did not change it or prove history uniqueness"
+                )
+                if not structured:
+                    status = RunStatus.PARTIAL
+                    notes.append(
+                        "Maestro history completed without a structured point/output "
+                        "table; completion alone was not treated as design success"
+                    )
             elif operation is Operation.SIMULATION_RUN:
                 self._action(
                     "schematic.inspect.before",

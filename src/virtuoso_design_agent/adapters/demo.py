@@ -394,6 +394,12 @@ class DeterministicDemoAdapter:
             "fabricate a human-operated ADE session or EDA results"
         )
 
+    def run_ade(self, task: TaskSpec) -> AdapterResult:
+        raise RuntimeError(
+            "ade.run requires the real Bridge; the demo adapter cannot fabricate "
+            "a Maestro history or EDA results"
+        )
+
     def simulate(
         self, task: TaskSpec, parameters: dict[str, float]
     ) -> AdapterResult:

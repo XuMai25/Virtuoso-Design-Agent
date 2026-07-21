@@ -28,6 +28,7 @@ class Operation(str, Enum):
     PARAMETERS_APPLY = "parameters.apply"
     ADE_PREPARE = "ade.prepare"
     ADE_CAPTURE = "ade.capture"
+    ADE_RUN = "ade.run"
     SIMULATION_RUN = "simulation.run"
     DESIGN_TUNE = "design.tune"
     DESIGN_CLOSE_LOOP = "design.close_loop"
@@ -230,6 +231,13 @@ class AdePrepareSpec(StrictModel):
     simulator: str = Field(default="spectre", pattern=r"^spectre$")
 
 
+class AdeRunSpec(StrictModel):
+    """Run one saved Maestro setup in a background session."""
+
+    backend: AdeBackend = AdeBackend.MAESTRO
+    require_structured_outputs: bool = True
+
+
 class SafetyPolicy(StrictModel):
     allow_remote_compute: bool = False
     allow_remote_write: bool = False
@@ -262,6 +270,7 @@ class TaskSpec(StrictModel):
     noise_sweep: NoiseSweep | None = None
     ade_capture: AdeCaptureSpec | None = None
     ade_prepare: AdePrepareSpec | None = None
+    ade_run: AdeRunSpec | None = None
     parameters: dict[str, float] = Field(default_factory=dict)
     instance_parameter_updates: list[InstanceParameterUpdate] = Field(
         default_factory=list
@@ -429,6 +438,27 @@ class TaskSpec(StrictModel):
                 raise ValueError("ade.prepare never replaces an existing Maestro view")
         elif self.ade_prepare is not None:
             raise ValueError("ade_prepare settings require operation='ade.prepare'")
+        if self.operation is Operation.ADE_RUN:
+            if self.ade_run is None:
+                raise ValueError("ade.run requires ade_run settings")
+            if self.target.view != "maestro":
+                raise ValueError("ade.run currently requires target.view='maestro'")
+            if (
+                self.parameters
+                or self.instance_parameter_updates
+                or self.parameter_space
+                or self.constraints
+                or self.objective is not None
+                or self.create_if_missing
+            ):
+                raise ValueError(
+                    "ade.run executes the saved Maestro setup and does not accept "
+                    "parameters, search, constraints, objective, or creation requests"
+                )
+            if self.safety.replace_existing:
+                raise ValueError("ade.run never replaces an existing Maestro view")
+        elif self.ade_run is not None:
+            raise ValueError("ade_run settings require operation='ade.run'")
         if self.instance_parameter_updates:
             if self.operation is not Operation.PARAMETERS_APPLY:
                 raise ValueError(

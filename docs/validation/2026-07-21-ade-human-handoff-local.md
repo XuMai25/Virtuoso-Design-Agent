@@ -56,10 +56,10 @@
 - 人工修改变量、analysis、sweep 或 output 后，前后 setup 指纹能否稳定反映变化。
 - ADE Detail 表在当前环境的全部 sweep subpoint、表达式和 pass/fail 读取。
 - 旧 ADE L state 的备份后非破坏迁移及人工重开。
-- VDA 对现有 Maestro setup 的非覆盖式变量 patch、原生 parametric sweep/corner run 和结果回收。
+- VDA 对现有 Maestro setup 的非覆盖式变量/analysis/output patch 和原生 corner；background parametric sweep run/result 回收已有本地契约，仍待 live。
 - ADE PSF 指标与当前 VDA `si` wrapper 指标的数值交叉核对。
 - `save_setup` 已落盘而随后 close/readback/transport 失败时可能留下一个新但未确认的 Maestro view；重试会因“已存在”而停止，必须先人工检查，当前没有删除式自动回滚。
 
-## 下一道 Gate
+## 后续 Gate（人工部分已延期）
 
-在 `vb_pdk_smoke/vda_manual_ade_handoff_001` 已有或新建的专用 design schematic 上执行 `ade.prepare`，确认只新增 `maestro` view；人工打开、补充一个小型 Spectre AC sweep/output 并运行，保存 setup；VDA 再用 `ade.capture` 固定 history，核对 setup、design variables、每个 sweep point、input.scs、PSF 和结构化 output/spec。通过后再实现带 setup 指纹前置条件的非覆盖式变量 patch 和 ADE 原生批量 sweep。
+人工 prepare/edit/capture、旧 ADE L 迁移和数值交叉检查已按用户决定延期，详见 [`../deferred-manual-gates.md`](../deferred-manual-gates.md)。当前自动化 Gate 改为实现带 setup 指纹或逐项旧值前置条件的非覆盖变量/analysis/output patch，并让 [`ade.run`](2026-07-21-ade-background-run-local.md) 在 background 原生 sweep 后保留 netlist/PSF 证据；延期项目完成前不升级人工兼容状态。
