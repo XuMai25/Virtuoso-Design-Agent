@@ -202,6 +202,11 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             if task.ade_run.require_structured_outputs
             else "允许没有逐点 output/spec，但 run record 只能记为 partial"
         )
+        artifact_requirement = (
+            "必须取得本次 history 的非空网表、结果和日志哈希清单"
+            if task.ade_run.require_artifact_manifest
+            else "允许缺少 history 产物清单，但 run record 只能记为 partial"
+        )
         return [
             probe,
             _step(
@@ -219,6 +224,7 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 (
                     "通过 Bridge run_and_wait 执行已保存的 Maestro 原生 analysis/"
                     f"parametric sweep 并等待本次返回的 history；{output_requirement}；"
+                    f"{artifact_requirement}；"
                     "history 命名/覆盖策略沿用已保存 setup，VDA 不改写也尚不能"
                     "证明名称唯一"
                 ),
@@ -229,10 +235,12 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 "ade.results.read",
                 (
                     "按 run_and_wait 为本次调用返回的 history 回收每个 point 的"
-                    "变量、output、spec "
-                    "和 pass/fail；本 operation 不捕获网表/PSF 文件哈希"
+                    "变量、output、spec 和 pass/fail；通过 Bridge shell 在"
+                    " project/scratch 精确 history 路径只读枚举网表、PSF/结果和日志，"
+                    "在 profile /data/xum run root 写入并保留小型 TSV，再下载"
+                    "大小与 SHA-256；双路径同名内容冲突时失败"
                 ),
-                SideEffect.READ_ONLY,
+                SideEffect.REMOTE_COMPUTE,
             ),
             persist.model_copy(
                 update={

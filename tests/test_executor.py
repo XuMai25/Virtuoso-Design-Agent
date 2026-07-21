@@ -358,6 +358,85 @@ def test_ade_run_records_background_history_without_oa_write(
                     "automated_simulation_performed": True,
                     "oa_write_performed": False,
                     "maestro_setup_write_performed": False,
+                    "artifact_history": "Interactive.8",
+                    "artifact_history_path_binding_verified": True,
+                    "artifact_manifest_complete": True,
+                    "artifacts_captured": True,
+                    "artifact_counts": {
+                        "simulator_input": 2,
+                        "eda_result": 1,
+                        "run_log": 1,
+                    },
+                    "artifact_manifest": [
+                        {
+                            "path": "Interactive.8/1/AC/netlist/netlist",
+                            "size_bytes": 10,
+                            "sha256": "1" * 64,
+                            "category": "simulator_input",
+                            "evidence_source": "eda_result",
+                            "remote_paths": [
+                                "/data/xum/scratch/vda_test/cell/maestro/results/"
+                                "maestro/Interactive.8/1/AC/netlist/netlist"
+                            ],
+                        },
+                        {
+                            "path": "Interactive.8/1/AC/netlist/input.scs",
+                            "size_bytes": 20,
+                            "sha256": "2" * 64,
+                            "category": "simulator_input",
+                            "evidence_source": "eda_result",
+                            "remote_paths": [
+                                "/data/xum/scratch/vda_test/cell/maestro/results/"
+                                "maestro/Interactive.8/1/AC/netlist/input.scs"
+                            ],
+                        },
+                        {
+                            "path": "Interactive.8/1/AC/psf/ac.ac",
+                            "size_bytes": 30,
+                            "sha256": "3" * 64,
+                            "category": "eda_result",
+                            "evidence_source": "eda_result",
+                            "remote_paths": [
+                                "/data/xum/scratch/vda_test/cell/maestro/results/"
+                                "maestro/Interactive.8/1/AC/psf/ac.ac"
+                            ],
+                        },
+                        {
+                            "path": "Interactive.8/Interactive.8.log",
+                            "size_bytes": 40,
+                            "sha256": "4" * 64,
+                            "category": "run_log",
+                            "evidence_source": "eda_result",
+                            "remote_paths": [
+                                "/data/xum/project/vda_test/cell/maestro/results/"
+                                "maestro/Interactive.8.log"
+                            ],
+                        },
+                    ],
+                    "simulation_fingerprint_sha256": (
+                        "58070e0bdbe50ba3c4f343f00c553a6b425271a5b2d678b6d113fff3695d9104"
+                    ),
+                    "remote_manifest_directory": "/data/xum/vda_runs/manifest",
+                    "artifact_locations_checked": [
+                        {
+                            "history_root": (
+                                "/data/xum/project/vda_test/cell/maestro/results/"
+                                "maestro/Interactive.8"
+                            ),
+                            "remote_manifest_path": (
+                                "/data/xum/vda_runs/manifest/0_project.tsv"
+                            ),
+                        },
+                        {
+                            "history_root": (
+                                "/data/xum/scratch/vda_test/cell/maestro/results/"
+                                "maestro/Interactive.8"
+                            ),
+                            "remote_manifest_path": (
+                                "/data/xum/vda_runs/manifest/1_scratch.tsv"
+                            ),
+                        },
+                    ],
                 },
                 evidence_source=EvidenceSource.EDA_RESULT,
             )
@@ -391,6 +470,7 @@ def test_ade_run_records_background_history_without_oa_write(
     assert run.evidence_source is EvidenceSource.EDA_RESULT
     assert run.details["history"] == "Interactive.8"
     assert run.details["oa_write_performed"] is False
+    assert run.details["artifact_manifest_complete"] is True
     assert record.candidates == []
     assert any("background session" in note for note in record.notes)
 
@@ -425,6 +505,107 @@ def test_ade_run_rejects_incomplete_adapter_evidence() -> None:
 
     assert record.status is RunStatus.FAILED
     assert any("exact background history" in note for note in record.notes)
+
+
+def test_ade_run_optional_missing_artifacts_is_partial() -> None:
+    class RunningAdapter(DeterministicDemoAdapter):
+        def run_ade(self, task):
+            return AdapterResult(
+                data={
+                    "session_mode": "background",
+                    "setup_evidence_source": "bridge_readback",
+                    "history": "Interactive.8",
+                    "structured_results_available": True,
+                    "structured_results_evidence_source": "eda_result",
+                    "automated_simulation_performed": True,
+                    "oa_write_performed": False,
+                    "maestro_setup_write_performed": False,
+                    "artifact_manifest_complete": False,
+                    "artifacts_captured": False,
+                    "artifact_capture_error": "remote manifest unavailable",
+                },
+                evidence_source=EvidenceSource.EDA_RESULT,
+            )
+
+    task = TaskSpec.model_validate(
+        {
+            "id": "run-saved-maestro-without-required-artifacts",
+            "operation": "ade.run",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_run": {"require_artifact_manifest": False},
+            "safety": {"allow_remote_compute": True},
+        }
+    )
+    plan = build_plan(task)
+
+    record = TaskExecutor(RunningAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.PARTIAL
+    assert any("evidence gate" in note for note in record.notes)
+
+
+def test_ade_run_rejects_corrupt_exact_history_artifact_evidence() -> None:
+    class RunningAdapter(DeterministicDemoAdapter):
+        def run_ade(self, task):
+            return AdapterResult(
+                data={
+                    "session_mode": "background",
+                    "setup_evidence_source": "bridge_readback",
+                    "history": "Interactive.8",
+                    "structured_results_available": True,
+                    "structured_results_evidence_source": "eda_result",
+                    "automated_simulation_performed": True,
+                    "oa_write_performed": False,
+                    "maestro_setup_write_performed": False,
+                    "artifact_history": "Interactive.7",
+                    "artifact_history_path_binding_verified": True,
+                    "artifact_manifest_complete": True,
+                    "artifacts_captured": True,
+                    "artifact_counts": {
+                        "simulator_input": 1,
+                        "eda_result": 1,
+                        "run_log": 1,
+                    },
+                    "artifact_manifest": [
+                        {
+                            "category": "simulator_input",
+                            "evidence_source": "eda_result",
+                        }
+                    ],
+                    "simulation_fingerprint_sha256": "a" * 64,
+                },
+                evidence_source=EvidenceSource.EDA_RESULT,
+            )
+
+    task = TaskSpec.model_validate(
+        {
+            "id": "run-saved-maestro-corrupt-artifacts",
+            "operation": "ade.run",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_run": {},
+            "safety": {"allow_remote_compute": True},
+        }
+    )
+    plan = build_plan(task)
+
+    record = TaskExecutor(RunningAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.FAILED
+    assert any("internally inconsistent" in note for note in record.notes)
 
 
 def test_ade_variable_patch_records_exact_persistent_compare_and_swap() -> None:

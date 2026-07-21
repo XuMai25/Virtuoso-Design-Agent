@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import itertools
+import json
 import math
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -851,23 +854,166 @@ class TaskExecutor:
                         "ADE run required structured output/spec results but the "
                         "adapter did not provide them"
                     )
+                artifacts_complete = bool(
+                    ran.data.get("artifact_manifest_complete", False)
+                )
+                if artifacts_complete:
+                    manifest = ran.data.get("artifact_manifest")
+                    counts = ran.data.get("artifact_counts")
+                    history = str(ran.data.get("history") or "")
+                    fingerprint = str(
+                        ran.data.get("simulation_fingerprint_sha256") or ""
+                    )
+                    locations = ran.data.get("artifact_locations_checked")
+                    manifest_directory = str(
+                        ran.data.get("remote_manifest_directory") or ""
+                    )
+                    if (
+                        ran.data.get("artifacts_captured") is not True
+                        or ran.data.get("artifact_history")
+                        != history
+                        or ran.data.get("artifact_history_path_binding_verified")
+                        is not True
+                        or not isinstance(manifest, list)
+                        or not manifest
+                        or not isinstance(counts, dict)
+                        or not re.fullmatch(r"[0-9a-f]{64}", fingerprint)
+                        or not isinstance(locations, list)
+                        or not locations
+                        or not manifest_directory.startswith("/data/xum/")
+                    ):
+                        raise RuntimeError(
+                            "ADE run artifact evidence was internally inconsistent"
+                        )
+                    required_categories = {
+                        "simulator_input",
+                        "eda_result",
+                        "run_log",
+                    }
+                    actual_counts = {category: 0 for category in required_categories}
+                    nonempty_input_names: set[str] = set()
+                    nonempty_result = False
+                    nonempty_log = False
+                    for item in manifest:
+                        if not isinstance(item, dict):
+                            raise RuntimeError(
+                                "ADE run artifact manifest contained a non-object row"
+                            )
+                        path = str(item.get("path") or "")
+                        category = str(item.get("category") or "")
+                        digest = str(item.get("sha256") or "")
+                        size = item.get("size_bytes")
+                        remote_paths = item.get("remote_paths")
+                        if (
+                            not path.startswith(f"{history}/")
+                            or category not in required_categories | {"other"}
+                            or not isinstance(size, int)
+                            or size < 0
+                            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                            or not isinstance(remote_paths, list)
+                            or not remote_paths
+                            or any(
+                                not isinstance(remote_path, str)
+                                or not remote_path.startswith("/data/xum/")
+                                for remote_path in remote_paths
+                            )
+                        ):
+                            raise RuntimeError(
+                                "ADE run artifact manifest row was internally "
+                                "inconsistent"
+                            )
+                        if category in required_categories:
+                            if item.get("evidence_source") != "eda_result":
+                                raise RuntimeError(
+                                    "ADE run artifact evidence source was not "
+                                    "eda_result"
+                                )
+                            actual_counts[category] += 1
+                        if category == "simulator_input" and size > 0:
+                            nonempty_input_names.add(Path(path).name)
+                        elif category == "eda_result" and size > 0:
+                            nonempty_result = True
+                        elif category == "run_log" and size > 0:
+                            nonempty_log = True
+                    for category in required_categories:
+                        if int(counts.get(category, -1)) != actual_counts[category]:
+                            raise RuntimeError(
+                                "ADE run artifact category count did not match "
+                                f"manifest rows for {category}"
+                            )
+                    if (
+                        not {"netlist", "input.scs"}.issubset(
+                            nonempty_input_names
+                        )
+                        or not nonempty_result
+                        or not nonempty_log
+                    ):
+                        raise RuntimeError(
+                            "ADE run artifact manifest lacked non-empty core input/"
+                            "result/log evidence"
+                        )
+                    fingerprint_payload = sorted(
+                        (
+                            {"path": item["path"], "sha256": item["sha256"]}
+                            for item in manifest
+                            if item["category"] in required_categories
+                        ),
+                        key=lambda item: item["path"],
+                    )
+                    calculated_fingerprint = hashlib.sha256(
+                        json.dumps(
+                            fingerprint_payload,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    if calculated_fingerprint != fingerprint:
+                        raise RuntimeError(
+                            "ADE run simulation fingerprint did not match artifact "
+                            "manifest"
+                        )
+                    if any(
+                        not isinstance(location, dict)
+                        or not str(location.get("history_root") or "").endswith(
+                            f"/{history}"
+                        )
+                        or not str(
+                            location.get("remote_manifest_path") or ""
+                        ).startswith(f"{manifest_directory}/")
+                        for location in locations
+                    ):
+                        raise RuntimeError(
+                            "ADE run artifact location metadata was internally "
+                            "inconsistent"
+                        )
+                if task.ade_run is not None and (
+                    task.ade_run.require_artifact_manifest
+                    and not artifacts_complete
+                ):
+                    raise RuntimeError(
+                        "ADE run required an exact-history simulator input/result/"
+                        "log manifest but the adapter did not provide one"
+                    )
                 notes.append(
                     "executed the saved Maestro setup in a background session; no "
                     "GUI focus, setup save, or OA write was performed"
                 )
                 notes.append(
-                    "ADE output/spec values are real EDA results but are not mapped "
-                    "to VDA constraints or netlist/PSF artifact hashes by ade.run"
+                    "ADE output/spec values and exact-history input/result/log hashes "
+                    "are EDA evidence but are not yet mapped to VDA constraints by "
+                    "ade.run"
                 )
                 notes.append(
                     "history naming and overwrite behavior came from the saved "
                     "Maestro setup; VDA did not change it or prove history uniqueness"
                 )
-                if not structured:
+                if not structured or not artifacts_complete:
                     status = RunStatus.PARTIAL
                     notes.append(
-                        "Maestro history completed without a structured point/output "
-                        "table; completion alone was not treated as design success"
+                        "Maestro history completed without every requested structured "
+                        "result/artifact evidence gate; completion alone was not "
+                        "treated as design success"
                     )
             elif operation is Operation.ADE_VARIABLES_APPLY:
                 patched = self._action(

@@ -35,7 +35,7 @@
 - VDA 的自动规划、搜索和选优不得取消人工打开、调整、运行和保存 ADE setup/history 的能力。
 - 自动路径与人工 ADE 路径必须通过显式 operation、目标 view 和状态/结果指纹交接；不得静默覆盖人工改动或把两个仿真状态混成同一真源。
 - `ade.prepare` 只能创建明确不存在的新 Maestro view；已有 view 一律拒绝，后续修改必须使用带前置指纹和逐项回读的显式 patch。
-- `ade.run` 只能消费已保存的 Maestro setup：使用后台 session，不改变 GUI 焦点、不保存 setup、不写 OA；缺少结构化 output 时不得仅凭 history/回调成功宣称仿真有效。
+- `ade.run` 只能消费已保存的 Maestro setup：使用后台 session，不改变 GUI 焦点、不保存 setup、不写 OA；默认还必须把本次返回的 exact-history 核心 simulator input/result/log 绑定到大小与 SHA-256 清单。缺少结构化 output 或完整清单时不得仅凭 history/回调成功宣称仿真有效；显式放宽要求也只能记为 partial。精确路径绑定不得包装成 history 名称唯一或变量已按预期进入网表。
 - `ade.variables.apply` 只能在声明的 tests、可选 enabled corners 和逐 scope 变量旧值都匹配时保存；已有 Maestro session 时拒绝，保存后必须独立重开逐 scope 回读。不得把声明 scope 的写回包装成未声明 override 已排除或仿真生效。
 - `ade.setup.apply` 只能对声明 analysis 做旧状态 CAS，并新增明确不存在的命名 output/spec；已有 output、并发 Maestro session 或任一旧状态不匹配时拒绝。全部目标写后立即回读，只保存一次，再独立重开复核；不得把配置持久化表述成 analysis 已运行或 output 已产生结果。
 - ADE setup 属于 `bridge_readback`，实际 Spectre 输入/结果属于 `eda_result`；捕获成功不等于规格闭环。

@@ -932,6 +932,20 @@ _ADE_RUN_INPUT_FILENAMES = {
     "variables_file",
 }
 _ADE_RUN_LOG_FILENAMES = {"logFile", "spectre.out"}
+_ADE_RUN_RESULT_SUFFIXES = {
+    ".ac",
+    ".dc",
+    ".noise",
+    ".pac",
+    ".pnoise",
+    ".pss",
+    ".pxf",
+    ".sens",
+    ".stb",
+    ".tran",
+    ".xf",
+}
+_ADE_ARTIFACT_LINE_PREFIX = "VDA_ARTIFACT\t"
 
 
 def _maestro_tests_readback(client, session: str) -> list[str]:
@@ -2208,6 +2222,394 @@ def _normalized_maestro_history(value: Any) -> str:
     return history
 
 
+def _validated_ade_remote_path(value: Any, label: str) -> str:
+    path = str(value or "").strip().rstrip("/")
+    if not (path == "/data/xum" or path.startswith("/data/xum/")):
+        raise RuntimeError(f"{label} must stay under /data/xum: {path!r}")
+    if "\\" in path or any(ord(character) < 32 for character in path):
+        raise RuntimeError(f"{label} contains unsafe path characters: {path!r}")
+    if any(part in {"", ".", ".."} for part in path.split("/")[1:]):
+        raise RuntimeError(f"{label} is not a normalized absolute path: {path!r}")
+    return path
+
+
+def _unwrap_single_skill_value(value: Any) -> Any:
+    current = value
+    while isinstance(current, list) and len(current) == 1:
+        current = current[0]
+    return current
+
+
+def _maestro_history_locations(
+    client,
+    *,
+    session: str,
+    library: str,
+    cell: str,
+    view: str,
+) -> list[dict[str, str]]:
+    """Resolve project and scratch Maestro roots without selecting a history."""
+
+    from virtuoso_bridge.virtuoso.ops import escape_skill_string
+
+    expression = (
+        "list("
+        f'ddGetObj("{escape_skill_string(library)}")~>readPath '
+        "errset(asiGetAnalogRunDir(asiGetSession("
+        f'"{escape_skill_string(session)}"))))'
+    )
+    readback = client.execute_skill(expression, timeout=30)
+    errors = getattr(readback, "errors", None) or []
+    if errors:
+        raise RuntimeError(f"Maestro history path readback failed: {errors[0]}")
+    parsed = _parse_skill_sexpr(getattr(readback, "output", ""))
+    if not isinstance(parsed, list) or len(parsed) != 2:
+        raise RuntimeError(f"invalid Maestro history path readback: {parsed!r}")
+    lib_path_raw = _unwrap_single_skill_value(parsed[0])
+    analog_run_dir_raw = _unwrap_single_skill_value(parsed[1])
+    if not isinstance(lib_path_raw, str) or not isinstance(
+        analog_run_dir_raw, str
+    ):
+        raise RuntimeError(
+            "Maestro did not expose both library and analog run directories"
+        )
+    lib_path = _validated_ade_remote_path(lib_path_raw, "Maestro library path")
+    analog_run_dir = _validated_ade_remote_path(
+        analog_run_dir_raw, "Maestro analog run directory"
+    )
+    marker = f"/{library}/{cell}/{view}/results/maestro"
+    marker_index = analog_run_dir.find(marker)
+    if marker_index <= 0:
+        raise RuntimeError(
+            "Maestro analog run directory did not contain the declared target "
+            f"anchor {marker!r}: {analog_run_dir!r}"
+        )
+    scratch_root = _validated_ade_remote_path(
+        analog_run_dir[:marker_index], "Maestro scratch root"
+    )
+    candidates = [
+        {
+            "source_location": "project",
+            "maestro_root": _validated_ade_remote_path(
+                f"{lib_path}/{cell}/{view}/results/maestro",
+                "project Maestro result root",
+            ),
+        },
+        {
+            "source_location": "scratch",
+            "maestro_root": _validated_ade_remote_path(
+                f"{scratch_root}/{library}/{cell}/{view}/results/maestro",
+                "scratch Maestro result root",
+            ),
+        },
+    ]
+    unique: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate["maestro_root"] in seen:
+            continue
+        unique.append(candidate)
+        seen.add(candidate["maestro_root"])
+    return unique
+
+
+def _ade_artifact_hash_command(
+    *,
+    history_root: str,
+    maestro_root: str,
+    history: str,
+    manifest_dir: str,
+    manifest_path: str,
+) -> str:
+    netlist_names = sorted(_ADE_RUN_INPUT_FILENAMES | {"netlist"})
+    psf_names = sorted(
+        _ADE_RUN_LOG_FILENAMES
+        | {"dcOp.dc", "dcOpInfo.info", "variables_file"}
+        | {f"*{suffix}" for suffix in _ADE_RUN_RESULT_SUFFIXES}
+    )
+
+    def names_clause(names: list[str]) -> str:
+        return " -o ".join(f"-name {shlex.quote(name)}" for name in names)
+
+    hasher = (
+        'manifest=$1; shift; for artifact; do [ -f "$artifact" ] || continue; '
+        'hash_line=$(sha256sum "$artifact") || exit 81; '
+        'hash=${hash_line%% *}; [ ${#hash} -eq 64 ] || exit 82; '
+        'size=$(wc -c < "$artifact") || exit 83; '
+        'printf "VDA_ARTIFACT\\t%s\\t%s\\t%s\\n" '
+        '"$size" "$hash" "$artifact" >> "$manifest"; done'
+    )
+    outer = (
+        "set -eu; history_root=$1; maestro_root=$2; history=$3; hasher=$4; "
+        "manifest_dir=$5; manifest=$6; mkdir -p \"$manifest_dir\"; "
+        ": > \"$manifest\"; if [ -d \"$history_root\" ]; then "
+        f'find "$history_root" \\( -type f -o -type l \\) \\( '
+        f'\\( -path "*/netlist/*" \\( {names_clause(netlist_names)} \\) \\) -o '
+        f'\\( -path "*/psf/*" \\( {names_clause(psf_names)} \\) \\) '
+        '\\) -exec sh -c "$hasher" sh "$manifest" {} +; fi; '
+        'sh -c "$hasher" sh "$manifest" '
+        '"$maestro_root/$history.log" "$maestro_root/$history.rdb" '
+        '"$maestro_root/$history.msg.db"'
+    )
+    return "sh -c {} sh {} {} {} {} {} {}".format(
+        shlex.quote(outer),
+        shlex.quote(history_root),
+        shlex.quote(maestro_root),
+        shlex.quote(history),
+        shlex.quote(hasher),
+        shlex.quote(manifest_dir),
+        shlex.quote(manifest_path),
+    )
+
+
+def _parse_remote_ade_artifact_manifest(
+    text: str,
+    *,
+    history: str,
+    source_location: str,
+    maestro_root: str,
+) -> list[dict[str, Any]]:
+    history_root = f"{maestro_root}/{history}"
+    extras = {
+        f"{maestro_root}/{history}.log",
+        f"{maestro_root}/{history}.rdb",
+        f"{maestro_root}/{history}.msg.db",
+    }
+    entries: list[dict[str, Any]] = []
+    for raw_line in str(text or "").splitlines():
+        if not raw_line:
+            continue
+        if not raw_line.startswith(_ADE_ARTIFACT_LINE_PREFIX):
+            raise RuntimeError(f"unexpected ADE artifact manifest line: {raw_line!r}")
+        fields = raw_line.split("\t", 3)
+        if len(fields) != 4:
+            raise RuntimeError(f"malformed ADE artifact manifest line: {raw_line!r}")
+        _, size_raw, digest, remote_path = fields
+        if any(ord(character) < 32 for character in remote_path):
+            raise RuntimeError("ADE artifact path contained control characters")
+        if remote_path.startswith(f"{history_root}/"):
+            relative = remote_path[len(history_root) + 1 :]
+        elif remote_path in extras:
+            relative = remote_path.rsplit("/", 1)[-1]
+        else:
+            raise RuntimeError(
+                "ADE artifact escaped the exact returned history: "
+                f"{remote_path!r}"
+            )
+        if not relative or any(part in {"", ".", ".."} for part in relative.split("/")):
+            raise RuntimeError(f"invalid ADE artifact relative path: {relative!r}")
+        try:
+            size = int(size_raw.strip())
+        except ValueError as exc:
+            raise RuntimeError(
+                f"invalid ADE artifact size for {remote_path!r}: {size_raw!r}"
+            ) from exc
+        normalized_digest = digest.strip().lower()
+        if size < 0 or not re.fullmatch(r"[0-9a-f]{64}", normalized_digest):
+            raise RuntimeError(
+                f"invalid ADE artifact hash record for {remote_path!r}"
+            )
+        logical_path = f"{history}/{relative}"
+        category = _ade_artifact_category(logical_path)
+        entries.append(
+            {
+                "path": logical_path,
+                "remote_path": remote_path,
+                "source_location": source_location,
+                "size_bytes": size,
+                "sha256": normalized_digest,
+                "category": category,
+                "evidence_source": (
+                    "eda_result"
+                    if category in {"simulator_input", "eda_result", "run_log"}
+                    else "bridge_readback"
+                ),
+            }
+        )
+    return entries
+
+
+def _merge_remote_ade_artifacts(
+    entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for item in entries:
+        path = str(item["path"])
+        existing = merged.get(path)
+        if existing is None:
+            normalized = dict(item)
+            normalized["remote_paths"] = [str(item["remote_path"])]
+            normalized["source_locations"] = [str(item["source_location"])]
+            merged[path] = normalized
+            continue
+        if (
+            existing["sha256"] != item["sha256"]
+            or existing["size_bytes"] != item["size_bytes"]
+            or existing["category"] != item["category"]
+        ):
+            raise RuntimeError(
+                "project and scratch contain conflicting exact-history artifact "
+                f"copies for {path!r}"
+            )
+        remote_path = str(item["remote_path"])
+        source_location = str(item["source_location"])
+        if remote_path not in existing["remote_paths"]:
+            existing["remote_paths"].append(remote_path)
+        if source_location not in existing["source_locations"]:
+            existing["source_locations"].append(source_location)
+    return [merged[path] for path in sorted(merged)]
+
+
+def _validate_background_ade_artifacts(
+    manifest: list[dict[str, Any]], history: str
+) -> dict[str, int]:
+    counts = {
+        category: sum(1 for item in manifest if item["category"] == category)
+        for category in ("simulator_input", "eda_result", "run_log", "other")
+    }
+    nonempty_names = {
+        Path(str(item["path"])).name
+        for item in manifest
+        if item["category"] == "simulator_input" and item["size_bytes"] > 0
+    }
+    missing_inputs = {"netlist", "input.scs"} - nonempty_names
+    if missing_inputs:
+        raise RuntimeError(
+            f"ADE history {history!r} lacked non-empty core simulator inputs: "
+            + ", ".join(sorted(missing_inputs))
+        )
+    for category in ("eda_result", "run_log"):
+        if not any(
+            item["category"] == category and item["size_bytes"] > 0
+            for item in manifest
+        ):
+            raise RuntimeError(
+                f"ADE history {history!r} lacked a non-empty {category} artifact"
+            )
+    return counts
+
+
+def _collect_background_ade_artifacts(
+    client,
+    payload: dict[str, Any],
+    *,
+    session: str,
+    history: str,
+    library: str,
+    cell: str,
+    view: str,
+) -> dict[str, Any]:
+    locations = _maestro_history_locations(
+        client,
+        session=session,
+        library=library,
+        cell=cell,
+        view=view,
+    )
+    profile = payload.get("profile") or {}
+    run_root = _validated_ade_remote_path(
+        profile.get("remote_run_root"), "ADE manifest run root"
+    )
+    task_slug = re.sub(r"[^A-Za-z0-9_.-]", "_", str(payload.get("task_id") or "task"))
+    manifest_dir = _validated_ade_remote_path(
+        f"{run_root}/vda_ade_manifest_{task_slug}_{uuid.uuid4().hex[:12]}",
+        "ADE manifest directory",
+    )
+    all_entries: list[dict[str, Any]] = []
+    remote_manifests: list[dict[str, Any]] = []
+    with tempfile.TemporaryDirectory(prefix="vda_ade_manifest_") as temp_dir:
+        local_root = Path(temp_dir)
+        for index, location in enumerate(locations):
+            maestro_root = location["maestro_root"]
+            history_root = f"{maestro_root}/{history}"
+            remote_manifest = f"{manifest_dir}/{index}_{location['source_location']}.tsv"
+            command = _ade_artifact_hash_command(
+                history_root=history_root,
+                maestro_root=maestro_root,
+                history=history,
+                manifest_dir=manifest_dir,
+                manifest_path=remote_manifest,
+            )
+            shell_result = client.run_shell_command(command, timeout=120)
+            try:
+                _require_bridge_result(
+                    shell_result,
+                    "hash exact Maestro history artifacts at "
+                    f"{location['source_location']}",
+                )
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"{exc}; remote ADE manifest directory retained at "
+                    f"{manifest_dir}"
+                ) from exc
+            local_manifest = local_root / f"{index}.tsv"
+            download = client.download_file(
+                remote_manifest, local_manifest, timeout=60
+            )
+            try:
+                _require_bridge_result(
+                    download,
+                    "download ADE artifact manifest from "
+                    f"{location['source_location']}",
+                )
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"{exc}; remote ADE manifest retained at {remote_manifest}"
+                ) from exc
+            try:
+                manifest_text = local_manifest.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise RuntimeError(
+                    "downloaded ADE artifact manifest was unreadable; remote copy "
+                    f"retained at {remote_manifest}"
+                ) from exc
+            try:
+                entries = _parse_remote_ade_artifact_manifest(
+                    manifest_text,
+                    history=history,
+                    source_location=location["source_location"],
+                    maestro_root=maestro_root,
+                )
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"{exc}; remote ADE manifest retained at {remote_manifest}"
+                ) from exc
+            all_entries.extend(entries)
+            remote_manifests.append(
+                {
+                    "source_location": location["source_location"],
+                    "maestro_root": maestro_root,
+                    "history_root": history_root,
+                    "remote_manifest_path": remote_manifest,
+                    "manifest_sha256": _sha256_path(local_manifest),
+                    "entry_count": len(entries),
+                }
+            )
+    try:
+        manifest = _merge_remote_ade_artifacts(all_entries)
+        counts = _validate_background_ade_artifacts(manifest, history)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"{exc}; remote ADE manifest directory retained at {manifest_dir}"
+        ) from exc
+    return {
+        "artifact_history": history,
+        "artifact_history_path_binding_verified": True,
+        "artifact_manifest": manifest,
+        "artifact_counts": counts,
+        "artifact_manifest_complete": True,
+        "artifacts_captured": True,
+        "artifact_collection_method": (
+            "bridge_public_shell_hash_to_remote_manifest_and_public_download"
+        ),
+        "artifact_locations_checked": remote_manifests,
+        "remote_manifest_directory": manifest_dir,
+        "simulation_fingerprint_sha256": _manifest_fingerprint(
+            manifest, {"simulator_input", "eda_result", "run_log"}
+        ),
+    }
+
+
 def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
     """Run a saved Maestro setup without opening or focusing a GUI window."""
 
@@ -2231,6 +2633,15 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(f"ADE run requires existing {library}/{cell}/{view}")
 
     session = open_session(client, library, cell)
+    artifact_evidence: dict[str, Any] = {
+        "artifact_history": None,
+        "artifact_history_path_binding_verified": False,
+        "artifact_manifest": [],
+        "artifact_counts": {},
+        "artifact_manifest_complete": False,
+        "artifacts_captured": False,
+        "simulation_fingerprint_sha256": None,
+    }
     try:
         tests = _maestro_tests_readback(client, session)
         if not tests:
@@ -2252,21 +2663,40 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
             cell=cell,
             history=history,
         )
+        result_history = str(results.get("history") or "")
+        if result_history and result_history != history:
+            raise RuntimeError(
+                "Maestro structured results history does not match the history "
+                "created by this run"
+            )
+        structured_outputs = _has_structured_ade_outputs(results)
+        try:
+            artifact_evidence = _collect_background_ade_artifacts(
+                client,
+                payload,
+                session=session,
+                history=history,
+                library=library,
+                cell=cell,
+                view=view,
+            )
+        except RuntimeError as exc:
+            if settings.get("require_artifact_manifest", True):
+                raise
+            artifact_evidence["artifact_capture_error"] = str(exc)
+        if settings.get("require_structured_outputs", True) and not structured_outputs:
+            retained = artifact_evidence.get("remote_manifest_directory")
+            raise RuntimeError(
+                "Maestro background run completed but did not expose a non-empty "
+                "point/output/spec table"
+                + (
+                    f"; remote ADE manifests retained at {retained}"
+                    if retained
+                    else ""
+                )
+            )
     finally:
         close_session(client, session)
-
-    result_history = str(results.get("history") or "")
-    if result_history and result_history != history:
-        raise RuntimeError(
-            "Maestro structured results history does not match the history created "
-            "by this run"
-        )
-    structured_outputs = _has_structured_ade_outputs(results)
-    if settings.get("require_structured_outputs", True) and not structured_outputs:
-        raise RuntimeError(
-            "Maestro background run completed but did not expose a non-empty "
-            "point/output/spec table"
-        )
 
     return {
         "backend": "maestro",
@@ -2286,11 +2716,13 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
         "automated_simulation_performed": True,
         "oa_write_performed": False,
         "maestro_setup_write_performed": False,
-        "artifacts_captured": False,
+        **artifact_evidence,
         "completion_scope": (
             "saved Maestro setup executed in a background session and the history "
-            "returned for this invocation was read; history uniqueness, simulator "
-            "input, and PSF artifacts were not captured by this operation"
+            "returned for this invocation was read; exact-history simulator input, "
+            "result, and log artifacts were hashed across project and scratch "
+            "locations when required; history name uniqueness and VDA constraint "
+            "mapping were not proved"
         ),
     }
 

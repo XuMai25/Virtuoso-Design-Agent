@@ -68,8 +68,8 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
         explicit_instance_parameters=True,
         evidence_gate=(
             "unfiltered Bridge schematic readback + targeted CDF value verification + "
-            "non-overwrite ADE prepare + human-operated capture + background run + "
-            "CAS declared-scope variable/setup patch (live pending)"
+            "non-overwrite ADE prepare + human-operated capture + background exact-"
+            "history artifact run + CAS declared-scope variable/setup patch (live pending)"
         ),
     ),
     CircuitKind.INVERTER: CircuitCapability(
@@ -87,8 +87,8 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
         explicit_instance_parameters=True,
         evidence_gate=(
             "OA readback + si netlist consistency + transient timing/supply energy + "
-            "bounded search + non-overwrite ADE prepare/capture/background run/CAS "
-            "declared-scope variable/setup patch (live pending)"
+            "bounded search + non-overwrite ADE prepare/capture/background exact-"
+            "history artifact run/CAS declared-scope variable/setup patch (live pending)"
         ),
     ),
     CircuitKind.COMMON_SOURCE: CircuitCapability(
@@ -110,8 +110,8 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "OA readback + si netlist consistency + DC region + complex AC + "
             "bounded W/RD/RS AC + AC/linearity/noise quality tuning, OA writeback, "
             "infeasible restore, checkpoint recovery, and non-overwrite ADE "
-            "prepare/capture/background run/CAS declared-scope variable/setup patch "
-            "(live pending); "
+            "prepare/capture/background exact-history artifact run/CAS declared-scope "
+            "variable/setup patch (live pending); "
             "L/VDD/corner pending"
         ),
     ),

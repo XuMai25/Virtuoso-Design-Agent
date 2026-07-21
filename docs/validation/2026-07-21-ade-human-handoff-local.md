@@ -62,4 +62,4 @@
 
 ## 后续 Gate（人工部分已延期）
 
-人工 prepare/edit/capture、旧 ADE L 迁移和数值交叉检查已按用户决定延期，详见 [`../deferred-manual-gates.md`](../deferred-manual-gates.md)。global/test/corner 逐 scope 旧值 CAS 已由 [`ade.variables.apply`](2026-07-21-ade-scoped-variable-patch-local.md) 完成本地契约，analysis CAS 与 output/spec 新增由 [`ade.setup.apply`](2026-07-21-ade-setup-patch-local.md) 完成本地契约；当前自动化 Gate 转为让 [`ade.run`](2026-07-21-ade-background-run-local.md) 在 background 原生 sweep 后保留 netlist/PSF 证据。延期项目完成前不升级人工兼容状态。
+人工 prepare/edit/capture、旧 ADE L 迁移和数值交叉检查已按用户决定延期，详见 [`../deferred-manual-gates.md`](../deferred-manual-gates.md)。global/test/corner 逐 scope 旧值 CAS 已由 [`ade.variables.apply`](2026-07-21-ade-scoped-variable-patch-local.md) 完成本地契约，analysis CAS 与 output/spec 新增由 [`ade.setup.apply`](2026-07-21-ade-setup-patch-local.md) 完成本地契约；[`ade.run`](2026-07-21-ade-background-run-local.md) 的 background exact-history input/result/log 清单也已完成[本地契约](2026-07-21-ade-background-artifact-manifest-local.md)。当前自动化 Gate 转为专用 cell live smoke 与网表参数核对；延期项目完成前不升级人工兼容状态。

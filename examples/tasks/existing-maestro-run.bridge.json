@@ -11,7 +11,8 @@
   "pdk_profile": "nics4304_tsmc28",
   "ade_run": {
     "backend": "maestro",
-    "require_structured_outputs": true
+    "require_structured_outputs": true,
+    "require_artifact_manifest": true
   },
   "safety": {
     "allow_remote_compute": true,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import shlex
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -277,14 +278,47 @@ def test_background_maestro_run_uses_exact_new_history_and_closes_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple] = []
+    scratch_root = (
+        "/data/xum/scratch/vda_test/vda_manual_tb/maestro/results/maestro"
+    )
 
     class Client:
         def execute_skill(self, expression, **kwargs):
+            if expression.startswith("list(ddGetObj"):
+                return SimpleNamespace(
+                    output=(
+                        '("/data/xum/cds/vda_test" '
+                        '("/data/xum/scratch/vda_test/vda_manual_tb/maestro/'
+                        'results/maestro/Interactive.8/1/AC"))'
+                    ),
+                    errors=[],
+                )
             if "ddGetObj" in expression:
                 return SimpleNamespace(output="t", errors=[])
             if "maeGetSetup" in expression:
                 return SimpleNamespace(output='("AC")', errors=[])
             raise AssertionError(expression)
+
+        def run_shell_command(self, command, **kwargs):
+            calls.append(("shell", command, kwargs))
+            return SimpleNamespace(ok=True)
+
+        def download_file(self, remote_path, local_path, **kwargs):
+            calls.append(("download", remote_path, kwargs))
+            contents = ""
+            if remote_path.endswith("1_scratch.tsv"):
+                rows = [
+                    (12, "1" * 64, f"{scratch_root}/Interactive.8/1/AC/netlist/netlist"),
+                    (18, "2" * 64, f"{scratch_root}/Interactive.8/1/AC/netlist/input.scs"),
+                    (24, "3" * 64, f"{scratch_root}/Interactive.8/1/AC/psf/ac.ac"),
+                    (30, "4" * 64, f"{scratch_root}/Interactive.8.log"),
+                ]
+                contents = "".join(
+                    f"VDA_ARTIFACT\t{size}\t{digest}\t{path}\n"
+                    for size, digest, path in rows
+                )
+            Path(local_path).write_text(contents, encoding="utf-8")
+            return SimpleNamespace(ok=True)
 
     def fake_open_session(_client, library, cell):
         calls.append(("open", library, cell))
@@ -329,7 +363,10 @@ def test_background_maestro_run_uses_exact_new_history_and_closes_session(
             "ade_run": {
                 "backend": "maestro",
                 "require_structured_outputs": True,
+                "require_artifact_manifest": True,
             },
+            "profile": {"remote_run_root": "/data/xum/vda_runs"},
+            "task_id": "run-saved-maestro",
             "timeout_seconds": 321,
         }
     )
@@ -344,11 +381,33 @@ def test_background_maestro_run_uses_exact_new_history_and_closes_session(
     assert result["automated_simulation_performed"] is True
     assert result["oa_write_performed"] is False
     assert result["maestro_setup_write_performed"] is False
-    assert result["artifacts_captured"] is False
+    assert result["artifacts_captured"] is True
+    assert result["artifact_manifest_complete"] is True
+    assert result["artifact_history"] == "Interactive.8"
+    assert result["artifact_history_path_binding_verified"] is True
+    assert result["artifact_counts"] == {
+        "simulator_input": 2,
+        "eda_result": 1,
+        "run_log": 1,
+        "other": 0,
+    }
+    assert len(result["artifact_manifest"]) == 4
+    assert result["simulation_fingerprint_sha256"]
+    assert result["remote_manifest_directory"].startswith(
+        "/data/xum/vda_runs/vda_ade_manifest_run-saved-maestro_"
+    )
     assert ("run", {"session": "fnxBackground8", "timeout": 321}) in calls
     read_call = next(call for call in calls if call[0] == "results")
     assert read_call[2]["history"] == "Interactive.8"
     assert calls[-1] == ("close", "fnxBackground8")
+    assert any(
+        call[0] == "download" and call[1].endswith("0_project.tsv")
+        for call in calls
+    )
+    assert any(
+        call[0] == "download" and call[1].endswith("1_scratch.tsv")
+        for call in calls
+    )
 
 
 def test_background_maestro_run_rejects_empty_structured_results_and_closes(
@@ -378,8 +437,24 @@ def test_background_maestro_run_rejects_empty_structured_results_and_closes(
         },
     )
     monkeypatch.setattr(bridge_worker, "_client", Client)
+    monkeypatch.setattr(
+        bridge_worker,
+        "_collect_background_ade_artifacts",
+        lambda *_args, **_kwargs: {
+            "artifact_history": "Interactive.9",
+            "artifact_history_path_binding_verified": True,
+            "artifact_manifest": [{"path": "Interactive.9/input.scs"}],
+            "artifact_counts": {"simulator_input": 1},
+            "artifact_manifest_complete": True,
+            "artifacts_captured": True,
+            "simulation_fingerprint_sha256": "a" * 64,
+            "remote_manifest_directory": "/data/xum/vda_runs/empty-output",
+        },
+    )
 
-    with pytest.raises(RuntimeError, match="non-empty point/output/spec table"):
+    with pytest.raises(
+        RuntimeError, match="non-empty point/output/spec table"
+    ) as failure:
         bridge_worker.run_background_maestro(
             {
                 "target": {
@@ -391,7 +466,231 @@ def test_background_maestro_run_rejects_empty_structured_results_and_closes(
             }
         )
 
+    assert "/data/xum/vda_runs/empty-output" in str(failure.value)
     assert calls == [("close", "fnxBackground9")]
+
+
+def test_remote_ade_manifest_rejects_a_different_history_path() -> None:
+    maestro_root = "/data/xum/scratch/vda_test/cell/maestro/results/maestro"
+    text = (
+        f"VDA_ARTIFACT\t10\t{'a' * 64}\t"
+        f"{maestro_root}/Interactive.7/1/AC/netlist/netlist\n"
+    )
+
+    with pytest.raises(RuntimeError, match="escaped the exact returned history"):
+        bridge_worker._parse_remote_ade_artifact_manifest(
+            text,
+            history="Interactive.8",
+            source_location="scratch",
+            maestro_root=maestro_root,
+        )
+
+
+def test_remote_ade_artifact_hash_command_is_single_line_and_shell_quoted() -> None:
+    command = bridge_worker._ade_artifact_hash_command(
+        history_root=(
+            "/data/xum/scratch/vda_test/cell/maestro/results/maestro/"
+            "Interactive.8"
+        ),
+        maestro_root="/data/xum/scratch/vda_test/cell/maestro/results/maestro",
+        history="Interactive.8",
+        manifest_dir="/data/xum/vda runs/manifest",
+        manifest_path="/data/xum/vda runs/manifest/scratch.tsv",
+    )
+
+    parts = shlex.split(command)
+
+    assert "\n" not in command
+    assert parts[:2] == ["sh", "-c"]
+    assert parts[3] == "sh"
+    assert parts[-2:] == [
+        "/data/xum/vda runs/manifest",
+        "/data/xum/vda runs/manifest/scratch.tsv",
+    ]
+    assert "sha256sum" in parts[7]
+
+
+def test_remote_ade_manifest_deduplicates_identical_copies_and_rejects_conflict() -> None:
+    base = {
+        "path": "Interactive.8/1/AC/netlist/netlist",
+        "remote_path": "/data/xum/project/Interactive.8/1/AC/netlist/netlist",
+        "source_location": "project",
+        "size_bytes": 10,
+        "sha256": "a" * 64,
+        "category": "simulator_input",
+        "evidence_source": "eda_result",
+    }
+    scratch = {
+        **base,
+        "remote_path": "/data/xum/scratch/Interactive.8/1/AC/netlist/netlist",
+        "source_location": "scratch",
+    }
+
+    merged = bridge_worker._merge_remote_ade_artifacts([base, scratch])
+
+    assert len(merged) == 1
+    assert merged[0]["source_locations"] == ["project", "scratch"]
+    assert len(merged[0]["remote_paths"]) == 2
+    with pytest.raises(RuntimeError, match="conflicting exact-history artifact"):
+        bridge_worker._merge_remote_ade_artifacts(
+            [base, {**scratch, "sha256": "b" * 64}]
+        )
+
+
+def test_background_ade_artifact_gate_rejects_empty_core_input() -> None:
+    manifest = [
+        {
+            "path": "Interactive.8/1/AC/netlist/netlist",
+            "size_bytes": 0,
+            "category": "simulator_input",
+        },
+        {
+            "path": "Interactive.8/1/AC/netlist/input.scs",
+            "size_bytes": 10,
+            "category": "simulator_input",
+        },
+        {
+            "path": "Interactive.8/1/AC/psf/ac.ac",
+            "size_bytes": 10,
+            "category": "eda_result",
+        },
+        {
+            "path": "Interactive.8/Interactive.8.log",
+            "size_bytes": 10,
+            "category": "run_log",
+        },
+    ]
+
+    with pytest.raises(RuntimeError, match="core simulator inputs: netlist"):
+        bridge_worker._validate_background_ade_artifacts(
+            manifest, "Interactive.8"
+        )
+
+
+def test_background_maestro_run_rejects_artifact_transport_failure_and_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+
+    class Client:
+        def execute_skill(self, expression, **kwargs):
+            if expression.startswith("list(ddGetObj"):
+                return SimpleNamespace(
+                    output=(
+                        '("/data/xum/cds/vda_test" '
+                        '("/data/xum/scratch/vda_test/vda_manual_tb/maestro/'
+                        'results/maestro/Interactive.8/1/AC"))'
+                    ),
+                    errors=[],
+                )
+            if "ddGetObj" in expression:
+                return SimpleNamespace(output="t", errors=[])
+            if "maeGetSetup" in expression:
+                return SimpleNamespace(output='("AC")', errors=[])
+            raise AssertionError(expression)
+
+        def run_shell_command(self, command, **kwargs):
+            calls.append(("shell", command))
+            return SimpleNamespace(ok=False, errors=["transport interrupted"])
+
+        def download_file(self, *_args, **_kwargs):
+            raise AssertionError("failed manifest command must not be downloaded")
+
+    def fake_close_session(_client, session):
+        calls.append(("close", session))
+
+    _install_fake_maestro_module(
+        monkeypatch,
+        open_session=lambda *_args: "fnxBackground8",
+        close_session=fake_close_session,
+        run_and_wait=lambda *_args, **_kwargs: ('"Interactive.8"', "done"),
+        read_results=lambda *_args, **_kwargs: {
+            "history": "Interactive.8",
+            "points": [{"outputs": {"BW": {"value": "1G"}}}],
+        },
+    )
+    monkeypatch.setattr(bridge_worker, "_client", Client)
+
+    with pytest.raises(RuntimeError, match="transport interrupted") as failure:
+        bridge_worker.run_background_maestro(
+            {
+                "task_id": "transport-failure",
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "profile": {"remote_run_root": "/data/xum/vda_runs"},
+                "ade_run": {"require_artifact_manifest": True},
+            }
+        )
+
+    assert "/data/xum/vda_runs/vda_ade_manifest_transport-failure_" in str(
+        failure.value
+    )
+    assert calls[-1] == ("close", "fnxBackground8")
+
+    calls.clear()
+    partial = bridge_worker.run_background_maestro(
+        {
+            "task_id": "optional-transport-failure",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "profile": {"remote_run_root": "/data/xum/vda_runs"},
+            "ade_run": {"require_artifact_manifest": False},
+        }
+    )
+
+    assert partial["artifact_manifest_complete"] is False
+    assert partial["artifacts_captured"] is False
+    assert "transport interrupted" in partial["artifact_capture_error"]
+    assert calls[-1] == ("close", "fnxBackground8")
+
+
+def test_background_maestro_run_rejects_structured_history_mismatch_and_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+
+    class Client:
+        def execute_skill(self, expression, **kwargs):
+            if "ddGetObj" in expression:
+                return SimpleNamespace(output="t", errors=[])
+            if "maeGetSetup" in expression:
+                return SimpleNamespace(output='("AC")', errors=[])
+            raise AssertionError(expression)
+
+    def fake_close_session(_client, session):
+        calls.append(("close", session))
+
+    _install_fake_maestro_module(
+        monkeypatch,
+        open_session=lambda *_args: "fnxBackground8",
+        close_session=fake_close_session,
+        run_and_wait=lambda *_args, **_kwargs: ('"Interactive.8"', "done"),
+        read_results=lambda *_args, **_kwargs: {
+            "history": "Interactive.7",
+            "points": [{"outputs": {"BW": {"value": "1G"}}}],
+        },
+    )
+    monkeypatch.setattr(bridge_worker, "_client", Client)
+
+    with pytest.raises(RuntimeError, match="history does not match"):
+        bridge_worker.run_background_maestro(
+            {
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "ade_run": {},
+            }
+        )
+
+    assert calls == [("close", "fnxBackground8")]
 
 
 def test_maestro_variable_patch_saves_once_and_reopens_for_readback(
@@ -1437,6 +1736,7 @@ def test_subprocess_ade_run_payload_has_no_configuration_or_analysis(
     assert "ade_prepare" not in payload
     assert "ade_capture" not in payload
     assert payload["ade_run"]["require_structured_outputs"] is True
+    assert payload["ade_run"]["require_artifact_manifest"] is True
     assert payload["ade_run_user_fields"] == ["require_structured_outputs"]
 
 

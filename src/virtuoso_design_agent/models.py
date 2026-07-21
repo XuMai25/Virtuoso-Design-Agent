@@ -255,6 +255,7 @@ class AdeRunSpec(StrictModel):
 
     backend: AdeBackend = AdeBackend.MAESTRO
     require_structured_outputs: bool = True
+    require_artifact_manifest: bool = True
 
 
 class AdeVariableUpdate(StrictModel):

@@ -130,10 +130,13 @@ def test_ade_run_plan_uses_background_compute_without_setup_write() -> None:
         "evidence.persist",
     ]
     assert plan.steps[2].side_effect is SideEffect.REMOTE_COMPUTE
+    assert plan.steps[3].side_effect is SideEffect.REMOTE_COMPUTE
     assert "不要求或改变 GUI 焦点" in plan.steps[1].description
     assert "原生 analysis/parametric sweep" in plan.steps[2].description
     assert "不能证明名称唯一" in plan.steps[2].description
-    assert "不捕获网表/PSF" in plan.steps[3].description
+    assert "project/scratch" in plan.steps[3].description
+    assert "SHA-256" in plan.steps[3].description
+    assert "保留小型 TSV" in plan.steps[3].description
     assert plan.requires_remote_compute
     assert not plan.requires_remote_write
 

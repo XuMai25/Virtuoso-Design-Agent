@@ -544,6 +544,7 @@ def test_ade_run_is_background_compute_without_oa_write() -> None:
 
     assert task.ade_run is not None
     assert task.ade_run.require_structured_outputs is True
+    assert task.ade_run.require_artifact_manifest is True
     assert plan.requires_remote_compute
     assert not plan.requires_remote_write
 

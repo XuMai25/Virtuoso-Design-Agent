@@ -65,4 +65,4 @@ run record 明确保存 `existing_outputs_replaced=false`、`unlisted_setup_stat
 
 ## 下一道 Gate
 
-自动化下一步是给 background `ade.run` 增加与本次确切 history 绑定的 simulator-input/PSF/log manifest 和哈希，再在一个专用 Maestro cell 上按“setup patch → background run → artifact/result readback”执行 live smoke。真实 smoke 前仍需重新列出目标 library/cell/view、OA 写入、远端计算、远端路径和覆盖风险并取得明确授权。
+background `ade.run` 的 exact-history simulator-input/result/log manifest 与哈希已完成本地实现，见 [`2026-07-21-ade-background-artifact-manifest-local.md`](2026-07-21-ade-background-artifact-manifest-local.md)。下一步是在一个专用 Maestro cell 上按“setup patch → background run → artifact/result readback → netlist 参数核对”执行 live smoke。真实 smoke 前仍需重新列出目标 library/cell/view、OA 写入、远端计算、远端路径和覆盖风险并取得明确授权。

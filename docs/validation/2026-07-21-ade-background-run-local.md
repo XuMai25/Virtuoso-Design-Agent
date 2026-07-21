@@ -1,5 +1,7 @@
 # 2026-07-21 ADE 后台运行与结果回收本地实现
 
+> 后续增量：exact-history simulator input/result/log 大小与 SHA-256 清单已在本地实现，详见 [`2026-07-21-ade-background-artifact-manifest-local.md`](2026-07-21-ade-background-artifact-manifest-local.md)。下文保留最初 background result-ingestion Gate 的验证快照；其中“不捕获产物”只描述该初始提交，不代表当前代码状态。
+
 ## 目标
 
 在不要求用户打开或聚焦 Virtuoso 窗口的条件下，运行一个已经保存的 Maestro setup，并把 `run_and_wait` 为本次调用返回的 history 中原生 parametric sweep 逐点 output/spec 交回 VDA。该能力只消费既有 setup，不修改变量、analysis、output、corner 或 schematic。
