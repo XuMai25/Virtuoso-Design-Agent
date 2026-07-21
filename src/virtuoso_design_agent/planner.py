@@ -299,6 +299,56 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             ),
         ]
 
+    if task.operation is Operation.ADE_SETUP_APPLY:
+        assert task.ade_setup is not None
+        analyses = ", ".join(
+            update.label() for update in task.ade_setup.analyses
+        ) or "none"
+        outputs = ", ".join(
+            output.label() for output in task.ade_setup.outputs
+        ) or "none"
+        return [
+            probe,
+            _step(
+                "02-preflight",
+                "ade.setup.preflight",
+                (
+                    "确认目标 Maestro view 已存在且没有任何已配置的开放 session；"
+                    "精确核对 tests、每个声明 analysis 的 enabled/options 旧状态，"
+                    "并确认所有待新增命名 output 均不存在；任一不符则零写入"
+                ),
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "03-apply",
+                "ade.setup.apply",
+                (
+                    f"更新 analyses: {analyses}；新增 outputs/specs: {outputs}；"
+                    "逐项写后立即结构化回读，全部一致后只保存一次 setup。"
+                    "不替换已有 output，也不运行仿真或改 schematic/variables/corners"
+                ),
+                SideEffect.REMOTE_WRITE,
+            ),
+            _step(
+                "04-readback",
+                "ade.setup.readback",
+                (
+                    "关闭写会话后重新打开 background session，核对 tests 与所有"
+                    "目标 analysis/output/spec 的持久化状态；不一致不自动重写"
+                ),
+                SideEffect.READ_ONLY,
+            ),
+            persist.model_copy(
+                update={
+                    "id": "05-persist",
+                    "description": (
+                        "记录请求=user_input、旧值/即时值/持久化值="
+                        "bridge_readback；成功不等于 analysis 已执行或 output 已产生结果"
+                    ),
+                }
+            ),
+        ]
+
     if task.operation is Operation.SCHEMATIC_CREATE:
         create_description = (
             f"显式删除并按受控模板替换已有{template_name} schematic"

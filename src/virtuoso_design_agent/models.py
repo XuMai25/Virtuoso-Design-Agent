@@ -31,6 +31,7 @@ class Operation(str, Enum):
     ADE_CAPTURE = "ade.capture"
     ADE_RUN = "ade.run"
     ADE_VARIABLES_APPLY = "ade.variables.apply"
+    ADE_SETUP_APPLY = "ade.setup.apply"
     SIMULATION_RUN = "simulation.run"
     DESIGN_TUNE = "design.tune"
     DESIGN_CLOSE_LOOP = "design.close_loop"
@@ -60,6 +61,16 @@ class AdeVariableScope(str, Enum):
     GLOBAL = "global"
     TEST = "test"
     CORNER = "corner"
+
+
+class AdeOutputType(str, Enum):
+    NET = "net"
+    POINT = "point"
+
+
+class AdeSpecRelation(str, Enum):
+    LESS_THAN = "lt"
+    GREATER_THAN = "gt"
 
 
 class Relation(str, Enum):
@@ -373,6 +384,158 @@ class AdeVariablesApplySpec(StrictModel):
         return self
 
 
+AdeAnalysisOptionValue = StrictStr | bool | None
+
+
+class AdeAnalysisState(StrictModel):
+    enabled: bool
+    options: dict[StrictStr, AdeAnalysisOptionValue] = Field(default_factory=dict)
+
+    @field_validator("options")
+    @classmethod
+    def validate_options(
+        cls, value: dict[str, AdeAnalysisOptionValue]
+    ) -> dict[str, AdeAnalysisOptionValue]:
+        for name, option in value.items():
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", name):
+                raise ValueError(f"invalid Maestro analysis option name: {name!r}")
+            if isinstance(option, str):
+                if not option or len(option) > 1024:
+                    raise ValueError(
+                        f"Maestro analysis option {name!r} must be 1..1024 characters"
+                    )
+                if any(ord(character) < 32 or ord(character) == 127 for character in option):
+                    raise ValueError(
+                        f"Maestro analysis option {name!r} contains control characters"
+                    )
+        return value
+
+
+class AdeAnalysisUpdate(StrictModel):
+    test: StrictStr = Field(min_length=1, max_length=128)
+    analysis: StrictStr = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$",
+    )
+    expected: AdeAnalysisState | None
+    enabled: bool
+    options: dict[StrictStr, AdeAnalysisOptionValue] = Field(default_factory=dict)
+
+    @field_validator("options")
+    @classmethod
+    def validate_option_updates(
+        cls, value: dict[str, AdeAnalysisOptionValue]
+    ) -> dict[str, AdeAnalysisOptionValue]:
+        return AdeAnalysisState(enabled=True, options=value).options
+
+    @model_validator(mode="after")
+    def reject_noop(self) -> "AdeAnalysisUpdate":
+        if self.expected is None:
+            if not self.enabled:
+                raise ValueError("a new Maestro analysis must be enabled")
+        else:
+            desired_options = dict(self.expected.options)
+            desired_options.update(self.options)
+            if (
+                self.expected.enabled == self.enabled
+                and desired_options == self.expected.options
+            ):
+                raise ValueError("Maestro analysis update must change enable or options")
+        return self
+
+    def label(self) -> str:
+        return f"{self.test}/{self.analysis}"
+
+
+class AdeOutputSpec(StrictModel):
+    relation: AdeSpecRelation
+    value: StrictStr = Field(min_length=1, max_length=1024)
+
+    @field_validator("value")
+    @classmethod
+    def validate_value(cls, value: str) -> str:
+        if any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("Maestro output spec contains control characters")
+        return value
+
+
+class AdeOutputAddition(StrictModel):
+    test: StrictStr = Field(min_length=1, max_length=128)
+    name: StrictStr = Field(min_length=1, max_length=128)
+    output_type: AdeOutputType
+    signal_name: StrictStr | None = Field(default=None, min_length=1, max_length=1024)
+    expression: StrictStr | None = Field(default=None, min_length=1, max_length=4096)
+    spec: AdeOutputSpec | None = None
+
+    @field_validator("name", "signal_name", "expression")
+    @classmethod
+    def validate_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("Maestro output fields cannot contain control characters")
+        return value
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "AdeOutputAddition":
+        if self.output_type is AdeOutputType.NET:
+            if self.signal_name is None or self.expression is not None:
+                raise ValueError(
+                    "net Maestro outputs require signal_name and forbid expression"
+                )
+        elif self.expression is None or self.signal_name is not None:
+            raise ValueError(
+                "point Maestro outputs require expression and forbid signal_name"
+            )
+        return self
+
+    def label(self) -> str:
+        return f"{self.test}/{self.name}"
+
+
+class AdeSetupApplySpec(StrictModel):
+    """Patch analyses and add non-conflicting named outputs in one save."""
+
+    backend: AdeBackend = AdeBackend.MAESTRO
+    expected_tests: list[StrictStr] = Field(min_length=1, max_length=32)
+    analyses: list[AdeAnalysisUpdate] = Field(default_factory=list, max_length=32)
+    outputs: list[AdeOutputAddition] = Field(default_factory=list, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_setup_patch(self) -> "AdeSetupApplySpec":
+        if not self.analyses and not self.outputs:
+            raise ValueError("ade.setup.apply requires analyses or outputs")
+        for test in self.expected_tests:
+            if (
+                not test
+                or len(test) > 128
+                or any(
+                    character in ('"', "\\")
+                    or ord(character) < 32
+                    or ord(character) == 127
+                    for character in test
+                )
+            ):
+                raise ValueError(f"invalid Maestro test name: {test!r}")
+        if len(self.expected_tests) != len(set(self.expected_tests)):
+            raise ValueError("expected_tests cannot contain duplicates")
+        for item in [*self.analyses, *self.outputs]:
+            if item.test not in self.expected_tests:
+                raise ValueError(
+                    f"Maestro setup item {item.label()!r} must target expected_tests"
+                )
+        analysis_identities = [
+            (update.test, update.analysis) for update in self.analyses
+        ]
+        if len(analysis_identities) != len(set(analysis_identities)):
+            raise ValueError("Maestro setup analyses cannot repeat a test/analysis")
+        output_identities = [(output.test, output.name) for output in self.outputs]
+        if len(output_identities) != len(set(output_identities)):
+            raise ValueError("Maestro setup outputs cannot repeat a test/name")
+        return self
+
+
 class SafetyPolicy(StrictModel):
     allow_remote_compute: bool = False
     allow_remote_write: bool = False
@@ -407,6 +570,7 @@ class TaskSpec(StrictModel):
     ade_prepare: AdePrepareSpec | None = None
     ade_run: AdeRunSpec | None = None
     ade_variables: AdeVariablesApplySpec | None = None
+    ade_setup: AdeSetupApplySpec | None = None
     parameters: dict[str, float] = Field(default_factory=dict)
     instance_parameter_updates: list[InstanceParameterUpdate] = Field(
         default_factory=list
@@ -625,6 +789,32 @@ class TaskSpec(StrictModel):
             raise ValueError(
                 "ade_variables settings require operation='ade.variables.apply'"
             )
+        if self.operation is Operation.ADE_SETUP_APPLY:
+            if self.ade_setup is None:
+                raise ValueError("ade.setup.apply requires ade_setup settings")
+            if self.target.view != "maestro":
+                raise ValueError(
+                    "ade.setup.apply currently requires target.view='maestro'"
+                )
+            if (
+                self.parameters
+                or self.instance_parameter_updates
+                or self.parameter_space
+                or self.constraints
+                or self.objective is not None
+                or self.create_if_missing
+            ):
+                raise ValueError(
+                    "ade.setup.apply only patches declared Maestro analyses/outputs "
+                    "and does not accept parameters, search, constraints, objective, "
+                    "or creation requests"
+                )
+            if self.safety.replace_existing:
+                raise ValueError(
+                    "ade.setup.apply never replaces an existing Maestro view"
+                )
+        elif self.ade_setup is not None:
+            raise ValueError("ade_setup settings require operation='ade.setup.apply'")
         if self.instance_parameter_updates:
             if self.operation is not Operation.PARAMETERS_APPLY:
                 raise ValueError(

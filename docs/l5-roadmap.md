@@ -43,6 +43,8 @@ Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发�
 
 随后新增并扩展 `ade.variables.apply`：任务声明 exact tests、可选 enabled corners，以及每个 global/test/corner design variable 的 scope、旧值和新值；旧值全部匹配后逐项 set/get，只保存一次 setup，再用全新 background session 逐 scope 复核持久化值。`null` 可断言变量在该 scope 原先不存在，逗号字符串可请求该 scope 的原生 sweep。已有已配置 Maestro session 时保守拒绝；请求标为 `user_input`，三阶段回读标为 `bridge_readback`。该 Gate 不检查未声明 override，也不证明变量进入网表或仿真，因此当前状态是 **local declared-scope variable compare-and-swap persistence contract implemented**。
 
+现在又新增正交的 `ade.setup.apply`：在 exact tests 下，对声明 analysis 的完整旧 enabled/options 做 CAS，并只新增明确不存在的命名 net/point output 与可选 lt/gt spec。worker 在首个 writer 前读完全部旧 analysis 和 output absence；随后复用 Bridge public analysis/output/spec writer，逐项立即回读，只保存一次，再独立重开核对。已有 output 不会被替换，未声明 setup 状态也不会被包装成已核验；analysis/output 配置仍是 `bridge_readback`，没有仿真就没有 `eda_result`。本地模型、planner、worker、executor、失败注入和 example 已通过，因此状态是 **local declared-analysis CAS and add-only output/spec persistence contract implemented**，尚无 nics4304 live 证据。
+
 需要用户操作 Virtuoso/ADE 的验证已按用户决定延期，并集中记录在 [`deferred-manual-gates.md`](deferred-manual-gates.md)：包括人工修改/保存/重跑后的双向交接、旧 ADE L state 备份后迁移与重开，以及相同 history/output 的人工数值交叉检查。这些项目不阻塞后台自动化实现，但在真实完成前仍保留为未验证边界；延期记录本身不构成远端授权。
 
 ## L5B：单模块设计代理（产品目标）
@@ -82,7 +84,7 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> 有限 AC trade-off 与失败/预算/恢复路径（已通过）
   -> 功耗 + transient 线性度 + noise（单点只读 live 已通过）
   -> 多 analysis 质量约束与受预算调优（W/RD/RS 写回、失败门与恢复已通过）
-  -> ADE 双路径（prepare/capture + global/test/corner 变量 CAS + background run 已本地实现；live、analysis/output 与 corner 待验证）
+  -> ADE 双路径（prepare/capture + 变量 CAS + analysis/output add-only patch + background run 已本地实现；live 与 corner 待验证）
   -> L/VDD + 多 analysis + 有限 corner
   -> 差分对
   -> L5B 单模块闭环
@@ -91,4 +93,4 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
 
 每一级只有在真实 Bridge smoke、结构回读、指标解析和失败注入均通过后才升级状态。
 
-反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化原位 transform/DC tuning、只读 AC 条件搜索、W/RD/RS AC 与多 analysis 质量写回、单项功耗/linearity/noise，以及预算/不可行/transport 恢复均已有 live 证据。Gate 2A 现在可以让不同 objective 在同一候选证据上得到不同 OA 设计。global/test/corner 变量逐 scope CAS 已完成本地契约；下一自动化硬门是 analysis/output patch，并让 background run 保留 netlist/PSF 证据，随后加入 L/VDD 与有限 corner。需要人工打开/修改/重跑、旧 ADE L 迁移和数值交叉检查的 Gate 已按用户决定延期，不再阻塞自动实现，但完成前仍不能升级为可重复的 L5B 单模块规格闭环。
+反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化原位 transform/DC tuning、只读 AC 条件搜索、W/RD/RS AC 与多 analysis 质量写回、单项功耗/linearity/noise，以及预算/不可行/transport 恢复均已有 live 证据。Gate 2A 现在可以让不同 objective 在同一候选证据上得到不同 OA 设计。global/test/corner 变量逐 scope CAS，以及 analysis CAS + output/spec add-only patch，均已完成本地契约；下一自动化硬门是让 background run 保留 netlist/PSF 证据并做一次专用 Maestro live smoke，随后加入已有 output 安全替换、L/VDD 与有限 corner。需要人工打开/修改/重跑、旧 ADE L 迁移和数值交叉检查的 Gate 已按用户决定延期，不再阻塞自动实现，但完成前仍不能升级为可重复的 L5B 单模块规格闭环。

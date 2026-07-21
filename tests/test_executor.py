@@ -69,6 +69,108 @@ def _explicit_parameter_apply() -> TaskSpec:
     )
 
 
+def _ade_setup_task() -> TaskSpec:
+    return TaskSpec.model_validate(
+        {
+            "id": "patch-maestro-setup",
+            "operation": "ade.setup.apply",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_setup": {
+                "expected_tests": ["AC"],
+                "analyses": [
+                    {
+                        "test": "AC",
+                        "analysis": "ac",
+                        "expected": None,
+                        "enabled": True,
+                        "options": {"start": "1", "stop": "10G"},
+                    }
+                ],
+                "outputs": [
+                    {
+                        "test": "AC",
+                        "name": "BW",
+                        "output_type": "point",
+                        "expression": "bandwidth(mag(VF(\"/OUT\")) 3 \"low\")",
+                        "spec": {"relation": "gt", "value": "1G"},
+                    }
+                ],
+            },
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+
+
+def _ade_setup_evidence(task: TaskSpec) -> dict:
+    assert task.ade_setup is not None
+    requested_analyses = [
+        update.model_dump(mode="json") for update in task.ade_setup.analyses
+    ]
+    requested_outputs = [
+        output.model_dump(mode="json") for output in task.ade_setup.outputs
+    ]
+    analysis_state = {
+        "enabled": True,
+        "options": {"anaName": "ac", "start": "1", "stop": "10G"},
+    }
+    output_state = {
+        "name": "BW",
+        "type": "point",
+        "signal_name": None,
+        "expression": requested_outputs[0]["expression"],
+        "eval_type": "point",
+        "plot": None,
+        "save": None,
+        "spec": {"relation": "gt", "value": "1G"},
+    }
+    immediate_analyses = [
+        {"test": "AC", "analysis": "ac", "state": analysis_state}
+    ]
+    immediate_outputs = [{"test": "AC", "name": "BW", "state": output_state}]
+    return {
+        "target": task.target.model_dump(mode="json"),
+        "expected_tests": ["AC"],
+        "tests_readback_before": ["AC"],
+        "tests_readback_after": ["AC"],
+        "requested_analysis_updates": requested_analyses,
+        "requested_output_additions": requested_outputs,
+        "requested_evidence_source": "user_input",
+        "before_analyses": [{"test": "AC", "analysis": "ac", "state": None}],
+        "immediate_analyses": immediate_analyses,
+        "persisted_analyses": immediate_analyses,
+        "before_outputs": [{"test": "AC", "name": "BW", "state": None}],
+        "immediate_outputs": immediate_outputs,
+        "persisted_outputs": immediate_outputs,
+        "confirmed_evidence_source": "bridge_readback",
+        "before_target_fingerprint_sha256": "a" * 64,
+        "after_target_fingerprint_sha256": "b" * 64,
+        "analysis_write_method": "bridge_public_set_analysis",
+        "analysis_readback_method": (
+            "cadence_maeGetAnalysis_via_bridge_skill_channel"
+        ),
+        "output_write_method": "bridge_public_add_output_and_set_spec",
+        "output_readback_method": (
+            "cadence_maeGetTestOutputs_and_axlGetSpecData_"
+            "via_bridge_skill_channel"
+        ),
+        "existing_outputs_replaced": False,
+        "existing_maestro_replaced": False,
+        "unlisted_setup_state_checked": False,
+        "full_setup_fingerprint_verified": False,
+        "schematic_oa_write_performed": False,
+        "maestro_setup_write_performed": True,
+        "automated_simulation_performed": False,
+    }
+
+
 def test_explicit_instance_parameter_apply_is_independently_read_back() -> None:
     task = _explicit_parameter_apply()
     adapter = DeterministicDemoAdapter()
@@ -543,6 +645,68 @@ def test_ade_variable_patch_rejects_untrusted_readback(
 
     assert record.status is RunStatus.FAILED
     assert any("compare-and-swap" in note for note in record.notes)
+
+
+def test_ade_setup_patch_records_atomic_persistent_readback() -> None:
+    task = _ade_setup_task()
+
+    class SetupAdapter(DeterministicDemoAdapter):
+        def apply_ade_setup(self, task):
+            return AdapterResult(
+                data=_ade_setup_evidence(task),
+                evidence_source=EvidenceSource.BRIDGE_READBACK,
+            )
+
+    plan = build_plan(task)
+    record = TaskExecutor(SetupAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert [action.action for action in record.actions] == [
+        "bridge.probe",
+        "ade.setup.apply",
+    ]
+    assert record.actions[-1].evidence_source is EvidenceSource.BRIDGE_READBACK
+    assert record.candidates == []
+    assert any("absent named outputs" in note for note in record.notes)
+    assert any("no simulation was run" in note for note in record.notes)
+
+
+@pytest.mark.parametrize("corruption", ["persisted", "fingerprint", "scope"])
+def test_ade_setup_patch_rejects_untrusted_confirmation(corruption: str) -> None:
+    task = _ade_setup_task()
+
+    class UntrustedSetupAdapter(DeterministicDemoAdapter):
+        def apply_ade_setup(self, task):
+            data = _ade_setup_evidence(task)
+            if corruption == "persisted":
+                data["persisted_analyses"] = [
+                    {
+                        "test": "AC",
+                        "analysis": "ac",
+                        "state": {
+                            "enabled": True,
+                            "options": {"start": "1", "stop": "1G"},
+                        },
+                    }
+                ]
+            elif corruption == "fingerprint":
+                data["after_target_fingerprint_sha256"] = "a" * 64
+            else:
+                data["unlisted_setup_state_checked"] = True
+            return AdapterResult(
+                data=data,
+                evidence_source=EvidenceSource.BRIDGE_READBACK,
+            )
+
+    plan = build_plan(task)
+    record = TaskExecutor(UntrustedSetupAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.FAILED
+    assert any("ADE setup patch did not prove" in note for note in record.notes)
 
 
 def test_explicit_parameter_apply_fails_on_untrusted_adapter_confirmation() -> None:

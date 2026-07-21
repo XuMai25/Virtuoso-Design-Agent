@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import sys
+from copy import deepcopy
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -68,12 +69,18 @@ def _install_fake_maestro_module(
     virtuoso = ModuleType("virtuoso_bridge.virtuoso")
     virtuoso.__path__ = []
     virtuoso.maestro = maestro
+    ops = ModuleType("virtuoso_bridge.virtuoso.ops")
+    ops.escape_skill_string = lambda value: (  # type: ignore[attr-defined]
+        str(value).replace("\\", "\\\\").replace('"', '\\"')
+    )
+    virtuoso.ops = ops
     bridge = ModuleType("virtuoso_bridge")
     bridge.__path__ = []
     bridge.virtuoso = virtuoso
     monkeypatch.setitem(sys.modules, "virtuoso_bridge", bridge)
     monkeypatch.setitem(sys.modules, "virtuoso_bridge.virtuoso", virtuoso)
     monkeypatch.setitem(sys.modules, "virtuoso_bridge.virtuoso.maestro", maestro)
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.virtuoso.ops", ops)
 
 
 def test_pdk_profile_contains_verified_nics4304_paths() -> None:
@@ -821,6 +828,398 @@ def test_maestro_variable_patch_rejects_persistent_readback_mismatch(
     ]
 
 
+def test_maestro_setup_readback_parser_preserves_skill_values_and_escapes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_maestro_module(monkeypatch)
+
+    parsed = bridge_worker._parse_skill_sexpr(  # noqa: SLF001
+        r'''(t (("start" "1") ("saveOppoint" t) ("unset" nil)
+        ("path" "A\\B") ("unknown" "x\qy")))'''
+    )
+
+    assert parsed == [
+        True,
+        [
+            ["start", "1"],
+            ["saveOppoint", True],
+            ["unset", None],
+            ["path", "A\\B"],
+            ["unknown", "x\\qy"],
+        ],
+    ]
+
+    class Client:
+        def execute_skill(self, expression, **kwargs):
+            if "maeGetEnabledAnalysis" in expression:
+                return SimpleNamespace(
+                    output='(t (("anaName" "ac") ("start" "1") '
+                    '("saveOppoint" t)))',
+                    errors=[],
+                )
+            if "maeGetTestOutputs" in expression:
+                assert "axlGetSpecData" in expression
+                return SimpleNamespace(
+                    output=(
+                        '(1 "BW" \'point nil "bandwidth(mag(VF(\\"/OUT\\")) '
+                        '3 \\"low\\")" \'point t nil ((\'gt "1G")))'
+                    ),
+                    errors=[],
+                )
+            raise AssertionError(expression)
+
+    analysis = bridge_worker._maestro_analysis_state(  # noqa: SLF001
+        Client(), "AC", "ac", session="fnxRead1"
+    )
+    output = bridge_worker._maestro_output_state(  # noqa: SLF001
+        Client(), "AC", "BW", session="fnxRead1"
+    )
+
+    assert analysis == {
+        "enabled": True,
+        "options": {"anaName": "ac", "start": "1", "saveOppoint": True},
+    }
+    assert output == {
+        "name": "BW",
+        "type": "point",
+        "signal_name": None,
+        "expression": 'bandwidth(mag(VF("/OUT")) 3 "low")',
+        "eval_type": "point",
+        "plot": True,
+        "save": None,
+        "spec": {"relation": "gt", "value": "1G"},
+    }
+
+
+def test_maestro_setup_patch_saves_once_and_reopens_for_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+    before_analysis = {
+        "enabled": True,
+        "options": {
+            "anaName": "ac",
+            "start": "1",
+            "stop": "1G",
+            "dec": "10",
+        },
+    }
+    desired_analysis = {
+        "enabled": True,
+        "options": {
+            "anaName": "ac",
+            "start": "1",
+            "stop": "10G",
+            "dec": "20",
+        },
+    }
+    expression = 'bandwidth(mag(VF("/OUT")) 3 "low")'
+    state = {
+        "persisted_analyses": {("AC", "ac"): before_analysis},
+        "persisted_outputs": {},
+        "working_analyses": {},
+        "working_outputs": {},
+    }
+
+    class Client:
+        def execute_skill(self, expression, **kwargs):
+            if "ddGetObj" in expression:
+                return SimpleNamespace(output="t", errors=[])
+            if "maeGetSetup" in expression:
+                return SimpleNamespace(output='("AC")', errors=[])
+            raise AssertionError(expression)
+
+    sessions = iter(["fnxSetupWrite", "fnxSetupVerify"])
+
+    def fake_open_session(_client, library, cell):
+        session = next(sessions)
+        state["working_analyses"] = deepcopy(state["persisted_analyses"])
+        state["working_outputs"] = deepcopy(state["persisted_outputs"])
+        calls.append(("open", session, library, cell))
+        return session
+
+    def fake_analysis_state(_client, test, analysis, *, session):
+        calls.append(("read_analysis", session, test, analysis))
+        return deepcopy(state["working_analyses"].get((test, analysis)))
+
+    def fake_output_state(_client, test, name, *, session):
+        calls.append(("read_output", session, test, name))
+        return deepcopy(state["working_outputs"].get((test, name)))
+
+    def fake_set_analysis(
+        _client, test, analysis, *, enable, options, session
+    ):
+        calls.append(("set_analysis", session, test, analysis, enable, options))
+        assert options == '(("stop" "10G") ("dec" "20"))'
+        state["working_analyses"][(test, analysis)] = deepcopy(desired_analysis)
+
+    def fake_add_output(
+        _client,
+        name,
+        test,
+        *,
+        output_type,
+        signal_name,
+        expr,
+        session,
+    ):
+        calls.append(("add_output", session, test, name, output_type))
+        assert '\\"/OUT\\"' in expr
+        state["working_outputs"][(test, name)] = {
+            "name": name,
+            "type": output_type,
+            "signal_name": signal_name or None,
+            "expression": expression,
+            "eval_type": output_type,
+            "plot": None,
+            "save": None,
+            "spec": None,
+        }
+
+    def fake_set_spec(_client, name, test, *, session, **kwargs):
+        calls.append(("set_spec", session, test, name, kwargs))
+        relation, value = next(iter(kwargs.items()))
+        state["working_outputs"][(test, name)]["spec"] = {
+            "relation": relation,
+            "value": value,
+        }
+
+    def fake_save_setup(_client, library, cell, *, session):
+        calls.append(("save", session, library, cell))
+        state["persisted_analyses"] = deepcopy(state["working_analyses"])
+        state["persisted_outputs"] = deepcopy(state["working_outputs"])
+
+    _install_fake_maestro_module(
+        monkeypatch,
+        find_open_session=lambda _client: None,
+        open_session=fake_open_session,
+        close_session=lambda _client, session: calls.append(("close", session)),
+        set_analysis=fake_set_analysis,
+        add_output=fake_add_output,
+        set_spec=fake_set_spec,
+        save_setup=fake_save_setup,
+    )
+    monkeypatch.setattr(bridge_worker, "_client", Client)
+    monkeypatch.setattr(bridge_worker, "_maestro_analysis_state", fake_analysis_state)
+    monkeypatch.setattr(bridge_worker, "_maestro_output_state", fake_output_state)
+
+    result = bridge_worker.apply_maestro_setup(
+        {
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_setup": {
+                "backend": "maestro",
+                "expected_tests": ["AC"],
+                "analyses": [
+                    {
+                        "test": "AC",
+                        "analysis": "ac",
+                        "expected": before_analysis,
+                        "enabled": True,
+                        "options": {"stop": "10G", "dec": "20"},
+                    }
+                ],
+                "outputs": [
+                    {
+                        "test": "AC",
+                        "name": "BW",
+                        "output_type": "point",
+                        "signal_name": None,
+                        "expression": expression,
+                        "spec": {"relation": "gt", "value": "1G"},
+                    }
+                ],
+            },
+        }
+    )
+
+    assert result["tests_readback_before"] == ["AC"]
+    assert result["tests_readback_after"] == ["AC"]
+    assert result["before_analyses"][0]["state"] == before_analysis
+    assert result["before_outputs"] == [
+        {"test": "AC", "name": "BW", "state": None}
+    ]
+    assert result["immediate_analyses"] == result["persisted_analyses"]
+    assert result["immediate_outputs"] == result["persisted_outputs"]
+    assert result["persisted_analyses"][0]["state"] == desired_analysis
+    assert result["persisted_outputs"][0]["state"]["spec"] == {
+        "relation": "gt",
+        "value": "1G",
+    }
+    assert result["existing_outputs_replaced"] is False
+    assert result["existing_maestro_replaced"] is False
+    assert result["maestro_setup_write_performed"] is True
+    assert result["automated_simulation_performed"] is False
+    assert result["before_target_fingerprint_sha256"] != result[
+        "after_target_fingerprint_sha256"
+    ]
+    assert [call[0] for call in calls].count("save") == 1
+    assert [call[0] for call in calls].count("open") == 2
+    assert [call[0] for call in calls].count("close") == 2
+    first_write = next(
+        index
+        for index, call in enumerate(calls)
+        if call[0] in {"set_analysis", "add_output"}
+    )
+    assert [call[0] for call in calls[:first_write] if call[0].startswith("read_")] == [
+        "read_analysis",
+        "read_output",
+    ]
+
+
+def test_maestro_setup_patch_stops_before_write_on_any_precondition_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+
+    class Client:
+        def execute_skill(self, expression, **kwargs):
+            if "ddGetObj" in expression:
+                return SimpleNamespace(output="t", errors=[])
+            if "maeGetSetup" in expression:
+                return SimpleNamespace(output='("AC")', errors=[])
+            raise AssertionError(expression)
+
+    def fake_analysis_state(_client, test, analysis, *, session):
+        calls.append(("read_analysis", test, analysis))
+        return {"enabled": True, "options": {"stop": "2G"}}
+
+    def fake_output_state(_client, test, name, *, session):
+        calls.append(("read_output", test, name))
+        return None
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("precondition mismatch must stop before write/save")
+
+    _install_fake_maestro_module(
+        monkeypatch,
+        find_open_session=lambda _client: None,
+        open_session=lambda *_args: "fnxSetupMismatch",
+        close_session=lambda _client, session: calls.append(("close", session)),
+        set_analysis=unexpected,
+        add_output=unexpected,
+        set_spec=unexpected,
+        save_setup=unexpected,
+    )
+    monkeypatch.setattr(bridge_worker, "_client", Client)
+    monkeypatch.setattr(bridge_worker, "_maestro_analysis_state", fake_analysis_state)
+    monkeypatch.setattr(bridge_worker, "_maestro_output_state", fake_output_state)
+
+    with pytest.raises(RuntimeError, match="before any write"):
+        bridge_worker.apply_maestro_setup(
+            {
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "ade_setup": {
+                    "expected_tests": ["AC"],
+                    "analyses": [
+                        {
+                            "test": "AC",
+                            "analysis": "ac",
+                            "expected": {
+                                "enabled": True,
+                                "options": {"stop": "1G"},
+                            },
+                            "enabled": True,
+                            "options": {"stop": "10G"},
+                        }
+                    ],
+                    "outputs": [
+                        {
+                            "test": "AC",
+                            "name": "Vout",
+                            "output_type": "net",
+                            "signal_name": "/OUT",
+                            "expression": None,
+                            "spec": None,
+                        }
+                    ],
+                },
+            }
+        )
+
+    assert calls == [
+        ("read_analysis", "AC", "ac"),
+        ("read_output", "AC", "Vout"),
+        ("close", "fnxSetupMismatch"),
+    ]
+
+
+def test_maestro_setup_patch_rejects_persistent_readback_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+    states = iter(
+        [
+            None,
+            {"enabled": True, "options": {"stop": "10G"}},
+            {"enabled": True, "options": {"stop": "1G"}},
+        ]
+    )
+
+    class Client:
+        def execute_skill(self, expression, **kwargs):
+            if "ddGetObj" in expression:
+                return SimpleNamespace(output="t", errors=[])
+            if "maeGetSetup" in expression:
+                return SimpleNamespace(output='("AC")', errors=[])
+            raise AssertionError(expression)
+
+    _install_fake_maestro_module(
+        monkeypatch,
+        find_open_session=lambda _client: None,
+        open_session=lambda *_args: (
+            "fnxSetupWrite" if not calls else "fnxSetupVerify"
+        ),
+        close_session=lambda _client, session: calls.append(("close", session)),
+        set_analysis=lambda *_args, **_kwargs: None,
+        add_output=lambda *_args, **_kwargs: None,
+        set_spec=lambda *_args, **_kwargs: None,
+        save_setup=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(bridge_worker, "_client", Client)
+    monkeypatch.setattr(
+        bridge_worker,
+        "_maestro_analysis_state",
+        lambda *_args, **_kwargs: next(states),
+    )
+
+    with pytest.raises(RuntimeError, match="persistent readback mismatch"):
+        bridge_worker.apply_maestro_setup(
+            {
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "ade_setup": {
+                    "expected_tests": ["AC"],
+                    "analyses": [
+                        {
+                            "test": "AC",
+                            "analysis": "ac",
+                            "expected": None,
+                            "enabled": True,
+                            "options": {"stop": "10G"},
+                        }
+                    ],
+                    "outputs": [],
+                },
+            }
+        )
+
+    assert calls == [
+        ("close", "fnxSetupWrite"),
+        ("close", "fnxSetupVerify"),
+    ]
+
+
 def test_focused_maestro_capture_keeps_manual_state_and_real_result_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1097,6 +1496,79 @@ def test_subprocess_ade_variable_payload_preserves_exact_strings(
     assert set(payload["ade_variables_user_fields"]) == {
         "expected_tests",
         "updates",
+    }
+
+
+def test_subprocess_ade_setup_payload_preserves_cas_and_output_expression(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expression = 'bandwidth(mag(VF("/OUT")) 3 "low")'
+    task = TaskSpec.model_validate(
+        {
+            "id": "patch-maestro-setup",
+            "operation": "ade.setup.apply",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_setup": {
+                "expected_tests": ["AC"],
+                "analyses": [
+                    {
+                        "test": "AC",
+                        "analysis": "ac",
+                        "expected": None,
+                        "enabled": True,
+                        "options": {"start": "1", "stop": "10G"},
+                    }
+                ],
+                "outputs": [
+                    {
+                        "test": "AC",
+                        "name": "BW",
+                        "output_type": "point",
+                        "expression": expression,
+                        "spec": {"relation": "gt", "value": "1G"},
+                    }
+                ],
+            },
+        }
+    )
+    adapter = SubprocessBridgeAdapter(tmp_path / "bridge-python.exe")
+    request: dict[str, object] = {}
+
+    def fake_request(action, payload, *, timeout):
+        request.update(action=action, payload=payload, timeout=timeout)
+        return {"persisted_outputs": []}
+
+    monkeypatch.setattr(adapter, "_request", fake_request)
+
+    result = adapter.apply_ade_setup(task)
+
+    assert result.evidence_source is EvidenceSource.BRIDGE_READBACK
+    assert request["action"] == "apply_maestro_setup"
+    assert request["timeout"] == 240
+    payload = request["payload"]
+    assert isinstance(payload, dict)
+    assert "analysis" not in payload
+    assert "analysis_source" not in payload
+    assert payload["ade_setup"]["expected_tests"] == ["AC"]
+    assert payload["ade_setup"]["analyses"][0]["expected"] is None
+    assert payload["ade_setup"]["analyses"][0]["options"] == {
+        "start": "1",
+        "stop": "10G",
+    }
+    assert payload["ade_setup"]["outputs"][0]["expression"] == expression
+    assert payload["ade_setup"]["outputs"][0]["spec"] == {
+        "relation": "gt",
+        "value": "1G",
+    }
+    assert set(payload["ade_setup_user_fields"]) == {
+        "expected_tests",
+        "analyses",
+        "outputs",
     }
 
 

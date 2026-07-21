@@ -776,6 +776,205 @@ def test_ade_variable_settings_cannot_leak_into_other_operations() -> None:
         )
 
 
+def test_ade_setup_patch_accepts_analysis_cas_and_named_output_additions() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "patch-maestro-setup",
+            "operation": "ade.setup.apply",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_setup": {
+                "expected_tests": ["AC"],
+                "analyses": [
+                    {
+                        "test": "AC",
+                        "analysis": "ac",
+                        "expected": {
+                            "enabled": True,
+                            "options": {
+                                "anaName": "ac",
+                                "start": "1",
+                                "stop": "1G",
+                                "dec": "10",
+                            },
+                        },
+                        "enabled": True,
+                        "options": {"stop": "10G", "dec": "20"},
+                    }
+                ],
+                "outputs": [
+                    {
+                        "test": "AC",
+                        "name": "Vout",
+                        "output_type": "net",
+                        "signal_name": "/OUT",
+                    },
+                    {
+                        "test": "AC",
+                        "name": "BW",
+                        "output_type": "point",
+                        "expression": "bandwidth(mag(VF(\"/OUT\")) 3 \"low\")",
+                        "spec": {"relation": "gt", "value": "1G"},
+                    },
+                ],
+            },
+        }
+    )
+
+    assert task.ade_setup is not None
+    assert task.ade_setup.analyses[0].label() == "AC/ac"
+    assert [output.label() for output in task.ade_setup.outputs] == [
+        "AC/Vout",
+        "AC/BW",
+    ]
+    plan = build_plan(task)
+    assert plan.requires_remote_write
+    assert not plan.requires_remote_compute
+
+
+@pytest.mark.parametrize(
+    ("ade_setup", "message"),
+    [
+        (
+            {
+                "expected_tests": ["AC"],
+                "analyses": [
+                    {
+                        "test": "AC",
+                        "analysis": "ac",
+                        "expected": None,
+                        "enabled": False,
+                    }
+                ],
+            },
+            "new Maestro analysis must be enabled",
+        ),
+        (
+            {
+                "expected_tests": ["AC"],
+                "analyses": [
+                    {
+                        "test": "AC",
+                        "analysis": "ac",
+                        "expected": {"enabled": True, "options": {"stop": "1G"}},
+                        "enabled": True,
+                    }
+                ],
+            },
+            "must change enable or options",
+        ),
+        (
+            {
+                "expected_tests": ["AC"],
+                "outputs": [
+                    {
+                        "test": "AC",
+                        "name": "bad",
+                        "output_type": "net",
+                        "expression": "VF(\"/OUT\")",
+                    }
+                ],
+            },
+            "require signal_name",
+        ),
+        (
+            {
+                "expected_tests": ["AC"],
+                "outputs": [
+                    {
+                        "test": "OTHER",
+                        "name": "BW",
+                        "output_type": "point",
+                        "expression": "1",
+                    }
+                ],
+            },
+            "must target expected_tests",
+        ),
+        (
+            {
+                "expected_tests": ["AC"],
+                "outputs": [
+                    {
+                        "test": "AC",
+                        "name": "BW",
+                        "output_type": "point",
+                        "expression": "1",
+                    },
+                    {
+                        "test": "AC",
+                        "name": "BW",
+                        "output_type": "point",
+                        "expression": "2",
+                    },
+                ],
+            },
+            "cannot repeat a test/name",
+        ),
+    ],
+)
+def test_ade_setup_patch_rejects_ambiguous_or_unsafe_changes(
+    ade_setup: dict, message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        TaskSpec.model_validate(
+            {
+                "id": "invalid-maestro-setup",
+                "operation": "ade.setup.apply",
+                "circuit": "existing_schematic",
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "ade_setup": ade_setup,
+            }
+        )
+
+
+def test_ade_setup_settings_cannot_leak_or_request_overwrite() -> None:
+    setup = {
+        "expected_tests": ["AC"],
+        "outputs": [
+            {
+                "test": "AC",
+                "name": "Vout",
+                "output_type": "net",
+                "signal_name": "/OUT",
+            }
+        ],
+    }
+    with pytest.raises(ValidationError, match="require operation='ade.setup.apply'"):
+        TaskSpec.model_validate(
+            {
+                "id": "wrong-setup-operation",
+                "operation": "schematic.inspect",
+                "circuit": "existing_schematic",
+                "target": {"library": "vda_test", "cell": "vda_manual_tb"},
+                "ade_setup": setup,
+            }
+        )
+    with pytest.raises(ValidationError, match="never replaces"):
+        TaskSpec.model_validate(
+            {
+                "id": "overwrite-maestro-setup",
+                "operation": "ade.setup.apply",
+                "circuit": "existing_schematic",
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "ade_setup": setup,
+                "safety": {"replace_existing": True},
+            }
+        )
+
+
 def test_ade_variable_patch_accepts_distinct_global_test_and_corner_scopes() -> None:
     task = TaskSpec.model_validate(
         {

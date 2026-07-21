@@ -181,6 +181,59 @@ def test_ade_variable_patch_plan_discloses_cas_and_single_setup_save() -> None:
     assert not plan.requires_remote_compute
 
 
+def test_ade_setup_patch_plan_discloses_atomic_add_only_boundary() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "patch-maestro-setup",
+            "operation": "ade.setup.apply",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_setup": {
+                "expected_tests": ["AC"],
+                "analyses": [
+                    {
+                        "test": "AC",
+                        "analysis": "ac",
+                        "expected": None,
+                        "enabled": True,
+                        "options": {"start": "1", "stop": "10G"},
+                    }
+                ],
+                "outputs": [
+                    {
+                        "test": "AC",
+                        "name": "Vout",
+                        "output_type": "net",
+                        "signal_name": "/OUT",
+                    }
+                ],
+            },
+        }
+    )
+
+    plan = build_plan(task)
+
+    assert [step.capability for step in plan.steps] == [
+        "bridge.probe",
+        "ade.setup.preflight",
+        "ade.setup.apply",
+        "ade.setup.readback",
+        "evidence.persist",
+    ]
+    assert "任一不符则零写入" in plan.steps[1].description
+    assert "AC/ac" in plan.steps[2].description
+    assert "AC/Vout" in plan.steps[2].description
+    assert "不替换已有 output" in plan.steps[2].description
+    assert "重新打开" in plan.steps[3].description
+    assert plan.steps[2].side_effect is SideEffect.REMOTE_WRITE
+    assert plan.requires_remote_write
+    assert not plan.requires_remote_compute
+
+
 def test_ade_variable_patch_plan_discloses_scoped_readback_and_corner_guard() -> None:
     task = TaskSpec.model_validate(
         {

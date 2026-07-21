@@ -123,6 +123,7 @@ class SubprocessBridgeAdapter:
             Operation.ADE_CAPTURE,
             Operation.ADE_RUN,
             Operation.ADE_VARIABLES_APPLY,
+            Operation.ADE_SETUP_APPLY,
         }:
             payload["analysis"] = task.resolved_analysis().value
             payload["analysis_source"] = (
@@ -160,6 +161,11 @@ class SubprocessBridgeAdapter:
             payload["ade_variables"] = task.ade_variables.model_dump(mode="json")
             payload["ade_variables_user_fields"] = sorted(
                 task.ade_variables.model_fields_set
+            )
+        if task.ade_setup is not None:
+            payload["ade_setup"] = task.ade_setup.model_dump(mode="json")
+            payload["ade_setup_user_fields"] = sorted(
+                task.ade_setup.model_fields_set
             )
         return payload
 
@@ -252,6 +258,14 @@ class SubprocessBridgeAdapter:
             "apply_maestro_variables",
             self._task_payload(task),
             timeout=min(task.limits.timeout_seconds, 180),
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
+
+    def apply_ade_setup(self, task: TaskSpec) -> AdapterResult:
+        data = self._request(
+            "apply_maestro_setup",
+            self._task_payload(task),
+            timeout=min(task.limits.timeout_seconds, 240),
         )
         return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
 

@@ -1406,6 +1406,686 @@ def apply_maestro_variables(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _parse_skill_sexpr(raw: str) -> Any:
+    """Parse the small SKILL value subset used by Maestro setup readback."""
+
+    text = str(raw or "").strip()
+    index = 0
+
+    def skip_space() -> None:
+        nonlocal index
+        while index < len(text) and text[index].isspace():
+            index += 1
+
+    def parse_value() -> Any:
+        nonlocal index
+        skip_space()
+        if index >= len(text):
+            raise RuntimeError("truncated SKILL value")
+        if text[index] == "(":
+            index += 1
+            values: list[Any] = []
+            while True:
+                skip_space()
+                if index >= len(text):
+                    raise RuntimeError("unterminated SKILL list")
+                if text[index] == ")":
+                    index += 1
+                    return values
+                values.append(parse_value())
+        if text[index] == '"':
+            index += 1
+            characters: list[str] = []
+            while index < len(text):
+                character = text[index]
+                index += 1
+                if character == '"':
+                    return "".join(characters)
+                if character == "\\":
+                    if index >= len(text):
+                        raise RuntimeError("truncated SKILL string escape")
+                    escaped = text[index]
+                    index += 1
+                    decoded = {
+                        '"': '"',
+                        "\\": "\\",
+                        "n": "\n",
+                        "r": "\r",
+                        "t": "\t",
+                    }.get(escaped)
+                    if decoded is None:
+                        characters.extend(("\\", escaped))
+                    else:
+                        characters.append(decoded)
+                else:
+                    characters.append(character)
+            raise RuntimeError("unterminated SKILL string")
+        start = index
+        while (
+            index < len(text)
+            and not text[index].isspace()
+            and text[index] not in "()"
+        ):
+            index += 1
+        atom = text[start:index]
+        if atom == "nil":
+            return None
+        if atom == "t":
+            return True
+        return atom
+
+    if not text:
+        return None
+    parsed = parse_value()
+    skip_space()
+    if index != len(text):
+        raise RuntimeError(f"unexpected trailing SKILL value: {text[index:]!r}")
+    return parsed
+
+
+def _maestro_analysis_state(
+    client, test: str, analysis: str, *, session: str
+) -> dict[str, Any] | None:
+    from virtuoso_bridge.virtuoso.ops import escape_skill_string
+
+    escaped_test = escape_skill_string(test)
+    escaped_analysis = escape_skill_string(analysis)
+    escaped_session = escape_skill_string(session)
+    expression = (
+        "list("
+        f'if(member("{escaped_analysis}" '
+        f'maeGetEnabledAnalysis("{escaped_test}" ?session "{escaped_session}")) '
+        "t nil) "
+        f'maeGetAnalysis("{escaped_test}" "{escaped_analysis}" '
+        f'?session "{escaped_session}"))'
+    )
+    readback = client.execute_skill(expression, timeout=30)
+    errors = getattr(readback, "errors", None) or []
+    if errors:
+        raise RuntimeError(
+            f"Maestro analysis readback failed for {test}/{analysis}: {errors[0]}"
+        )
+    parsed = _parse_skill_sexpr(getattr(readback, "output", ""))
+    if not isinstance(parsed, list) or len(parsed) != 2:
+        raise RuntimeError(
+            f"invalid Maestro analysis readback for {test}/{analysis}: {parsed!r}"
+        )
+    enabled = parsed[0] is True
+    raw_options = parsed[1]
+    if raw_options is None:
+        if enabled:
+            raise RuntimeError(
+                f"enabled Maestro analysis {test}/{analysis} returned no options"
+            )
+        return None
+    if not isinstance(raw_options, list):
+        raise RuntimeError(
+            f"invalid Maestro analysis options for {test}/{analysis}: "
+            f"{raw_options!r}"
+        )
+    options: dict[str, str | bool | None] = {}
+    for pair in raw_options:
+        if (
+            not isinstance(pair, list)
+            or len(pair) != 2
+            or not isinstance(pair[0], str)
+            or isinstance(pair[1], list)
+        ):
+            raise RuntimeError(
+                f"unsupported Maestro analysis option for {test}/{analysis}: "
+                f"{pair!r}"
+            )
+        if pair[0] in options:
+            raise RuntimeError(
+                f"duplicate Maestro analysis option for {test}/{analysis}: "
+                f"{pair[0]!r}"
+            )
+        options[pair[0]] = pair[1]
+    return {"enabled": enabled, "options": options}
+
+
+def _maestro_output_state(
+    client, test: str, name: str, *, session: str
+) -> dict[str, Any] | None:
+    from virtuoso_bridge.virtuoso.ops import escape_skill_string
+
+    escaped_test = escape_skill_string(test)
+    escaped_name = escape_skill_string(name)
+    escaped_session = escape_skill_string(session)
+    expression = f'''
+let((outs o sdb)
+  outs = setof(item maeGetTestOutputs("{escaped_test}" ?session "{escaped_session}")
+    item~>name == "{escaped_name}")
+  if(length(outs) == 0
+    then list(0)
+    else if(length(outs) != 1
+      then list(length(outs))
+      else
+        o = car(outs)
+        sdb = axlGetMainSetupDB("{escaped_session}")
+        list(1 o~>name o~>type o~>signal o~>expression o~>evalType
+          o~>plot o~>save axlGetSpecData(sdb "{escaped_name}" "{escaped_test}"))
+    )
+  )
+)
+'''
+    readback = client.execute_skill(expression, timeout=30)
+    errors = getattr(readback, "errors", None) or []
+    if errors:
+        raise RuntimeError(
+            f"Maestro output readback failed for {test}/{name}: {errors[0]}"
+        )
+    parsed = _parse_skill_sexpr(getattr(readback, "output", ""))
+    if not isinstance(parsed, list) or not parsed:
+        raise RuntimeError(
+            f"invalid Maestro output readback for {test}/{name}: {parsed!r}"
+        )
+    count = str(parsed[0])
+    if count == "0":
+        return None
+    if count != "1" or len(parsed) != 9:
+        raise RuntimeError(
+            f"Maestro output {test}/{name} is ambiguous or malformed: {parsed!r}"
+        )
+    def normalized_symbol(value: Any) -> Any:
+        if isinstance(value, str) and value.startswith("'"):
+            return value[1:]
+        return value
+
+    spec_raw = parsed[8]
+    if spec_raw is None:
+        spec = None
+    else:
+        if (
+            isinstance(spec_raw, list)
+            and len(spec_raw) == 1
+            and isinstance(spec_raw[0], list)
+        ):
+            spec_raw = spec_raw[0]
+        if (
+            not isinstance(spec_raw, list)
+            or len(spec_raw) != 2
+            or not all(isinstance(value, str) for value in spec_raw)
+        ):
+            raise RuntimeError(
+                f"unsupported Maestro output spec for {test}/{name}: {spec_raw!r}"
+            )
+        relation = normalized_symbol(spec_raw[0])
+        if relation not in {"lt", "gt"}:
+            raise RuntimeError(
+                f"unsupported Maestro output spec relation for {test}/{name}: "
+                f"{relation!r}"
+            )
+        spec = {"relation": relation, "value": spec_raw[1]}
+
+    return {
+        "name": parsed[1],
+        "type": normalized_symbol(parsed[2]),
+        "signal_name": parsed[3],
+        "expression": parsed[4],
+        "eval_type": normalized_symbol(parsed[5]),
+        "plot": parsed[6],
+        "save": parsed[7],
+        "spec": spec,
+    }
+
+
+def _analysis_options_skill(options: dict[str, Any]) -> str:
+    from virtuoso_bridge.virtuoso.ops import escape_skill_string
+
+    pairs: list[str] = []
+    for name, value in options.items():
+        escaped_name = escape_skill_string(str(name))
+        if value is True:
+            encoded = "t"
+        elif value is False or value is None:
+            encoded = "nil"
+        else:
+            encoded = f'"{escape_skill_string(str(value))}"'
+        pairs.append(f'("{escaped_name}" {encoded})')
+    return "(" + " ".join(pairs) + ")"
+
+
+def _requested_analysis_matches(
+    update: dict[str, Any], actual: dict[str, Any] | None
+) -> bool:
+    if actual is None or actual.get("enabled") != bool(update["enabled"]):
+        return False
+    options = actual.get("options")
+    if not isinstance(options, dict):
+        return False
+    expected = update.get("expected")
+    if isinstance(expected, dict):
+        desired = dict(expected.get("options") or {})
+        desired.update(update.get("options") or {})
+        return options == desired
+    return all(
+        options.get(name) == value
+        for name, value in update.get("options", {}).items()
+    )
+
+
+def _requested_output_matches(
+    output: dict[str, Any], actual: dict[str, Any] | None
+) -> bool:
+    if actual is None or actual.get("name") != output.get("name"):
+        return False
+    output_type = str(output.get("output_type") or "")
+    if output_type not in {actual.get("type"), actual.get("eval_type")}:
+        return False
+    if actual.get("signal_name") != output.get("signal_name"):
+        return False
+    if actual.get("expression") != output.get("expression"):
+        return False
+    return actual.get("spec") == output.get("spec")
+
+
+def _maestro_setup_patch_fingerprint(
+    tests: list[str],
+    analyses: list[dict[str, Any]],
+    outputs: list[dict[str, Any]],
+) -> str:
+    canonical = json.dumps(
+        {"tests": tests, "analyses": analyses, "outputs": outputs},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _validate_maestro_analysis_options(
+    options: Any, *, context: str
+) -> dict[str, str | bool | None]:
+    if not isinstance(options, dict):
+        raise RuntimeError(f"{context} must be an object")
+    validated: dict[str, str | bool | None] = {}
+    for raw_name, value in options.items():
+        name = str(raw_name)
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", name):
+            raise RuntimeError(f"invalid Maestro analysis option name: {name!r}")
+        if value is not None and not isinstance(value, (str, bool)):
+            raise RuntimeError(
+                f"Maestro analysis option {name!r} must be string, boolean, or null"
+            )
+        if isinstance(value, str) and (
+            not value
+            or len(value) > 1024
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise RuntimeError(f"invalid Maestro analysis option value for {name!r}")
+        validated[name] = value
+    return validated
+
+
+def _validate_maestro_analysis_update(update: dict[str, Any]) -> None:
+    analysis = str(update.get("analysis") or "")
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]*", analysis):
+        raise RuntimeError(f"invalid Maestro analysis name: {analysis!r}")
+    if "expected" not in update or not isinstance(update.get("enabled"), bool):
+        raise RuntimeError("ADE analysis update requires expected and enabled fields")
+    options = _validate_maestro_analysis_options(
+        update.get("options"), context="ADE analysis options"
+    )
+    expected = update.get("expected")
+    if expected is None:
+        if not update["enabled"]:
+            raise RuntimeError("a new Maestro analysis must be enabled")
+        return
+    if not isinstance(expected, dict) or not isinstance(expected.get("enabled"), bool):
+        raise RuntimeError(
+            "ADE analysis expected state requires enabled and options fields"
+        )
+    expected_options = _validate_maestro_analysis_options(
+        expected.get("options"), context="ADE analysis expected options"
+    )
+    desired_options = dict(expected_options)
+    desired_options.update(options)
+    if expected["enabled"] == update["enabled"] and desired_options == expected_options:
+        raise RuntimeError("Maestro analysis update must change enable or options")
+
+
+def _validate_maestro_output_addition(output: dict[str, Any]) -> None:
+    name = output.get("name")
+    if not isinstance(name, str) or not name or len(name) > 128:
+        raise RuntimeError(f"invalid Maestro output name: {name!r}")
+    if any(ord(character) < 32 or ord(character) == 127 for character in name):
+        raise RuntimeError(f"invalid Maestro output name: {name!r}")
+    output_type = output.get("output_type")
+    if output_type not in {"net", "point"}:
+        raise RuntimeError(f"invalid Maestro output type: {output_type!r}")
+    signal_name = output.get("signal_name")
+    expression = output.get("expression")
+    if output_type == "net":
+        if not isinstance(signal_name, str) or not signal_name or expression is not None:
+            raise RuntimeError(
+                "net Maestro outputs require signal_name and forbid expression"
+            )
+    elif not isinstance(expression, str) or not expression or signal_name is not None:
+        raise RuntimeError(
+            "point Maestro outputs require expression and forbid signal_name"
+        )
+    source = signal_name if output_type == "net" else expression
+    assert isinstance(source, str)
+    maximum = 1024 if output_type == "net" else 4096
+    if len(source) > maximum or any(
+        ord(character) < 32 or ord(character) == 127 for character in source
+    ):
+        raise RuntimeError(f"invalid Maestro {output_type} output source")
+    spec = output.get("spec")
+    if spec is None:
+        return
+    if not isinstance(spec, dict) or spec.get("relation") not in {"lt", "gt"}:
+        raise RuntimeError("Maestro output spec requires relation lt or gt")
+    value = spec.get("value")
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 1024
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise RuntimeError("invalid Maestro output spec value")
+
+
+def apply_maestro_setup(payload: dict[str, Any]) -> dict[str, Any]:
+    """CAS analysis state and add non-conflicting named outputs in one save."""
+
+    from virtuoso_bridge.virtuoso.maestro import (
+        add_output,
+        close_session,
+        find_open_session,
+        open_session,
+        save_setup,
+        set_analysis,
+        set_spec,
+    )
+    from virtuoso_bridge.virtuoso.ops import escape_skill_string
+
+    settings = payload.get("ade_setup") or {}
+    if settings.get("backend", "maestro") != "maestro":
+        raise RuntimeError("only the verified Bridge Maestro backend is supported")
+    library, cell = _target(payload)
+    view = str(payload["target"].get("view") or "")
+    if view != "maestro":
+        raise RuntimeError("ADE setup patch target view must be maestro")
+    expected_tests = [str(value) for value in settings.get("expected_tests") or []]
+    analyses = list(settings.get("analyses") or [])
+    outputs = list(settings.get("outputs") or [])
+    if not expected_tests or (not analyses and not outputs):
+        raise RuntimeError(
+            "ADE setup patch requires expected_tests and analyses or outputs"
+        )
+    if len(expected_tests) != len(set(expected_tests)):
+        raise RuntimeError("ADE setup patch expected_tests contain duplicates")
+    for test in expected_tests:
+        if (
+            not test
+            or len(test) > 128
+            or any(
+                character in ('"', "\\")
+                or ord(character) < 32
+                or ord(character) == 127
+                for character in test
+            )
+        ):
+            raise RuntimeError(f"invalid Maestro test name: {test!r}")
+    analysis_identities: set[tuple[str, str]] = set()
+    for update in analyses:
+        if not isinstance(update, dict):
+            raise RuntimeError("ADE analysis update must be an object")
+        test = str(update.get("test") or "")
+        analysis = str(update.get("analysis") or "")
+        identity = (test, analysis)
+        if test not in expected_tests:
+            raise RuntimeError("ADE analysis update targets an undeclared test")
+        if identity in analysis_identities:
+            raise RuntimeError("ADE setup patch contains duplicate analyses")
+        analysis_identities.add(identity)
+        _validate_maestro_analysis_update(update)
+    output_identities: set[tuple[str, str]] = set()
+    for output in outputs:
+        if not isinstance(output, dict):
+            raise RuntimeError("ADE output addition must be an object")
+        test = str(output.get("test") or "")
+        name = str(output.get("name") or "")
+        identity = (test, name)
+        if test not in expected_tests:
+            raise RuntimeError("ADE output addition targets an undeclared test")
+        if identity in output_identities:
+            raise RuntimeError("ADE setup patch contains duplicate outputs")
+        output_identities.add(identity)
+        _validate_maestro_output_addition(output)
+
+    client = _client()
+    if not _cellview_exists(client, library, cell, view):
+        raise RuntimeError(f"ADE setup patch requires existing {library}/{cell}/{view}")
+    existing_session = find_open_session(client)
+    if existing_session is not None:
+        raise RuntimeError(
+            "ADE setup patch refuses to save while any configured Maestro "
+            f"session is already open: {existing_session}"
+        )
+
+    before_analyses: list[dict[str, Any]] = []
+    immediate_analyses: list[dict[str, Any]] = []
+    before_outputs: list[dict[str, Any]] = []
+    immediate_outputs: list[dict[str, Any]] = []
+    session = open_session(client, library, cell)
+    try:
+        tests = _maestro_tests_readback(client, session)
+        if tests != expected_tests:
+            raise RuntimeError(
+                "Maestro tests changed before setup patch: "
+                f"expected {expected_tests!r}, got {tests!r}"
+            )
+        mismatches: list[str] = []
+        for update in analyses:
+            state = _maestro_analysis_state(
+                client,
+                str(update["test"]),
+                str(update["analysis"]),
+                session=session,
+            )
+            entry = {
+                "test": str(update["test"]),
+                "analysis": str(update["analysis"]),
+                "state": state,
+            }
+            before_analyses.append(entry)
+            if state != update.get("expected"):
+                mismatches.append(
+                    f"analysis {update['test']}/{update['analysis']} expected "
+                    f"{update.get('expected')!r}, got {state!r}"
+                )
+        for output in outputs:
+            state = _maestro_output_state(
+                client,
+                str(output["test"]),
+                str(output["name"]),
+                session=session,
+            )
+            entry = {
+                "test": str(output["test"]),
+                "name": str(output["name"]),
+                "state": state,
+            }
+            before_outputs.append(entry)
+            if state is not None:
+                mismatches.append(
+                    f"output {output['test']}/{output['name']} already exists"
+                )
+        if mismatches:
+            raise RuntimeError(
+                "Maestro setup precondition mismatch before any write: "
+                + "; ".join(mismatches)
+            )
+
+        for update in analyses:
+            options = dict(update.get("options") or {})
+            set_analysis(
+                client,
+                escape_skill_string(str(update["test"])),
+                str(update["analysis"]),
+                enable=bool(update["enabled"]),
+                options=_analysis_options_skill(options) if options else "",
+                session=session,
+            )
+            state = _maestro_analysis_state(
+                client,
+                str(update["test"]),
+                str(update["analysis"]),
+                session=session,
+            )
+            if not _requested_analysis_matches(update, state):
+                raise RuntimeError(
+                    "Maestro analysis immediate readback mismatch for "
+                    f"{update['test']}/{update['analysis']}: {state!r}"
+                )
+            immediate_analyses.append(
+                {
+                    "test": str(update["test"]),
+                    "analysis": str(update["analysis"]),
+                    "state": state,
+                }
+            )
+        for output in outputs:
+            add_output(
+                client,
+                escape_skill_string(str(output["name"])),
+                escape_skill_string(str(output["test"])),
+                output_type=str(output["output_type"]),
+                signal_name=(
+                    escape_skill_string(str(output["signal_name"]))
+                    if output.get("signal_name") is not None
+                    else ""
+                ),
+                expr=(
+                    escape_skill_string(str(output["expression"]))
+                    if output.get("expression") is not None
+                    else ""
+                ),
+                session=session,
+            )
+            spec = output.get("spec")
+            if isinstance(spec, dict):
+                kwargs = {
+                    str(spec["relation"]): escape_skill_string(str(spec["value"]))
+                }
+                set_spec(
+                    client,
+                    escape_skill_string(str(output["name"])),
+                    escape_skill_string(str(output["test"])),
+                    session=session,
+                    **kwargs,
+                )
+            state = _maestro_output_state(
+                client,
+                str(output["test"]),
+                str(output["name"]),
+                session=session,
+            )
+            if not _requested_output_matches(output, state):
+                raise RuntimeError(
+                    "Maestro output immediate readback mismatch for "
+                    f"{output['test']}/{output['name']}: {state!r}"
+                )
+            immediate_outputs.append(
+                {
+                    "test": str(output["test"]),
+                    "name": str(output["name"]),
+                    "state": state,
+                }
+            )
+        save_setup(client, library, cell, session=session)
+    finally:
+        close_session(client, session)
+
+    persisted_analyses: list[dict[str, Any]] = []
+    persisted_outputs: list[dict[str, Any]] = []
+    verify_session = open_session(client, library, cell)
+    try:
+        verify_tests = _maestro_tests_readback(client, verify_session)
+        if verify_tests != expected_tests:
+            raise RuntimeError(
+                "Maestro tests changed after setup patch: "
+                f"expected {expected_tests!r}, got {verify_tests!r}"
+            )
+        for immediate in immediate_analyses:
+            state = _maestro_analysis_state(
+                client,
+                str(immediate["test"]),
+                str(immediate["analysis"]),
+                session=verify_session,
+            )
+            persisted = {**immediate, "state": state}
+            persisted_analyses.append(persisted)
+            if persisted != immediate:
+                raise RuntimeError(
+                    "Maestro analysis persistent readback mismatch for "
+                    f"{immediate['test']}/{immediate['analysis']}"
+                )
+        for immediate in immediate_outputs:
+            state = _maestro_output_state(
+                client,
+                str(immediate["test"]),
+                str(immediate["name"]),
+                session=verify_session,
+            )
+            persisted = {**immediate, "state": state}
+            persisted_outputs.append(persisted)
+            if persisted != immediate:
+                raise RuntimeError(
+                    "Maestro output persistent readback mismatch for "
+                    f"{immediate['test']}/{immediate['name']}"
+                )
+    finally:
+        close_session(client, verify_session)
+
+    return {
+        "backend": "maestro",
+        "target": {"library": library, "cell": cell, "view": view},
+        "expected_tests": expected_tests,
+        "tests_readback_before": tests,
+        "tests_readback_after": verify_tests,
+        "requested_analysis_updates": analyses,
+        "requested_output_additions": outputs,
+        "requested_evidence_source": "user_input",
+        "before_analyses": before_analyses,
+        "immediate_analyses": immediate_analyses,
+        "persisted_analyses": persisted_analyses,
+        "before_outputs": before_outputs,
+        "immediate_outputs": immediate_outputs,
+        "persisted_outputs": persisted_outputs,
+        "confirmed_evidence_source": "bridge_readback",
+        "before_target_fingerprint_sha256": _maestro_setup_patch_fingerprint(
+            tests, before_analyses, before_outputs
+        ),
+        "after_target_fingerprint_sha256": _maestro_setup_patch_fingerprint(
+            verify_tests, persisted_analyses, persisted_outputs
+        ),
+        "analysis_write_method": "bridge_public_set_analysis",
+        "analysis_readback_method": "cadence_maeGetAnalysis_via_bridge_skill_channel",
+        "output_write_method": "bridge_public_add_output_and_set_spec",
+        "output_readback_method": (
+            "cadence_maeGetTestOutputs_and_axlGetSpecData_via_bridge_skill_channel"
+        ),
+        "existing_outputs_replaced": False,
+        "existing_maestro_replaced": False,
+        "unlisted_setup_state_checked": False,
+        "full_setup_fingerprint_verified": False,
+        "schematic_oa_write_performed": False,
+        "maestro_setup_write_performed": True,
+        "automated_simulation_performed": False,
+        "completion_scope": (
+            "declared analyses matched exact old state and requested updates; "
+            "declared named outputs were absent before addition; all targeted state "
+            "was saved once and matched after independent reopen; existing outputs, "
+            "unlisted setup state, simulator input, and simulation results were not "
+            "modified or verified"
+        ),
+    }
+
+
 def _sha256_path(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -3762,6 +4442,7 @@ _ACTIONS = {
     "capture_focused_maestro": capture_focused_maestro,
     "run_background_maestro": run_background_maestro,
     "apply_maestro_variables": apply_maestro_variables,
+    "apply_maestro_setup": apply_maestro_setup,
     "inspect_existing_schematic": inspect_existing_schematic,
     "apply_existing_schematic_parameters": apply_existing_schematic_parameters,
     "create_inverter": create_inverter,

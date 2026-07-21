@@ -974,6 +974,183 @@ class TaskExecutor:
                     "declared scope, but unlisted scope overrides and effective "
                     "simulator values were not verified by this operation"
                 )
+            elif operation is Operation.ADE_SETUP_APPLY:
+                patched = self._action(
+                    "ade.setup.apply",
+                    lambda: self.adapter.apply_ade_setup(task),
+                )
+                if task.ade_setup is None:
+                    raise RuntimeError("ADE setup settings disappeared at execution")
+                expected_tests = list(task.ade_setup.expected_tests)
+                requested_analyses = [
+                    update.model_dump(mode="json")
+                    for update in task.ade_setup.analyses
+                ]
+                requested_outputs = [
+                    output.model_dump(mode="json")
+                    for output in task.ade_setup.outputs
+                ]
+                expected_before_analyses = [
+                    {
+                        "test": update.test,
+                        "analysis": update.analysis,
+                        "state": (
+                            None
+                            if update.expected is None
+                            else update.expected.model_dump(mode="json")
+                        ),
+                    }
+                    for update in task.ade_setup.analyses
+                ]
+                expected_before_outputs = [
+                    {"test": output.test, "name": output.name, "state": None}
+                    for output in task.ade_setup.outputs
+                ]
+                before_fingerprint = patched.data.get(
+                    "before_target_fingerprint_sha256"
+                )
+                after_fingerprint = patched.data.get(
+                    "after_target_fingerprint_sha256"
+                )
+                valid_fingerprints = all(
+                    isinstance(value, str)
+                    and len(value) == 64
+                    and all(character in "0123456789abcdef" for character in value)
+                    for value in (before_fingerprint, after_fingerprint)
+                ) and before_fingerprint != after_fingerprint
+                if (
+                    patched.evidence_source is not EvidenceSource.BRIDGE_READBACK
+                    or patched.data.get("target")
+                    != task.target.model_dump(mode="json")
+                    or patched.data.get("requested_evidence_source") != "user_input"
+                    or patched.data.get("confirmed_evidence_source")
+                    != "bridge_readback"
+                    or patched.data.get("existing_maestro_replaced") is not False
+                    or patched.data.get("existing_outputs_replaced") is not False
+                    or patched.data.get("schematic_oa_write_performed") is not False
+                    or patched.data.get("maestro_setup_write_performed") is not True
+                    or patched.data.get("automated_simulation_performed") is not False
+                    or patched.data.get("unlisted_setup_state_checked") is not False
+                    or patched.data.get("full_setup_fingerprint_verified") is not False
+                    or patched.data.get("analysis_write_method")
+                    != "bridge_public_set_analysis"
+                    or patched.data.get("analysis_readback_method")
+                    != "cadence_maeGetAnalysis_via_bridge_skill_channel"
+                    or patched.data.get("output_write_method")
+                    != "bridge_public_add_output_and_set_spec"
+                    or patched.data.get("output_readback_method")
+                    != (
+                        "cadence_maeGetTestOutputs_and_axlGetSpecData_"
+                        "via_bridge_skill_channel"
+                    )
+                    or patched.data.get("expected_tests") != expected_tests
+                    or patched.data.get("tests_readback_before") != expected_tests
+                    or patched.data.get("tests_readback_after") != expected_tests
+                    or patched.data.get("requested_analysis_updates")
+                    != requested_analyses
+                    or patched.data.get("requested_output_additions")
+                    != requested_outputs
+                    or patched.data.get("before_analyses")
+                    != expected_before_analyses
+                    or patched.data.get("before_outputs")
+                    != expected_before_outputs
+                    or not valid_fingerprints
+                ):
+                    raise RuntimeError(
+                        "ADE setup patch did not prove the declared target, exact "
+                        "preconditions, write boundary, and persistent fingerprints"
+                    )
+
+                immediate_analyses = patched.data.get("immediate_analyses")
+                persisted_analyses = patched.data.get("persisted_analyses")
+                immediate_outputs = patched.data.get("immediate_outputs")
+                persisted_outputs = patched.data.get("persisted_outputs")
+                if (
+                    not isinstance(immediate_analyses, list)
+                    or not isinstance(persisted_analyses, list)
+                    or not isinstance(immediate_outputs, list)
+                    or not isinstance(persisted_outputs, list)
+                    or persisted_analyses != immediate_analyses
+                    or persisted_outputs != immediate_outputs
+                    or len(immediate_analyses) != len(requested_analyses)
+                    or len(immediate_outputs) != len(requested_outputs)
+                ):
+                    raise RuntimeError(
+                        "ADE setup patch did not prove identical immediate and "
+                        "independently reopened targeted state"
+                    )
+                for request, entry in zip(
+                    requested_analyses, immediate_analyses, strict=True
+                ):
+                    if (
+                        not isinstance(entry, dict)
+                        or entry.get("test") != request["test"]
+                        or entry.get("analysis") != request["analysis"]
+                        or not isinstance(entry.get("state"), dict)
+                    ):
+                        raise RuntimeError(
+                            "ADE setup analysis readback identity is incomplete"
+                        )
+                    state = entry["state"]
+                    options = state.get("options")
+                    if (
+                        state.get("enabled") != request["enabled"]
+                        or not isinstance(options, dict)
+                    ):
+                        raise RuntimeError(
+                            "ADE setup analysis readback does not match enable/options"
+                        )
+                    expected = request.get("expected")
+                    if isinstance(expected, dict):
+                        desired = dict(expected.get("options") or {})
+                        desired.update(request.get("options") or {})
+                        options_match = options == desired
+                    else:
+                        options_match = all(
+                            options.get(name) == value
+                            for name, value in (request.get("options") or {}).items()
+                        )
+                    if not options_match:
+                        raise RuntimeError(
+                            "ADE setup analysis option readback does not match request"
+                        )
+                for request, entry in zip(
+                    requested_outputs, immediate_outputs, strict=True
+                ):
+                    if (
+                        not isinstance(entry, dict)
+                        or entry.get("test") != request["test"]
+                        or entry.get("name") != request["name"]
+                        or not isinstance(entry.get("state"), dict)
+                    ):
+                        raise RuntimeError(
+                            "ADE setup output readback identity is incomplete"
+                        )
+                    state = entry["state"]
+                    if (
+                        state.get("name") != request["name"]
+                        or request["output_type"]
+                        not in {state.get("type"), state.get("eval_type")}
+                        or state.get("signal_name") != request.get("signal_name")
+                        or state.get("expression") != request.get("expression")
+                        or state.get("spec") != request.get("spec")
+                    ):
+                        raise RuntimeError(
+                            "ADE setup output/spec readback does not match request"
+                        )
+                notes.append(
+                    "patched only the declared Maestro analyses and absent named "
+                    "outputs after exact preconditions, then verified one saved setup "
+                    "through an independent reopen"
+                )
+                notes.append(
+                    "existing outputs, variables, corners, tests, schematic, and "
+                    "unlisted setup state were not replaced or modified"
+                )
+                notes.append(
+                    "no simulation was run; configured analyses and outputs remain "
+                    "Bridge readback until an ADE run supplies EDA results"
+                )
             elif operation is Operation.SIMULATION_RUN:
                 self._action(
                     "schematic.inspect.before",

@@ -26,7 +26,7 @@
 ## 实现原则
 
 - Python 代码放在 `src/virtuoso_design_agent/`；测试放在 `tests/`。
-- 任务能力保持正交：建图、读图、应用参数、ADE 准备/人工捕获/后台运行、仿真、调优、完整闭环均可单独调用。
+- 任务能力保持正交：建图、读图、应用参数、ADE 准备/人工捕获/变量或 setup 微调/后台运行、仿真、调优、完整闭环均可单独调用。
 - 首版只实现反相器真实 adapter；共源/源极退化和差分对先作为明确的后续验收门，不写空壳执行器。
 - 不引入 Web UI、数据库、多智能体框架或云端 LLM 依赖，除非真实工作流证明有必要。
 
@@ -37,6 +37,7 @@
 - `ade.prepare` 只能创建明确不存在的新 Maestro view；已有 view 一律拒绝，后续修改必须使用带前置指纹和逐项回读的显式 patch。
 - `ade.run` 只能消费已保存的 Maestro setup：使用后台 session，不改变 GUI 焦点、不保存 setup、不写 OA；缺少结构化 output 时不得仅凭 history/回调成功宣称仿真有效。
 - `ade.variables.apply` 只能在声明的 tests、可选 enabled corners 和逐 scope 变量旧值都匹配时保存；已有 Maestro session 时拒绝，保存后必须独立重开逐 scope 回读。不得把声明 scope 的写回包装成未声明 override 已排除或仿真生效。
+- `ade.setup.apply` 只能对声明 analysis 做旧状态 CAS，并新增明确不存在的命名 output/spec；已有 output、并发 Maestro session 或任一旧状态不匹配时拒绝。全部目标写后立即回读，只保存一次，再独立重开复核；不得把配置持久化表述成 analysis 已运行或 output 已产生结果。
 - ADE setup 属于 `bridge_readback`，实际 Spectre 输入/结果属于 `eda_result`；捕获成功不等于规格闭环。
 - 当前只把 Bridge 已公开的 Maestro 接口称为已实现；旧 ADE L state 在完成备份、非覆盖迁移和 live smoke 前不得宣称已打通。
 

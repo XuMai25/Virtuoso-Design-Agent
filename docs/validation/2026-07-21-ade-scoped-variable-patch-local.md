@@ -42,4 +42,4 @@
 - exact `expected_corners` 只核对 enabled corner membership；不会创建、删除或启停 corner，也不会检查未声明变量和 corner model-file 内容。
 - 成功只证明声明 scope 的配置值被持久化。未声明的 test/corner/global override、变量优先级、netlist 中的最终值以及 simulator 实际使用值均未验证。
 - setup 保存成功后若 close、重开或 transport 失败，远端可能已经持久化；旧值前置条件会阻止盲目重放，但当前没有自动回滚。
-- analysis/output patch、background netlist/PSF 捕获和有限 corner 规格闭环仍是后续 Gate。
+- analysis CAS 与 output/spec add-only patch 已在后续本地 Gate 实现，见 [`2026-07-21-ade-setup-patch-local.md`](2026-07-21-ade-setup-patch-local.md)；两类 patch 的 nics4304 live、background netlist/PSF 捕获和有限 corner 规格闭环仍待验证。

@@ -406,6 +406,12 @@ class DeterministicDemoAdapter:
             "write or verify a persistent Maestro setup"
         )
 
+    def apply_ade_setup(self, task: TaskSpec) -> AdapterResult:
+        raise RuntimeError(
+            "ade.setup.apply requires the real Bridge; the demo adapter cannot "
+            "write or verify persistent Maestro analyses/outputs"
+        )
+
     def simulate(
         self, task: TaskSpec, parameters: dict[str, float]
     ) -> AdapterResult:

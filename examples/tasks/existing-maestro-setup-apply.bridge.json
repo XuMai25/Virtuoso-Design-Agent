@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "id": "existing-maestro-setup-apply",
+  "operation": "ade.setup.apply",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_manual_ade_handoff_001",
+    "view": "maestro"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "ade_setup": {
+    "backend": "maestro",
+    "expected_tests": [
+      "VDA"
+    ],
+    "analyses": [
+      {
+        "test": "VDA",
+        "analysis": "ac",
+        "expected": null,
+        "enabled": true,
+        "options": {
+          "start": "1",
+          "stop": "10G",
+          "incrType": "Logarithmic",
+          "stepTypeLog": "Points Per Decade",
+          "dec": "20"
+        }
+      }
+    ],
+    "outputs": [
+      {
+        "test": "VDA",
+        "name": "Vout",
+        "output_type": "net",
+        "signal_name": "/OUT"
+      },
+      {
+        "test": "VDA",
+        "name": "BW",
+        "output_type": "point",
+        "expression": "bandwidth(mag(VF(\"/OUT\")) 3 \"low\")",
+        "spec": {
+          "relation": "gt",
+          "value": "1G"
+        }
+      }
+    ]
+  },
+  "safety": {
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 600
+  }
+}
