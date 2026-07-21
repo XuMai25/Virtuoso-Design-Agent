@@ -4,6 +4,8 @@ Virtuoso Design Agent 是 `virtuoso-bridge-lite` 之上的受控设计编排层�
 
 当前版本从 **L5A** 起步：在已知 PDK、固定电路模板、显式规格和有限搜索空间内完成闭环。TSMC28 反相器 Gate 1、电阻负载 NMOS 共源级 nominal DC，以及同一已有 cellview 上的源极退化 transform/DC/RS 有限调优均有真实 OA/`si`/Spectre 证据。2026-07-20 又真实通过共源 nominal/退化复数 AC、12 点不写 OA 的 bias/load 条件搜索、专用 cell 上的 W/RD/RS 调优，以及同一 cell 的 5 点相干 transient 线性度/真实 VDD 功耗和 211 点普通 noise PSF。2026-07-21 固定 `quality` 组合先通过真实只读 bias/load 搜索，随后又完成 8 点 W/RD/RS 三分析搜索、逐候选 OA 写入、transport checkpoint 恢复、最佳写回和全不可行恢复。一个线性度优先任务进一步自动把 RS 从 1 kΩ 改为 2 kΩ，以 29.30% GBW 损失换取 41.93% THD 降低、37.26% P1dB 提升和 17.27% DC 功耗降低。ADE 方向现有五个本地纵向 operation：非覆盖新建 Maestro test 的 `ade.prepare`、捕获人工聚焦 setup/history/产物的 `ade.capture`、后台运行已保存原生 analysis/sweep 的 `ade.run`、按 tests/corners/逐 scope 旧值 CAS 修改 design variable 的 `ade.variables.apply`，以及对 analysis 做旧状态 CAS 并新增命名 output/spec 的 `ade.setup.apply`。五项均尚待 nics4304 live smoke；需要人工打开 ADE、旧 ADE L 迁移和数值交叉检查的 Gate 已明确延期。L/VDD 联合搜索和 corner 仍未闭合，因此仍不能称为完整 L5B 设计质量闭环。
 
+PDK 默认面向晶圆厂 CMOS 设计。当前缺省 profile 为 `nics4304_tsmc28`，对应 TSMC N28/`tsmcN28`；后续 TSMC、SMIC 等工艺使用独立 profile 和各自验证证据。TSV、hybrid-bonding 等封装/3D PDK 只有任务显式选择时才使用，不会成为自动 fallback，也不会改变普通晶体管级模板的默认假设。详见[决策 0002](docs/decisions/0002-foundry-cmos-pdk-default.md)。
+
 ## 当前能做什么
 
 - 将任务编译为带副作用标记的稳定执行计划。
@@ -150,6 +152,7 @@ C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe 
 - [系统架构](docs/architecture.md)
 - [三类起步电路与验收门](docs/initial-circuits.md)
 - [首个决策记录](docs/decisions/0001-l5a-first.md)
+- [PDK 默认使用晶圆厂 CMOS 的决策](docs/decisions/0002-foundry-cmos-pdk-default.md)
 - [2026-07-19 反相器 L5A smoke](docs/validation/2026-07-19-inverter-l5a-smoke.md)
 - [2026-07-19 共源放大器 Gate 2A DC smoke](docs/validation/2026-07-19-common-source-gate2a-dc-smoke.md)
 - [2026-07-19 显式实例参数能力验证](docs/validation/2026-07-19-explicit-instance-parameters.md)

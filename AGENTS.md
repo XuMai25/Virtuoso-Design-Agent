@@ -6,6 +6,12 @@
 
 当前阶段是 L5A：只在已知 PDK、固定电路模板和显式搜索边界内执行。不得把一次命令成功、OA 对象存在或仿真退出码为 0 单独表述成“设计完成”。
 
+## PDK 默认策略
+
+- 普通晶体管级设计默认使用晶圆厂 CMOS PDK；当前默认 profile 是 `nics4304_tsmc28`，对应 TSMC N28/`tsmcN28`。
+- 后续 TSMC、SMIC 等工艺以独立 profile 显式接入和验证。切换晶圆厂、节点、版本、model section 或服务器时不得沿用旧性能证据。
+- TSV、hybrid-bonding 等封装/3D PDK 不得成为默认或自动 fallback；只有任务显式选择并具备专门模板与验证 Gate 时才使用。
+
 ## 远端安全
 
 - 默认只生成计划；真实执行必须同时提供 `--execute` 和计划 token。

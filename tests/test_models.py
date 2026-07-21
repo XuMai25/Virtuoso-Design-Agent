@@ -4,7 +4,11 @@ import pytest
 from pydantic import ValidationError
 
 from virtuoso_design_agent.catalog import UnsupportedCapability
-from virtuoso_design_agent.models import AnalysisKind, TaskSpec
+from virtuoso_design_agent.models import (
+    DEFAULT_PDK_PROFILE,
+    AnalysisKind,
+    TaskSpec,
+)
 from virtuoso_design_agent.planner import build_plan
 
 
@@ -17,6 +21,13 @@ def _base_task() -> dict:
         "parameter_space": {"nmos_width_um": [0.4, 0.5]},
         "constraints": [{"metric": "delay_ps", "relation": "<=", "value": 50}],
     }
+
+
+def test_default_pdk_is_the_verified_tsmc_n28_foundry_profile() -> None:
+    task = TaskSpec.model_validate(_base_task())
+
+    assert DEFAULT_PDK_PROFILE == "nics4304_tsmc28"
+    assert task.pdk_profile == DEFAULT_PDK_PROFILE
 
 
 def test_tuning_requires_parameter_space() -> None:

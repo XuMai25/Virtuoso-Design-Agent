@@ -17,6 +17,10 @@ from pydantic import (
     model_validator,
 )
 
+# The default is the currently verified foundry-CMOS environment. Packaging,
+# TSV, and hybrid-bonding profiles must always be selected explicitly.
+DEFAULT_PDK_PROFILE = "nics4304_tsmc28"
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -562,7 +566,7 @@ class TaskSpec(StrictModel):
     operation: Operation
     circuit: CircuitKind
     target: DesignTarget
-    pdk_profile: str = Field(default="nics4304_tsmc28", min_length=1)
+    pdk_profile: str = Field(default=DEFAULT_PDK_PROFILE, min_length=1)
     analysis: AnalysisKind | None = None
     ac_sweep: AcSweep | None = None
     linearity_sweep: LinearitySweep | None = None

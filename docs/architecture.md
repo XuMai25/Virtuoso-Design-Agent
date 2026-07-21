@@ -32,6 +32,10 @@ VDA 不嵌入一个新的通用 LLM。Codex 负责开放式推理，VDA 负责�
 
 `virtuoso-bridge-lite` 已有自己的 Python 虚拟环境和本机配置。主程序通过该环境中的 Python 启动 JSON worker，而不是把 Bridge 源码复制进来或强制安装成本项目依赖。这样可以保持 Bridge 独立升级、避免依赖漂移，并把跨环境协议缩小到版本化 JSON action。
 
+## PDK 选择边界
+
+VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PDK_PROFILE=nics4304_tsmc28`，其当前工艺身份是 TSMC N28/`tsmcN28`。未来 TSMC、SMIC 等工艺各用独立 profile 绑定器件库、model、默认电压和远端路径，并单独通过 smoke；profile 之间不共享性能结论。TSV、hybrid-bonding 等封装/3D PDK 不参与默认选择或 fallback，必须由任务显式指定并使用专门 Gate。见[决策 0002](decisions/0002-foundry-cmos-pdk-default.md)。
+
 ## 任务与局部能力
 
 任务不是固定的“全流程按钮”。`operation` 决定实际范围：

@@ -18,7 +18,13 @@ from .executor import (
     load_execution_checkpoint,
     save_run_record,
 )
-from .models import ExecutionPlan, Operation, RunStatus, TaskSpec
+from .models import (
+    DEFAULT_PDK_PROFILE,
+    ExecutionPlan,
+    Operation,
+    RunStatus,
+    TaskSpec,
+)
 from .planner import build_plan
 from .safety import SafetyViolation
 
@@ -173,7 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = subparsers.add_parser("doctor", help="probe an adapter without writing OA")
     doctor.add_argument("--adapter", choices=("demo", "bridge"), default="bridge")
     doctor.add_argument("--bridge-python")
-    doctor.add_argument("--pdk-profile", default="nics4304_tsmc28")
+    doctor.add_argument("--pdk-profile", default=DEFAULT_PDK_PROFILE)
     doctor.set_defaults(handler=_cmd_doctor)
     return parser
 
