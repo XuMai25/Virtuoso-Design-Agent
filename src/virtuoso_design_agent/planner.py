@@ -117,6 +117,50 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         SideEffect.REMOTE_COMPUTE,
     )
 
+    if task.operation is Operation.ADE_CAPTURE:
+        assert task.ade_capture is not None
+        history = task.ade_capture.history or "当前可用的最新 history"
+        saved_requirement = (
+            "要求 setup 已保存"
+            if task.ade_capture.require_saved_setup
+            else "允许捕获未保存 setup，但必须显式标记"
+        )
+        result_requirement = (
+            "要求存在非空 EDA result artifacts"
+            if task.ade_capture.require_results
+            else "允许只捕获 setup"
+        )
+        return [
+            probe,
+            _step(
+                "02-verify-focus",
+                "ade.focus.verify",
+                (
+                    "只读核对当前聚焦窗口正是任务声明的 library/cell/maestro；"
+                    "不打开、保存、关闭或运行 ADE"
+                ),
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "03-capture",
+                "ade.capture",
+                (
+                    f"捕获 Maestro setup、{history}、Spectre 网表/结果及哈希；"
+                    f"{saved_requirement}，{result_requirement}"
+                ),
+                SideEffect.LOCAL_WRITE,
+            ),
+            persist.model_copy(
+                update={
+                    "id": "04-persist",
+                    "description": (
+                        "记录 ADE setup=bridge_readback、仿真产物/输出=eda_result；"
+                        "捕获成功不等于 VDA 规格闭环"
+                    ),
+                }
+            ),
+        ]
+
     if task.operation is Operation.SCHEMATIC_CREATE:
         create_description = (
             f"显式删除并按受控模板替换已有{template_name} schematic"

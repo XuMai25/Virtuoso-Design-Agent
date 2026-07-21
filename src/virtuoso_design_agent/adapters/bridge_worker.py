@@ -913,6 +913,279 @@ def _attach_targeted_parameter_verification(
     return summary
 
 
+_ADE_SETUP_FILENAMES = {
+    "active.state",
+    "maestro.sdb",
+    "state_from_active_state.xml",
+    "state_from_sdb.xml",
+    "state_from_skill.txt",
+}
+_ADE_RUN_INPUT_FILENAMES = {
+    "input.scs",
+    "paramInfo.ils",
+    "qpInformation.ils",
+    "runObjFile",
+    "variables_file",
+}
+_ADE_RUN_LOG_FILENAMES = {"logFile", "spectre.out"}
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _ade_artifact_category(relative_path: str) -> str:
+    path = Path(relative_path)
+    name = path.name
+    lowered_parts = {part.lower() for part in path.parts}
+    if name in _ADE_SETUP_FILENAMES:
+        return "setup"
+    if "netlist" in lowered_parts or name in _ADE_RUN_INPUT_FILENAMES:
+        return "simulator_input"
+    if "psf" in lowered_parts:
+        if name in _ADE_RUN_LOG_FILENAMES:
+            return "run_log"
+        return "eda_result"
+    if name.endswith(".rdb"):
+        return "eda_result"
+    if name.endswith(".log") or name.endswith(".msg.db"):
+        return "run_log"
+    return "other"
+
+
+def _ade_capture_manifest(output_dir: Path) -> list[dict[str, Any]]:
+    if not output_dir.is_dir():
+        raise RuntimeError(f"ADE capture output directory is missing: {output_dir}")
+    entries: list[dict[str, Any]] = []
+    for path in sorted(item for item in output_dir.rglob("*") if item.is_file()):
+        relative = path.relative_to(output_dir).as_posix()
+        category = _ade_artifact_category(relative)
+        source = (
+            "eda_result"
+            if category in {"simulator_input", "eda_result", "run_log"}
+            else "bridge_readback"
+        )
+        entries.append(
+            {
+                "path": relative,
+                "size_bytes": path.stat().st_size,
+                "sha256": _sha256_path(path),
+                "category": category,
+                "evidence_source": source,
+            }
+        )
+    return entries
+
+
+def _manifest_fingerprint(
+    manifest: list[dict[str, Any]], categories: set[str]
+) -> str | None:
+    selected = [
+        {"path": item["path"], "sha256": item["sha256"]}
+        for item in manifest
+        if item["category"] in categories
+    ]
+    if not selected:
+        return None
+    canonical = json.dumps(
+        selected, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _assert_focused_maestro(
+    snapshot_data: dict[str, Any],
+    *,
+    library: str,
+    cell: str,
+    view: str,
+    expected_session: str | None = None,
+) -> str:
+    session = str(snapshot_data.get("session") or "")
+    if not session:
+        raise RuntimeError(
+            "no focused ADE Explorer/Assembler Maestro window; focus the declared "
+            "view and retry"
+        )
+    actual = (
+        str(snapshot_data.get("lib") or ""),
+        str(snapshot_data.get("cell") or ""),
+        str(snapshot_data.get("view") or ""),
+    )
+    expected = (library, cell, view)
+    if actual != expected:
+        raise RuntimeError(
+            "focused ADE target mismatch: "
+            f"expected {library}/{cell}/{view}, got {'/'.join(actual)}"
+        )
+    if expected_session is not None and session != expected_session:
+        raise RuntimeError(
+            "focused ADE session changed while capturing; no mixed-session evidence "
+            "was accepted"
+        )
+    return session
+
+
+def _has_structured_ade_outputs(results: dict[str, Any]) -> bool:
+    points = results.get("points")
+    return bool(
+        isinstance(points, list)
+        and any(
+            isinstance(point, dict)
+            and isinstance(point.get("outputs"), dict)
+            and bool(point["outputs"])
+            for point in points
+        )
+    )
+
+
+def capture_focused_maestro(payload: dict[str, Any]) -> dict[str, Any]:
+    """Capture a user-operated Maestro view without changing or rerunning it."""
+
+    from virtuoso_bridge.virtuoso.maestro import read_results, snapshot
+
+    settings = payload.get("ade_capture") or {}
+    if settings.get("backend", "maestro") != "maestro":
+        raise RuntimeError("only the verified Bridge Maestro backend is supported")
+    library, cell = _target(payload)
+    view = str(payload["target"].get("view") or "")
+    if view != "maestro":
+        raise RuntimeError("ADE capture target view must be maestro")
+
+    client = _client()
+    before = snapshot(client)
+    session = _assert_focused_maestro(
+        before, library=library, cell=cell, view=view
+    )
+    if bool(before.get("unsaved")) and settings.get("require_saved_setup", True):
+        raise RuntimeError(
+            "focused Maestro setup has unsaved changes; save it before capture or "
+            "explicitly set require_saved_setup=false"
+        )
+
+    output_root = Path(str(payload.get("capture_output_root") or "")).resolve()
+    if not str(payload.get("capture_output_root") or ""):
+        raise RuntimeError("ADE capture requires a local output root")
+    requested_history = str(settings.get("history") or "")
+    captured = snapshot(
+        client,
+        output_root=str(output_root),
+        history=requested_history or None,
+    )
+    _assert_focused_maestro(
+        captured,
+        library=library,
+        cell=cell,
+        view=view,
+        expected_session=session,
+    )
+    if bool(captured.get("unsaved")) and settings.get("require_saved_setup", True):
+        raise RuntimeError("Maestro setup became unsaved while it was being captured")
+
+    output_dir = Path(str(captured.get("output_dir") or "")).resolve()
+    try:
+        output_dir.relative_to(output_root)
+    except ValueError as exc:
+        raise RuntimeError(
+            "Bridge returned an ADE capture path outside its output root"
+        ) from exc
+    manifest = _ade_capture_manifest(output_dir)
+    setup_entries = [
+        item
+        for item in manifest
+        if item["category"] == "setup" and item["size_bytes"] > 0
+    ]
+    if not setup_entries:
+        raise RuntimeError("ADE capture did not contain any setup evidence")
+
+    selected_history = str(captured.get("latest_history") or requested_history)
+    eda_result_entries = [
+        item
+        for item in manifest
+        if item["category"] == "eda_result" and item["size_bytes"] > 0
+    ]
+    results: dict[str, Any] = {}
+    if selected_history:
+        results = read_results(
+            client,
+            session,
+            lib=library,
+            cell=cell,
+            history=selected_history,
+        )
+        actual_result_history = str(results.get("history") or "")
+        if actual_result_history and actual_result_history != selected_history:
+            raise RuntimeError(
+                "ADE structured results history does not match the captured history"
+            )
+
+    structured_outputs = _has_structured_ade_outputs(results)
+    if settings.get("require_results", True) and (
+        not selected_history or not eda_result_entries
+    ):
+        raise RuntimeError(
+            "ADE capture did not contain a non-empty simulation history with EDA "
+            "result artifacts"
+        )
+    if settings.get("require_structured_outputs", False) and not structured_outputs:
+        raise RuntimeError(
+            "ADE capture did not expose structured output/spec values for the selected "
+            "history"
+        )
+
+    return {
+        "backend": "maestro",
+        "target": {"library": library, "cell": cell, "view": view},
+        "session": session,
+        "application": captured.get("app"),
+        "mode": captured.get("mode"),
+        "setup_saved": not bool(captured.get("unsaved")),
+        "setup_evidence_source": "bridge_readback",
+        "raw_setup_sections": captured.get("raw_sections") or [],
+        "setup_fingerprint_sha256": _manifest_fingerprint(
+            manifest, {"setup"}
+        ),
+        "requested_history": requested_history or None,
+        "requested_history_evidence_source": (
+            "user_input" if requested_history else None
+        ),
+        "selected_history": selected_history or None,
+        "history_selection_evidence_source": (
+            "user_input" if requested_history else "software_inference"
+        ),
+        "structured_results_available": structured_outputs,
+        "structured_results": results,
+        "structured_results_evidence_source": (
+            "eda_result" if structured_outputs else None
+        ),
+        "simulation_fingerprint_sha256": _manifest_fingerprint(
+            manifest, {"simulator_input", "eda_result", "run_log"}
+        ),
+        "artifact_directory": str(output_dir),
+        "artifact_manifest": manifest,
+        "artifact_counts": {
+            category: sum(1 for item in manifest if item["category"] == category)
+            for category in (
+                "setup",
+                "simulator_input",
+                "eda_result",
+                "run_log",
+                "other",
+            )
+        },
+        "automated_simulation_performed": False,
+        "oa_write_performed": False,
+        "completion_scope": (
+            "human-operated ADE setup and existing result capture only; no VDA "
+            "specification closure was inferred"
+        ),
+    }
+
+
 def probe(payload: dict[str, Any]) -> dict[str, Any]:
     import virtuoso_bridge
 
@@ -2913,6 +3186,7 @@ def simulate_common_source(
 
 _ACTIONS = {
     "probe": probe,
+    "capture_focused_maestro": capture_focused_maestro,
     "inspect_existing_schematic": inspect_existing_schematic,
     "apply_existing_schematic_parameters": apply_existing_schematic_parameters,
     "create_inverter": create_inverter,

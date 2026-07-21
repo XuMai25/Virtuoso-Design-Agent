@@ -3,16 +3,21 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from types import SimpleNamespace
+import sys
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
+import virtuoso_design_agent.adapters.bridge_worker as bridge_worker
 from virtuoso_design_agent.adapters.base import merge_analysis_bundle
 from virtuoso_design_agent.adapters.bridge_worker import (
+    _ade_capture_manifest,
     _apply_explicit_instance_parameters,
     _assert_common_source,
     _assert_common_source_transform_preserved,
     _assert_parameter_consistency,
+    _assert_focused_maestro,
     _common_source_ac_metrics_from_result,
     _common_source_dc_data_from_result,
     _common_source_linearity_metrics_from_result,
@@ -28,6 +33,8 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     _generate_oa_netlist,
     _inverter_testbench_deck,
     _instance_parameters_from_schematic,
+    _has_structured_ade_outputs,
+    _manifest_fingerprint,
     _parse_common_source_netlist,
     _parse_inverter_netlist,
     _preflight_mn0_source_label,
@@ -47,6 +54,7 @@ from virtuoso_design_agent.adapters.subprocess_bridge import (
     SubprocessBridgeAdapter,
 )
 from virtuoso_design_agent.profiles import load_pdk_profile
+from virtuoso_design_agent.models import EvidenceSource, TaskSpec
 
 
 def test_pdk_profile_contains_verified_nics4304_paths() -> None:
@@ -55,6 +63,230 @@ def test_pdk_profile_contains_verified_nics4304_paths() -> None:
     assert profile.model_include.startswith("/data/technique/")
     assert profile.cds_lib_path.startswith("/data/xum/")
     assert profile.remote_run_root.startswith("/data/xum/")
+
+
+def test_ade_capture_manifest_separates_setup_input_results_and_logs(
+    tmp_path: Path,
+) -> None:
+    files = {
+        "maestro.sdb": b"setup",
+        "Interactive.7/1/AC/netlist/input.scs": b"simulator input",
+        "Interactive.7/1/AC/psf/ac.ac": b"waveform",
+        "Interactive.7/1/AC/psf/spectre.out": b"spectre log",
+    }
+    for relative, content in files.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+    manifest = _ade_capture_manifest(tmp_path)
+    categories = {item["path"]: item["category"] for item in manifest}
+
+    assert categories["maestro.sdb"] == "setup"
+    assert categories["Interactive.7/1/AC/netlist/input.scs"] == "simulator_input"
+    assert categories["Interactive.7/1/AC/psf/ac.ac"] == "eda_result"
+    assert categories["Interactive.7/1/AC/psf/spectre.out"] == "run_log"
+    assert all(item["size_bytes"] > 0 for item in manifest)
+    assert all(len(item["sha256"]) == 64 for item in manifest)
+    assert _manifest_fingerprint(manifest, {"setup"}) is not None
+    assert _manifest_fingerprint(manifest, {"eda_result"}) is not None
+
+
+def test_focused_maestro_capture_rejects_missing_mismatched_or_changed_focus() -> None:
+    expected = {
+        "session": "fnxSession7",
+        "lib": "vda_test",
+        "cell": "vda_manual_tb",
+        "view": "maestro",
+    }
+    assert (
+        _assert_focused_maestro(
+            expected,
+            library="vda_test",
+            cell="vda_manual_tb",
+            view="maestro",
+        )
+        == "fnxSession7"
+    )
+    with pytest.raises(RuntimeError, match="no focused ADE"):
+        _assert_focused_maestro(
+            expected | {"session": ""},
+            library="vda_test",
+            cell="vda_manual_tb",
+            view="maestro",
+        )
+    with pytest.raises(RuntimeError, match="target mismatch"):
+        _assert_focused_maestro(
+            expected | {"cell": "other"},
+            library="vda_test",
+            cell="vda_manual_tb",
+            view="maestro",
+        )
+    with pytest.raises(RuntimeError, match="session changed"):
+        _assert_focused_maestro(
+            expected | {"session": "fnxSession8"},
+            library="vda_test",
+            cell="vda_manual_tb",
+            view="maestro",
+            expected_session="fnxSession7",
+        )
+
+
+def test_structured_ade_outputs_require_a_nonempty_point_output_table() -> None:
+    assert not _has_structured_ade_outputs({})
+    assert not _has_structured_ade_outputs({"points": [{"outputs": {}}]})
+    assert _has_structured_ade_outputs(
+        {"points": [{"outputs": {"gain": {"value": "3.1"}}}]}
+    )
+
+
+def test_focused_maestro_capture_keeps_manual_state_and_real_result_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = {
+        "session": "fnxSession7",
+        "lib": "vda_test",
+        "cell": "vda_manual_tb",
+        "view": "maestro",
+        "app": "explorer",
+        "mode": "Editing",
+        "unsaved": False,
+        "raw_sections": [["maeGetSetup", '("AC")']],
+    }
+    calls: list[dict[str, object]] = []
+
+    def fake_snapshot(_client, *, output_root=None, history=None):
+        calls.append({"output_root": output_root, "history": history})
+        if output_root is None:
+            return dict(session)
+        output_dir = Path(output_root) / "capture"
+        setup = output_dir / "maestro.sdb"
+        result = output_dir / "Interactive.7" / "1" / "AC" / "psf" / "ac.ac"
+        netlist = (
+            output_dir / "Interactive.7" / "1" / "AC" / "netlist" / "input.scs"
+        )
+        for path, content in (
+            (setup, b"saved ADE setup"),
+            (result, b"real PSF result"),
+            (netlist, b"real Spectre input"),
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        return dict(session) | {
+            "output_dir": str(output_dir),
+            "latest_history": history or "Interactive.7",
+        }
+
+    def fake_read_results(_client, captured_session, **kwargs):
+        assert captured_session == "fnxSession7"
+        assert kwargs["history"] == "Interactive.7"
+        return {
+            "history": "Interactive.7",
+            "points": [
+                {
+                    "point": 1,
+                    "parameters": {"vdd": "0.9"},
+                    "outputs": {"gain": {"value": "3.1", "pass_fail": "pass"}},
+                }
+            ],
+        }
+
+    maestro = ModuleType("virtuoso_bridge.virtuoso.maestro")
+    maestro.snapshot = fake_snapshot
+    maestro.read_results = fake_read_results
+    virtuoso = ModuleType("virtuoso_bridge.virtuoso")
+    virtuoso.__path__ = []
+    virtuoso.maestro = maestro
+    bridge = ModuleType("virtuoso_bridge")
+    bridge.__path__ = []
+    bridge.virtuoso = virtuoso
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge", bridge)
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.virtuoso", virtuoso)
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.virtuoso.maestro", maestro)
+    monkeypatch.setattr(bridge_worker, "_client", lambda: object())
+
+    captured = bridge_worker.capture_focused_maestro(
+        {
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_capture": {
+                "backend": "maestro",
+                "history": "Interactive.7",
+                "require_results": True,
+                "require_saved_setup": True,
+                "require_structured_outputs": True,
+            },
+            "capture_output_root": str(tmp_path / "capture-root"),
+        }
+    )
+
+    assert calls == [
+        {"output_root": None, "history": None},
+        {
+            "output_root": str((tmp_path / "capture-root").resolve()),
+            "history": "Interactive.7",
+        },
+    ]
+    assert captured["setup_evidence_source"] == "bridge_readback"
+    assert captured["structured_results_evidence_source"] == "eda_result"
+    assert captured["artifact_counts"]["setup"] == 1
+    assert captured["artifact_counts"]["simulator_input"] == 1
+    assert captured["artifact_counts"]["eda_result"] == 1
+    assert captured["automated_simulation_performed"] is False
+    assert captured["oa_write_performed"] is False
+    assert captured["setup_fingerprint_sha256"]
+    assert captured["simulation_fingerprint_sha256"]
+
+
+def test_subprocess_ade_capture_payload_and_artifact_root_are_explicit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "capture-manual-ade",
+            "operation": "ade.capture",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_capture": {
+                "history": "Interactive.7",
+                "require_structured_outputs": True,
+            },
+        }
+    )
+    adapter = SubprocessBridgeAdapter(
+        tmp_path / "bridge-python.exe", artifact_root=tmp_path / "captures"
+    )
+    request: dict[str, object] = {}
+
+    def fake_request(action, payload, *, timeout):
+        request.update(action=action, payload=payload, timeout=timeout)
+        return {"structured_results_available": True}
+
+    monkeypatch.setattr(adapter, "_request", fake_request)
+
+    result = adapter.capture_ade(task)
+
+    assert result.evidence_source is EvidenceSource.BRIDGE_READBACK
+    assert request["action"] == "capture_focused_maestro"
+    payload = request["payload"]
+    assert isinstance(payload, dict)
+    assert "analysis" not in payload
+    assert "analysis_source" not in payload
+    assert payload["ade_capture"]["history"] == "Interactive.7"
+    assert payload["ade_capture"]["require_structured_outputs"] is True
+    assert set(payload["ade_capture_user_fields"]) == {
+        "history",
+        "require_structured_outputs",
+    }
+    output_root = Path(payload["capture_output_root"])
+    output_root.relative_to(tmp_path / "captures" / task.id)
 
 
 def test_inverter_testbench_deck_includes_oa_netlist_without_device_topology() -> None:

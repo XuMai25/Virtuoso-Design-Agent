@@ -382,6 +382,12 @@ class DeterministicDemoAdapter:
             evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
         )
 
+    def capture_ade(self, task: TaskSpec) -> AdapterResult:
+        raise RuntimeError(
+            "ade.capture requires the real Bridge; the demo adapter cannot "
+            "fabricate a human-operated ADE session or EDA results"
+        )
+
     def simulate(
         self, task: TaskSpec, parameters: dict[str, float]
     ) -> AdapterResult:

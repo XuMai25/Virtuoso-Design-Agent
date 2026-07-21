@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Any
 
-from ..models import AnalysisKind, CircuitKind, EvidenceSource, TaskSpec
+from ..models import AnalysisKind, CircuitKind, EvidenceSource, Operation, TaskSpec
 from ..profiles import load_pdk_profile
 from .base import AdapterInterrupted, AdapterResult
 
@@ -46,10 +47,20 @@ class BridgeWorkerError(AdapterInterrupted):
 class SubprocessBridgeAdapter:
     name = "virtuoso-bridge-subprocess"
 
-    def __init__(self, bridge_python: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        bridge_python: str | Path | None = None,
+        *,
+        artifact_root: str | Path | None = None,
+    ) -> None:
         configured = bridge_python or os.getenv("VDA_BRIDGE_PYTHON")
         self.bridge_python = Path(configured) if configured else DEFAULT_BRIDGE_PYTHON
         self.source_root = Path(__file__).resolve().parents[2]
+        self.artifact_root = (
+            Path(artifact_root)
+            if artifact_root is not None
+            else Path(__file__).resolve().parents[3] / "artifacts" / "ade-captures"
+        )
 
     def _request(
         self, action: str, payload: dict[str, Any], *, timeout: int
@@ -97,10 +108,6 @@ class SubprocessBridgeAdapter:
             "task_id": task.id,
             "operation": task.operation.value,
             "circuit": task.circuit.value,
-            "analysis": task.resolved_analysis().value,
-            "analysis_source": (
-                "user_input" if task.analysis is not None else "software_inference"
-            ),
             "target": task.target.model_dump(mode="json"),
             "profile": load_pdk_profile(task.pdk_profile).model_dump(mode="json"),
             "parameters": task.parameters,
@@ -111,6 +118,11 @@ class SubprocessBridgeAdapter:
             "replace_existing": task.safety.replace_existing,
             "timeout_seconds": task.limits.timeout_seconds,
         }
+        if task.operation is not Operation.ADE_CAPTURE:
+            payload["analysis"] = task.resolved_analysis().value
+            payload["analysis_source"] = (
+                "user_input" if task.analysis is not None else "software_inference"
+            )
         if task.ac_sweep is not None:
             payload["ac_sweep"] = task.ac_sweep.model_dump(mode="json")
             payload["ac_sweep_user_fields"] = sorted(
@@ -125,6 +137,11 @@ class SubprocessBridgeAdapter:
             payload["noise_sweep"] = task.noise_sweep.model_dump(mode="json")
             payload["noise_sweep_user_fields"] = sorted(
                 task.noise_sweep.model_fields_set
+            )
+        if task.ade_capture is not None:
+            payload["ade_capture"] = task.ade_capture.model_dump(mode="json")
+            payload["ade_capture_user_fields"] = sorted(
+                task.ade_capture.model_fields_set
             )
         return payload
 
@@ -181,6 +198,18 @@ class SubprocessBridgeAdapter:
             _WORKER_ACTIONS[task.circuit]["apply"],
             payload,
             timeout=min(task.limits.timeout_seconds, 180),
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
+
+    def capture_ade(self, task: TaskSpec) -> AdapterResult:
+        payload = self._task_payload(task)
+        payload["capture_output_root"] = str(
+            self.artifact_root / task.id / uuid.uuid4().hex
+        )
+        data = self._request(
+            "capture_focused_maestro",
+            payload,
+            timeout=task.limits.timeout_seconds + 240,
         )
         return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
 

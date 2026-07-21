@@ -39,6 +39,40 @@ def test_create_plan_discloses_replace_existing() -> None:
     assert "替换已有" in create.description
 
 
+def test_ade_capture_plan_preserves_manual_session_and_discloses_local_artifacts() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "capture-manual-ade",
+            "operation": "ade.capture",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_capture": {
+                "history": "Interactive.7",
+                "require_structured_outputs": True,
+            },
+        }
+    )
+
+    plan = build_plan(task)
+
+    assert [step.capability for step in plan.steps] == [
+        "bridge.probe",
+        "ade.focus.verify",
+        "ade.capture",
+        "evidence.persist",
+    ]
+    assert plan.steps[1].side_effect is SideEffect.READ_ONLY
+    assert plan.steps[2].side_effect is SideEffect.LOCAL_WRITE
+    assert "不打开、保存、关闭或运行" in plan.steps[1].description
+    assert "Interactive.7" in plan.steps[2].description
+    assert not plan.requires_remote_write
+    assert not plan.requires_remote_compute
+
+
 def test_inspect_plan_is_remote_read_only() -> None:
     plan = build_plan(_task("schematic.inspect"))
     assert all(step.side_effect is not SideEffect.REMOTE_WRITE for step in plan.steps)

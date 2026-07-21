@@ -9,7 +9,12 @@ from virtuoso_design_agent.executor import (
     TaskExecutor,
     load_execution_checkpoint,
 )
-from virtuoso_design_agent.models import AnalysisKind, RunStatus, TaskSpec
+from virtuoso_design_agent.models import (
+    AnalysisKind,
+    EvidenceSource,
+    RunStatus,
+    TaskSpec,
+)
 from virtuoso_design_agent.planner import build_plan
 
 
@@ -88,6 +93,54 @@ def test_explicit_instance_parameter_apply_is_independently_read_back() -> None:
     readback = adapter.inspect_schematic(task).data["instance_parameters"]
     assert readback["MN0"]["fingers"] == "2"
     assert readback["RD0"]["r"] == "22k"
+
+
+def test_ade_capture_records_manual_handoff_without_simulating_or_writing_oa() -> None:
+    class CapturingAdapter(DeterministicDemoAdapter):
+        def capture_ade(self, task):
+            return AdapterResult(
+                data={
+                    "target": task.target.model_dump(mode="json"),
+                    "setup_evidence_source": "bridge_readback",
+                    "structured_results_available": True,
+                    "structured_results_evidence_source": "eda_result",
+                    "automated_simulation_performed": False,
+                    "oa_write_performed": False,
+                },
+                evidence_source=EvidenceSource.BRIDGE_READBACK,
+            )
+
+    task = TaskSpec.model_validate(
+        {
+            "id": "capture-manual-ade",
+            "operation": "ade.capture",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_capture": {"backend": "maestro"},
+        }
+    )
+    plan = build_plan(task)
+
+    record = TaskExecutor(CapturingAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert [action.action for action in record.actions] == [
+        "bridge.probe",
+        "ade.capture",
+    ]
+    capture = record.actions[-1]
+    assert capture.evidence_source is EvidenceSource.BRIDGE_READBACK
+    assert capture.details["structured_results_evidence_source"] == "eda_result"
+    assert capture.details["automated_simulation_performed"] is False
+    assert capture.details["oa_write_performed"] is False
+    assert record.candidates == []
+    assert any("human-operated ADE" in note for note in record.notes)
 
 
 def test_explicit_parameter_apply_fails_on_untrusted_adapter_confirmation() -> None:

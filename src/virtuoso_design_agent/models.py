@@ -26,6 +26,7 @@ class Operation(str, Enum):
     SCHEMATIC_INSPECT = "schematic.inspect"
     SCHEMATIC_TRANSFORM = "schematic.transform"
     PARAMETERS_APPLY = "parameters.apply"
+    ADE_CAPTURE = "ade.capture"
     SIMULATION_RUN = "simulation.run"
     DESIGN_TUNE = "design.tune"
     DESIGN_CLOSE_LOOP = "design.close_loop"
@@ -45,6 +46,10 @@ class AnalysisKind(str, Enum):
     AC = "ac"
     NOISE = "noise"
     QUALITY = "quality"
+
+
+class AdeBackend(str, Enum):
+    MAESTRO = "maestro"
 
 
 class Relation(str, Enum):
@@ -193,6 +198,20 @@ class NoiseSweep(StrictModel):
         return self
 
 
+class AdeCaptureSpec(StrictModel):
+    """Read a human-operated ADE setup without changing or rerunning it."""
+
+    backend: AdeBackend = AdeBackend.MAESTRO
+    history: str | None = Field(
+        default=None,
+        min_length=1,
+        pattern=r"^[A-Za-z0-9_.-]+$",
+    )
+    require_results: bool = True
+    require_saved_setup: bool = True
+    require_structured_outputs: bool = False
+
+
 class SafetyPolicy(StrictModel):
     allow_remote_compute: bool = False
     allow_remote_write: bool = False
@@ -223,6 +242,7 @@ class TaskSpec(StrictModel):
     ac_sweep: AcSweep | None = None
     linearity_sweep: LinearitySweep | None = None
     noise_sweep: NoiseSweep | None = None
+    ade_capture: AdeCaptureSpec | None = None
     parameters: dict[str, float] = Field(default_factory=dict)
     instance_parameter_updates: list[InstanceParameterUpdate] = Field(
         default_factory=list
@@ -347,6 +367,27 @@ class TaskSpec(StrictModel):
                             f"common-source {resolved_analysis.value} analysis requires "
                             f"{required[0]}"
                         )
+        if self.operation is Operation.ADE_CAPTURE:
+            if self.ade_capture is None:
+                raise ValueError("ade.capture requires ade_capture settings")
+            if self.target.view != "maestro":
+                raise ValueError("ade.capture currently requires target.view='maestro'")
+            if (
+                self.parameters
+                or self.instance_parameter_updates
+                or self.parameter_space
+                or self.constraints
+                or self.objective is not None
+                or self.create_if_missing
+            ):
+                raise ValueError(
+                    "ade.capture only reads the focused ADE state and does not accept "
+                    "parameters, search, constraints, objective, or creation requests"
+                )
+            if self.safety.replace_existing:
+                raise ValueError("ade.capture cannot replace an existing view")
+        elif self.ade_capture is not None:
+            raise ValueError("ade_capture settings require operation='ade.capture'")
         if self.instance_parameter_updates:
             if self.operation is not Operation.PARAMETERS_APPLY:
                 raise ValueError(

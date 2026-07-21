@@ -32,9 +32,9 @@
 - 调优边界：W/L/RD/RS 维度仍逐候选写 OA 和回读；纯 bias/load 条件搜索不写 OA。两种路径都复用原有 constraints/objective、预算和 checkpoint 语义。
 - 质量组合：`analysis: quality` 强制声明 AC、linearity、noise 三组 sweep；每候选复用一次 OA/`si` 网表，任一子分析不完整或共享证据不一致即拒绝。真实 4 点搜索得到 2 个可行点；两个 0.40 V 点虽有更高 GBW，但因 THD 与 DC 功耗超限被拒绝，最终选择 `0.35 V/1 fF`。预算、全不可行和首候选 transport 恢复均正确，before/after OA 参数一致。
 - 质量写回：8 点 W/RD/RS 搜索全部三项完整，候选 4 transport 中断后从独立 OA 回读恢复；GBW objective 写回 `1 µm/20 kΩ/1 kΩ`。线性度 objective 随后选择 `RS=2 kΩ`，真实获得 THD/P1dB/功耗改善并接受 GBW/noise 代价。2 点全不可行任务恢复初始 OA，selection 保持为空。
-- 当前最近的硬门：加入 L/VDD 和有限 corner，检查同一设计在多个工作条件下能否重复满足规格；通过后进入差分对。不能用 nominal W/RD/RS 网格代替跨条件放大器设计质量。
+- 当前最近的硬门：先在一个专用 Maestro view 上闭合人工调整/运行后的只读捕获，再验证 VDA 对现有 setup 的非覆盖式变量 patch 和 ADE 原生 sweep；随后加入 L/VDD 和有限 corner，检查同一设计在多个工作条件下能否重复满足规格。通过后进入差分对。不能用 nominal W/RD/RS 网格代替跨条件放大器设计质量。
 
-跨拓扑的参数基础：`existing_schematic` 可以不依赖固定模板读取已有 schematic，并用 `instance_parameter_updates` 人工指定实例原始 CDF 参数和值字符串；固定模板还可把它与 W/L/R semantic parameters 组合。写入必须经过 callback、立即定向 OA 回读和独立再次回读。通用只读 live smoke 已保留完整 Bridge 结构并枚举 MN0 的 233 个 CDF 字段；专用新 cell 上又真实闭合 `MN0.fingers=2` 和 `RD0.r=22K` 的双重回读。`MN0.m=2` 被当前 PDK callback 恢复为 `1`，因此保留为字段不可持久化边界。它只证明“按名字尝试修改并以 OA 值确认”，不证明 VDA 理解任意参数的物理作用，也不自动允许该参数参与调优。
+跨拓扑的人工基础有两条。`existing_schematic` 可以不依赖固定模板读取已有 schematic，并用 `instance_parameter_updates` 人工指定实例原始 CDF 参数和值字符串；固定模板还可把它与 W/L/R semantic parameters 组合。写入必须经过 callback、立即定向 OA 回读和独立再次回读。`ade.capture` 则接收人工在 Maestro 中保存并运行的 setup/history，保留真实 Spectre 输入、PSF/output/spec 和指纹，不要求 VDA 先理解该拓扑，也不替用户运行或改写 setup。参数路径已有 live 证据；ADE 捕获当前只有本地实现与失败测试，尚无 nics4304 live 证据。通用 OA smoke 已枚举 MN0 的 233 个 CDF 字段；专用新 cell 上又真实闭合 `MN0.fingers=2` 和 `RD0.r=22K` 的双重回读。`MN0.m=2` 被当前 PDK callback 恢复为 `1`，因此保留为字段不可持久化边界。这些能力只证明“按名字修改并以 OA 值确认”或“捕获当前 ADE 状态”，不证明 VDA 理解任意参数的物理作用，也不自动允许该参数参与调优。
 
 Gate 2 已分别覆盖 bias/load 条件网格与 W/RD/RS 设计网格，但尚未把器件尺寸、偏置、负载、L/VDD 和退化电阻放入一个受预算约束的联合调整。实现不要求为源极退化新建模板或复制执行器：`schematic.transform` 在同一既有 common-source cellview 上应用固定最小 delta，`source_resistance_ohm` 随后直接进入原有 `parameters.apply`/`design.tune`。当前未实现自动逆变换，且保存成功后的后置审计失败尚无通用 snapshot 回滚；任何拓扑都必须先满足偏置和工作区，再比较增益/带宽。
 
@@ -44,4 +44,4 @@ Gate 2 已分别覆盖 bias/load 条件网格与 W/RD/RS 设计网格，但尚�
 
 ## 升级原则
 
-每个 Gate 都要同时通过结构创建与回读、参数写入与回读、非空仿真和指标重算、可行/不可行规格判定，以及中断恢复。
+每个 Gate 都要同时通过结构创建与回读、参数写入与回读、非空仿真和指标重算、可行/不可行规格判定，以及中断恢复。凡是声明支持人工 ADE 介入，还必须证明保存后的 setup 可由人工重开、修改和重跑，VDA 能在不覆盖改动的前提下重新捕获同一个 history/网表/结果关系。

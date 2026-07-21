@@ -374,6 +374,81 @@ def test_existing_schematic_exposes_only_read_and_manual_parameter_write() -> No
         build_plan(invalid)
 
 
+def test_ade_capture_is_a_read_only_human_handoff_contract() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "capture-manual-ade",
+            "operation": "ade.capture",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_capture": {
+                "backend": "maestro",
+                "history": "Interactive.7",
+                "require_structured_outputs": True,
+            },
+        }
+    )
+
+    plan = build_plan(task)
+
+    assert task.ade_capture is not None
+    assert task.ade_capture.history == "Interactive.7"
+    assert not plan.requires_remote_write
+    assert not plan.requires_remote_compute
+
+
+@pytest.mark.parametrize(
+    ("update", "message"),
+    [
+        ({"ade_capture": None}, "requires ade_capture settings"),
+        (
+            {"target": {"library": "vda_test", "cell": "vda_manual_tb"}},
+            "target.view='maestro'",
+        ),
+        ({"parameters": {"vdd_v": 0.9}}, "only reads the focused ADE state"),
+        (
+            {"constraints": [{"metric": "gain", "relation": ">=", "value": 2}]},
+            "only reads the focused ADE state",
+        ),
+    ],
+)
+def test_ade_capture_rejects_automation_or_ambiguous_targets(
+    update: dict, message: str
+) -> None:
+    data = {
+        "id": "capture-manual-ade",
+        "operation": "ade.capture",
+        "circuit": "existing_schematic",
+        "target": {
+            "library": "vda_test",
+            "cell": "vda_manual_tb",
+            "view": "maestro",
+        },
+        "ade_capture": {"backend": "maestro"},
+    }
+    data.update(update)
+
+    with pytest.raises(ValidationError, match=message):
+        TaskSpec.model_validate(data)
+
+
+def test_ade_capture_settings_cannot_leak_into_other_operations() -> None:
+    with pytest.raises(ValidationError, match="require operation='ade.capture'"):
+        TaskSpec.model_validate(
+            {
+                "id": "wrong-operation",
+                "operation": "schematic.inspect",
+                "circuit": "existing_schematic",
+                "target": {"library": "vda_test", "cell": "vda_manual_tb"},
+                "ade_capture": {"backend": "maestro"},
+            }
+        )
+
+
 def test_source_degeneration_is_an_exact_common_source_transform() -> None:
     task = TaskSpec.model_validate(
         {

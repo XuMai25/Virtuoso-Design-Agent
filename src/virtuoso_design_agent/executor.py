@@ -786,6 +786,19 @@ class TaskExecutor:
                         lambda: self.adapter.inspect_schematic(task),
                     )
                     selected_parameters = dict(task.parameters)
+            elif operation is Operation.ADE_CAPTURE:
+                captured = self._action(
+                    "ade.capture", lambda: self.adapter.capture_ade(task)
+                )
+                notes.append(
+                    "captured an existing human-operated ADE setup/history; no "
+                    "simulation or OA write was performed by VDA"
+                )
+                if not captured.data.get("structured_results_available", False):
+                    notes.append(
+                        "ADE result artifacts were retained, but no structured "
+                        "output/spec table was available"
+                    )
             elif operation is Operation.SIMULATION_RUN:
                 self._action(
                     "schematic.inspect.before",
