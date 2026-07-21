@@ -138,6 +138,49 @@ def test_ade_run_plan_uses_background_compute_without_setup_write() -> None:
     assert not plan.requires_remote_write
 
 
+def test_ade_variable_patch_plan_discloses_cas_and_single_setup_save() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "patch-maestro-variables",
+            "operation": "ade.variables.apply",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_variables": {
+                "expected_tests": ["VDA"],
+                "updates": [
+                    {
+                        "name": "bias_v",
+                        "expected_value": "0.35",
+                        "value": "0.30,0.35,0.40",
+                    }
+                ],
+            },
+        }
+    )
+
+    plan = build_plan(task)
+
+    assert [step.capability for step in plan.steps] == [
+        "bridge.probe",
+        "ade.variables.preflight",
+        "ade.variables.apply",
+        "ade.variables.readback",
+        "evidence.persist",
+    ]
+    assert "任何已配置的开放" in plan.steps[1].description
+    assert "逐项匹配任务前置条件" in plan.steps[1].description
+    assert "bias_v" in plan.steps[2].description
+    assert "只保存一次 setup" in plan.steps[2].description
+    assert "不证明同名 test/corner" in plan.steps[2].description
+    assert "不自动覆盖式重试" in plan.steps[3].description
+    assert plan.requires_remote_write
+    assert not plan.requires_remote_compute
+
+
 def test_inspect_plan_is_remote_read_only() -> None:
     plan = build_plan(_task("schematic.inspect"))
     assert all(step.side_effect is not SideEffect.REMOTE_WRITE for step in plan.steps)

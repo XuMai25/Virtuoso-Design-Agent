@@ -387,6 +387,285 @@ def test_background_maestro_run_rejects_empty_structured_results_and_closes(
     assert calls == [("close", "fnxBackground9")]
 
 
+def test_maestro_variable_patch_saves_once_and_reopens_for_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+    state = {
+        "persisted": {"bias_v": None, "load_ff": "1f"},
+        "working": {},
+    }
+
+    class Client:
+        def execute_skill(self, expression, **kwargs):
+            if "ddGetObj" in expression:
+                return SimpleNamespace(output="t", errors=[])
+            if "maeGetSetup" in expression:
+                return SimpleNamespace(output='("VDA")', errors=[])
+            raise AssertionError(expression)
+
+    sessions = iter(["fnxPatch1", "fnxPatch2"])
+
+    def fake_open_session(_client, library, cell):
+        session = next(sessions)
+        state["working"] = dict(state["persisted"])
+        calls.append(("open", session, library, cell))
+        return session
+
+    def fake_get_var(_client, name, *, session):
+        calls.append(("get", session, name))
+        value = state["working"].get(name)
+        return "nil" if value is None else f'"{value}"'
+
+    def fake_set_var(_client, name, value, *, session):
+        calls.append(("set", session, name, value))
+        state["working"][name] = value
+
+    def fake_save_setup(_client, library, cell, *, session):
+        calls.append(("save", session, library, cell))
+        state["persisted"] = dict(state["working"])
+
+    def fake_close_session(_client, session):
+        calls.append(("close", session))
+
+    _install_fake_maestro_module(
+        monkeypatch,
+        find_open_session=lambda _client: None,
+        open_session=fake_open_session,
+        close_session=fake_close_session,
+        get_var=fake_get_var,
+        set_var=fake_set_var,
+        save_setup=fake_save_setup,
+    )
+    monkeypatch.setattr(bridge_worker, "_client", Client)
+
+    result = bridge_worker.apply_maestro_variables(
+        {
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_variables": {
+                "backend": "maestro",
+                "expected_tests": ["VDA"],
+                "updates": [
+                    {
+                        "name": "bias_v",
+                        "expected_value": None,
+                        "value": "0.30,0.35,0.40",
+                    },
+                    {
+                        "name": "load_ff",
+                        "expected_value": "1f",
+                        "value": "1f,2f",
+                    },
+                ],
+            },
+        }
+    )
+
+    assert result["variable_scope"] == "global"
+    assert result["tests_readback_before"] == ["VDA"]
+    assert result["tests_readback_after"] == ["VDA"]
+    assert result["before_variables"] == {"bias_v": None, "load_ff": "1f"}
+    assert result["immediate_variables"] == {
+        "bias_v": "0.30,0.35,0.40",
+        "load_ff": "1f,2f",
+    }
+    assert result["persisted_variables"] == result["immediate_variables"]
+    assert result["declared_global_sweep_variables"] == ["bias_v", "load_ff"]
+    assert result["test_or_corner_overrides_checked"] is False
+    assert result["effective_simulation_value_verified"] is False
+    assert result["maestro_setup_write_performed"] is True
+    assert result["schematic_oa_write_performed"] is False
+    assert result["automated_simulation_performed"] is False
+    assert result["before_target_fingerprint_sha256"]
+    assert result["after_target_fingerprint_sha256"]
+    assert result["before_target_fingerprint_sha256"] != result[
+        "after_target_fingerprint_sha256"
+    ]
+    assert [call[0] for call in calls].count("save") == 1
+    assert [call[0] for call in calls].count("open") == 2
+    assert [call[0] for call in calls].count("close") == 2
+
+
+def test_maestro_variable_patch_worker_requires_explicit_old_value() -> None:
+    with pytest.raises(RuntimeError, match="must be explicitly declared"):
+        bridge_worker._validate_maestro_variable_update(  # noqa: SLF001
+            {"name": "bias_v", "value": "0.35"}
+        )
+
+
+def test_maestro_variable_patch_stops_before_write_on_precondition_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+
+    class Client:
+        def execute_skill(self, expression, **kwargs):
+            if "ddGetObj" in expression:
+                return SimpleNamespace(output="t", errors=[])
+            if "maeGetSetup" in expression:
+                return SimpleNamespace(output='("VDA")', errors=[])
+            raise AssertionError(expression)
+
+    def fake_get_var(_client, name, *, session):
+        calls.append(("get", session, name))
+        return '"0.35"'
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("precondition mismatch must stop before write/save")
+
+    _install_fake_maestro_module(
+        monkeypatch,
+        find_open_session=lambda _client: None,
+        open_session=lambda *_args: "fnxPatchMismatch",
+        close_session=lambda _client, session: calls.append(("close", session)),
+        get_var=fake_get_var,
+        set_var=unexpected,
+        save_setup=unexpected,
+    )
+    monkeypatch.setattr(bridge_worker, "_client", Client)
+
+    with pytest.raises(RuntimeError, match="precondition mismatch"):
+        bridge_worker.apply_maestro_variables(
+            {
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "ade_variables": {
+                    "expected_tests": ["VDA"],
+                    "updates": [
+                        {
+                            "name": "bias_v",
+                            "expected_value": "0.30",
+                            "value": "0.40",
+                        }
+                    ],
+                },
+            }
+        )
+
+    assert calls == [
+        ("get", "fnxPatchMismatch", "bias_v"),
+        ("close", "fnxPatchMismatch"),
+    ]
+
+
+def test_maestro_variable_patch_refuses_any_existing_configured_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Client:
+        def execute_skill(self, expression, **kwargs):
+            if "ddGetObj" in expression:
+                return SimpleNamespace(output="t", errors=[])
+            raise AssertionError(expression)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("existing session must stop before opening another")
+
+    _install_fake_maestro_module(
+        monkeypatch,
+        find_open_session=lambda _client: "fnxManual7",
+        open_session=unexpected,
+        close_session=unexpected,
+        get_var=unexpected,
+        set_var=unexpected,
+        save_setup=unexpected,
+    )
+    monkeypatch.setattr(bridge_worker, "_client", Client)
+
+    with pytest.raises(RuntimeError, match="already open: fnxManual7"):
+        bridge_worker.apply_maestro_variables(
+            {
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "ade_variables": {
+                    "expected_tests": ["VDA"],
+                    "updates": [
+                        {
+                            "name": "bias_v",
+                            "expected_value": None,
+                            "value": "0.35",
+                        }
+                    ],
+                },
+            }
+        )
+
+
+def test_maestro_variable_patch_rejects_persistent_readback_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+    state = {"value": "0.35", "verify": False}
+
+    class Client:
+        def execute_skill(self, expression, **kwargs):
+            if "ddGetObj" in expression:
+                return SimpleNamespace(output="t", errors=[])
+            if "maeGetSetup" in expression:
+                return SimpleNamespace(output='("VDA")', errors=[])
+            raise AssertionError(expression)
+
+    sessions = iter(["fnxPatchWrite", "fnxPatchVerify"])
+
+    def fake_open_session(*_args):
+        session = next(sessions)
+        state["verify"] = session == "fnxPatchVerify"
+        return session
+
+    def fake_get_var(_client, _name, *, session):
+        value = "0.38" if state["verify"] else state["value"]
+        return f'"{value}"'
+
+    def fake_set_var(_client, _name, value, *, session):
+        state["value"] = value
+
+    _install_fake_maestro_module(
+        monkeypatch,
+        find_open_session=lambda _client: None,
+        open_session=fake_open_session,
+        close_session=lambda _client, session: calls.append(("close", session)),
+        get_var=fake_get_var,
+        set_var=fake_set_var,
+        save_setup=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(bridge_worker, "_client", Client)
+
+    with pytest.raises(RuntimeError, match="persistent readback mismatch"):
+        bridge_worker.apply_maestro_variables(
+            {
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "ade_variables": {
+                    "expected_tests": ["VDA"],
+                    "updates": [
+                        {
+                            "name": "bias_v",
+                            "expected_value": "0.35",
+                            "value": "0.40",
+                        }
+                    ],
+                },
+            }
+        )
+
+    assert calls == [
+        ("close", "fnxPatchWrite"),
+        ("close", "fnxPatchVerify"),
+    ]
+
+
 def test_focused_maestro_capture_keeps_manual_state_and_real_result_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -605,6 +884,62 @@ def test_subprocess_ade_run_payload_has_no_configuration_or_analysis(
     assert "ade_capture" not in payload
     assert payload["ade_run"]["require_structured_outputs"] is True
     assert payload["ade_run_user_fields"] == ["require_structured_outputs"]
+
+
+def test_subprocess_ade_variable_payload_preserves_exact_strings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "patch-maestro-variables",
+            "operation": "ade.variables.apply",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_variables": {
+                "expected_tests": ["VDA"],
+                "updates": [
+                    {
+                        "name": "bias_v",
+                        "expected_value": None,
+                        "value": "0.30,0.35,0.40",
+                    }
+                ],
+            },
+        }
+    )
+    adapter = SubprocessBridgeAdapter(tmp_path / "bridge-python.exe")
+    request: dict[str, object] = {}
+
+    def fake_request(action, payload, *, timeout):
+        request.update(action=action, payload=payload, timeout=timeout)
+        return {"persisted_variables": {"bias_v": "0.30,0.35,0.40"}}
+
+    monkeypatch.setattr(adapter, "_request", fake_request)
+
+    result = adapter.apply_ade_variables(task)
+
+    assert result.evidence_source is EvidenceSource.BRIDGE_READBACK
+    assert request["action"] == "apply_maestro_variables"
+    payload = request["payload"]
+    assert isinstance(payload, dict)
+    assert "analysis" not in payload
+    assert "analysis_source" not in payload
+    assert payload["ade_variables"]["expected_tests"] == ["VDA"]
+    assert payload["ade_variables"]["updates"] == [
+        {
+            "name": "bias_v",
+            "expected_value": None,
+            "value": "0.30,0.35,0.40",
+        }
+    ]
+    assert set(payload["ade_variables_user_fields"]) == {
+        "expected_tests",
+        "updates",
+    }
 
 
 def test_inverter_testbench_deck_includes_oa_netlist_without_device_topology() -> None:

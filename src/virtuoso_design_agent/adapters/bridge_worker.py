@@ -945,6 +945,52 @@ def _maestro_tests_readback(client, session: str) -> list[str]:
     return re.findall(r'"([^"\\]+)"', raw_tests)
 
 
+def _normalized_maestro_variable_value(value: Any) -> str | None:
+    normalized = str(value or "").strip()
+    if normalized in {"", "nil"}:
+        return None
+    if (
+        len(normalized) >= 2
+        and normalized.startswith('"')
+        and normalized.endswith('"')
+    ):
+        normalized = normalized[1:-1]
+    return normalized
+
+
+def _validate_maestro_variable_update(update: dict[str, Any]) -> None:
+    name = str(update.get("name") or "")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", name):
+        raise RuntimeError(f"invalid Maestro variable name: {name!r}")
+    if "expected_value" not in update:
+        raise RuntimeError(
+            f"Maestro variable {name}.expected_value must be explicitly declared"
+        )
+    for field in ("expected_value", "value"):
+        value = update.get(field)
+        if value is None and field == "expected_value":
+            continue
+        if not isinstance(value, str) or not value:
+            raise RuntimeError(f"Maestro variable {name}.{field} must be a string")
+        if any(character in value for character in ('"', "\\", "\r", "\n", "\0")):
+            raise RuntimeError(
+                f"Maestro variable {name}.{field} contains unsafe SKILL string "
+                "characters"
+            )
+
+
+def _maestro_variable_fingerprint(
+    tests: list[str], values: dict[str, str | None]
+) -> str:
+    canonical = json.dumps(
+        {"tests": tests, "global_variables": values},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def prepare_maestro(payload: dict[str, Any]) -> dict[str, Any]:
     """Create one new persistent Maestro view and leave it for manual editing."""
 
@@ -1026,6 +1072,164 @@ def prepare_maestro(payload: dict[str, Any]) -> dict[str, Any]:
         "completion_scope": (
             "persistent Spectre-backed Maestro test prepared for manual editing; "
             "no analysis, stimulus, sweep, output, or simulation was configured"
+        ),
+    }
+
+
+def apply_maestro_variables(payload: dict[str, Any]) -> dict[str, Any]:
+    """Compare-and-swap global variables in one saved Maestro setup."""
+
+    from virtuoso_bridge.virtuoso.maestro import (
+        close_session,
+        find_open_session,
+        get_var,
+        open_session,
+        save_setup,
+        set_var,
+    )
+
+    settings = payload.get("ade_variables") or {}
+    if settings.get("backend", "maestro") != "maestro":
+        raise RuntimeError("only the verified Bridge Maestro backend is supported")
+    library, cell = _target(payload)
+    view = str(payload["target"].get("view") or "")
+    if view != "maestro":
+        raise RuntimeError("ADE variable patch target view must be maestro")
+    expected_tests = [str(value) for value in settings.get("expected_tests") or []]
+    updates = list(settings.get("updates") or [])
+    if not expected_tests or not updates:
+        raise RuntimeError(
+            "ADE variable patch requires expected_tests and variable updates"
+        )
+    if len(expected_tests) != len(set(expected_tests)):
+        raise RuntimeError("ADE variable patch expected_tests contain duplicates")
+    for update in updates:
+        if not isinstance(update, dict):
+            raise RuntimeError("ADE variable update must be an object")
+        _validate_maestro_variable_update(update)
+    names = [str(update["name"]) for update in updates]
+    if len(names) != len(set(names)):
+        raise RuntimeError("ADE variable patch contains duplicate variable names")
+
+    client = _client()
+    if not _cellview_exists(client, library, cell, view):
+        raise RuntimeError(
+            f"ADE variable patch requires existing {library}/{cell}/{view}"
+        )
+    existing_session = find_open_session(client)
+    if existing_session is not None:
+        raise RuntimeError(
+            "ADE variable patch refuses to save while any configured Maestro "
+            f"session is already open: {existing_session}"
+        )
+
+    before: dict[str, str | None] = {}
+    immediate: dict[str, str | None] = {}
+    session = open_session(client, library, cell)
+    try:
+        tests = _maestro_tests_readback(client, session)
+        if tests != expected_tests:
+            raise RuntimeError(
+                "Maestro tests changed before variable patch: "
+                f"expected {expected_tests!r}, got {tests!r}"
+            )
+        for update in updates:
+            name = str(update["name"])
+            before[name] = _normalized_maestro_variable_value(
+                get_var(client, name, session=session)
+            )
+        mismatches = {
+            str(update["name"]): {
+                "expected": update.get("expected_value"),
+                "actual": before[str(update["name"])],
+            }
+            for update in updates
+            if before[str(update["name"])] != update.get("expected_value")
+        }
+        if mismatches:
+            raise RuntimeError(
+                "Maestro variable precondition mismatch: "
+                + json.dumps(mismatches, sort_keys=True)
+            )
+        for update in updates:
+            name = str(update["name"])
+            requested = str(update["value"])
+            set_var(client, name, requested, session=session)
+            immediate[name] = _normalized_maestro_variable_value(
+                get_var(client, name, session=session)
+            )
+            if immediate[name] != requested:
+                raise RuntimeError(
+                    f"Maestro variable immediate readback mismatch for {name}: "
+                    f"requested {requested!r}, got {immediate[name]!r}"
+                )
+        save_setup(client, library, cell, session=session)
+    finally:
+        close_session(client, session)
+
+    persisted: dict[str, str | None] = {}
+    verify_session = open_session(client, library, cell)
+    try:
+        verify_tests = _maestro_tests_readback(client, verify_session)
+        if verify_tests != expected_tests:
+            raise RuntimeError(
+                "Maestro tests changed after variable patch: "
+                f"expected {expected_tests!r}, got {verify_tests!r}"
+            )
+        for update in updates:
+            name = str(update["name"])
+            persisted[name] = _normalized_maestro_variable_value(
+                get_var(client, name, session=verify_session)
+            )
+            if persisted[name] != update["value"]:
+                raise RuntimeError(
+                    f"Maestro variable persistent readback mismatch for {name}: "
+                    f"requested {update['value']!r}, got {persisted[name]!r}"
+                )
+    finally:
+        close_session(client, verify_session)
+
+    requested = {
+        str(update["name"]): {
+            "expected_value": update.get("expected_value"),
+            "value": str(update["value"]),
+        }
+        for update in updates
+    }
+    return {
+        "backend": "maestro",
+        "target": {"library": library, "cell": cell, "view": view},
+        "variable_scope": "global",
+        "expected_tests": expected_tests,
+        "tests_readback_before": tests,
+        "tests_readback_after": verify_tests,
+        "requested_variable_updates": requested,
+        "requested_evidence_source": "user_input",
+        "before_variables": before,
+        "immediate_variables": immediate,
+        "persisted_variables": persisted,
+        "confirmed_evidence_source": "bridge_readback",
+        "before_target_fingerprint_sha256": _maestro_variable_fingerprint(
+            tests, before
+        ),
+        "after_target_fingerprint_sha256": _maestro_variable_fingerprint(
+            verify_tests, persisted
+        ),
+        "declared_global_sweep_variables": [
+            name for name, value in persisted.items() if value and "," in value
+        ],
+        "sweep_detection_evidence_source": "software_inference",
+        "test_or_corner_overrides_checked": False,
+        "effective_simulation_value_verified": False,
+        "existing_maestro_replaced": False,
+        "schematic_oa_write_performed": False,
+        "maestro_setup_write_performed": True,
+        "automated_simulation_performed": False,
+        "completion_scope": (
+            "declared global Maestro variables matched their expected old values, "
+            "were saved once, and matched after an independent reopen; tests, "
+            "analysis, outputs, corners, and schematic were not changed; test/corner "
+            "overrides and effective simulator values were not verified"
         ),
     }
 
@@ -3385,6 +3589,7 @@ _ACTIONS = {
     "prepare_maestro": prepare_maestro,
     "capture_focused_maestro": capture_focused_maestro,
     "run_background_maestro": run_background_maestro,
+    "apply_maestro_variables": apply_maestro_variables,
     "inspect_existing_schematic": inspect_existing_schematic,
     "apply_existing_schematic_parameters": apply_existing_schematic_parameters,
     "create_inverter": create_inverter,

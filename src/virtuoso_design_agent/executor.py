@@ -869,6 +869,72 @@ class TaskExecutor:
                         "Maestro history completed without a structured point/output "
                         "table; completion alone was not treated as design success"
                     )
+            elif operation is Operation.ADE_VARIABLES_APPLY:
+                patched = self._action(
+                    "ade.variables.apply",
+                    lambda: self.adapter.apply_ade_variables(task),
+                )
+                if task.ade_variables is None:
+                    raise RuntimeError("ADE variable settings disappeared at execution")
+                expected_tests = list(task.ade_variables.expected_tests)
+                requested = {
+                    update.name: {
+                        "expected_value": update.expected_value,
+                        "value": update.value,
+                    }
+                    for update in task.ade_variables.updates
+                }
+                expected_before = {
+                    update.name: update.expected_value
+                    for update in task.ade_variables.updates
+                }
+                expected_after = {
+                    update.name: update.value
+                    for update in task.ade_variables.updates
+                }
+                if (
+                    patched.evidence_source is not EvidenceSource.BRIDGE_READBACK
+                    or patched.data.get("requested_evidence_source") != "user_input"
+                    or patched.data.get("confirmed_evidence_source")
+                    != "bridge_readback"
+                    or patched.data.get("existing_maestro_replaced") is not False
+                    or patched.data.get("schematic_oa_write_performed") is not False
+                    or patched.data.get("maestro_setup_write_performed") is not True
+                    or patched.data.get("automated_simulation_performed") is not False
+                    or patched.data.get("variable_scope") != "global"
+                    or patched.data.get("expected_tests") != expected_tests
+                    or patched.data.get("tests_readback_before") != expected_tests
+                    or patched.data.get("tests_readback_after") != expected_tests
+                    or patched.data.get("requested_variable_updates") != requested
+                    or patched.data.get("before_variables") != expected_before
+                    or patched.data.get("immediate_variables") != expected_after
+                    or patched.data.get("persisted_variables") != expected_after
+                    or (
+                        patched.data.get("test_or_corner_overrides_checked")
+                        is not False
+                    )
+                    or (
+                        patched.data.get("effective_simulation_value_verified")
+                        is not False
+                    )
+                ):
+                    raise RuntimeError(
+                        "ADE variable patch did not prove an exact global-variable "
+                        "compare-and-swap with persistent readback"
+                    )
+                notes.append(
+                    "patched only the declared global Maestro variables after exact "
+                    "old-value preconditions and an independent persisted readback"
+                )
+                notes.append(
+                    "no simulation, schematic write, test, analysis, output, or "
+                    "corner modification was performed"
+                )
+                notes.append(
+                    "global comma-separated values can request a native sweep, but "
+                    "test/corner overrides and effective simulator values were not "
+                    "verified by this operation"
+                )
             elif operation is Operation.SIMULATION_RUN:
                 self._action(
                     "schematic.inspect.before",

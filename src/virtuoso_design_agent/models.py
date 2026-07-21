@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -29,6 +30,7 @@ class Operation(str, Enum):
     ADE_PREPARE = "ade.prepare"
     ADE_CAPTURE = "ade.capture"
     ADE_RUN = "ade.run"
+    ADE_VARIABLES_APPLY = "ade.variables.apply"
     SIMULATION_RUN = "simulation.run"
     DESIGN_TUNE = "design.tune"
     DESIGN_CLOSE_LOOP = "design.close_loop"
@@ -238,6 +240,52 @@ class AdeRunSpec(StrictModel):
     require_structured_outputs: bool = True
 
 
+class AdeVariableUpdate(StrictModel):
+    """Compare-and-swap one global Maestro design variable."""
+
+    name: StrictStr = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$",
+    )
+    expected_value: StrictStr | None = Field(max_length=1024)
+    value: StrictStr = Field(min_length=1, max_length=1024)
+
+    @field_validator("expected_value", "value")
+    @classmethod
+    def validate_skill_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if not value:
+            raise ValueError("Maestro variable values cannot be empty strings")
+        if any(character in value for character in ('"', "\\", "\r", "\n", "\0")):
+            raise ValueError(
+                "Maestro variable values cannot contain quotes, backslashes, or "
+                "control characters"
+            )
+        return value
+
+
+class AdeVariablesApplySpec(StrictModel):
+    """Patch global Maestro variables with exact old-value preconditions."""
+
+    backend: AdeBackend = AdeBackend.MAESTRO
+    expected_tests: list[StrictStr] = Field(min_length=1, max_length=32)
+    updates: list[AdeVariableUpdate] = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_unique_names(self) -> "AdeVariablesApplySpec":
+        for test in self.expected_tests:
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$.-]*", test):
+                raise ValueError(f"invalid Maestro test name: {test!r}")
+        if len(self.expected_tests) != len(set(self.expected_tests)):
+            raise ValueError("expected_tests cannot contain duplicates")
+        names = [update.name for update in self.updates]
+        if len(names) != len(set(names)):
+            raise ValueError("Maestro variable updates cannot repeat a name")
+        return self
+
+
 class SafetyPolicy(StrictModel):
     allow_remote_compute: bool = False
     allow_remote_write: bool = False
@@ -271,6 +319,7 @@ class TaskSpec(StrictModel):
     ade_capture: AdeCaptureSpec | None = None
     ade_prepare: AdePrepareSpec | None = None
     ade_run: AdeRunSpec | None = None
+    ade_variables: AdeVariablesApplySpec | None = None
     parameters: dict[str, float] = Field(default_factory=dict)
     instance_parameter_updates: list[InstanceParameterUpdate] = Field(
         default_factory=list
@@ -459,6 +508,36 @@ class TaskSpec(StrictModel):
                 raise ValueError("ade.run never replaces an existing Maestro view")
         elif self.ade_run is not None:
             raise ValueError("ade_run settings require operation='ade.run'")
+        if self.operation is Operation.ADE_VARIABLES_APPLY:
+            if self.ade_variables is None:
+                raise ValueError(
+                    "ade.variables.apply requires ade_variables settings"
+                )
+            if self.target.view != "maestro":
+                raise ValueError(
+                    "ade.variables.apply currently requires target.view='maestro'"
+                )
+            if (
+                self.parameters
+                or self.instance_parameter_updates
+                or self.parameter_space
+                or self.constraints
+                or self.objective is not None
+                or self.create_if_missing
+            ):
+                raise ValueError(
+                    "ade.variables.apply only patches declared global Maestro "
+                    "variables and does not accept parameters, search, constraints, "
+                    "objective, or creation requests"
+                )
+            if self.safety.replace_existing:
+                raise ValueError(
+                    "ade.variables.apply never replaces an existing Maestro view"
+                )
+        elif self.ade_variables is not None:
+            raise ValueError(
+                "ade_variables settings require operation='ade.variables.apply'"
+            )
         if self.instance_parameter_updates:
             if self.operation is not Operation.PARAMETERS_APPLY:
                 raise ValueError(

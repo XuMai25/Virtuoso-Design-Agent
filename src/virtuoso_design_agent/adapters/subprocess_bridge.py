@@ -122,6 +122,7 @@ class SubprocessBridgeAdapter:
             Operation.ADE_PREPARE,
             Operation.ADE_CAPTURE,
             Operation.ADE_RUN,
+            Operation.ADE_VARIABLES_APPLY,
         }:
             payload["analysis"] = task.resolved_analysis().value
             payload["analysis_source"] = (
@@ -155,6 +156,11 @@ class SubprocessBridgeAdapter:
         if task.ade_run is not None:
             payload["ade_run"] = task.ade_run.model_dump(mode="json")
             payload["ade_run_user_fields"] = sorted(task.ade_run.model_fields_set)
+        if task.ade_variables is not None:
+            payload["ade_variables"] = task.ade_variables.model_dump(mode="json")
+            payload["ade_variables_user_fields"] = sorted(
+                task.ade_variables.model_fields_set
+            )
         return payload
 
     def probe(self, pdk_profile: str) -> AdapterResult:
@@ -240,6 +246,14 @@ class SubprocessBridgeAdapter:
             timeout=task.limits.timeout_seconds + 240,
         )
         return AdapterResult(data=data, evidence_source=EvidenceSource.EDA_RESULT)
+
+    def apply_ade_variables(self, task: TaskSpec) -> AdapterResult:
+        data = self._request(
+            "apply_maestro_variables",
+            self._task_payload(task),
+            timeout=min(task.limits.timeout_seconds, 180),
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
 
     def simulate(
         self, task: TaskSpec, parameters: dict[str, float]

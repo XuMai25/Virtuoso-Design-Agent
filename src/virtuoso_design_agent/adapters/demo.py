@@ -400,6 +400,12 @@ class DeterministicDemoAdapter:
             "a Maestro history or EDA results"
         )
 
+    def apply_ade_variables(self, task: TaskSpec) -> AdapterResult:
+        raise RuntimeError(
+            "ade.variables.apply requires the real Bridge; the demo adapter cannot "
+            "write or verify a persistent Maestro setup"
+        )
+
     def simulate(
         self, task: TaskSpec, parameters: dict[str, float]
     ) -> AdapterResult:

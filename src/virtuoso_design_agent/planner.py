@@ -245,6 +245,54 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             ),
         ]
 
+    if task.operation is Operation.ADE_VARIABLES_APPLY:
+        assert task.ade_variables is not None
+        variables = ", ".join(
+            update.name for update in task.ade_variables.updates
+        )
+        return [
+            probe,
+            _step(
+                "02-preflight",
+                "ade.variables.preflight",
+                (
+                    "确认目标 Maestro view 已存在且当前没有任何已配置的开放 "
+                    "Maestro session；独立后台回读 tests 与每个变量旧值，必须"
+                    "逐项匹配任务前置条件"
+                ),
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "03-apply",
+                "ade.variables.apply",
+                (
+                    f"仅更新全局 Maestro design variables: {variables}；"
+                    "每项 set_var 后立即 get_var，不改 test/analysis/output/corner "
+                    "或 schematic，全部一致后只保存一次 setup；本 Gate 不证明"
+                    "同名 test/corner 局部变量没有覆盖全局值"
+                ),
+                SideEffect.REMOTE_WRITE,
+            ),
+            _step(
+                "04-readback",
+                "ade.variables.readback",
+                (
+                    "关闭写会话后重新打开后台 session，再次核对 tests 与所有"
+                    "目标变量；保存后的不一致或连接失败不自动覆盖式重试"
+                ),
+                SideEffect.READ_ONLY,
+            ),
+            persist.model_copy(
+                update={
+                    "id": "05-persist",
+                    "description": (
+                        "记录请求=user_input、旧值/即时值/持久化值="
+                        "bridge_readback；成功只证明声明全局变量的 CAS patch"
+                    ),
+                }
+            ),
+        ]
+
     if task.operation is Operation.SCHEMATIC_CREATE:
         create_description = (
             f"显式删除并按受控模板替换已有{template_name} schematic"

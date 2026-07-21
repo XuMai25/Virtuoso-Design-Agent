@@ -593,6 +593,162 @@ def test_ade_run_settings_cannot_leak_into_other_operations() -> None:
         )
 
 
+def test_ade_variable_patch_requires_exact_old_values_and_remote_write() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "patch-maestro-variables",
+            "operation": "ade.variables.apply",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_variables": {
+                "expected_tests": ["VDA"],
+                "updates": [
+                    {
+                        "name": "bias_v",
+                        "expected_value": None,
+                        "value": "0.30,0.35,0.40",
+                    }
+                ],
+            },
+        }
+    )
+
+    plan = build_plan(task)
+
+    assert task.ade_variables is not None
+    assert task.ade_variables.updates[0].expected_value is None
+    assert plan.requires_remote_write
+    assert not plan.requires_remote_compute
+
+
+@pytest.mark.parametrize(
+    ("update", "message"),
+    [
+        ({"ade_variables": None}, "requires ade_variables settings"),
+        (
+            {"target": {"library": "vda_test", "cell": "vda_manual_tb"}},
+            "target.view='maestro'",
+        ),
+        ({"parameters": {"vdd_v": 0.9}}, "only patches declared global"),
+        ({"safety": {"replace_existing": True}}, "never replaces"),
+    ],
+)
+def test_ade_variable_patch_rejects_other_configuration_or_overwrite(
+    update: dict, message: str
+) -> None:
+    data = {
+        "id": "patch-maestro-variables",
+        "operation": "ade.variables.apply",
+        "circuit": "existing_schematic",
+        "target": {
+            "library": "vda_test",
+            "cell": "vda_manual_tb",
+            "view": "maestro",
+        },
+        "ade_variables": {
+            "expected_tests": ["VDA"],
+            "updates": [
+                {"name": "bias_v", "expected_value": None, "value": "0.35"}
+            ],
+        },
+    }
+    data.update(update)
+
+    with pytest.raises(ValidationError, match=message):
+        TaskSpec.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    ("ade_variables", "message"),
+    [
+        (
+            {
+                "expected_tests": ["VDA"],
+                "updates": [{"name": "bias_v", "value": "0.35"}],
+            },
+            "Field required",
+        ),
+        (
+            {
+                "expected_tests": ["VDA"],
+                "updates": [
+                    {
+                        "name": "bias_v",
+                        "expected_value": None,
+                        "value": '0.35\" system("bad")',
+                    }
+                ],
+            },
+            "quotes, backslashes",
+        ),
+        (
+            {
+                "expected_tests": ["VDA"],
+                "updates": [
+                    {"name": "bias_v", "expected_value": None, "value": "0.35"},
+                    {"name": "bias_v", "expected_value": None, "value": "0.40"},
+                ],
+            },
+            "cannot repeat",
+        ),
+        (
+            {
+                "expected_tests": ["VDA", "VDA"],
+                "updates": [
+                    {"name": "bias_v", "expected_value": None, "value": "0.35"}
+                ],
+            },
+            "expected_tests cannot contain duplicates",
+        ),
+    ],
+)
+def test_ade_variable_patch_rejects_unsafe_or_ambiguous_updates(
+    ade_variables: dict, message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        TaskSpec.model_validate(
+            {
+                "id": "invalid-maestro-variables",
+                "operation": "ade.variables.apply",
+                "circuit": "existing_schematic",
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "ade_variables": ade_variables,
+            }
+        )
+
+
+def test_ade_variable_settings_cannot_leak_into_other_operations() -> None:
+    with pytest.raises(
+        ValidationError, match="require operation='ade.variables.apply'"
+    ):
+        TaskSpec.model_validate(
+            {
+                "id": "wrong-variable-operation",
+                "operation": "schematic.inspect",
+                "circuit": "existing_schematic",
+                "target": {"library": "vda_test", "cell": "vda_manual_tb"},
+                "ade_variables": {
+                    "expected_tests": ["VDA"],
+                    "updates": [
+                        {
+                            "name": "bias_v",
+                            "expected_value": None,
+                            "value": "0.35",
+                        }
+                    ],
+                },
+            }
+        )
+
+
 def test_source_degeneration_is_an_exact_common_source_transform() -> None:
     task = TaskSpec.model_validate(
         {

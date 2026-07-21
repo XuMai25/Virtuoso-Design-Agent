@@ -35,7 +35,7 @@
 
 - 尚未在 nics4304/Virtuoso 6.1.8 上执行真实 background Maestro run；本记录只证明 VDA 契约和 Bridge API 组合的本地实现。
 - Bridge 的示例明确使用 background `open_session -> run_and_wait -> read_results`，但 `read_results` 文档仍写有 GUI evaluator 要求；6.1.8 的实际行为必须由 live smoke 判定，失败不能归类为电路不可行。
-- 尚未由 VDA 自动创建完整 testbench、stimulus、analysis/output 或写入原生 sweep 变量；`ade.run` 只执行已有保存状态。
+- VDA 已有全局变量 CAS patch 的本地契约，但尚未 live 验证，也未自动创建完整 testbench、stimulus、analysis/output 或 test/corner scoped sweep 变量；`ade.run` 仍只执行已有保存状态。详见 [`2026-07-21-ade-variable-patch-local.md`](2026-07-21-ade-variable-patch-local.md)。
 - 尚未捕获 background run 的 netlist/PSF 文件证据，也没有 checkpoint/resume；transport 中断后应先检查是否已产生 history，不能盲目重跑。
 - history 命名及是否复用/覆盖旧 history 由已保存 setup 决定；当前公共 background API 不能在 run 前证明名称唯一。计划会披露这一点，真实 smoke 前不得宣称自动路径保留了所有旧结果 history。
 - 需要人工打开、修改、保存、重跑、旧 ADE L 迁移和数值交叉检查的项目已延期，见 [`../deferred-manual-gates.md`](../deferred-manual-gates.md)。

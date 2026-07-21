@@ -325,6 +325,151 @@ def test_ade_run_rejects_incomplete_adapter_evidence() -> None:
     assert any("exact background history" in note for note in record.notes)
 
 
+def test_ade_variable_patch_records_exact_persistent_compare_and_swap() -> None:
+    class VariableAdapter(DeterministicDemoAdapter):
+        def apply_ade_variables(self, task):
+            return AdapterResult(
+                data={
+                    "variable_scope": "global",
+                    "expected_tests": ["VDA"],
+                    "tests_readback_before": ["VDA"],
+                    "tests_readback_after": ["VDA"],
+                    "requested_variable_updates": {
+                        "bias_v": {
+                            "expected_value": "0.35",
+                            "value": "0.30,0.35,0.40",
+                        }
+                    },
+                    "requested_evidence_source": "user_input",
+                    "before_variables": {"bias_v": "0.35"},
+                    "immediate_variables": {"bias_v": "0.30,0.35,0.40"},
+                    "persisted_variables": {"bias_v": "0.30,0.35,0.40"},
+                    "confirmed_evidence_source": "bridge_readback",
+                    "test_or_corner_overrides_checked": False,
+                    "effective_simulation_value_verified": False,
+                    "existing_maestro_replaced": False,
+                    "schematic_oa_write_performed": False,
+                    "maestro_setup_write_performed": True,
+                    "automated_simulation_performed": False,
+                },
+                evidence_source=EvidenceSource.BRIDGE_READBACK,
+            )
+
+    task = TaskSpec.model_validate(
+        {
+            "id": "patch-maestro-variables",
+            "operation": "ade.variables.apply",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_variables": {
+                "expected_tests": ["VDA"],
+                "updates": [
+                    {
+                        "name": "bias_v",
+                        "expected_value": "0.35",
+                        "value": "0.30,0.35,0.40",
+                    }
+                ],
+            },
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+    plan = build_plan(task)
+
+    record = TaskExecutor(VariableAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert [action.action for action in record.actions] == [
+        "bridge.probe",
+        "ade.variables.apply",
+    ]
+    assert record.actions[-1].evidence_source is EvidenceSource.BRIDGE_READBACK
+    assert record.candidates == []
+    assert any("old-value preconditions" in note for note in record.notes)
+    assert any("no simulation" in note for note in record.notes)
+
+
+@pytest.mark.parametrize(
+    ("immediate_value", "persisted_value"),
+    [("0.38", "0.40"), ("0.40", "0.38")],
+)
+def test_ade_variable_patch_rejects_untrusted_readback(
+    immediate_value: str, persisted_value: str
+) -> None:
+    class UntrustedVariableAdapter(DeterministicDemoAdapter):
+        def apply_ade_variables(self, task):
+            return AdapterResult(
+                data={
+                    "variable_scope": "global",
+                    "expected_tests": ["VDA"],
+                    "tests_readback_before": ["VDA"],
+                    "tests_readback_after": ["VDA"],
+                    "requested_variable_updates": {
+                        "bias_v": {
+                            "expected_value": "0.35",
+                            "value": "0.40",
+                        }
+                    },
+                    "requested_evidence_source": "user_input",
+                    "before_variables": {"bias_v": "0.35"},
+                    "immediate_variables": {"bias_v": immediate_value},
+                    "persisted_variables": {"bias_v": persisted_value},
+                    "confirmed_evidence_source": "bridge_readback",
+                    "test_or_corner_overrides_checked": False,
+                    "effective_simulation_value_verified": False,
+                    "existing_maestro_replaced": False,
+                    "schematic_oa_write_performed": False,
+                    "maestro_setup_write_performed": True,
+                    "automated_simulation_performed": False,
+                },
+                evidence_source=EvidenceSource.BRIDGE_READBACK,
+            )
+
+    task = TaskSpec.model_validate(
+        {
+            "id": "patch-maestro-variables-untrusted",
+            "operation": "ade.variables.apply",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_variables": {
+                "expected_tests": ["VDA"],
+                "updates": [
+                    {
+                        "name": "bias_v",
+                        "expected_value": "0.35",
+                        "value": "0.40",
+                    }
+                ],
+            },
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+    plan = build_plan(task)
+
+    record = TaskExecutor(UntrustedVariableAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.FAILED
+    assert any("compare-and-swap" in note for note in record.notes)
+
+
 def test_explicit_parameter_apply_fails_on_untrusted_adapter_confirmation() -> None:
     class MismatchedConfirmationAdapter(DeterministicDemoAdapter):
         def apply_parameters(self, task, parameters):
