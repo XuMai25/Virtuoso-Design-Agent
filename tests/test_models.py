@@ -621,6 +621,7 @@ def test_ade_variable_patch_requires_exact_old_values_and_remote_write() -> None
 
     assert task.ade_variables is not None
     assert task.ade_variables.updates[0].expected_value is None
+    assert task.ade_variables.updates[0].evidence_key() == "bias_v"
     assert plan.requires_remote_write
     assert not plan.requires_remote_compute
 
@@ -667,6 +668,19 @@ def test_ade_variable_patch_rejects_other_configuration_or_overwrite(
     [
         (
             {
+                "expected_tests": ['bad"test'],
+                "updates": [
+                    {
+                        "name": "bias_v",
+                        "expected_value": None,
+                        "value": "0.35",
+                    }
+                ],
+            },
+            "invalid Maestro test name",
+        ),
+        (
+            {
                 "expected_tests": ["VDA"],
                 "updates": [{"name": "bias_v", "value": "0.35"}],
             },
@@ -684,6 +698,19 @@ def test_ade_variable_patch_rejects_other_configuration_or_overwrite(
                 ],
             },
             "quotes, backslashes",
+        ),
+        (
+            {
+                "expected_tests": ["VDA"],
+                "updates": [
+                    {
+                        "name": "bias_v",
+                        "expected_value": None,
+                        "value": "0.35\t0.40",
+                    }
+                ],
+            },
+            "control characters",
         ),
         (
             {
@@ -740,6 +767,189 @@ def test_ade_variable_settings_cannot_leak_into_other_operations() -> None:
                     "updates": [
                         {
                             "name": "bias_v",
+                            "expected_value": None,
+                            "value": "0.35",
+                        }
+                    ],
+                },
+            }
+        )
+
+
+def test_ade_variable_patch_accepts_distinct_global_test_and_corner_scopes() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "patch-scoped-maestro-variables",
+            "operation": "ade.variables.apply",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_variables": {
+                "expected_tests": ["AC Sweep:1"],
+                "expected_corners": ["nominal", "TT 25C"],
+                "updates": [
+                    {
+                        "name": "bias_v",
+                        "scope": "global",
+                        "expected_value": "0.35",
+                        "value": "0.40",
+                    },
+                    {
+                        "name": "bias_v",
+                        "scope": "test",
+                        "scope_name": "AC Sweep:1",
+                        "expected_value": None,
+                        "value": "0.30,0.35,0.40",
+                    },
+                    {
+                        "name": "bias_v",
+                        "scope": "corner",
+                        "scope_name": "TT 25C",
+                        "expected_value": "0.9",
+                        "value": "0.95",
+                    },
+                ],
+            },
+        }
+    )
+
+    assert task.ade_variables is not None
+    assert [update.evidence_key() for update in task.ade_variables.updates] == [
+        "bias_v",
+        "test:AC Sweep:1:bias_v",
+        "corner:TT 25C:bias_v",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("ade_variables", "message"),
+    [
+        (
+            {
+                "expected_tests": ["VDA"],
+                "updates": [
+                    {
+                        "name": "bias_v",
+                        "scope_name": "VDA",
+                        "expected_value": None,
+                        "value": "0.35",
+                    }
+                ],
+            },
+            "global Maestro variables cannot declare scope_name",
+        ),
+        (
+            {
+                "expected_tests": ["VDA"],
+                "updates": [
+                    {
+                        "name": "bias_v",
+                        "scope": "test",
+                        "expected_value": None,
+                        "value": "0.35",
+                    }
+                ],
+            },
+            "test/corner Maestro variables require scope_name",
+        ),
+        (
+            {
+                "expected_tests": ["VDA"],
+                "updates": [
+                    {
+                        "name": "bias_v",
+                        "scope": "test",
+                        "scope_name": "OTHER",
+                        "expected_value": None,
+                        "value": "0.35",
+                    }
+                ],
+            },
+            "must target one of expected_tests",
+        ),
+        (
+            {
+                "expected_tests": ["VDA"],
+                "updates": [
+                    {
+                        "name": "vdd",
+                        "scope": "corner",
+                        "scope_name": "TT",
+                        "expected_value": "0.9",
+                        "value": "0.95",
+                    }
+                ],
+            },
+            "require expected_corners",
+        ),
+        (
+            {
+                "expected_tests": ["VDA"],
+                "updates": [
+                    {
+                        "name": "bias_v",
+                        "scope": "test",
+                        "scope_name": "VDA",
+                        "expected_value": None,
+                        "value": "0.35",
+                    },
+                    {
+                        "name": "bias_v",
+                        "scope": "test",
+                        "scope_name": "VDA",
+                        "expected_value": "0.35",
+                        "value": "0.40",
+                    },
+                ],
+            },
+            "cannot repeat the same scoped variable",
+        ),
+    ],
+)
+def test_ade_variable_patch_rejects_invalid_scopes(
+    ade_variables: dict, message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        TaskSpec.model_validate(
+            {
+                "id": "invalid-scoped-maestro-variables",
+                "operation": "ade.variables.apply",
+                "circuit": "existing_schematic",
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "ade_variables": ade_variables,
+            }
+        )
+
+
+@pytest.mark.parametrize("unsafe_name", ["VDA\t1", "TT\x7f"])
+def test_ade_variable_patch_rejects_control_characters_in_scope_selectors(
+    unsafe_name: str,
+) -> None:
+    with pytest.raises(ValidationError, match="control characters"):
+        TaskSpec.model_validate(
+            {
+                "id": "invalid-maestro-selector",
+                "operation": "ade.variables.apply",
+                "circuit": "existing_schematic",
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "ade_variables": {
+                    "expected_tests": [unsafe_name],
+                    "updates": [
+                        {
+                            "name": "bias_v",
+                            "scope": "test",
+                            "scope_name": unsafe_name,
                             "expected_value": None,
                             "value": "0.35",
                         }

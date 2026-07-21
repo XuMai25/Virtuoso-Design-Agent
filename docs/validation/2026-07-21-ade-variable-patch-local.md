@@ -43,3 +43,5 @@
 - 没有自动配置 analysis/output/spec、testbench stimulus 或 corner，也没有运行仿真。
 
 本次没有修改 `C:\Users\aknigsesl\tools\virtuoso-bridge-lite`；第三方仓库仍保持在用户隔离分支且工作树干净。
+
+后续同日扩展已加入 test/corner scoped CAS 与 exact enabled-corner 前置条件，见 [`2026-07-21-ade-scoped-variable-patch-local.md`](2026-07-21-ade-scoped-variable-patch-local.md)。本记录保留为首个 global-only Gate 的历史验证快照。

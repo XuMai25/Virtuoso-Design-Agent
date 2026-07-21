@@ -2,7 +2,7 @@
 
 Virtuoso Design Agent 是 `virtuoso-bridge-lite` 之上的受控设计编排层。它把“建原理图、读回、应用参数、跑仿真、判定规格、有限调优”组织成可单独执行、可组合、可审计的任务，而不是再造一套 Bridge。
 
-当前版本从 **L5A** 起步：在已知 PDK、固定电路模板、显式规格和有限搜索空间内完成闭环。TSMC28 反相器 Gate 1、电阻负载 NMOS 共源级 nominal DC，以及同一已有 cellview 上的源极退化 transform/DC/RS 有限调优均有真实 OA/`si`/Spectre 证据。2026-07-20 又真实通过共源 nominal/退化复数 AC、12 点不写 OA 的 bias/load 条件搜索、专用 cell 上的 W/RD/RS 调优，以及同一 cell 的 5 点相干 transient 线性度/真实 VDD 功耗和 211 点普通 noise PSF。2026-07-21 固定 `quality` 组合先通过真实只读 bias/load 搜索，随后又完成 8 点 W/RD/RS 三分析搜索、逐候选 OA 写入、transport checkpoint 恢复、最佳写回和全不可行恢复。一个线性度优先任务进一步自动把 RS 从 1 kΩ 改为 2 kΩ，以 29.30% GBW 损失换取 41.93% THD 降低、37.26% P1dB 提升和 17.27% DC 功耗降低。ADE 方向现有四个本地纵向 operation：非覆盖新建 Maestro test 的 `ade.prepare`、捕获人工聚焦 setup/history/产物的 `ade.capture`、后台运行已保存原生 analysis/sweep 的 `ade.run`，以及按 tests/旧值 CAS 修改全局 design variable 的 `ade.variables.apply`。四项均尚待 nics4304 live smoke；需要人工打开 ADE、旧 ADE L 迁移和数值交叉检查的 Gate 已明确延期。L/VDD 联合搜索和 corner 仍未闭合，因此仍不能称为完整 L5B 设计质量闭环。
+当前版本从 **L5A** 起步：在已知 PDK、固定电路模板、显式规格和有限搜索空间内完成闭环。TSMC28 反相器 Gate 1、电阻负载 NMOS 共源级 nominal DC，以及同一已有 cellview 上的源极退化 transform/DC/RS 有限调优均有真实 OA/`si`/Spectre 证据。2026-07-20 又真实通过共源 nominal/退化复数 AC、12 点不写 OA 的 bias/load 条件搜索、专用 cell 上的 W/RD/RS 调优，以及同一 cell 的 5 点相干 transient 线性度/真实 VDD 功耗和 211 点普通 noise PSF。2026-07-21 固定 `quality` 组合先通过真实只读 bias/load 搜索，随后又完成 8 点 W/RD/RS 三分析搜索、逐候选 OA 写入、transport checkpoint 恢复、最佳写回和全不可行恢复。一个线性度优先任务进一步自动把 RS 从 1 kΩ 改为 2 kΩ，以 29.30% GBW 损失换取 41.93% THD 降低、37.26% P1dB 提升和 17.27% DC 功耗降低。ADE 方向现有四个本地纵向 operation：非覆盖新建 Maestro test 的 `ade.prepare`、捕获人工聚焦 setup/history/产物的 `ade.capture`、后台运行已保存原生 analysis/sweep 的 `ade.run`，以及按 tests、可选 enabled corners 和逐 scope 旧值 CAS 修改 global/test/corner design variable 的 `ade.variables.apply`。四项均尚待 nics4304 live smoke；需要人工打开 ADE、旧 ADE L 迁移和数值交叉检查的 Gate 已明确延期。L/VDD 联合搜索和 corner 仍未闭合，因此仍不能称为完整 L5B 设计质量闭环。
 
 ## 当前能做什么
 
@@ -12,7 +12,7 @@ Virtuoso Design Agent 是 `virtuoso-bridge-lite` 之上的受控设计编排层�
 - 通过独立 worker 调用本机 `virtuoso-bridge-lite` 环境。反相器支持 `OA -> si -> Spectre transient` 的 timing、过冲/欠冲和周期供电能量；共源级支持同一 `OA -> si` 网表上的 DC OP、复数 AC、相干正弦 transient 幅度 sweep 和普通 noise sweep。可提取 `Id/VGS/VDS/VDSAT/gm/gds`、真实 VDD 功耗与 KCL、低频增益、首个 −3 dB 带宽、GBW、unity、HD2/HD3、THD、P1dB，以及频带积分的输出/输入参考噪声；单项执行与提取均有 live 证据。`analysis: "quality"` 已在一次 OA/`si` 核对后依次运行 AC、linearity、noise，并用真实联合指标完成 bias/load 条件搜索与 W/RD/RS 设计参数搜索、约束过滤、最佳 OA 写回和 checkpoint 恢复。
 - 源极退化不新建第二套模板或仿真器：在同一 common-source cellview 中把 `MN0.S: VSS -> NSRC`，只新增 `RS0(NSRC,VSS)`；随后由同一 inspect、参数应用、`si` 网表解析、DC 指标和有限搜索路径动态识别该变体。
 - `existing_schematic` 提供不依赖固定电路模板的 Bridge 能力面：`schematic.inspect` 保留 Bridge 的完整结构结果和所有可回读 CDF 参数；`parameters.apply` 可按实例透传 Bridge 接受的参数字符串，写入后用定向 CDF 读取再次核对。反相器/共源模板仍可在同一任务中组合 semantic parameters 与原始实例参数。
-- `ade.prepare` 与 `ade.capture` 保留显式人工介入边界。`prepare` 只在 design schematic 已存在且相邻 Maestro view 不存在时新建持久化 Spectre test；已有 view 一律拒绝，也不预设 analysis/stimulus/sweep/output。`capture` 核对人工聚焦的目标，捕获 setup、history、真实 Spectre netlist/PSF/log 哈希和逐点 output/spec。自动分支中，`ade.variables.apply` 只有在 expected tests 和全部全局变量旧值匹配时才更新、保存一次并独立重开回读；逗号字符串可声明原生 sweep。`ade.run` 随后用 background session 运行已保存 setup 并读取本次 history 的逐点 output/spec。前者不证明 test/corner override 或仿真生效，后者不捕获 netlist/PSF 哈希，也不自动判 VDA constraints；两者都不能替代完整 capture/closure。旧 ADE L state 的非破坏迁移尚未纳入已验证 VDA operation。
+- `ade.prepare` 与 `ade.capture` 保留显式人工介入边界。`prepare` 只在 design schematic 已存在且相邻 Maestro view 不存在时新建持久化 Spectre test；已有 view 一律拒绝，也不预设 analysis/stimulus/sweep/output。`capture` 核对人工聚焦的目标，捕获 setup、history、真实 Spectre netlist/PSF/log 哈希和逐点 output/spec。自动分支中，`ade.variables.apply` 只有在 expected tests、可选 enabled corners 和全部声明 scope 的旧值匹配时才更新、保存一次并独立重开回读；global/test/corner 均可单独声明，逗号字符串可请求该 scope 的原生 sweep。`ade.run` 随后用 background session 运行已保存 setup 并读取本次 history 的逐点 output/spec。前者不证明未声明 override 或仿真生效，后者不捕获 netlist/PSF 哈希，也不自动判 VDA constraints；两者都不能替代完整 capture/closure。旧 ADE L state 的非破坏迁移尚未纳入已验证 VDA operation。
 - 对远端计算和 OA 写入分别授权；真实执行还需要计划 token，避免一句模糊指令直接改库。
 - 将动作、候选点、指标、约束判定、最终选择和证据来源写入本地 JSON run record；调优任务还会在候选边界原子保存 checkpoint，并可在独立 OA 回读后续跑。
 
@@ -64,6 +64,7 @@ py -3.13 -m venv .venv
 .\.venv\Scripts\vda.exe plan examples\tasks\existing-maestro-prepare.bridge.json
 .\.venv\Scripts\vda.exe plan examples\tasks\existing-maestro-capture.bridge.json
 .\.venv\Scripts\vda.exe plan examples\tasks\existing-maestro-variables-apply.bridge.json
+.\.venv\Scripts\vda.exe plan examples\tasks\existing-maestro-scoped-variables-apply.bridge.json
 .\.venv\Scripts\vda.exe plan examples\tasks\existing-maestro-run.bridge.json
 ```
 
@@ -107,9 +108,9 @@ C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe 
 
 人工 ADE 交接先用可选的 `ade.prepare`，再用 `ade.capture`。两者的 `target.view` 都必须为 `maestro`。`prepare` 需要 OA 写授权、library 白名单和 cell 前缀，只创建一个新 Maestro view/test；若目标已经存在则失败，因此不会覆盖人工状态。`capture` 默认要求 setup 已保存且存在非空 EDA result artifacts；可用 `ade_capture.history` 固定某个 `Interactive.N` 等 history，并用 `require_structured_outputs: true` 要求 ADE Detail output/spec 表可读。捕获前由用户自己打开、调整、运行、保存并聚焦目标窗口；VDA 不会抢焦点或修改它。setup 标为 `bridge_readback`，网表、PSF、Spectre log 和结构化 output/spec 标为 `eda_result`，自动选择最新 history 标为 `software_inference`，显式 history 标为 `user_input`。
 
-不需要人工窗口的已保存 setup 可用 `ade.run`。它要求 `target.view: "maestro"`、`ade_run` 设置和 `allow_remote_compute: true`，但不要求 `allow_remote_write`；worker 新开 background session，回读 tests，运行 setup，并用本次调用返回的 history 读取逐点 output/spec。默认 `require_structured_outputs: true`；显式设为 false 且没有输出时，run record 仍降为 `partial`。该 operation 不配置/保存 setup，不捕获 Spectre input/PSF 哈希，也不把 ADE output 自动映射成 VDA constraints。history 命名/覆盖策略由已保存 setup 决定，VDA 当前不能在后台 run 前证明名称唯一，计划会明确披露。test/corner scoped 变量、analysis/output 配置与有限 corner 仍是后续 Gate；人工相关验证见 `docs/deferred-manual-gates.md`。
+不需要人工窗口的已保存 setup 可用 `ade.run`。它要求 `target.view: "maestro"`、`ade_run` 设置和 `allow_remote_compute: true`，但不要求 `allow_remote_write`；worker 新开 background session，回读 tests，运行 setup，并用本次调用返回的 history 读取逐点 output/spec。默认 `require_structured_outputs: true`；显式设为 false 且没有输出时，run record 仍降为 `partial`。该 operation 不配置/保存 setup，不捕获 Spectre input/PSF 哈希，也不把 ADE output 自动映射成 VDA constraints。history 命名/覆盖策略由已保存 setup 决定，VDA 当前不能在后台 run 前证明名称唯一，计划会明确披露。analysis/output 配置与有限 corner 仍是后续 Gate；人工相关验证见 `docs/deferred-manual-gates.md`。
 
-自动修改全局 design variable 使用 `ade.variables.apply`。任务必须列出 `expected_tests`，每个 update 给出 `name`、`expected_value` 和 `value`；`expected_value: null` 表示要求变量不存在。任何已配置 Maestro session 已打开时都会保守拒绝。该 operation 需要完整 OA-write 授权，但只保存一次 Maestro setup，不运行仿真或修改 schematic/test/analysis/output/corner；保存后用全新 session 再次回读。逗号列表只是全局 sweep 声明，不能排除同名 test/corner override。test/corner scoped 变量仍可由原 Bridge/人工使用，VDA 尚未在缺少等价 scoped getter 时伪造闭环支持。
+自动修改 design variable 使用 `ade.variables.apply`。任务必须列出 `expected_tests`；使用 corner scope 时还必须列出 exact `expected_corners`。每个 update 给出 `name`、显式 `expected_value`、`value`，以及可选的 `scope: global|test|corner`/`scope_name`；`expected_value: null` 表示要求变量在该 scope 不存在。同名变量可分别出现在不同 scope，但同一 scope 不能重复。任何已配置 Maestro session 已打开时都会保守拒绝。该 operation 需要完整 OA-write 授权，只在所有 tests/corners/旧值匹配后逐项 set/get，保存一次 setup，再用全新 session 逐 scope 回读；不运行仿真或修改 schematic/test/analysis/output/corner membership。逗号列表只是该 scope 的 sweep 声明，不能排除未声明 override，也不能证明 simulator 采用新值。
 
 共源任务省略 `analysis` 时保持向后兼容的 `dc`。AC 必须显式设置 `analysis: "ac"` 与 `ac_sweep`；线性度使用 `analysis: "transient"` 与 `linearity_sweep`；普通噪声使用 `analysis: "noise"` 与 `noise_sweep`。固定质量组合使用 `analysis: "quality"`，并强制同时声明上述三种 sweep；任一子分析不完整、参数不一致或共享 DC 指标不一致都会拒绝整个候选。worker 只做一次 OA 回读与 `si` 网表生成，再从同一网表分别运行三种 Spectre wrapper；组合逻辑标为 `software_inference`，连续指标仍保持 `eda_result`。所有显式和默认 sweep 字段都进入 token 与证据。线性度在一个 Spectre nested sweep 中运行按幅度递增的相干正弦，P1dB 未被声明范围包围时只报告 unresolved；noise 对 Bridge 已下载的普通 noise PSF 做频带积分，不把 AC 或 transient 数据包装成噪声。`load_ff` 是动态分析的可选 testbench 负载，不写 OA。若 `design.tune` 的搜索维度只有 `bias_v/vdd_v/load_ff` 这类 testbench 条件，计划和 executor 不要求或执行 OA 写入；若搜索包含 W/L/RD/RS，则仍逐候选写入、回读、checkpoint，并只提交最佳可行 OA 参数。
 
@@ -162,4 +163,5 @@ C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe 
 - [2026-07-21 ADE 双向人工交接本地实现](docs/validation/2026-07-21-ade-human-handoff-local.md)
 - [2026-07-21 ADE 后台运行与结果回收本地实现](docs/validation/2026-07-21-ade-background-run-local.md)
 - [2026-07-21 Maestro 全局变量 CAS patch 本地实现](docs/validation/2026-07-21-ade-variable-patch-local.md)
+- [2026-07-21 Maestro scoped 变量 CAS 扩展本地实现](docs/validation/2026-07-21-ade-scoped-variable-patch-local.md)
 - [延期的人工 ADE Gate](docs/deferred-manual-gates.md)

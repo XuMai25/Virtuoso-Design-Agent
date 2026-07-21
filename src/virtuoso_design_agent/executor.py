@@ -878,19 +878,40 @@ class TaskExecutor:
                     raise RuntimeError("ADE variable settings disappeared at execution")
                 expected_tests = list(task.ade_variables.expected_tests)
                 requested = {
-                    update.name: {
+                    update.evidence_key(): {
+                        "name": update.name,
+                        "scope": update.scope.value,
+                        "scope_name": update.scope_name,
                         "expected_value": update.expected_value,
                         "value": update.value,
                     }
                     for update in task.ade_variables.updates
                 }
                 expected_before = {
-                    update.name: update.expected_value
+                    update.evidence_key(): update.expected_value
                     for update in task.ade_variables.updates
                 }
                 expected_after = {
-                    update.name: update.value
+                    update.evidence_key(): update.value
                     for update in task.ade_variables.updates
+                }
+                expected_scopes = list(
+                    dict.fromkeys(
+                        update.scope.value for update in task.ade_variables.updates
+                    )
+                )
+                expected_corners = (
+                    None
+                    if task.ade_variables.expected_corners is None
+                    else list(task.ade_variables.expected_corners)
+                )
+                expected_readback_methods = {
+                    scope: (
+                        "bridge_public_get_var"
+                        if scope == "global"
+                        else "cadence_maeGetVar_via_bridge_skill_channel"
+                    )
+                    for scope in expected_scopes
                 }
                 if (
                     patched.evidence_source is not EvidenceSource.BRIDGE_READBACK
@@ -901,16 +922,34 @@ class TaskExecutor:
                     or patched.data.get("schematic_oa_write_performed") is not False
                     or patched.data.get("maestro_setup_write_performed") is not True
                     or patched.data.get("automated_simulation_performed") is not False
-                    or patched.data.get("variable_scope") != "global"
+                    or patched.data.get("variable_scope")
+                    != (
+                        "global"
+                        if expected_scopes == ["global"]
+                        else "declared_scopes"
+                    )
+                    or patched.data.get("variable_scopes") != expected_scopes
                     or patched.data.get("expected_tests") != expected_tests
                     or patched.data.get("tests_readback_before") != expected_tests
                     or patched.data.get("tests_readback_after") != expected_tests
+                    or patched.data.get("expected_corners") != expected_corners
+                    or patched.data.get("corners_readback_before")
+                    != expected_corners
+                    or patched.data.get("corners_readback_after")
+                    != expected_corners
                     or patched.data.get("requested_variable_updates") != requested
                     or patched.data.get("before_variables") != expected_before
                     or patched.data.get("immediate_variables") != expected_after
                     or patched.data.get("persisted_variables") != expected_after
+                    or patched.data.get("declared_scoped_values_verified") is not True
+                    or patched.data.get("variable_readback_methods")
+                    != expected_readback_methods
                     or (
                         patched.data.get("test_or_corner_overrides_checked")
+                        is not False
+                    )
+                    or (
+                        patched.data.get("unlisted_scope_overrides_checked")
                         is not False
                     )
                     or (
@@ -919,21 +958,21 @@ class TaskExecutor:
                     )
                 ):
                     raise RuntimeError(
-                        "ADE variable patch did not prove an exact global-variable "
+                        "ADE variable patch did not prove an exact declared-scope "
                         "compare-and-swap with persistent readback"
                     )
                 notes.append(
-                    "patched only the declared global Maestro variables after exact "
+                    "patched only the declared Maestro variable scopes after exact "
                     "old-value preconditions and an independent persisted readback"
                 )
                 notes.append(
                     "no simulation, schematic write, test, analysis, output, or "
-                    "corner modification was performed"
+                    "corner-membership modification was performed"
                 )
                 notes.append(
-                    "global comma-separated values can request a native sweep, but "
-                    "test/corner overrides and effective simulator values were not "
-                    "verified by this operation"
+                    "comma-separated values can request a native sweep at their "
+                    "declared scope, but unlisted scope overrides and effective "
+                    "simulator values were not verified by this operation"
                 )
             elif operation is Operation.SIMULATION_RUN:
                 self._action(

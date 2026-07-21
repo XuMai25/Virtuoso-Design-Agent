@@ -56,10 +56,10 @@
 - 人工修改变量、analysis、sweep 或 output 后，前后 setup 指纹能否稳定反映变化。
 - ADE Detail 表在当前环境的全部 sweep subpoint、表达式和 pass/fail 读取。
 - 旧 ADE L state 的备份后非破坏迁移及人工重开。
-- VDA 对现有 Maestro setup 的全局变量 CAS patch 已有本地契约但仍待 live；test/corner scoped 变量、analysis/output patch 和原生 corner 尚未实现。background parametric sweep run/result 回收已有本地契约，仍待 live。
+- VDA 对现有 Maestro setup 的 global/test/corner 逐 scope 变量 CAS patch 已有本地契约但仍待 live；analysis/output patch 和原生 corner 搜索尚未实现。background parametric sweep run/result 回收已有本地契约，仍待 live。
 - ADE PSF 指标与当前 VDA `si` wrapper 指标的数值交叉核对。
 - `save_setup` 已落盘而随后 close/readback/transport 失败时可能留下一个新但未确认的 Maestro view；重试会因“已存在”而停止，必须先人工检查，当前没有删除式自动回滚。
 
 ## 后续 Gate（人工部分已延期）
 
-人工 prepare/edit/capture、旧 ADE L 迁移和数值交叉检查已按用户决定延期，详见 [`../deferred-manual-gates.md`](../deferred-manual-gates.md)。全局变量逐项旧值 CAS 已由 [`ade.variables.apply`](2026-07-21-ade-variable-patch-local.md) 完成本地契约；当前自动化 Gate 转为 test/corner scoped 变量的等价回读、analysis/output patch，并让 [`ade.run`](2026-07-21-ade-background-run-local.md) 在 background 原生 sweep 后保留 netlist/PSF 证据。延期项目完成前不升级人工兼容状态。
+人工 prepare/edit/capture、旧 ADE L 迁移和数值交叉检查已按用户决定延期，详见 [`../deferred-manual-gates.md`](../deferred-manual-gates.md)。global/test/corner 逐 scope 旧值 CAS 已由 [`ade.variables.apply`](2026-07-21-ade-scoped-variable-patch-local.md) 完成本地契约；当前自动化 Gate 转为 analysis/output patch，并让 [`ade.run`](2026-07-21-ade-background-run-local.md) 在 background 原生 sweep 后保留 netlist/PSF 证据。延期项目完成前不升级人工兼容状态。

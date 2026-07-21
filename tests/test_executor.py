@@ -330,22 +330,62 @@ def test_ade_variable_patch_records_exact_persistent_compare_and_swap() -> None:
         def apply_ade_variables(self, task):
             return AdapterResult(
                 data={
-                    "variable_scope": "global",
+                    "variable_scope": "declared_scopes",
+                    "variable_scopes": ["global", "test", "corner"],
                     "expected_tests": ["VDA"],
                     "tests_readback_before": ["VDA"],
                     "tests_readback_after": ["VDA"],
+                    "expected_corners": ["nominal", "TT"],
+                    "corners_readback_before": ["nominal", "TT"],
+                    "corners_readback_after": ["nominal", "TT"],
                     "requested_variable_updates": {
                         "bias_v": {
+                            "name": "bias_v",
+                            "scope": "global",
+                            "scope_name": None,
                             "expected_value": "0.35",
+                            "value": "0.40",
+                        },
+                        "test:VDA:bias_v": {
+                            "name": "bias_v",
+                            "scope": "test",
+                            "scope_name": "VDA",
+                            "expected_value": None,
                             "value": "0.30,0.35,0.40",
-                        }
+                        },
+                        "corner:TT:vdd": {
+                            "name": "vdd",
+                            "scope": "corner",
+                            "scope_name": "TT",
+                            "expected_value": "0.9",
+                            "value": "0.95",
+                        },
                     },
                     "requested_evidence_source": "user_input",
-                    "before_variables": {"bias_v": "0.35"},
-                    "immediate_variables": {"bias_v": "0.30,0.35,0.40"},
-                    "persisted_variables": {"bias_v": "0.30,0.35,0.40"},
+                    "before_variables": {
+                        "bias_v": "0.35",
+                        "test:VDA:bias_v": None,
+                        "corner:TT:vdd": "0.9",
+                    },
+                    "immediate_variables": {
+                        "bias_v": "0.40",
+                        "test:VDA:bias_v": "0.30,0.35,0.40",
+                        "corner:TT:vdd": "0.95",
+                    },
+                    "persisted_variables": {
+                        "bias_v": "0.40",
+                        "test:VDA:bias_v": "0.30,0.35,0.40",
+                        "corner:TT:vdd": "0.95",
+                    },
                     "confirmed_evidence_source": "bridge_readback",
+                    "declared_scoped_values_verified": True,
+                    "variable_readback_methods": {
+                        "global": "bridge_public_get_var",
+                        "test": "cadence_maeGetVar_via_bridge_skill_channel",
+                        "corner": "cadence_maeGetVar_via_bridge_skill_channel",
+                    },
                     "test_or_corner_overrides_checked": False,
+                    "unlisted_scope_overrides_checked": False,
                     "effective_simulation_value_verified": False,
                     "existing_maestro_replaced": False,
                     "schematic_oa_write_performed": False,
@@ -367,12 +407,27 @@ def test_ade_variable_patch_records_exact_persistent_compare_and_swap() -> None:
             },
             "ade_variables": {
                 "expected_tests": ["VDA"],
+                "expected_corners": ["nominal", "TT"],
                 "updates": [
                     {
                         "name": "bias_v",
                         "expected_value": "0.35",
+                        "value": "0.40",
+                    },
+                    {
+                        "name": "bias_v",
+                        "scope": "test",
+                        "scope_name": "VDA",
+                        "expected_value": None,
                         "value": "0.30,0.35,0.40",
-                    }
+                    },
+                    {
+                        "name": "vdd",
+                        "scope": "corner",
+                        "scope_name": "TT",
+                        "expected_value": "0.9",
+                        "value": "0.95",
+                    },
                 ],
             },
             "safety": {
@@ -399,22 +454,39 @@ def test_ade_variable_patch_records_exact_persistent_compare_and_swap() -> None:
 
 
 @pytest.mark.parametrize(
-    ("immediate_value", "persisted_value"),
-    [("0.38", "0.40"), ("0.40", "0.38")],
+    ("immediate_value", "persisted_value", "readback_methods"),
+    [
+        ("0.38", "0.40", {"global": "bridge_public_get_var"}),
+        ("0.40", "0.38", {"global": "bridge_public_get_var"}),
+        (
+            "0.40",
+            "0.40",
+            {"global": "cadence_maeGetVar_via_bridge_skill_channel"},
+        ),
+    ],
 )
 def test_ade_variable_patch_rejects_untrusted_readback(
-    immediate_value: str, persisted_value: str
+    immediate_value: str,
+    persisted_value: str,
+    readback_methods: dict[str, str],
 ) -> None:
     class UntrustedVariableAdapter(DeterministicDemoAdapter):
         def apply_ade_variables(self, task):
             return AdapterResult(
                 data={
                     "variable_scope": "global",
+                    "variable_scopes": ["global"],
                     "expected_tests": ["VDA"],
                     "tests_readback_before": ["VDA"],
                     "tests_readback_after": ["VDA"],
+                    "expected_corners": None,
+                    "corners_readback_before": None,
+                    "corners_readback_after": None,
                     "requested_variable_updates": {
                         "bias_v": {
+                            "name": "bias_v",
+                            "scope": "global",
+                            "scope_name": None,
                             "expected_value": "0.35",
                             "value": "0.40",
                         }
@@ -424,7 +496,10 @@ def test_ade_variable_patch_rejects_untrusted_readback(
                     "immediate_variables": {"bias_v": immediate_value},
                     "persisted_variables": {"bias_v": persisted_value},
                     "confirmed_evidence_source": "bridge_readback",
+                    "declared_scoped_values_verified": True,
+                    "variable_readback_methods": readback_methods,
                     "test_or_corner_overrides_checked": False,
+                    "unlisted_scope_overrides_checked": False,
                     "effective_simulation_value_verified": False,
                     "existing_maestro_replaced": False,
                     "schematic_oa_write_performed": False,

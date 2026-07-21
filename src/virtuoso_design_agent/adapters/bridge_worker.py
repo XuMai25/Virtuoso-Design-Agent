@@ -945,6 +945,18 @@ def _maestro_tests_readback(client, session: str) -> list[str]:
     return re.findall(r'"([^"\\]+)"', raw_tests)
 
 
+def _maestro_corners_readback(client, session: str) -> list[str]:
+    readback = client.execute_skill(
+        f'maeGetSetup(?typeName "corners" ?enabled t ?session "{session}")',
+        timeout=30,
+    )
+    errors = getattr(readback, "errors", None) or []
+    if errors:
+        raise RuntimeError(f"Maestro corner readback failed: {errors[0]}")
+    raw_corners = str(getattr(readback, "output", "") or "")
+    return re.findall(r'"([^"\\]+)"', raw_corners)
+
+
 def _normalized_maestro_variable_value(value: Any) -> str | None:
     normalized = str(value or "").strip()
     if normalized in {"", "nil"}:
@@ -966,24 +978,90 @@ def _validate_maestro_variable_update(update: dict[str, Any]) -> None:
         raise RuntimeError(
             f"Maestro variable {name}.expected_value must be explicitly declared"
         )
+    scope = str(update.get("scope") or "global")
+    scope_name = update.get("scope_name")
+    if scope not in {"global", "test", "corner"}:
+        raise RuntimeError(f"invalid Maestro variable scope: {scope!r}")
+    if scope == "global" and scope_name is not None:
+        raise RuntimeError("global Maestro variables cannot declare scope_name")
+    if scope != "global":
+        if not isinstance(scope_name, str) or not scope_name:
+            raise RuntimeError("test/corner Maestro variables require scope_name")
+        if len(scope_name) > 128:
+            raise RuntimeError("Maestro variable scope_name exceeds 128 characters")
+        if any(
+            character in ('"', "\\") or ord(character) < 32 or ord(character) == 127
+            for character in scope_name
+        ):
+            raise RuntimeError("Maestro variable scope_name is unsafe")
     for field in ("expected_value", "value"):
         value = update.get(field)
         if value is None and field == "expected_value":
             continue
         if not isinstance(value, str) or not value:
             raise RuntimeError(f"Maestro variable {name}.{field} must be a string")
-        if any(character in value for character in ('"', "\\", "\r", "\n", "\0")):
+        if any(
+            character in ('"', "\\") or ord(character) < 32 or ord(character) == 127
+            for character in value
+        ):
             raise RuntimeError(
                 f"Maestro variable {name}.{field} contains unsafe SKILL string "
                 "characters"
             )
 
 
+def _maestro_variable_identity(update: dict[str, Any]) -> str:
+    scope = str(update.get("scope") or "global")
+    name = str(update["name"])
+    if scope == "global":
+        return name
+    return f"{scope}:{update['scope_name']}:{name}"
+
+
+def _read_maestro_variable(
+    client, get_var, update: dict[str, Any], *, session: str
+) -> str | None:
+    scope = str(update.get("scope") or "global")
+    name = str(update["name"])
+    if scope == "global":
+        raw = get_var(client, name, session=session)
+    else:
+        scope_name = str(update["scope_name"])
+        readback = client.execute_skill(
+            f'maeGetVar("{name}" ?typeName "{scope}" '
+            f'?typeValue "{scope_name}" ?session "{session}")',
+            timeout=30,
+        )
+        errors = getattr(readback, "errors", None) or []
+        if errors:
+            raise RuntimeError(
+                f"Maestro variable readback failed for "
+                f"{_maestro_variable_identity(update)}: {errors[0]}"
+            )
+        raw = getattr(readback, "output", "")
+    return _normalized_maestro_variable_value(raw)
+
+
+def _write_maestro_variable(
+    client, set_var, update: dict[str, Any], *, session: str
+) -> None:
+    scope = str(update.get("scope") or "global")
+    kwargs: dict[str, str] = {"session": session}
+    if scope != "global":
+        kwargs.update(
+            type_name=scope,
+            type_value=f'("{update["scope_name"]}")',
+        )
+    set_var(client, str(update["name"]), str(update["value"]), **kwargs)
+
+
 def _maestro_variable_fingerprint(
-    tests: list[str], values: dict[str, str | None]
+    tests: list[str],
+    corners: list[str] | None,
+    values: dict[str, str | None],
 ) -> str:
     canonical = json.dumps(
-        {"tests": tests, "global_variables": values},
+        {"tests": tests, "corners": corners, "declared_variables": values},
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -1077,7 +1155,7 @@ def prepare_maestro(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def apply_maestro_variables(payload: dict[str, Any]) -> dict[str, Any]:
-    """Compare-and-swap global variables in one saved Maestro setup."""
+    """Compare-and-swap declared variable scopes in one saved Maestro setup."""
 
     from virtuoso_bridge.virtuoso.maestro import (
         close_session,
@@ -1096,6 +1174,12 @@ def apply_maestro_variables(payload: dict[str, Any]) -> dict[str, Any]:
     if view != "maestro":
         raise RuntimeError("ADE variable patch target view must be maestro")
     expected_tests = [str(value) for value in settings.get("expected_tests") or []]
+    expected_corners_raw = settings.get("expected_corners")
+    expected_corners = (
+        None
+        if expected_corners_raw is None
+        else [str(value) for value in expected_corners_raw]
+    )
     updates = list(settings.get("updates") or [])
     if not expected_tests or not updates:
         raise RuntimeError(
@@ -1103,13 +1187,48 @@ def apply_maestro_variables(payload: dict[str, Any]) -> dict[str, Any]:
         )
     if len(expected_tests) != len(set(expected_tests)):
         raise RuntimeError("ADE variable patch expected_tests contain duplicates")
+    if expected_corners is not None:
+        if not expected_corners:
+            raise RuntimeError("ADE variable patch expected_corners cannot be empty")
+        if len(expected_corners) != len(set(expected_corners)):
+            raise RuntimeError("ADE variable patch expected_corners contain duplicates")
+    for item_type, values in (
+        ("test", expected_tests),
+        ("corner", expected_corners or []),
+    ):
+        for value in values:
+            if (
+                not value
+                or len(value) > 128
+                or any(
+                    character in ('"', "\\")
+                    or ord(character) < 32
+                    or ord(character) == 127
+                    for character in value
+                )
+            ):
+                raise RuntimeError(f"invalid Maestro {item_type} name: {value!r}")
     for update in updates:
         if not isinstance(update, dict):
             raise RuntimeError("ADE variable update must be an object")
         _validate_maestro_variable_update(update)
-    names = [str(update["name"]) for update in updates]
-    if len(names) != len(set(names)):
-        raise RuntimeError("ADE variable patch contains duplicate variable names")
+        scope = str(update.get("scope") or "global")
+        scope_name = update.get("scope_name")
+        if scope == "test" and scope_name not in expected_tests:
+            raise RuntimeError(
+                "test-scoped Maestro variable must target one of expected_tests"
+            )
+        if scope == "corner" and (
+            expected_corners is None or scope_name not in expected_corners
+        ):
+            raise RuntimeError(
+                "corner-scoped Maestro variable must target one of expected_corners"
+            )
+    identities = [_maestro_variable_identity(update) for update in updates]
+    if len(identities) != len(set(identities)):
+        raise RuntimeError(
+            "ADE variable patch contains duplicate scoped variable identities"
+        )
 
     client = _client()
     if not _cellview_exists(client, library, cell, view):
@@ -1133,18 +1252,29 @@ def apply_maestro_variables(payload: dict[str, Any]) -> dict[str, Any]:
                 "Maestro tests changed before variable patch: "
                 f"expected {expected_tests!r}, got {tests!r}"
             )
+        corners = (
+            _maestro_corners_readback(client, session)
+            if expected_corners is not None
+            else None
+        )
+        if corners != expected_corners:
+            raise RuntimeError(
+                "Maestro corners changed before variable patch: "
+                f"expected {expected_corners!r}, got {corners!r}"
+            )
         for update in updates:
-            name = str(update["name"])
-            before[name] = _normalized_maestro_variable_value(
-                get_var(client, name, session=session)
+            identity = _maestro_variable_identity(update)
+            before[identity] = _read_maestro_variable(
+                client, get_var, update, session=session
             )
         mismatches = {
-            str(update["name"]): {
+            _maestro_variable_identity(update): {
                 "expected": update.get("expected_value"),
-                "actual": before[str(update["name"])],
+                "actual": before[_maestro_variable_identity(update)],
             }
             for update in updates
-            if before[str(update["name"])] != update.get("expected_value")
+            if before[_maestro_variable_identity(update)]
+            != update.get("expected_value")
         }
         if mismatches:
             raise RuntimeError(
@@ -1152,16 +1282,16 @@ def apply_maestro_variables(payload: dict[str, Any]) -> dict[str, Any]:
                 + json.dumps(mismatches, sort_keys=True)
             )
         for update in updates:
-            name = str(update["name"])
+            identity = _maestro_variable_identity(update)
             requested = str(update["value"])
-            set_var(client, name, requested, session=session)
-            immediate[name] = _normalized_maestro_variable_value(
-                get_var(client, name, session=session)
+            _write_maestro_variable(client, set_var, update, session=session)
+            immediate[identity] = _read_maestro_variable(
+                client, get_var, update, session=session
             )
-            if immediate[name] != requested:
+            if immediate[identity] != requested:
                 raise RuntimeError(
-                    f"Maestro variable immediate readback mismatch for {name}: "
-                    f"requested {requested!r}, got {immediate[name]!r}"
+                    f"Maestro variable immediate readback mismatch for {identity}: "
+                    f"requested {requested!r}, got {immediate[identity]!r}"
                 )
         save_setup(client, library, cell, session=session)
     finally:
@@ -1176,33 +1306,55 @@ def apply_maestro_variables(payload: dict[str, Any]) -> dict[str, Any]:
                 "Maestro tests changed after variable patch: "
                 f"expected {expected_tests!r}, got {verify_tests!r}"
             )
-        for update in updates:
-            name = str(update["name"])
-            persisted[name] = _normalized_maestro_variable_value(
-                get_var(client, name, session=verify_session)
+        verify_corners = (
+            _maestro_corners_readback(client, verify_session)
+            if expected_corners is not None
+            else None
+        )
+        if verify_corners != expected_corners:
+            raise RuntimeError(
+                "Maestro corners changed after variable patch: "
+                f"expected {expected_corners!r}, got {verify_corners!r}"
             )
-            if persisted[name] != update["value"]:
+        for update in updates:
+            identity = _maestro_variable_identity(update)
+            persisted[identity] = _read_maestro_variable(
+                client, get_var, update, session=verify_session
+            )
+            if persisted[identity] != update["value"]:
                 raise RuntimeError(
-                    f"Maestro variable persistent readback mismatch for {name}: "
-                    f"requested {update['value']!r}, got {persisted[name]!r}"
+                    f"Maestro variable persistent readback mismatch for {identity}: "
+                    f"requested {update['value']!r}, got {persisted[identity]!r}"
                 )
     finally:
         close_session(client, verify_session)
 
     requested = {
-        str(update["name"]): {
+        _maestro_variable_identity(update): {
+            "name": str(update["name"]),
+            "scope": str(update.get("scope") or "global"),
+            "scope_name": update.get("scope_name"),
             "expected_value": update.get("expected_value"),
             "value": str(update["value"]),
         }
         for update in updates
     }
+    variable_scopes = list(
+        dict.fromkeys(str(update.get("scope") or "global") for update in updates)
+    )
     return {
         "backend": "maestro",
         "target": {"library": library, "cell": cell, "view": view},
-        "variable_scope": "global",
+        "variable_scope": (
+            "global" if variable_scopes == ["global"] else "declared_scopes"
+        ),
+        "variable_scopes": variable_scopes,
         "expected_tests": expected_tests,
         "tests_readback_before": tests,
         "tests_readback_after": verify_tests,
+        "expected_corners": expected_corners,
+        "corners_readback_before": corners,
+        "corners_readback_after": verify_corners,
         "requested_variable_updates": requested,
         "requested_evidence_source": "user_input",
         "before_variables": before,
@@ -1210,26 +1362,46 @@ def apply_maestro_variables(payload: dict[str, Any]) -> dict[str, Any]:
         "persisted_variables": persisted,
         "confirmed_evidence_source": "bridge_readback",
         "before_target_fingerprint_sha256": _maestro_variable_fingerprint(
-            tests, before
+            tests, corners, before
         ),
         "after_target_fingerprint_sha256": _maestro_variable_fingerprint(
-            verify_tests, persisted
+            verify_tests, verify_corners, persisted
         ),
         "declared_global_sweep_variables": [
-            name for name, value in persisted.items() if value and "," in value
+            _maestro_variable_identity(update)
+            for update in updates
+            if str(update.get("scope") or "global") == "global"
+            and persisted[_maestro_variable_identity(update)]
+            and "," in str(persisted[_maestro_variable_identity(update)])
+        ],
+        "declared_sweep_variables": [
+            identity
+            for identity, value in persisted.items()
+            if value and "," in value
         ],
         "sweep_detection_evidence_source": "software_inference",
+        "declared_scoped_values_verified": True,
+        "variable_readback_methods": {
+            scope: (
+                "bridge_public_get_var"
+                if scope == "global"
+                else "cadence_maeGetVar_via_bridge_skill_channel"
+            )
+            for scope in variable_scopes
+        },
         "test_or_corner_overrides_checked": False,
+        "unlisted_scope_overrides_checked": False,
         "effective_simulation_value_verified": False,
         "existing_maestro_replaced": False,
         "schematic_oa_write_performed": False,
         "maestro_setup_write_performed": True,
         "automated_simulation_performed": False,
         "completion_scope": (
-            "declared global Maestro variables matched their expected old values, "
-            "were saved once, and matched after an independent reopen; tests, "
-            "analysis, outputs, corners, and schematic were not changed; test/corner "
-            "overrides and effective simulator values were not verified"
+            "declared Maestro variable scopes matched their expected old values, "
+            "were saved once, and matched after an independent reopen; tests and "
+            "declared corner membership were preserved; analysis, outputs, and "
+            "schematic were not changed; unlisted scope overrides and effective "
+            "simulator values were not verified"
         ),
     }
 

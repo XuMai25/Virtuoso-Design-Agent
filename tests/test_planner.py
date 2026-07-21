@@ -175,8 +175,53 @@ def test_ade_variable_patch_plan_discloses_cas_and_single_setup_save() -> None:
     assert "逐项匹配任务前置条件" in plan.steps[1].description
     assert "bias_v" in plan.steps[2].description
     assert "只保存一次 setup" in plan.steps[2].description
-    assert "不证明同名 test/corner" in plan.steps[2].description
+    assert "不证明未声明 scope" in plan.steps[2].description
     assert "不自动覆盖式重试" in plan.steps[3].description
+    assert plan.requires_remote_write
+    assert not plan.requires_remote_compute
+
+
+def test_ade_variable_patch_plan_discloses_scoped_readback_and_corner_guard() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "patch-scoped-maestro-variables",
+            "operation": "ade.variables.apply",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_variables": {
+                "expected_tests": ["VDA"],
+                "expected_corners": ["nominal", "TT"],
+                "updates": [
+                    {
+                        "name": "bias_v",
+                        "scope": "test",
+                        "scope_name": "VDA",
+                        "expected_value": "0.35",
+                        "value": "0.30,0.35,0.40",
+                    },
+                    {
+                        "name": "vdd",
+                        "scope": "corner",
+                        "scope_name": "TT",
+                        "expected_value": "0.9",
+                        "value": "0.95",
+                    },
+                ],
+            },
+        }
+    )
+
+    plan = build_plan(task)
+
+    assert "enabled corners" in plan.steps[1].description
+    assert "test:VDA:bias_v" in plan.steps[2].description
+    assert "corner:TT:vdd" in plan.steps[2].description
+    assert "不证明仿真采用新值" in plan.steps[2].description
+    assert "enabled corners" in plan.steps[3].description
     assert plan.requires_remote_write
     assert not plan.requires_remote_compute
 

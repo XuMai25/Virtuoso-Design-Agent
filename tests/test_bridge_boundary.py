@@ -392,7 +392,11 @@ def test_maestro_variable_patch_saves_once_and_reopens_for_readback(
 ) -> None:
     calls: list[tuple] = []
     state = {
-        "persisted": {"bias_v": None, "load_ff": "1f"},
+        "persisted": {
+            "bias_v": None,
+            "test:VDA:bias_v": "0.35",
+            "corner:TT:vdd": "0.9",
+        },
         "working": {},
     }
 
@@ -400,8 +404,24 @@ def test_maestro_variable_patch_saves_once_and_reopens_for_readback(
         def execute_skill(self, expression, **kwargs):
             if "ddGetObj" in expression:
                 return SimpleNamespace(output="t", errors=[])
+            if '?typeName "corners"' in expression:
+                return SimpleNamespace(output='("nominal" "TT")', errors=[])
             if "maeGetSetup" in expression:
                 return SimpleNamespace(output='("VDA")', errors=[])
+            if expression.startswith("maeGetVar"):
+                parts = expression.split('"')
+                name, scope, scope_name, session = (
+                    parts[1],
+                    parts[3],
+                    parts[5],
+                    parts[7],
+                )
+                identity = f"{scope}:{scope_name}:{name}"
+                calls.append(("get", session, identity))
+                value = state["working"].get(identity)
+                return SimpleNamespace(
+                    output="nil" if value is None else f'"{value}"', errors=[]
+                )
             raise AssertionError(expression)
 
     sessions = iter(["fnxPatch1", "fnxPatch2"])
@@ -417,9 +437,23 @@ def test_maestro_variable_patch_saves_once_and_reopens_for_readback(
         value = state["working"].get(name)
         return "nil" if value is None else f'"{value}"'
 
-    def fake_set_var(_client, name, value, *, session):
-        calls.append(("set", session, name, value))
-        state["working"][name] = value
+    def fake_set_var(
+        _client,
+        name,
+        value,
+        *,
+        type_name="",
+        type_value="",
+        session,
+    ):
+        scope_name = type_value.strip('()"')
+        identity = (
+            name if not type_name else f"{type_name}:{scope_name}:{name}"
+        )
+        calls.append(
+            ("set", session, identity, value, type_name, type_value)
+        )
+        state["working"][identity] = value
 
     def fake_save_setup(_client, library, cell, *, session):
         calls.append(("save", session, library, cell))
@@ -449,6 +483,7 @@ def test_maestro_variable_patch_saves_once_and_reopens_for_readback(
             "ade_variables": {
                 "backend": "maestro",
                 "expected_tests": ["VDA"],
+                "expected_corners": ["nominal", "TT"],
                 "updates": [
                     {
                         "name": "bias_v",
@@ -456,26 +491,54 @@ def test_maestro_variable_patch_saves_once_and_reopens_for_readback(
                         "value": "0.30,0.35,0.40",
                     },
                     {
-                        "name": "load_ff",
-                        "expected_value": "1f",
-                        "value": "1f,2f",
+                        "name": "bias_v",
+                        "scope": "test",
+                        "scope_name": "VDA",
+                        "expected_value": "0.35",
+                        "value": "0.30,0.35",
+                    },
+                    {
+                        "name": "vdd",
+                        "scope": "corner",
+                        "scope_name": "TT",
+                        "expected_value": "0.9",
+                        "value": "0.95",
                     },
                 ],
             },
         }
     )
 
-    assert result["variable_scope"] == "global"
+    assert result["variable_scope"] == "declared_scopes"
+    assert result["variable_scopes"] == ["global", "test", "corner"]
     assert result["tests_readback_before"] == ["VDA"]
     assert result["tests_readback_after"] == ["VDA"]
-    assert result["before_variables"] == {"bias_v": None, "load_ff": "1f"}
+    assert result["corners_readback_before"] == ["nominal", "TT"]
+    assert result["corners_readback_after"] == ["nominal", "TT"]
+    assert result["before_variables"] == {
+        "bias_v": None,
+        "test:VDA:bias_v": "0.35",
+        "corner:TT:vdd": "0.9",
+    }
     assert result["immediate_variables"] == {
         "bias_v": "0.30,0.35,0.40",
-        "load_ff": "1f,2f",
+        "test:VDA:bias_v": "0.30,0.35",
+        "corner:TT:vdd": "0.95",
     }
     assert result["persisted_variables"] == result["immediate_variables"]
-    assert result["declared_global_sweep_variables"] == ["bias_v", "load_ff"]
+    assert result["declared_global_sweep_variables"] == ["bias_v"]
+    assert result["declared_sweep_variables"] == [
+        "bias_v",
+        "test:VDA:bias_v",
+    ]
+    assert result["declared_scoped_values_verified"] is True
+    assert result["variable_readback_methods"] == {
+        "global": "bridge_public_get_var",
+        "test": "cadence_maeGetVar_via_bridge_skill_channel",
+        "corner": "cadence_maeGetVar_via_bridge_skill_channel",
+    }
     assert result["test_or_corner_overrides_checked"] is False
+    assert result["unlisted_scope_overrides_checked"] is False
     assert result["effective_simulation_value_verified"] is False
     assert result["maestro_setup_write_performed"] is True
     assert result["schematic_oa_write_performed"] is False
@@ -488,12 +551,104 @@ def test_maestro_variable_patch_saves_once_and_reopens_for_readback(
     assert [call[0] for call in calls].count("save") == 1
     assert [call[0] for call in calls].count("open") == 2
     assert [call[0] for call in calls].count("close") == 2
+    first_set = next(index for index, call in enumerate(calls) if call[0] == "set")
+    assert [call[2] for call in calls[:first_set] if call[0] == "get"] == [
+        "bias_v",
+        "test:VDA:bias_v",
+        "corner:TT:vdd",
+    ]
+    scoped_sets = [call for call in calls if call[0] == "set" and call[4]]
+    assert scoped_sets == [
+        (
+            "set",
+            "fnxPatch1",
+            "test:VDA:bias_v",
+            "0.30,0.35",
+            "test",
+            '("VDA")',
+        ),
+        (
+            "set",
+            "fnxPatch1",
+            "corner:TT:vdd",
+            "0.95",
+            "corner",
+            '("TT")',
+        ),
+    ]
+
+
+def test_maestro_variable_patch_stops_before_write_on_corner_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+
+    class Client:
+        def execute_skill(self, expression, **kwargs):
+            if "ddGetObj" in expression:
+                return SimpleNamespace(output="t", errors=[])
+            if '?typeName "corners"' in expression:
+                return SimpleNamespace(output='("nominal" "FF")', errors=[])
+            if "maeGetSetup" in expression:
+                return SimpleNamespace(output='("VDA")', errors=[])
+            raise AssertionError(expression)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("corner mismatch must stop before variable I/O or save")
+
+    _install_fake_maestro_module(
+        monkeypatch,
+        find_open_session=lambda _client: None,
+        open_session=lambda *_args: "fnxCornerMismatch",
+        close_session=lambda _client, session: calls.append(("close", session)),
+        get_var=unexpected,
+        set_var=unexpected,
+        save_setup=unexpected,
+    )
+    monkeypatch.setattr(bridge_worker, "_client", Client)
+
+    with pytest.raises(RuntimeError, match="corners changed before"):
+        bridge_worker.apply_maestro_variables(
+            {
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "ade_variables": {
+                    "expected_tests": ["VDA"],
+                    "expected_corners": ["nominal", "TT"],
+                    "updates": [
+                        {
+                            "name": "vdd",
+                            "scope": "corner",
+                            "scope_name": "TT",
+                            "expected_value": "0.9",
+                            "value": "0.95",
+                        }
+                    ],
+                },
+            }
+        )
+
+    assert calls == [("close", "fnxCornerMismatch")]
 
 
 def test_maestro_variable_patch_worker_requires_explicit_old_value() -> None:
     with pytest.raises(RuntimeError, match="must be explicitly declared"):
         bridge_worker._validate_maestro_variable_update(  # noqa: SLF001
             {"name": "bias_v", "value": "0.35"}
+        )
+
+    with pytest.raises(RuntimeError, match="exceeds 128"):
+        bridge_worker._validate_maestro_variable_update(  # noqa: SLF001
+            {
+                "name": "bias_v",
+                "scope": "test",
+                "scope_name": "x" * 129,
+                "expected_value": None,
+                "value": "0.35",
+            }
         )
 
 
@@ -929,11 +1084,14 @@ def test_subprocess_ade_variable_payload_preserves_exact_strings(
     assert "analysis" not in payload
     assert "analysis_source" not in payload
     assert payload["ade_variables"]["expected_tests"] == ["VDA"]
+    assert payload["ade_variables"]["expected_corners"] is None
     assert payload["ade_variables"]["updates"] == [
         {
             "name": "bias_v",
             "expected_value": None,
             "value": "0.30,0.35,0.40",
+            "scope": "global",
+            "scope_name": None,
         }
     ]
     assert set(payload["ade_variables_user_fields"]) == {

@@ -45,7 +45,7 @@ VDA 不嵌入一个新的通用 LLM。Codex 负责开放式推理，VDA 负责�
 | `ade.prepare` | 为已有 design 新建持久化 Spectre-backed Maestro view/test；拒绝已有 view | Maestro OA 写入 |
 | `ade.capture` | 捕获人工聚焦并已保存的 Maestro setup、history 和已有真实结果 | 远端只读 + 本地证据写入 |
 | `ade.run` | 在独立后台 session 运行已保存的 Maestro setup，读取本次 history 的逐点 output/spec | 远端计算，不写 OA/setup |
-| `ade.variables.apply` | 以 tests + 逐变量旧值为前置条件修改全局 Maestro 变量，保存后独立重开回读 | Maestro setup 写入 |
+| `ade.variables.apply` | 以 tests、可选 enabled corners 和逐 scope 旧值为前置条件修改 global/test/corner Maestro 变量，保存后独立重开回读 | Maestro setup 写入 |
 | `simulation.run` | 单点仿真并判规格 | scratch/计算 |
 | `design.tune` | 有限搜索；设计参数提交 OA，纯 testbench 条件只记录选择 | 计算；按维度决定是否写 OA |
 | `design.close_loop` | 建图、搜索、应用、回读 | 计算 + OA 写入 |
@@ -63,7 +63,7 @@ VDA 保留两种用途不同的参数表示：
 - `parameters` / `parameter_space` 是电路模板已定义的 canonical semantic parameters，例如 `device_width_um`、`load_resistance_ohm`、`bias_v` 和 AC `load_ff`。它们可参与仿真、规格判定和有限搜索，但并非都写 OA：W/L/RD/RS 是设计参数，bias/VDD/外部负载是 testbench 条件。当前 MOS width semantic 指单指宽 `Wfg`；多指 OA/`si` 一致性另外核对 `finger_width`、`fingers/nf`、`m/multi` 和总有效宽度，不能把网表 `w` 无条件当成 `Wfg`。
 - `instance_parameter_updates` 是人工明确指定的实例级 CDF/OA 写入，例如 `MN0.fingers="2"`、`MN0.m="1"` 或 `RD0.r="22k"`。参数名和值按 Bridge 字符串契约原样传递，不做单位、别名或枚举推断。
 
-`existing_schematic` 是不依赖固定拓扑模板的通用 circuit kind，开放 `schematic.inspect`、`parameters.apply`、`ade.prepare`、`ade.capture`、`ade.run` 与 `ade.variables.apply`：前者保留 Bridge reader 的完整结构对象、geometry、notes、nets/pins 细节和所有可回读 CDF 参数；参数操作允许人工指定任意已有实例；ADE 操作则为已有 design 准备新的 Maestro 人工入口、读取人工状态、后台运行一个已保存 setup，或以旧值前置条件修改全局 design variable，不要求 VDA 理解 DUT 拓扑。反相器和共源模板也能使用相同原始参数与 ADE 交接路径，并可在一个参数任务中组合 semantic parameters 与原始实例参数；semantic 写入先执行，原始 CDF callback 后执行，最终 OA 必须同时满足所有已声明 semantic 值和原始字段值。
+`existing_schematic` 是不依赖固定拓扑模板的通用 circuit kind，开放 `schematic.inspect`、`parameters.apply`、`ade.prepare`、`ade.capture`、`ade.run` 与 `ade.variables.apply`：前者保留 Bridge reader 的完整结构对象、geometry、notes、nets/pins 细节和所有可回读 CDF 参数；参数操作允许人工指定任意已有实例；ADE 操作则为已有 design 准备新的 Maestro 人工入口、读取人工状态、后台运行一个已保存 setup，或以逐 scope 旧值前置条件修改 global/test/corner design variable，不要求 VDA 理解 DUT 拓扑。反相器和共源模板也能使用相同原始参数与 ADE 交接路径，并可在一个参数任务中组合 semantic parameters 与原始实例参数；semantic 写入先执行，原始 CDF callback 后执行，最终 OA 必须同时满足所有已声明 semantic 值和原始字段值。
 
 执行路径先结构化回读目标 schematic 并确认实例存在，再复用 Bridge 的 `set_instance_params(..., param_filters=None)` 触发 CDF callback、`schCheck` 和 `dbSave`。通用 reader 为控制输出会省略空值和超长值，因此 VDA 不用摘要缺失来限制 Bridge：写入后另发只读 SKILL，直接打开目标 OA、定位实例 CDF，并逐字段比较真实 `p~>value` 与请求字符串；executor 的 `schematic.inspect.after` 再独立执行一次同样的定向读取。首次值不一致时，worker 至多按任务声明顺序逐字段重放一次；计划必须披露该副作用，最终仍不一致则整个 run 失败。
 
@@ -87,9 +87,9 @@ ADE 兼容是当前架构约束，不是 UI 附加项。VDA 可以规划、搜�
 
 无需 GUI 的自动分支由 `ade.run` 提供。worker 明确打开目标 cell 的独立 background Maestro session，回读非空 test 列表，通过 Bridge `run_and_wait` 取得本次调用返回的 history，再把该 history 传给 `read_results`。它不调用 `save_setup`、不改变窗口焦点、不写 schematic 或 Maestro OA。默认必须得到非空逐点 output/spec；若任务显式允许缺失，executor 也只记为 `partial`。setup test 标为 `bridge_readback`，history/output 标为 `eda_result`。该 operation 当前不执行 `snapshot`，所以没有 netlist/PSF 哈希，也不自动把 ADE output 映射为 VDA constraints；history 命名和覆盖策略沿用已保存 setup，VDA 尚不能在运行前证明名称唯一。它证明“后台运行与结构化结果回收的契约”，不是完整同源规格闭环。
 
-自动微调 setup 的首个切片是 `ade.variables.apply`。任务必须给出 exact `expected_tests`，每个全局变量必须给出 `expected_value`（`null` 表示不存在）和新字符串。worker 在任何已配置 Maestro session 已打开时拒绝，随后以独立 background session 先读完全部旧值；只有 tests/旧值全部匹配才逐项 `set_var/get_var`，一次 `save_setup` 后关闭，并用全新 session 再次核对。请求属于 `user_input`，旧值、即时值和持久化值属于 `bridge_readback`。tests + 声明变量形成 targeted 前后指纹，但不是完整 setup 指纹。逗号列表只说明全局层声明了 sweep；同名 test/corner 局部变量是否覆盖、最终 netlist/仿真是否采用该值仍未验证。
+自动微调 setup 的首个切片是 `ade.variables.apply`。任务必须给出 exact `expected_tests`；使用 corner scope 时还要给出 exact enabled `expected_corners`。每个变量必须给出 scope、可选 scope name、`expected_value`（`null` 表示该 scope 不存在）和新字符串。worker 在任何已配置 Maestro session 已打开时拒绝，随后以独立 background session 先读完所有声明 scope 的旧值；只有 tests/corners/旧值全部匹配才逐项 `set_var/get_var`，一次 `save_setup` 后关闭，并用全新 session 再次核对。global 读取复用 Bridge public `get_var`；test/corner 写入复用 public `set_var`，读取通过 Bridge SKILL channel 调用 Cadence public scoped `maeGetVar`，没有修改第三方仓库。请求属于 `user_input`，旧值、即时值和持久化值属于 `bridge_readback`。tests + 可选 corners + 声明 scope 形成 targeted 前后指纹，但不是完整 setup 指纹。逗号列表只说明该 scope 声明了 sweep；未声明 override、history 中各 sweep point 和最终 netlist/仿真是否采用该值仍未验证。
 
-当前受支持的持久化后端是 `maestro`，因为这是 Bridge 已公开并带 setup/history/result API 的路径。Bridge 同时提供 ADE L state 到 Maestro 的迁移原语，但 VDA 尚未把迁移包装成 operation，也不会在没有备份、目标冲突检查和 live smoke 时改写旧 state。`ade.run` 已在本地实现后台原生 analysis/sweep 执行与 Detail 结果回收，`ade.variables.apply` 已实现全局变量旧值 CAS 与持久化回读；两者都尚无 nics4304 live 证据。下一自动化 Gate 是 scoped-variable 等价回读、analysis/output patch 与 background netlist/PSF 证据，再加入有限 corner；需要打开 ADE、旧 ADE L 迁移和人工数值对照的 Gate 已延期到 [`deferred-manual-gates.md`](deferred-manual-gates.md)。人工改动必须通过前置条件、setup 指纹或重新 snapshot 被发现，而不是被 VDA 静默覆盖。
+当前受支持的持久化后端是 `maestro`，因为这是 Bridge 已公开并带 setup/history/result API 的路径。Bridge 同时提供 ADE L state 到 Maestro 的迁移原语，但 VDA 尚未把迁移包装成 operation，也不会在没有备份、目标冲突检查和 live smoke 时改写旧 state。`ade.run` 已在本地实现后台原生 analysis/sweep 执行与 Detail 结果回收，`ade.variables.apply` 已实现 global/test/corner 逐 scope 旧值 CAS 与持久化回读；两者都尚无 nics4304 live 证据。下一自动化 Gate 是 analysis/output patch 与 background netlist/PSF 证据，再加入有限 corner；需要打开 ADE、旧 ADE L 迁移和人工数值对照的 Gate 已延期到 [`deferred-manual-gates.md`](deferred-manual-gates.md)。人工改动必须通过前置条件、setup 指纹或重新 snapshot 被发现，而不是被 VDA 静默覆盖。
 
 ## 反相器同源仿真路径
 

@@ -56,6 +56,12 @@ class AdeBackend(str, Enum):
     MAESTRO = "maestro"
 
 
+class AdeVariableScope(str, Enum):
+    GLOBAL = "global"
+    TEST = "test"
+    CORNER = "corner"
+
+
 class Relation(str, Enum):
     LESS_OR_EQUAL = "<="
     GREATER_OR_EQUAL = ">="
@@ -241,7 +247,7 @@ class AdeRunSpec(StrictModel):
 
 
 class AdeVariableUpdate(StrictModel):
-    """Compare-and-swap one global Maestro design variable."""
+    """Compare-and-swap one Maestro design variable at one exact scope."""
 
     name: StrictStr = Field(
         min_length=1,
@@ -250,6 +256,8 @@ class AdeVariableUpdate(StrictModel):
     )
     expected_value: StrictStr | None = Field(max_length=1024)
     value: StrictStr = Field(min_length=1, max_length=1024)
+    scope: AdeVariableScope = AdeVariableScope.GLOBAL
+    scope_name: StrictStr | None = Field(default=None, min_length=1, max_length=128)
 
     @field_validator("expected_value", "value")
     @classmethod
@@ -258,31 +266,110 @@ class AdeVariableUpdate(StrictModel):
             return value
         if not value:
             raise ValueError("Maestro variable values cannot be empty strings")
-        if any(character in value for character in ('"', "\\", "\r", "\n", "\0")):
+        if any(
+            character in ('"', "\\") or ord(character) < 32 or ord(character) == 127
+            for character in value
+        ):
             raise ValueError(
                 "Maestro variable values cannot contain quotes, backslashes, or "
                 "control characters"
             )
         return value
 
+    @field_validator("scope_name")
+    @classmethod
+    def validate_scope_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if any(
+            character in ('"', "\\") or ord(character) < 32 or ord(character) == 127
+            for character in value
+        ):
+            raise ValueError(
+                "Maestro variable scope names cannot contain quotes, backslashes, "
+                "or control characters"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> "AdeVariableUpdate":
+        if self.scope is AdeVariableScope.GLOBAL and self.scope_name is not None:
+            raise ValueError("global Maestro variables cannot declare scope_name")
+        if self.scope is not AdeVariableScope.GLOBAL and self.scope_name is None:
+            raise ValueError("test/corner Maestro variables require scope_name")
+        return self
+
+    def evidence_key(self) -> str:
+        if self.scope is AdeVariableScope.GLOBAL:
+            return self.name
+        return f"{self.scope.value}:{self.scope_name}:{self.name}"
+
 
 class AdeVariablesApplySpec(StrictModel):
-    """Patch global Maestro variables with exact old-value preconditions."""
+    """Patch declared Maestro variable scopes with exact old-value preconditions."""
 
     backend: AdeBackend = AdeBackend.MAESTRO
     expected_tests: list[StrictStr] = Field(min_length=1, max_length=32)
+    expected_corners: list[StrictStr] | None = Field(
+        default=None, min_length=1, max_length=64
+    )
     updates: list[AdeVariableUpdate] = Field(min_length=1, max_length=64)
 
     @model_validator(mode="after")
     def validate_unique_names(self) -> "AdeVariablesApplySpec":
         for test in self.expected_tests:
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$.-]*", test):
+            if (
+                not test
+                or len(test) > 128
+                or any(
+                    character in ('"', "\\")
+                    or ord(character) < 32
+                    or ord(character) == 127
+                    for character in test
+                )
+            ):
                 raise ValueError(f"invalid Maestro test name: {test!r}")
         if len(self.expected_tests) != len(set(self.expected_tests)):
             raise ValueError("expected_tests cannot contain duplicates")
-        names = [update.name for update in self.updates]
-        if len(names) != len(set(names)):
-            raise ValueError("Maestro variable updates cannot repeat a name")
+        if self.expected_corners is not None:
+            for corner in self.expected_corners:
+                if (
+                    not corner
+                    or len(corner) > 128
+                    or any(
+                        character in ('"', "\\")
+                        or ord(character) < 32
+                        or ord(character) == 127
+                        for character in corner
+                    )
+                ):
+                    raise ValueError(f"invalid Maestro corner name: {corner!r}")
+            if len(self.expected_corners) != len(set(self.expected_corners)):
+                raise ValueError("expected_corners cannot contain duplicates")
+        for update in self.updates:
+            if (
+                update.scope is AdeVariableScope.TEST
+                and update.scope_name not in self.expected_tests
+            ):
+                raise ValueError(
+                    f"test-scoped variable {update.name!r} must target one of "
+                    "expected_tests"
+                )
+            if update.scope is AdeVariableScope.CORNER:
+                if self.expected_corners is None:
+                    raise ValueError(
+                        "corner-scoped variables require expected_corners"
+                    )
+                if update.scope_name not in self.expected_corners:
+                    raise ValueError(
+                        f"corner-scoped variable {update.name!r} must target one of "
+                        "expected_corners"
+                    )
+        identities = [update.evidence_key() for update in self.updates]
+        if len(identities) != len(set(identities)):
+            raise ValueError(
+                "Maestro variable updates cannot repeat the same scoped variable"
+            )
         return self
 
 
