@@ -720,6 +720,10 @@ def _native_sweep_run_evidence(task: TaskSpec) -> dict:
         "sweep_point_consistency": point_consistency,
         "effective_simulation_values_verified": True,
         "exact_point_input_result_binding_verified": True,
+        "native_sweep_database_binding_verified": False,
+        "sweep_point_evidence_mode": "exact_point_artifacts",
+        "sweep_history_log_evidence": None,
+        "sweep_result_database_artifacts": [],
         "sweep_consistency_evidence_sources": {
             "expected_sweep": "user_input",
             "maestro_setup_and_oa": "bridge_readback",
@@ -766,6 +770,183 @@ def _native_sweep_run_task() -> TaskSpec:
     )
 
 
+def _native_sweep_database_run_evidence(task: TaskSpec) -> dict:
+    data = _native_sweep_run_evidence(task)
+    history = data["history"]
+    input_path = f"{history}/runtime/VDA/input.scs"
+    netlist_path = f"{history}/runtime/VDA/netlist"
+    rdb_path = f"{history}/{history}.rdb"
+    log_path = f"{history}/{history}.log"
+    input_hash = "b" * 64
+    netlist_hash = "a" * 64
+    comparison_hash = "c" * 64
+    rdb_hash = "d" * 64
+    log_hash = "e" * 64
+    manifest = [
+        {
+            "path": netlist_path,
+            "size_bytes": 120,
+            "sha256": netlist_hash,
+            "category": "simulator_input",
+            "binding": "unique_runtime_session",
+            "evidence_source": "eda_result",
+            "remote_paths": [
+                f"{data['runtime_scratch_root']}/VDA/netlist/netlist"
+            ],
+        },
+        {
+            "path": input_path,
+            "size_bytes": 180,
+            "sha256": input_hash,
+            "category": "simulator_input",
+            "binding": "unique_runtime_session",
+            "evidence_source": "eda_result",
+            "remote_paths": [
+                f"{data['runtime_scratch_root']}/VDA/netlist/input.scs"
+            ],
+        },
+        {
+            "path": rdb_path,
+            "size_bytes": 4096,
+            "sha256": rdb_hash,
+            "category": "eda_result",
+            "binding": "exact_history_companion",
+            "evidence_source": "eda_result",
+            "remote_paths": [f"/data/xum/results/{history}.rdb"],
+        },
+        {
+            "path": log_path,
+            "size_bytes": 320,
+            "sha256": log_hash,
+            "category": "run_log",
+            "binding": "exact_history_companion",
+            "evidence_source": "eda_result",
+            "remote_paths": [f"/data/xum/results/{history}.log"],
+        },
+    ]
+    input_consistency = [
+        {
+            "test": "VDA",
+            "input_path": input_path,
+            "design_identity_verified": True,
+            "instance_set_verified": True,
+            "node_connectivity_verified": True,
+            "raw_parameter_mapping_verified": True,
+            "symbolic_sweep_bindings_verified": True,
+            "effective_sweep_bindings_verified": False,
+            "verified_sweep_binding_pairs": 1,
+            "verified_parameter_pairs": 1,
+            "retained_point": 1,
+            "retained_sweep_values": {"CL": "1f"},
+            "input_sha256": input_hash,
+            "included_netlist_path": netlist_path,
+            "included_netlist_sha256": netlist_hash,
+            "input_bundle_sha256": hashlib.sha256(
+                json.dumps(
+                    {"input.scs": input_hash, "netlist": netlist_hash},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+            "comparison_sha256": comparison_hash,
+        }
+    ]
+    point_consistency = []
+    for point in data["sweep_point_consistency"]:
+        point_payload = {
+            "point": point["point"],
+            "expected_parameters": point["expected_parameters"],
+            "result_parameters": point["result_parameters"],
+            "scalar_outputs": point["scalar_outputs"],
+            "tests": [
+                {
+                    "test": "VDA",
+                    "evidence_mode": (
+                        "maestro_exact_history_rdb_with_shared_symbolic_"
+                        "runtime_input"
+                    ),
+                    "inputs": [
+                        {
+                            "path": input_path,
+                            "sha256": input_hash,
+                            "included_netlist_path": netlist_path,
+                            "included_netlist_sha256": netlist_hash,
+                            "input_bundle_sha256": input_consistency[0][
+                                "input_bundle_sha256"
+                            ],
+                            "comparison_sha256": comparison_hash,
+                        }
+                    ],
+                    "result_artifacts": [
+                        {
+                            "path": rdb_path,
+                            "sha256": rdb_hash,
+                            "size_bytes": 4096,
+                        }
+                    ],
+                }
+            ],
+        }
+        point_consistency.append(
+            {
+                **point_payload,
+                "point_binding_sha256": hashlib.sha256(
+                    json.dumps(
+                        point_payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+    counts = {
+        category: sum(1 for item in manifest if item["category"] == category)
+        for category in ("simulator_input", "eda_result", "run_log")
+    }
+    fingerprint_payload = sorted(
+        (
+            {"path": item["path"], "sha256": item["sha256"]}
+            for item in manifest
+            if item["category"] in counts
+        ),
+        key=lambda item: item["path"],
+    )
+    data.update(
+        {
+            "artifact_manifest": manifest,
+            "artifact_counts": counts,
+            "simulation_fingerprint_sha256": hashlib.sha256(
+                json.dumps(
+                    fingerprint_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest(),
+            "simulator_input_consistency": input_consistency,
+            "sweep_point_consistency": point_consistency,
+            "exact_point_input_result_binding_verified": False,
+            "native_sweep_database_binding_verified": True,
+            "sweep_point_evidence_mode": (
+                "maestro_exact_history_rdb_with_shared_symbolic_runtime_input"
+            ),
+            "sweep_history_log_evidence": {
+                "path": log_path,
+                "sha256": log_hash,
+                "size_bytes": 320,
+                "points_completed": 2,
+                "simulation_errors": 0,
+                "history_completed": True,
+            },
+            "sweep_result_database_artifacts": [
+                {"path": rdb_path, "sha256": rdb_hash, "size_bytes": 4096}
+            ],
+        }
+    )
+    return data
+
+
 def test_ade_run_accepts_complete_native_sweep_point_evidence() -> None:
     class RunningAdapter(DeterministicDemoAdapter):
         def run_ade(self, task):
@@ -783,6 +964,46 @@ def test_ade_run_accepts_complete_native_sweep_point_evidence() -> None:
 
     assert record.status is RunStatus.SUCCEEDED
     assert any("every declared native Maestro sweep point" in note for note in record.notes)
+
+
+def test_ade_run_accepts_native_sweep_history_database_evidence() -> None:
+    class RunningAdapter(DeterministicDemoAdapter):
+        def run_ade(self, task):
+            return AdapterResult(
+                data=_native_sweep_database_run_evidence(task),
+                evidence_source=EvidenceSource.EDA_RESULT,
+            )
+
+    task = _native_sweep_run_task()
+    plan = build_plan(task)
+
+    record = TaskExecutor(RunningAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert any("exact-history RDB/completion log" in note for note in record.notes)
+
+
+def test_ade_run_rejects_native_sweep_database_log_errors() -> None:
+    class RunningAdapter(DeterministicDemoAdapter):
+        def run_ade(self, task):
+            data = _native_sweep_database_run_evidence(task)
+            data["sweep_history_log_evidence"]["simulation_errors"] = 1
+            return AdapterResult(
+                data=data,
+                evidence_source=EvidenceSource.EDA_RESULT,
+            )
+
+    task = _native_sweep_run_task()
+    plan = build_plan(task)
+
+    record = TaskExecutor(RunningAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.FAILED
+    assert any("history log" in note for note in record.notes)
 
 
 def test_ade_run_rejects_a_sweep_point_without_effective_input_binding() -> None:

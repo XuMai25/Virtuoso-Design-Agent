@@ -3317,6 +3317,10 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
         "sweep_point_consistency": [],
         "effective_simulation_values_verified": False,
         "exact_point_input_result_binding_verified": False,
+        "native_sweep_database_binding_verified": False,
+        "sweep_point_evidence_mode": None,
+        "sweep_history_log_evidence": None,
+        "sweep_result_database_artifacts": [],
     }
     sweep_verification = settings.get("sweep_verification")
     sweep_setup_before: dict[str, Any] | None = None
@@ -3525,9 +3529,18 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
             "result, and log artifacts were hashed across project and scratch "
             "locations when required"
             + (
-                "; every declared native sweep point was bound to saved variable "
-                "scope readback, exact-history input.scs, OA parameter references, "
-                "and structured results"
+                (
+                    "; every declared native sweep point was bound through the "
+                    "saved variable scope, one symbolic runtime Spectre input per "
+                    "test, the exact-history Maestro result database and completion "
+                    "log, OA parameter references, and structured point results"
+                    if artifact_evidence.get(
+                        "native_sweep_database_binding_verified"
+                    )
+                    else "; every declared native sweep point was bound to saved "
+                    "variable scope readback, exact-history input.scs, OA parameter "
+                    "references, and structured results"
+                )
                 if sweep_verification is not None
                 else ""
             )
@@ -4624,7 +4637,13 @@ def _compare_ade_input_to_schematic(
     *,
     design: dict[str, str],
     sweep_bindings: dict[tuple[str, str], dict[str, str]] | None = None,
+    symbolic_sweep_bindings: dict[tuple[str, str], str] | None = None,
 ) -> dict[str, Any]:
+    if sweep_bindings and symbolic_sweep_bindings:
+        raise RuntimeError(
+            "ADE input comparison cannot mix resolved-point and symbolic sweep "
+            "bindings"
+        )
     if parsed["design"] != design:
         raise RuntimeError(
             "ADE Spectre input design header does not match Maestro test design: "
@@ -4651,7 +4670,9 @@ def _compare_ade_input_to_schematic(
     excluded_cdf_semantics: list[dict[str, str]] = []
     verified_parameter_pairs = 0
     verified_sweep_bindings: set[tuple[str, str]] = set()
+    verified_symbolic_sweep_bindings: set[tuple[str, str]] = set()
     requested_sweep_bindings = sweep_bindings or {}
+    requested_symbolic_sweep_bindings = symbolic_sweep_bindings or {}
     for name in sorted(expected_names):
         oa_instance = oa_instances[name]
         contract = _ade_instance_contract(oa_instance)
@@ -4688,7 +4709,10 @@ def _compare_ade_input_to_schematic(
             oa_value = str(oa_parameters[oa_name])
             netlist_value = str(netlist_parameters[netlist_name])
             binding = requested_sweep_bindings.get((name, oa_name))
-            if binding is None:
+            symbolic_variable = requested_symbolic_sweep_bindings.get(
+                (name, oa_name)
+            )
+            if binding is None and symbolic_variable is None:
                 if not spectre_values_equal(oa_value, netlist_value):
                     raise RuntimeError(
                         f"ADE Spectre parameter mismatch for {name}."
@@ -4703,7 +4727,7 @@ def _compare_ade_input_to_schematic(
                         "netlist_value": netlist_value,
                     }
                 )
-            else:
+            elif binding is not None:
                 variable = str(binding["variable"])
                 point_value = str(binding["point_value"])
                 if oa_value != variable:
@@ -4747,6 +4771,36 @@ def _compare_ade_input_to_schematic(
                     }
                 )
                 verified_sweep_bindings.add((name, oa_name))
+            else:
+                variable = str(symbolic_variable)
+                if oa_value != variable:
+                    raise RuntimeError(
+                        f"ADE symbolic sweep binding expected OA {name}.{oa_name} "
+                        f"to reference {variable!r}, got {oa_value!r}"
+                    )
+                if netlist_value != variable:
+                    raise RuntimeError(
+                        f"ADE symbolic sweep binding expected netlist {name}."
+                        f"{netlist_name} to reference {variable!r}, got "
+                        f"{netlist_value!r}"
+                    )
+                retained_value = (parsed.get("design_variables") or {}).get(variable)
+                if retained_value is None:
+                    raise RuntimeError(
+                        f"ADE symbolic sweep input did not declare {variable!r}"
+                    )
+                parameter_checks.append(
+                    {
+                        "oa_parameter": oa_name,
+                        "netlist_parameter": netlist_name,
+                        "oa_value": oa_value,
+                        "netlist_value": netlist_value,
+                        "sweep_variable": variable,
+                        "retained_design_value": str(retained_value),
+                        "resolution": "symbolic_spectre_design_variable",
+                    }
+                )
+                verified_symbolic_sweep_bindings.add((name, oa_name))
             verified_parameter_pairs += 1
         if "Wfg" in oa_parameters:
             excluded_cdf_semantics.append(
@@ -4773,13 +4827,25 @@ def _compare_ade_input_to_schematic(
             "ADE sweep bindings were not covered by known primitive parameter "
             f"contracts: {missing_sweep_bindings}"
         )
+    missing_symbolic_sweep_bindings = sorted(
+        set(requested_symbolic_sweep_bindings)
+        - verified_symbolic_sweep_bindings
+    )
+    if missing_symbolic_sweep_bindings:
+        raise RuntimeError(
+            "ADE symbolic sweep bindings were not covered by known primitive "
+            f"parameter contracts: {missing_symbolic_sweep_bindings}"
+        )
+    all_verified_sweep_bindings = (
+        verified_sweep_bindings | verified_symbolic_sweep_bindings
+    )
     payload = {
         "design": design,
         "instances": comparisons,
         "omitted_ground_symbols": omitted_ground_symbols,
         "verified_sweep_bindings": [
             {"instance": instance, "oa_parameter": parameter}
-            for instance, parameter in sorted(verified_sweep_bindings)
+            for instance, parameter in sorted(all_verified_sweep_bindings)
         ],
     }
     return {
@@ -4789,9 +4855,14 @@ def _compare_ade_input_to_schematic(
         "node_connectivity_verified": True,
         "verified_parameter_pairs": verified_parameter_pairs,
         "raw_parameter_mapping_verified": True,
-        "verified_sweep_binding_pairs": len(verified_sweep_bindings),
+        "verified_sweep_binding_pairs": len(all_verified_sweep_bindings),
         "effective_sweep_bindings_verified": (
             bool(verified_sweep_bindings) if requested_sweep_bindings else False
+        ),
+        "symbolic_sweep_bindings_verified": (
+            bool(verified_symbolic_sweep_bindings)
+            if requested_symbolic_sweep_bindings
+            else False
         ),
         "excluded_cdf_semantics": excluded_cdf_semantics,
         "effective_pdk_width_semantics_verified": False,
@@ -4927,7 +4998,7 @@ def _verify_ade_sweep_consistency(
     artifact_evidence: dict[str, Any],
     verification: dict[str, Any],
 ) -> dict[str, Any]:
-    """Bind every declared native sweep point to OA, input.scs, and results."""
+    """Bind each declared sweep point through exact files or Maestro's RDB."""
 
     expected_tests = [str(value) for value in verification.get("expected_tests") or []]
     if tests != expected_tests:
@@ -4986,6 +5057,246 @@ def _verify_ade_sweep_consistency(
 
     input_evidence: list[dict[str, Any]] = []
     point_evidence: list[dict[str, Any]] = []
+    exact_point_tree_present = any(
+        item.get("binding") == "exact_history_path"
+        and item.get("category") in {"simulator_input", "eda_result"}
+        and re.match(
+            rf"^{re.escape(history)}/[0-9]+/",
+            str(item.get("path") or ""),
+        )
+        for item in manifest
+    )
+    database_mode = not exact_point_tree_present
+    database_result_artifacts: list[dict[str, Any]] = []
+    shared_inputs_by_test: dict[str, dict[str, Any]] = {}
+    history_log_evidence: dict[str, Any] | None = None
+    if database_mode:
+        expected_rdb_path = f"{history}/{history}.rdb"
+        rdb_candidates = [
+            item
+            for item in manifest
+            if item.get("path") == expected_rdb_path
+            and item.get("binding") == "exact_history_companion"
+            and item.get("category") == "eda_result"
+            and int(item.get("size_bytes") or 0) > 0
+        ]
+        if len(rdb_candidates) != 1:
+            raise RuntimeError(
+                "ADE native sweep database evidence requires one non-empty "
+                f"exact-history RDB; found {len(rdb_candidates)}"
+            )
+        rdb_item = rdb_candidates[0]
+        database_result_artifacts = [
+            {
+                "path": rdb_item["path"],
+                "sha256": rdb_item["sha256"],
+                "size_bytes": rdb_item["size_bytes"],
+            }
+        ]
+
+        expected_log_path = f"{history}/{history}.log"
+        log_candidates = [
+            item
+            for item in manifest
+            if item.get("path") == expected_log_path
+            and item.get("binding") == "exact_history_companion"
+            and item.get("category") == "run_log"
+            and int(item.get("size_bytes") or 0) > 0
+        ]
+        if len(log_candidates) != 1:
+            raise RuntimeError(
+                "ADE native sweep database evidence requires one non-empty "
+                f"exact-history log; found {len(log_candidates)}"
+            )
+        log_item = log_candidates[0]
+        log_remote_path = _remote_manifest_item_path(log_item)
+        log_text = _read_remote_text_via_skill(
+            client, log_remote_path, page_lines=16
+        )
+        log_digest = hashlib.sha256(log_text.encode("utf-8")).hexdigest()
+        if log_digest != log_item.get("sha256"):
+            raise RuntimeError(
+                "ADE native sweep history log changed after manifest capture"
+            )
+        completed_match = re.search(
+            r"Number of points completed:\s*([0-9]+)", log_text
+        )
+        error_match = re.search(
+            r"Number of simulation errors:\s*([0-9]+)", log_text
+        )
+        history_completed = re.search(
+            rf"(?m)^\s*{re.escape(history)} completed\.\s*$", log_text
+        ) is not None
+        points_completed = (
+            int(completed_match.group(1)) if completed_match is not None else -1
+        )
+        simulation_errors = (
+            int(error_match.group(1)) if error_match is not None else -1
+        )
+        if (
+            points_completed != len(expected_points)
+            or simulation_errors != 0
+            or not history_completed
+        ):
+            raise RuntimeError(
+                "ADE native sweep history log did not prove the exact point count, "
+                "zero simulation errors, and completed history"
+            )
+        history_log_evidence = {
+            "path": log_item["path"],
+            "sha256": log_digest,
+            "size_bytes": log_item["size_bytes"],
+            "points_completed": points_completed,
+            "simulation_errors": simulation_errors,
+            "history_completed": True,
+        }
+
+        for test in tests:
+            test_token = re.sub(r"[^A-Za-z0-9_.-]", "_", test)
+            input_suffix = f"/runtime/{test_token}/input.scs"
+            shared_inputs = [
+                item
+                for item in manifest
+                if item.get("binding") == "unique_runtime_session"
+                and item.get("category") == "simulator_input"
+                and int(item.get("size_bytes") or 0) > 0
+                and str(item.get("path") or "").endswith(input_suffix)
+            ]
+            if len(shared_inputs) != 1:
+                raise RuntimeError(
+                    "ADE native sweep database evidence requires one unique "
+                    f"runtime input.scs for {test}; found {len(shared_inputs)}"
+                )
+            input_item = shared_inputs[0]
+            input_remote_path = _remote_manifest_item_path(input_item)
+            input_text = _read_remote_text_via_skill(
+                client, input_remote_path, page_lines=32
+            )
+            input_digest = hashlib.sha256(input_text.encode("utf-8")).hexdigest()
+            if input_digest != input_item.get("sha256"):
+                raise RuntimeError(
+                    "ADE native sweep runtime input changed after manifest capture "
+                    f"for {test}"
+                )
+            netlist_path = str(input_item["path"]).removesuffix("input.scs") + "netlist"
+            netlist_candidates = [
+                item
+                for item in manifest
+                if item.get("path") == netlist_path
+                and item.get("binding") == "unique_runtime_session"
+                and item.get("category") == "simulator_input"
+                and int(item.get("size_bytes") or 0) > 0
+            ]
+            if len(netlist_candidates) != 1:
+                raise RuntimeError(
+                    "ADE native sweep runtime input requires one non-empty sibling "
+                    f"netlist for {test}; found {len(netlist_candidates)}"
+                )
+            if re.search(
+                r'(?m)^\s*include\s+"(?:[.]/)?netlist"\s*$', input_text
+            ) is None:
+                raise RuntimeError(
+                    f"ADE native sweep input.scs did not include its sibling netlist "
+                    f"for {test}"
+                )
+            netlist_item = netlist_candidates[0]
+            netlist_remote_path = _remote_manifest_item_path(netlist_item)
+            netlist_text = _read_remote_text_via_skill(
+                client, netlist_remote_path, page_lines=32
+            )
+            netlist_digest = hashlib.sha256(netlist_text.encode("utf-8")).hexdigest()
+            if netlist_digest != netlist_item.get("sha256"):
+                raise RuntimeError(
+                    "ADE native sweep runtime netlist changed after manifest "
+                    f"capture for {test}"
+                )
+            test_bindings = [
+                binding
+                for binding in bindings
+                if isinstance(binding, dict) and binding.get("test") == test
+            ]
+            symbolic_binding_map = {
+                (str(binding["instance"]), str(binding["oa_parameter"])): str(
+                    binding["variable"]
+                )
+                for binding in test_bindings
+            }
+            if not symbolic_binding_map:
+                raise RuntimeError(
+                    f"ADE native sweep test {test} has no OA bindings"
+                )
+            parsed_input = _parse_ade_spectre_input(
+                f"{input_text.rstrip()}\n{netlist_text}"
+            )
+            comparison = _compare_ade_input_to_schematic(
+                parsed_input,
+                schematics[test],
+                design=designs[test],
+                symbolic_sweep_bindings=symbolic_binding_map,
+            )
+            if comparison.get("symbolic_sweep_bindings_verified") is not True:
+                raise RuntimeError(
+                    f"ADE native sweep test {test} did not verify symbolic OA "
+                    "variable bindings"
+                )
+            retained_values: dict[str, str] = {}
+            for variable_name in variable_names:
+                retained_value = (parsed_input.get("design_variables") or {}).get(
+                    variable_name
+                )
+                if retained_value is None:
+                    raise RuntimeError(
+                        "ADE native sweep runtime input did not declare "
+                        f"{variable_name!r} for {test}"
+                    )
+                retained_values[variable_name] = str(retained_value)
+            retained_points = [
+                int(point["point"])
+                for point in expected_points
+                if all(
+                    spectre_values_equal(
+                        retained_values[name], str(point["values"][name])
+                    )
+                    for name in variable_names
+                )
+            ]
+            if len(retained_points) != 1:
+                raise RuntimeError(
+                    "ADE native sweep runtime input retained values did not match "
+                    f"one declared point for {test}: {retained_values!r}"
+                )
+            item_evidence = {
+                "test": test,
+                "input_path": input_item["path"],
+                "input_remote_path": input_remote_path,
+                "input_sha256": input_digest,
+                "included_netlist_path": netlist_item["path"],
+                "included_netlist_remote_path": netlist_remote_path,
+                "included_netlist_sha256": netlist_digest,
+                "input_bundle_sha256": hashlib.sha256(
+                    json.dumps(
+                        {
+                            "input.scs": input_digest,
+                            "netlist": netlist_digest,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+                "retained_point": retained_points[0],
+                "retained_sweep_values": retained_values,
+                **comparison,
+            }
+            input_evidence.append(item_evidence)
+            shared_inputs_by_test[test] = {
+                "path": input_item["path"],
+                "sha256": input_digest,
+                "included_netlist_path": netlist_item["path"],
+                "included_netlist_sha256": netlist_digest,
+                "input_bundle_sha256": item_evidence["input_bundle_sha256"],
+                "comparison_sha256": comparison["comparison_sha256"],
+            }
+
     for expected in expected_points:
         point_number = int(expected["point"])
         expected_values = {
@@ -5024,6 +5335,19 @@ def _verify_ade_sweep_consistency(
 
         point_tests: list[dict[str, Any]] = []
         for test in tests:
+            if database_mode:
+                point_tests.append(
+                    {
+                        "test": test,
+                        "evidence_mode": (
+                            "maestro_exact_history_rdb_with_shared_symbolic_"
+                            "runtime_input"
+                        ),
+                        "inputs": [shared_inputs_by_test[test]],
+                        "result_artifacts": database_result_artifacts,
+                    }
+                )
+                continue
             allow_unlabeled = len(tests) == 1
             point_inputs = _ade_point_artifacts(
                 manifest,
@@ -5156,7 +5480,19 @@ def _verify_ade_sweep_consistency(
         "sweep_point_consistency_verified": bool(point_evidence),
         "sweep_point_consistency": point_evidence,
         "effective_simulation_values_verified": bool(point_evidence),
-        "exact_point_input_result_binding_verified": bool(point_evidence),
+        "exact_point_input_result_binding_verified": (
+            bool(point_evidence) and not database_mode
+        ),
+        "native_sweep_database_binding_verified": (
+            bool(point_evidence) and database_mode
+        ),
+        "sweep_point_evidence_mode": (
+            "maestro_exact_history_rdb_with_shared_symbolic_runtime_input"
+            if database_mode
+            else "exact_point_artifacts"
+        ),
+        "sweep_history_log_evidence": history_log_evidence,
+        "sweep_result_database_artifacts": database_result_artifacts,
         "sweep_consistency_evidence_sources": {
             "expected_sweep": "user_input",
             "maestro_setup_and_oa": "bridge_readback",

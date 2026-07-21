@@ -572,12 +572,22 @@ class TaskExecutor:
             setup_readbacks.append(readback)
         if setup_readbacks[0] != setup_readbacks[1]:
             raise RuntimeError("ADE sweep setup changed during background execution")
+        exact_point_mode = (
+            data.get("exact_point_input_result_binding_verified") is True
+        )
+        database_mode = data.get("native_sweep_database_binding_verified") is True
+        expected_mode_name = (
+            "maestro_exact_history_rdb_with_shared_symbolic_runtime_input"
+            if database_mode
+            else "exact_point_artifacts"
+        )
         if (
             data.get("sweep_setup_readback_evidence_source") != "bridge_readback"
             or data.get("expected_sweep_evidence_source") != "user_input"
             or data.get("sweep_point_consistency_verified") is not True
             or data.get("effective_simulation_values_verified") is not True
-            or data.get("exact_point_input_result_binding_verified") is not True
+            or exact_point_mode == database_mode
+            or data.get("sweep_point_evidence_mode") != expected_mode_name
             or data.get("sweep_consistency_evidence_sources")
             != {
                 "expected_sweep": "user_input",
@@ -611,16 +621,20 @@ class TaskExecutor:
             )
             for test in sweep.expected_tests
         }
+        expected_points = {point.point: point for point in sweep.points}
         input_consistency_by_key: dict[tuple[int, str, str], dict[str, Any]] = {}
         for item in raw_input_consistency:
             if not isinstance(item, dict):
                 raise RuntimeError("ADE sweep OA/input comparison is not an object")
-            try:
-                item_point = int(item.get("point"))
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError(
-                    "ADE sweep OA/input comparison has an invalid point"
-                ) from exc
+            if exact_point_mode:
+                try:
+                    item_point = int(item.get("point"))
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        "ADE sweep OA/input comparison has an invalid point"
+                    ) from exc
+            else:
+                item_point = 0
             item_test = str(item.get("test") or "")
             item_path = str(item.get("input_path") or "")
             key = (item_point, item_test, item_path)
@@ -628,7 +642,14 @@ class TaskExecutor:
                 item_test not in binding_counts
                 or not item_path
                 or key in input_consistency_by_key
-                or item.get("effective_sweep_bindings_verified") is not True
+                or (
+                    exact_point_mode
+                    and item.get("effective_sweep_bindings_verified") is not True
+                )
+                or (
+                    database_mode
+                    and item.get("symbolic_sweep_bindings_verified") is not True
+                )
                 or item.get("verified_sweep_binding_pairs")
                 != binding_counts[item_test]
             ):
@@ -636,8 +657,93 @@ class TaskExecutor:
                     "ADE sweep OA/input comparison did not uniquely verify every "
                     "declared binding"
                 )
+            if database_mode:
+                try:
+                    retained_point = int(item.get("retained_point"))
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        "ADE sweep symbolic input has an invalid retained point"
+                    ) from exc
+                expected_retained = expected_points.get(retained_point)
+                retained_values = item.get("retained_sweep_values")
+                if (
+                    expected_retained is None
+                    or not isinstance(retained_values, dict)
+                    or set(retained_values) != set(expected_retained.values)
+                    or any(
+                        not spectre_values_equal(
+                            retained_values[name], expected_value
+                        )
+                        for name, expected_value in expected_retained.values.items()
+                    )
+                ):
+                    raise RuntimeError(
+                        "ADE sweep symbolic input retained values did not match one "
+                        "declared point"
+                    )
             input_consistency_by_key[key] = item
-        expected_points = {point.point: point for point in sweep.points}
+        database_artifacts_by_path: dict[str, dict[str, Any]] = {}
+        if database_mode:
+            raw_database_artifacts = data.get("sweep_result_database_artifacts")
+            if (
+                not isinstance(raw_database_artifacts, list)
+                or len(raw_database_artifacts) != 1
+            ):
+                raise RuntimeError(
+                    "ADE sweep database mode requires one exact-history RDB "
+                    "artifact"
+                )
+            for artifact in raw_database_artifacts:
+                if not isinstance(artifact, dict):
+                    raise RuntimeError("ADE sweep database artifact is malformed")
+                artifact_path = str(artifact.get("path") or "")
+                manifest_item = manifest_by_path.get(artifact_path)
+                if (
+                    artifact_path != f"{history}/{history}.rdb"
+                    or not isinstance(manifest_item, dict)
+                    or manifest_item.get("category") != "eda_result"
+                    or manifest_item.get("binding")
+                    != "exact_history_companion"
+                    or manifest_item.get("sha256") != artifact.get("sha256")
+                    or manifest_item.get("size_bytes")
+                    != artifact.get("size_bytes")
+                    or int(artifact.get("size_bytes") or 0) <= 0
+                ):
+                    raise RuntimeError(
+                        "ADE sweep database artifact did not match the exact-history "
+                        "manifest"
+                    )
+                database_artifacts_by_path[artifact_path] = artifact
+
+            history_log = data.get("sweep_history_log_evidence")
+            if not isinstance(history_log, dict):
+                raise RuntimeError("ADE sweep database mode lacked history log evidence")
+            history_log_path = str(history_log.get("path") or "")
+            manifest_log = manifest_by_path.get(history_log_path)
+            if (
+                history_log_path != f"{history}/{history}.log"
+                or not isinstance(manifest_log, dict)
+                or manifest_log.get("category") != "run_log"
+                or manifest_log.get("binding") != "exact_history_companion"
+                or manifest_log.get("sha256") != history_log.get("sha256")
+                or manifest_log.get("size_bytes") != history_log.get("size_bytes")
+                or int(history_log.get("size_bytes") or 0) <= 0
+                or history_log.get("points_completed") != len(sweep.points)
+                or history_log.get("simulation_errors") != 0
+                or history_log.get("history_completed") is not True
+            ):
+                raise RuntimeError(
+                    "ADE sweep history log did not prove the declared completed "
+                    "point count without simulation errors"
+                )
+        elif (
+            data.get("sweep_history_log_evidence") is not None
+            or data.get("sweep_result_database_artifacts") not in (None, [])
+        ):
+            raise RuntimeError(
+                "ADE exact-point sweep evidence unexpectedly mixed database mode "
+                "artifacts"
+            )
         seen_points: set[int] = set()
         seen_input_consistency: set[tuple[int, str, str]] = set()
         for point_evidence in raw_points:
@@ -704,6 +810,21 @@ class TaskExecutor:
                 test_name = str(test_evidence.get("test") or "")
                 inputs = test_evidence.get("inputs")
                 results = test_evidence.get("result_artifacts")
+                if database_mode and test_evidence.get("evidence_mode") != (
+                    "maestro_exact_history_rdb_with_shared_symbolic_runtime_input"
+                ):
+                    raise RuntimeError(
+                        f"ADE sweep point {point_number} did not declare its "
+                        "database evidence mode"
+                    )
+                if exact_point_mode and test_evidence.get("evidence_mode") not in (
+                    None,
+                    "exact_point_artifacts",
+                ):
+                    raise RuntimeError(
+                        f"ADE sweep point {point_number} mixed point and database "
+                        "evidence modes"
+                    )
                 if not isinstance(inputs, list) or not inputs:
                     raise RuntimeError(
                         f"ADE sweep point {point_number} lacked input evidence"
@@ -712,6 +833,20 @@ class TaskExecutor:
                     raise RuntimeError(
                         f"ADE sweep point {point_number} lacked result evidence"
                     )
+                if database_mode and (
+                    len(inputs) != 1
+                    or len(results) != len(database_artifacts_by_path)
+                    or {
+                        str(item.get("path") or "")
+                        for item in results
+                        if isinstance(item, dict)
+                    }
+                    != set(database_artifacts_by_path)
+                ):
+                    raise RuntimeError(
+                        f"ADE sweep point {point_number} did not reference exactly "
+                        "one shared runtime input and the declared history RDB"
+                    )
                 for input_item in inputs:
                     if not isinstance(input_item, dict):
                         raise RuntimeError(
@@ -719,14 +854,69 @@ class TaskExecutor:
                         )
                     input_path = str(input_item.get("path") or "")
                     manifest_item = manifest_by_path.get(input_path)
-                    comparison = input_consistency_by_key.get(
-                        (point_number, test_name, input_path)
+                    comparison_key = (
+                        point_number if exact_point_mode else 0,
+                        test_name,
+                        input_path,
                     )
+                    comparison = input_consistency_by_key.get(
+                        comparison_key
+                    )
+                    test_token = re.sub(r"[^A-Za-z0-9_.-]", "_", test_name)
+                    included_netlist_path = str(
+                        input_item.get("included_netlist_path") or ""
+                    )
+                    included_netlist_sha256 = str(
+                        input_item.get("included_netlist_sha256") or ""
+                    )
+                    included_manifest = manifest_by_path.get(
+                        included_netlist_path
+                    )
+                    expected_bundle_sha256 = hashlib.sha256(
+                        json.dumps(
+                            {
+                                "input.scs": str(input_item.get("sha256") or ""),
+                                "netlist": included_netlist_sha256,
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    if exact_point_mode:
+                        binding_valid = (
+                            isinstance(manifest_item, dict)
+                            and manifest_item.get("binding")
+                            == "exact_history_path"
+                            and input_path.startswith(
+                                f"{history}/{point_number}/"
+                            )
+                        )
+                    else:
+                        binding_valid = (
+                            isinstance(manifest_item, dict)
+                            and manifest_item.get("binding")
+                            == "unique_runtime_session"
+                            and input_path.startswith(
+                                f"{history}/runtime/{test_token}/"
+                            )
+                            and input_path.endswith("/input.scs")
+                            and included_netlist_path
+                            == input_path.removesuffix("input.scs") + "netlist"
+                            and isinstance(included_manifest, dict)
+                            and included_manifest.get("category")
+                            == "simulator_input"
+                            and included_manifest.get("binding")
+                            == "unique_runtime_session"
+                            and included_manifest.get("sha256")
+                            == included_netlist_sha256
+                            and int(included_manifest.get("size_bytes") or 0) > 0
+                            and input_item.get("input_bundle_sha256")
+                            == expected_bundle_sha256
+                        )
                     if (
                         not isinstance(manifest_item, dict)
                         or manifest_item.get("category") != "simulator_input"
-                        or manifest_item.get("binding") != "exact_history_path"
-                        or not input_path.startswith(f"{history}/{point_number}/")
+                        or not binding_valid
                         or manifest_item.get("sha256") != input_item.get("sha256")
                         or int(manifest_item.get("size_bytes") or 0) <= 0
                         or not re.fullmatch(
@@ -738,14 +928,23 @@ class TaskExecutor:
                         != input_item.get("sha256")
                         or comparison.get("comparison_sha256")
                         != input_item.get("comparison_sha256")
+                        or (
+                            database_mode
+                            and (
+                                comparison.get("included_netlist_path")
+                                != included_netlist_path
+                                or comparison.get("included_netlist_sha256")
+                                != included_netlist_sha256
+                                or comparison.get("input_bundle_sha256")
+                                != expected_bundle_sha256
+                            )
+                        )
                     ):
                         raise RuntimeError(
                             f"ADE sweep point {point_number} input did not match "
-                            "the exact-history manifest and OA/input comparison"
+                            "the declared artifact mode and OA/input comparison"
                         )
-                    seen_input_consistency.add(
-                        (point_number, test_name, input_path)
-                    )
+                    seen_input_consistency.add(comparison_key)
                 for result_item in results:
                     if not isinstance(result_item, dict):
                         raise RuntimeError(
@@ -753,11 +952,29 @@ class TaskExecutor:
                         )
                     result_path = str(result_item.get("path") or "")
                     manifest_item = manifest_by_path.get(result_path)
+                    if exact_point_mode:
+                        result_binding_valid = (
+                            isinstance(manifest_item, dict)
+                            and manifest_item.get("binding")
+                            == "exact_history_path"
+                            and result_path.startswith(
+                                f"{history}/{point_number}/"
+                            )
+                        )
+                    else:
+                        expected_database_artifact = (
+                            database_artifacts_by_path.get(result_path)
+                        )
+                        result_binding_valid = (
+                            isinstance(manifest_item, dict)
+                            and manifest_item.get("binding")
+                            == "exact_history_companion"
+                            and expected_database_artifact == result_item
+                        )
                     if (
                         not isinstance(manifest_item, dict)
                         or manifest_item.get("category") != "eda_result"
-                        or manifest_item.get("binding") != "exact_history_path"
-                        or not result_path.startswith(f"{history}/{point_number}/")
+                        or not result_binding_valid
                         or manifest_item.get("sha256") != result_item.get("sha256")
                         or manifest_item.get("size_bytes")
                         != result_item.get("size_bytes")
@@ -765,7 +982,7 @@ class TaskExecutor:
                     ):
                         raise RuntimeError(
                             f"ADE sweep point {point_number} result did not match "
-                            "the exact-history manifest"
+                            "the declared exact-history artifact mode"
                         )
         if seen_points != set(expected_points):
             raise RuntimeError("ADE sweep evidence omitted a declared point")
@@ -1460,12 +1677,21 @@ class TaskExecutor:
                     and task.ade_run.sweep_verification is not None
                 ):
                     self._assert_ade_sweep_evidence(task, ran.data)
-                    notes.append(
-                        "verified every declared native Maestro sweep point against "
-                        "saved variable scope readback, exact-history input.scs, OA "
-                        "parameter references, non-empty results, and structured "
-                        "point parameters"
-                    )
+                    if ran.data.get("native_sweep_database_binding_verified") is True:
+                        notes.append(
+                            "verified every declared native Maestro sweep point "
+                            "against saved variable scope readback, one symbolic "
+                            "runtime Spectre input per test, OA parameter references, "
+                            "the exact-history RDB/completion log, and structured "
+                            "point parameters and outputs"
+                        )
+                    else:
+                        notes.append(
+                            "verified every declared native Maestro sweep point "
+                            "against saved variable scope readback, exact-history "
+                            "input.scs, OA parameter references, non-empty results, "
+                            "and structured point parameters"
+                        )
                 if ran.data.get("history_recovery_performed") is True:
                     notes.append(
                         "recovered the explicitly named Maestro history without "
@@ -1478,9 +1704,9 @@ class TaskExecutor:
                         "GUI focus, setup save, or OA write was performed"
                     )
                 notes.append(
-                    "ADE output/spec values and exact-history input/result/log hashes "
-                    "are EDA evidence but are not yet mapped to VDA constraints by "
-                    "ade.run"
+                    "ADE output/spec values, runtime input hashes, and exact-history "
+                    "result/log hashes are EDA evidence but are not yet mapped to "
+                    "VDA constraints by ade.run"
                 )
                 notes.append(
                     "history naming and overwrite behavior came from the saved "

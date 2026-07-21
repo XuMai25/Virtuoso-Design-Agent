@@ -2,6 +2,8 @@
 
 ## 结论
 
+> 后续状态：同日已完成真实 TSMC N28 Gate，并根据 IC6.1.8 的保留产物增加严格的共享符号输入束 + exact-history RDB 模式。详见[真实验证记录](2026-07-22-ade-native-sweep-consistency-live.md)。本文件保留最初本地契约和当时尚未验证的假设。
+
 VDA 已为 `ade.run` 增加一个可选的严格 `sweep_verification` 契约。任务只有显式启用该契约时，才要求一个保存的 Maestro 原生 sweep 同时满足：
 
 ```text
@@ -79,14 +81,15 @@ executor 会重新检查上述来源、setup 前后指纹、Detail 结果参数�
 
 ## 可执行任务链
 
-新增六个独立任务，目标均为非覆盖专用 cell `vb_pdk_smoke/vda_ade_sweep_inv_001`：
+最终形成七个独立任务，目标均为非覆盖专用 cell `vb_pdk_smoke/vda_ade_sweep_inv_001`：
 
 1. `inverter-ade-sweep-create.bridge.json`：新建并回读 inverter schematic；
-2. `inverter-ade-sweep-bind.bridge.json`：把 `CL0.c` 改为 raw 变量引用 `CL` 并双重回读；
-3. `inverter-ade-sweep-prepare.bridge.json`：新建同 cell 的 Maestro view/test；
-4. `inverter-ade-sweep-setup.bridge.json`：CAS 配置 transient 和 `VoutAvg` output/spec；
-5. `inverter-ade-sweep-variables.bridge.json`：CAS 保存 `CL=1f,2f,4f`；
-6. `inverter-ade-sweep-run.bridge.json`：后台运行并要求三个 point 的完整同源证据。
+2. `inverter-ade-sweep-testbench.bridge.json`：在同一 cellview 以受限 delta 增加 source/load/ground testbench；
+3. `inverter-ade-sweep-bind.bridge.json`：把 `CL0.c` 改为 raw 变量引用 `CL` 并双重回读；
+4. `inverter-ade-sweep-prepare.bridge.json`：新建同 cell 的 Maestro view/test；
+5. `inverter-ade-sweep-setup.bridge.json`：CAS 配置 transient 和 `VoutAvg` output/spec；
+6. `inverter-ade-sweep-variables.bridge.json`：CAS 保存 `CL=1f,2f,4f`；
+7. `inverter-ade-sweep-run.bridge.json`：后台运行并要求三个 point 的完整同源证据。
 
 这些文件带真实安全声明，但仍必须经过 CLI plan token、`--execute` 和一次明确 live 授权；文件存在本身不构成远端执行授权。
 
@@ -97,3 +100,5 @@ executor 会重新检查上述来源、setup 前后指纹、Detail 结果参数�
 3. `VoutAvg > 0.1` 仍只是 sweep 链路 smoke，不是设计质量规格；delay、rise/fall、能量和 VDA constraint 映射属于下一 Gate。
 4. corner、多 test/multi-analysis 的真实目录形状、二维 `VDD×CL`、history 名唯一性和人工 ADE 交叉检查尚未验证。
 5. 本轮没有修改 `virtuoso-bridge-lite`。标准 Bridge Maestro、shell、download 和 SKILL channel 仍是唯一远端执行与传输机制。
+
+上述第 1 项 live 假设后来被真实产物否定，第 2 项也得到更具体的目录答案：IC6.1.8 没有保留逐点 `input.scs`，而是使用共享的 `input.scs` + sibling `netlist` 和 exact-history RDB。VDA 没有放宽为只看 RDB；最终模式同时要求 include 关系、两份输入哈希、OA 符号绑定、setup 前后指纹、RDB 逐点参数/非空 output 以及 completion log 的 3 点完成/0 错误。最终回归为 `288 passed`、`59/59` example plans。

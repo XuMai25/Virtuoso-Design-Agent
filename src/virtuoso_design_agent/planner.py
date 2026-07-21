@@ -212,8 +212,9 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             else "允许缺少 history 产物清单，但 run record 只能记为 partial"
         )
         consistency_requirement = (
-            "；必须把每个 test 的 exact input.scs 哈希绑定到 Maestro design 与"
-            "只读 OA instance/node/raw parameter 回读；PDK CDF 派生语义单独标记"
+            "；必须把每个 test 的 simulator input.scs/netlist 输入束哈希绑定到 "
+            "Maestro design 与只读 OA instance/node/raw parameter 回读；PDK CDF "
+            "派生语义单独标记"
             if task.ade_run.require_simulator_input_consistency
             else ""
         )
@@ -226,8 +227,10 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             sweep_requirement = (
                 f"；必须精确回读 tests={sweep.expected_tests!r} 与 sweep "
                 f"variables={variables}，并把 {len(sweep.points)} 个声明 point "
-                "逐一绑定到 Detail 参数/非空 output、exact-history input.scs、"
-                "非空结果产物及 OA 变量引用"
+                "逐一绑定到 Detail 参数/非空 output、OA 变量引用以及非空 EDA "
+                "结果；优先使用完整 exact-history 逐点输入/结果，IC6.1.8 未保留"
+                "逐点文件时则强制核对唯一 runtime 符号输入束、exact-history "
+                "RDB 和完成日志"
             )
         return [
             probe,
@@ -284,8 +287,11 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                     "大小与 SHA-256；双路径同名内容冲突时失败"
                     + (
                         (
-                            "；从 exact-history 逐 point 输入读取 input.scs，核对 "
-                            "Detail 参数、OA 变量引用与有效 Spectre 值"
+                            "；若存在逐 point 输入目录则要求每点完整；否则从唯一 "
+                            "runtime 根读取 input.scs 及其显式 include 的 netlist，"
+                            "并将符号 OA 绑定与 exact-history RDB/Detail 的逐点参数/"
+                            "输出、"
+                            "完成点数和零仿真错误日志共同核对"
                             if task.ade_run.sweep_verification is not None
                             else "；从唯一 runtime 根读取 input.scs 并核对 test "
                             "design、OA 连接与显式 raw 参数映射"
@@ -307,8 +313,8 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                         else ""
                     )
                     + (
-                        "原生 sweep 值进入逐点输入和结果仍不等于已满足 VDA "
-                        "constraints"
+                        "原生 sweep 值与输入束、RDB 逐点结果完成一致性绑定仍不"
+                        "等于已满足 VDA constraints"
                         if task.ade_run.sweep_verification is not None
                         else "后台运行成功不等于已满足 VDA constraints"
                     )

@@ -1068,6 +1068,23 @@ def test_ade_spectre_input_rejects_a_sweep_point_value_mismatch() -> None:
         )
 
 
+def test_ade_spectre_input_verifies_a_symbolic_native_sweep_binding() -> None:
+    comparison = bridge_worker._compare_ade_input_to_schematic(
+        bridge_worker._parse_ade_spectre_input(_native_sweep_input("1f")),
+        _native_sweep_schematic(),
+        design={
+            "library": "vda_test",
+            "cell": "vda_sweep_tb",
+            "view": "schematic",
+        },
+        symbolic_sweep_bindings={("CL0", "c"): "CL"},
+    )
+
+    assert comparison["symbolic_sweep_bindings_verified"] is True
+    assert comparison["effective_sweep_bindings_verified"] is False
+    assert comparison["verified_sweep_binding_pairs"] == 1
+
+
 def test_native_ade_sweep_does_not_reuse_unlabeled_artifacts_across_tests() -> None:
     manifest = [
         {
@@ -1186,12 +1203,220 @@ def test_native_ade_sweep_binds_each_structured_point_to_input_and_result(
     assert evidence["sweep_point_consistency_verified"] is True
     assert evidence["effective_simulation_values_verified"] is True
     assert evidence["exact_point_input_result_binding_verified"] is True
+    assert evidence["native_sweep_database_binding_verified"] is False
+    assert evidence["sweep_point_evidence_mode"] == "exact_point_artifacts"
     assert len(evidence["sweep_point_consistency"]) == 2
     assert len(evidence["simulator_input_consistency"]) == 2
     assert {
         point["result_parameters"]["CL"]
         for point in evidence["sweep_point_consistency"]
     } == {"1e-15", "2e-15"}
+
+
+def _native_sweep_database_case(
+    *,
+    simulation_errors: int = 0,
+    include_rdb: bool = True,
+    include_netlist_reference: bool = True,
+) -> tuple[dict, list[dict], dict[str, str]]:
+    history = "Interactive.12"
+    input_remote = "/data/xum/runtime/VDA/input.scs"
+    input_text = """// Design library name: vda_test
+// Design cell name: vda_sweep_tb
+// Design view name: schematic
+simulator lang=spectre
+parameters CL=1f
+{include_statement}
+tran tran stop=1n
+save OUT
+""".format(
+        include_statement=(
+            'include "netlist"' if include_netlist_reference else "// no include"
+        )
+    )
+    netlist_remote = "/data/xum/runtime/VDA/netlist"
+    netlist_text = "CL0 (OUT 0) capacitor c=CL\n"
+    log_remote = f"/data/xum/results/{history}.log"
+    log_text = (
+        "Starting Single Run, Sweeps and Corners...\n"
+        "Best design point: 1\n"
+        "Design parameters:\n\tCL\t\t1f\n"
+        f"{history}\n"
+        "Number of points completed: 2\n"
+        f"Number of simulation errors: {simulation_errors}\n"
+        f"{history} completed.\n"
+    )
+    manifest = [
+        {
+            "path": f"{history}/runtime/VDA/input.scs",
+            "remote_path": input_remote,
+            "binding": "unique_runtime_session",
+            "category": "simulator_input",
+            "size_bytes": len(input_text.encode()),
+            "sha256": hashlib.sha256(input_text.encode()).hexdigest(),
+            "evidence_source": "eda_result",
+        },
+        {
+            "path": f"{history}/{history}.log",
+            "remote_path": log_remote,
+            "binding": "exact_history_companion",
+            "category": "run_log",
+            "size_bytes": len(log_text.encode()),
+            "sha256": hashlib.sha256(log_text.encode()).hexdigest(),
+            "evidence_source": "eda_result",
+        },
+        {
+            "path": f"{history}/runtime/VDA/netlist",
+            "remote_path": netlist_remote,
+            "binding": "unique_runtime_session",
+            "category": "simulator_input",
+            "size_bytes": len(netlist_text.encode()),
+            "sha256": hashlib.sha256(netlist_text.encode()).hexdigest(),
+            "evidence_source": "eda_result",
+        },
+    ]
+    if include_rdb:
+        manifest.append(
+            {
+                "path": f"{history}/{history}.rdb",
+                "remote_path": f"/data/xum/results/{history}.rdb",
+                "binding": "exact_history_companion",
+                "category": "eda_result",
+                "size_bytes": 4096,
+                "sha256": "a" * 64,
+                "evidence_source": "eda_result",
+            }
+        )
+    results = {
+        "history": history,
+        "points": [
+            {
+                "point": 1,
+                "parameters": {"CL": "1f"},
+                "outputs": {"VoutAvg": {"value": "0.4155"}},
+            },
+            {
+                "point": 2,
+                "parameters": {"CL": "2f"},
+                "outputs": {"VoutAvg": {"value": "0.4198"}},
+            },
+        ],
+    }
+    return results, manifest, {
+        input_remote: input_text,
+        netlist_remote: netlist_text,
+        log_remote: log_text,
+    }
+
+
+def _patch_native_sweep_database_readbacks(
+    monkeypatch: pytest.MonkeyPatch, texts: dict[str, str]
+) -> None:
+    monkeypatch.setattr(
+        bridge_worker,
+        "_maestro_test_design_readback",
+        lambda *_args, **_kwargs: {
+            "library": "vda_test",
+            "cell": "vda_sweep_tb",
+            "view": "schematic",
+        },
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_read_schematic",
+        lambda *_args, **_kwargs: _native_sweep_schematic(),
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_read_remote_text_via_skill",
+        lambda _client, path, **_kwargs: texts[path],
+    )
+
+
+def test_native_ade_sweep_accepts_ic618_shared_input_and_history_rdb(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results, manifest, texts = _native_sweep_database_case()
+    _patch_native_sweep_database_readbacks(monkeypatch, texts)
+
+    evidence = bridge_worker._verify_ade_sweep_consistency(
+        object(),
+        session="fnxSweep12",
+        tests=["VDA"],
+        history="Interactive.12",
+        results=results,
+        artifact_evidence={"artifact_manifest": manifest},
+        verification=_native_sweep_verification(),
+    )
+
+    assert evidence["effective_simulation_values_verified"] is True
+    assert evidence["exact_point_input_result_binding_verified"] is False
+    assert evidence["native_sweep_database_binding_verified"] is True
+    assert evidence["sweep_point_evidence_mode"] == (
+        "maestro_exact_history_rdb_with_shared_symbolic_runtime_input"
+    )
+    assert evidence["sweep_history_log_evidence"]["points_completed"] == 2
+    assert len(evidence["simulator_input_consistency"]) == 1
+    assert {
+        point["result_parameters"]["CL"]
+        for point in evidence["sweep_point_consistency"]
+    } == {"1f", "2f"}
+
+
+def test_native_ade_sweep_database_mode_rejects_a_missing_history_rdb(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results, manifest, texts = _native_sweep_database_case(include_rdb=False)
+    _patch_native_sweep_database_readbacks(monkeypatch, texts)
+
+    with pytest.raises(RuntimeError, match="exact-history RDB"):
+        bridge_worker._verify_ade_sweep_consistency(
+            object(),
+            session="fnxSweep12",
+            tests=["VDA"],
+            history="Interactive.12",
+            results=results,
+            artifact_evidence={"artifact_manifest": manifest},
+            verification=_native_sweep_verification(),
+        )
+
+
+def test_native_ade_sweep_database_mode_rejects_history_simulation_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results, manifest, texts = _native_sweep_database_case(simulation_errors=1)
+    _patch_native_sweep_database_readbacks(monkeypatch, texts)
+
+    with pytest.raises(RuntimeError, match="zero simulation errors"):
+        bridge_worker._verify_ade_sweep_consistency(
+            object(),
+            session="fnxSweep12",
+            tests=["VDA"],
+            history="Interactive.12",
+            results=results,
+            artifact_evidence={"artifact_manifest": manifest},
+            verification=_native_sweep_verification(),
+        )
+
+
+def test_native_ade_sweep_database_mode_requires_the_sibling_include(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results, manifest, texts = _native_sweep_database_case(
+        include_netlist_reference=False
+    )
+    _patch_native_sweep_database_readbacks(monkeypatch, texts)
+
+    with pytest.raises(RuntimeError, match="did not include its sibling netlist"):
+        bridge_worker._verify_ade_sweep_consistency(
+            object(),
+            session="fnxSweep12",
+            tests=["VDA"],
+            history="Interactive.12",
+            results=results,
+            artifact_evidence={"artifact_manifest": manifest},
+            verification=_native_sweep_verification(),
+        )
 
 
 @pytest.mark.parametrize(

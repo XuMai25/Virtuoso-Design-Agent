@@ -216,8 +216,10 @@ def test_ade_native_sweep_plan_discloses_point_input_and_result_binding() -> Non
     plan = build_plan(task)
 
     assert "3 个声明 point" in plan.steps[2].description
-    assert "exact-history input.scs" in plan.steps[2].description
-    assert "Detail 参数" in plan.steps[3].description
+    assert "exact-history RDB" in plan.steps[2].description
+    assert "唯一 runtime 符号输入束" in plan.steps[2].description
+    assert "RDB/Detail" in plan.steps[3].description
+    assert "逐点参数" in plan.steps[3].description
     assert "仍不等于已满足 VDA constraints" in plan.steps[4].description
 
 
