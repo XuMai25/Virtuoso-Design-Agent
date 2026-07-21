@@ -12,7 +12,8 @@
   "ade_run": {
     "backend": "maestro",
     "require_structured_outputs": true,
-    "require_artifact_manifest": true
+    "require_artifact_manifest": true,
+    "require_simulator_input_consistency": true
   },
   "safety": {
     "allow_remote_compute": true,

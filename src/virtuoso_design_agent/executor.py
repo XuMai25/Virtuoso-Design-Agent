@@ -793,11 +793,18 @@ class TaskExecutor:
                 prepared = self._action(
                     "ade.prepare", lambda: self.adapter.prepare_ade(task)
                 )
+                assert task.ade_prepare is not None
+                expected_design = task.ade_prepare.design or task.target.model_copy(
+                    update={"view": task.ade_prepare.design_view}
+                )
                 if (
                     prepared.data.get("persistent_view_confirmed") is not True
                     or prepared.data.get("existing_maestro_overwritten") is not False
                     or prepared.data.get("schematic_oa_write_performed") is not False
                     or prepared.data.get("maestro_oa_write_performed") is not True
+                    or prepared.data.get("design_target_confirmed") is not True
+                    or prepared.data.get("design_readback")
+                    != expected_design.model_dump(mode="json")
                 ):
                     raise RuntimeError(
                         "ADE prepare did not prove a new persistent Maestro-only write "
@@ -831,6 +838,13 @@ class TaskExecutor:
                     or ran.data.get("maestro_setup_write_performed") is not False
                     or ran.data.get("session_mode") != "background"
                     or not ran.data.get("history")
+                    or ran.data.get("runtime_directory_persisted") is not False
+                    or ran.data.get("runtime_directory_restored") is not True
+                    or ran.data.get("runtime_artifacts_restricted_to_data_xum")
+                    is not True
+                    or not str(ran.data.get("runtime_scratch_root") or "").startswith(
+                        "/data/xum/"
+                    )
                 ):
                     raise RuntimeError(
                         "ADE run did not prove an exact background history without "
@@ -874,6 +888,9 @@ class TaskExecutor:
                         != history
                         or ran.data.get("artifact_history_path_binding_verified")
                         is not True
+                        or ran.data.get("artifact_runtime_input_binding_verified")
+                        is not True
+                        or ran.data.get("artifact_run_binding_verified") is not True
                         or not isinstance(manifest, list)
                         or not manifest
                         or not isinstance(counts, dict)
@@ -973,20 +990,35 @@ class TaskExecutor:
                             "ADE run simulation fingerprint did not match artifact "
                             "manifest"
                         )
-                    if any(
-                        not isinstance(location, dict)
-                        or not str(location.get("history_root") or "").endswith(
-                            f"/{history}"
-                        )
-                        or not str(
+                    for location in locations:
+                        if not isinstance(location, dict) or not str(
                             location.get("remote_manifest_path") or ""
-                        ).startswith(f"{manifest_directory}/")
-                        for location in locations
-                    ):
-                        raise RuntimeError(
-                            "ADE run artifact location metadata was internally "
-                            "inconsistent"
-                        )
+                        ).startswith(f"{manifest_directory}/"):
+                            raise RuntimeError(
+                                "ADE run artifact location metadata was internally "
+                                "inconsistent"
+                            )
+                        binding = str(location.get("binding") or "exact_history")
+                        if binding == "exact_history":
+                            valid_binding = str(
+                                location.get("history_root") or ""
+                            ).endswith(f"/{history}")
+                        elif binding == "unique_runtime_session":
+                            valid_binding = (
+                                location.get("history_root") is None
+                                and location.get("source_location") == "runtime"
+                                and bool(location.get("runtime_test"))
+                                and str(location.get("tree_root") or "").startswith(
+                                    f"{ran.data['runtime_scratch_root']}/"
+                                )
+                            )
+                        else:
+                            valid_binding = False
+                        if not valid_binding:
+                            raise RuntimeError(
+                                "ADE run artifact location metadata was internally "
+                                "inconsistent"
+                            )
                 if task.ade_run is not None and (
                     task.ade_run.require_artifact_manifest
                     and not artifacts_complete
@@ -995,10 +1027,58 @@ class TaskExecutor:
                         "ADE run required an exact-history simulator input/result/"
                         "log manifest but the adapter did not provide one"
                     )
-                notes.append(
-                    "executed the saved Maestro setup in a background session; no "
-                    "GUI focus, setup save, or OA write was performed"
-                )
+                if (
+                    task.ade_run is not None
+                    and task.ade_run.require_simulator_input_consistency
+                ):
+                    consistency = ran.data.get("simulator_input_consistency")
+                    sources = ran.data.get(
+                        "simulator_input_consistency_evidence_sources"
+                    )
+                    if (
+                        ran.data.get("simulator_input_consistency_verified") is not True
+                        or not isinstance(consistency, list)
+                        or not consistency
+                        or sources
+                        != {
+                            "maestro_design_and_oa": "bridge_readback",
+                            "spectre_input": "eda_result",
+                            "comparison": "software_inference",
+                        }
+                        or any(
+                            not isinstance(item, dict)
+                            or item.get("design_identity_verified") is not True
+                            or item.get("instance_set_verified") is not True
+                            or item.get("node_connectivity_verified") is not True
+                            or item.get("raw_parameter_mapping_verified") is not True
+                            or not isinstance(item.get("verified_parameter_pairs"), int)
+                            or item["verified_parameter_pairs"] <= 0
+                            or not re.fullmatch(
+                                r"[0-9a-f]{64}",
+                                str(item.get("input_sha256") or ""),
+                            )
+                            or not re.fullmatch(
+                                r"[0-9a-f]{64}",
+                                str(item.get("comparison_sha256") or ""),
+                            )
+                            for item in consistency
+                        )
+                    ):
+                        raise RuntimeError(
+                            "ADE run did not prove the requested OA-to-input.scs "
+                            "consistency"
+                        )
+                if ran.data.get("history_recovery_performed") is True:
+                    notes.append(
+                        "recovered the explicitly named Maestro history without "
+                        "rerunning simulation; no GUI focus, setup save, or OA write "
+                        "was performed"
+                    )
+                else:
+                    notes.append(
+                        "executed the saved Maestro setup in a background session; no "
+                        "GUI focus, setup save, or OA write was performed"
+                    )
                 notes.append(
                     "ADE output/spec values and exact-history input/result/log hashes "
                     "are EDA evidence but are not yet mapped to VDA constraints by "

@@ -251,6 +251,7 @@ class AdePrepareSpec(StrictModel):
         min_length=1,
         pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$",
     )
+    design: DesignTarget | None = None
     simulator: str = Field(default="spectre", pattern=r"^spectre$")
 
 
@@ -260,6 +261,44 @@ class AdeRunSpec(StrictModel):
     backend: AdeBackend = AdeBackend.MAESTRO
     require_structured_outputs: bool = True
     require_artifact_manifest: bool = True
+    require_simulator_input_consistency: bool = False
+    resume_history: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9_.-]+$",
+    )
+    resume_runtime_scratch_root: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=1024,
+    )
+
+    @model_validator(mode="after")
+    def validate_resume_pair(self) -> "AdeRunSpec":
+        if (
+            self.require_simulator_input_consistency
+            and not self.require_artifact_manifest
+        ):
+            raise ValueError(
+                "ADE simulator input consistency requires the artifact manifest"
+            )
+        if (self.resume_history is None) != (
+            self.resume_runtime_scratch_root is None
+        ):
+            raise ValueError(
+                "ADE run resume requires both resume_history and "
+                "resume_runtime_scratch_root"
+            )
+        path = self.resume_runtime_scratch_root
+        if path is not None:
+            if not path.startswith("/data/xum/") or "\\" in path:
+                raise ValueError("ADE run resume scratch root must stay under /data/xum")
+            if any(
+                part in {"", ".", ".."} for part in path.split("/")[1:]
+            ) or any(ord(character) < 32 for character in path):
+                raise ValueError("ADE run resume scratch root must be normalized")
+        return self
 
 
 class AdeVariableUpdate(StrictModel):

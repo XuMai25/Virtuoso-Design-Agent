@@ -50,7 +50,14 @@ def test_ade_prepare_plan_refuses_existing_state_and_leaves_manual_configuration
                 "cell": "vda_manual_tb",
                 "view": "maestro",
             },
-            "ade_prepare": {"test_name": "VDA_AC"},
+            "ade_prepare": {
+                "test_name": "VDA_AC",
+                "design": {
+                    "library": "source_lib",
+                    "cell": "legacy_tb",
+                    "view": "schematic",
+                },
+            },
         }
     )
 
@@ -66,6 +73,7 @@ def test_ade_prepare_plan_refuses_existing_state_and_leaves_manual_configuration
     assert plan.steps[1].side_effect is SideEffect.READ_ONLY
     assert plan.steps[2].side_effect is SideEffect.REMOTE_WRITE
     assert "已有 Maestro 状态一律拒绝" in plan.steps[1].description
+    assert "source_lib/legacy_tb/schematic" in plan.steps[1].description
     assert "不设置 analysis" in plan.steps[2].description
     assert plan.requires_remote_write
     assert not plan.requires_remote_compute
@@ -137,6 +145,34 @@ def test_ade_run_plan_uses_background_compute_without_setup_write() -> None:
     assert "project/scratch" in plan.steps[3].description
     assert "SHA-256" in plan.steps[3].description
     assert "保留小型 TSV" in plan.steps[3].description
+    assert plan.requires_remote_compute
+    assert not plan.requires_remote_write
+
+
+def test_ade_run_resume_plan_skips_new_simulation_and_discloses_exact_paths() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "recover-saved-maestro",
+            "operation": "ade.run",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_run": {
+                "resume_history": "Interactive.0",
+                "resume_runtime_scratch_root": "/data/xum/vda_runs/run-0",
+            },
+        }
+    )
+
+    plan = build_plan(task)
+
+    assert plan.steps[2].capability == "ade.run.resume"
+    assert "不再次调用 run_and_wait" in plan.steps[2].description
+    assert "Interactive.0" in plan.steps[1].description
+    assert "/data/xum/vda_runs/run-0" in plan.steps[1].description
     assert plan.requires_remote_compute
     assert not plan.requires_remote_write
 

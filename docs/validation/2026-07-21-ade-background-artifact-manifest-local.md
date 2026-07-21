@@ -1,5 +1,7 @@
 # 2026-07-21 ADE background exact-history 产物清单本地实现
 
+> 后续 live Gate 已完成，见 [`2026-07-21-ade-background-same-source-live.md`](2026-07-21-ade-background-same-source-live.md)。真实 IC6.1.8 环境进一步要求 unique-runtime input 绑定、短 `csh` 命令、显式 history/scratch 恢复、受限 SKILL 文本 fallback 和 OA→`input.scs` raw 参数核对；下文保留最初本地契约快照。
+
 ## 目标
 
 在既有 `ade.run` 后台运行与结构化结果回收之上，为 `run_and_wait` 本次返回的确切 history 建立 simulator input、结果和日志的只读大小/SHA-256 清单。该能力只消费已保存 setup，不修改变量、analysis、output、corner 或 schematic。

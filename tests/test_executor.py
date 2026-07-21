@@ -207,7 +207,13 @@ def test_ade_prepare_creates_only_new_manual_setup_without_simulating() -> None:
                     "confirmed_setup_evidence_source": "bridge_readback",
                     "existing_maestro_overwritten": False,
                     "schematic_oa_write_performed": False,
-                    "maestro_oa_write_performed": True,
+                        "maestro_oa_write_performed": True,
+                        "design_target_confirmed": True,
+                        "design_readback": {
+                            "library": "vda_test",
+                            "cell": "vda_manual_tb",
+                            "view": "schematic",
+                        },
                     "configured_analyses": [],
                     "configured_sweeps": [],
                     "configured_outputs": [],
@@ -357,9 +363,32 @@ def test_ade_run_records_background_history_without_oa_write(
                     "structured_results_evidence_source": "eda_result",
                     "automated_simulation_performed": True,
                     "oa_write_performed": False,
-                    "maestro_setup_write_performed": False,
+                        "maestro_setup_write_performed": False,
+                        "runtime_directory_persisted": False,
+                        "runtime_directory_restored": True,
+                        "runtime_artifacts_restricted_to_data_xum": True,
+                        "runtime_scratch_root": "/data/xum/vda_runs/run-1",
                     "artifact_history": "Interactive.8",
                     "artifact_history_path_binding_verified": True,
+                    "artifact_runtime_input_binding_verified": True,
+                    "artifact_run_binding_verified": True,
+                    "simulator_input_consistency_verified": True,
+                    "simulator_input_consistency_evidence_sources": {
+                        "maestro_design_and_oa": "bridge_readback",
+                        "spectre_input": "eda_result",
+                        "comparison": "software_inference",
+                    },
+                    "simulator_input_consistency": [
+                        {
+                            "design_identity_verified": True,
+                            "instance_set_verified": True,
+                            "node_connectivity_verified": True,
+                            "raw_parameter_mapping_verified": True,
+                            "verified_parameter_pairs": 4,
+                            "input_sha256": "2" * 64,
+                            "comparison_sha256": "5" * 64,
+                        }
+                    ],
                     "artifact_manifest_complete": True,
                     "artifacts_captured": True,
                     "artifact_counts": {
@@ -419,6 +448,7 @@ def test_ade_run_records_background_history_without_oa_write(
                     "remote_manifest_directory": "/data/xum/vda_runs/manifest",
                     "artifact_locations_checked": [
                         {
+                            "binding": "exact_history",
                             "history_root": (
                                 "/data/xum/project/vda_test/cell/maestro/results/"
                                 "maestro/Interactive.8"
@@ -428,12 +458,26 @@ def test_ade_run_records_background_history_without_oa_write(
                             ),
                         },
                         {
+                            "binding": "exact_history",
                             "history_root": (
                                 "/data/xum/scratch/vda_test/cell/maestro/results/"
                                 "maestro/Interactive.8"
                             ),
                             "remote_manifest_path": (
                                 "/data/xum/vda_runs/manifest/1_scratch.tsv"
+                            ),
+                        },
+                        {
+                            "source_location": "runtime",
+                            "binding": "unique_runtime_session",
+                            "tree_root": (
+                                "/data/xum/vda_runs/run-1/vda_test/cell/maestro/"
+                                "results/maestro/.tmpADEDir_vda/0_AC/netlist"
+                            ),
+                            "history_root": None,
+                            "runtime_test": "AC",
+                            "remote_manifest_path": (
+                                "/data/xum/vda_runs/manifest/2_runtime.tsv"
                             ),
                         },
                     ],
@@ -451,7 +495,10 @@ def test_ade_run_records_background_history_without_oa_write(
                 "cell": "vda_manual_tb",
                 "view": "maestro",
             },
-            "ade_run": {"require_structured_outputs": structured},
+            "ade_run": {
+                "require_structured_outputs": structured,
+                "require_simulator_input_consistency": True,
+            },
             "safety": {"allow_remote_compute": True},
         }
     )
@@ -519,7 +566,11 @@ def test_ade_run_optional_missing_artifacts_is_partial() -> None:
                     "structured_results_evidence_source": "eda_result",
                     "automated_simulation_performed": True,
                     "oa_write_performed": False,
-                    "maestro_setup_write_performed": False,
+                        "maestro_setup_write_performed": False,
+                        "runtime_directory_persisted": False,
+                        "runtime_directory_restored": True,
+                        "runtime_artifacts_restricted_to_data_xum": True,
+                        "runtime_scratch_root": "/data/xum/vda_runs/run-2",
                     "artifact_manifest_complete": False,
                     "artifacts_captured": False,
                     "artifact_capture_error": "remote manifest unavailable",
@@ -563,9 +614,15 @@ def test_ade_run_rejects_corrupt_exact_history_artifact_evidence() -> None:
                     "structured_results_evidence_source": "eda_result",
                     "automated_simulation_performed": True,
                     "oa_write_performed": False,
-                    "maestro_setup_write_performed": False,
+                        "maestro_setup_write_performed": False,
+                        "runtime_directory_persisted": False,
+                        "runtime_directory_restored": True,
+                        "runtime_artifacts_restricted_to_data_xum": True,
+                        "runtime_scratch_root": "/data/xum/vda_runs/run-3",
                     "artifact_history": "Interactive.7",
                     "artifact_history_path_binding_verified": True,
+                    "artifact_runtime_input_binding_verified": True,
+                    "artifact_run_binding_verified": True,
                     "artifact_manifest_complete": True,
                     "artifacts_captured": True,
                     "artifact_counts": {

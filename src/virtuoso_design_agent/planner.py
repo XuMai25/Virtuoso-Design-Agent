@@ -119,14 +119,17 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
 
     if task.operation is Operation.ADE_PREPARE:
         assert task.ade_prepare is not None
+        design = task.ade_prepare.design or task.target.model_copy(
+            update={"view": task.ade_prepare.design_view}
+        )
         return [
             probe,
             _step(
                 "02-preflight",
                 "ade.prepare.preflight",
                 (
-                    f"确认 {task.target.library}/{task.target.cell}/"
-                    f"{task.ade_prepare.design_view} 已存在且目标 maestro view 不存在；"
+                    f"确认 design {design.library}/{design.cell}/{design.view} 已存在"
+                    f"且目标 {task.target.library}/{task.target.cell}/maestro 不存在；"
                     "已有 Maestro 状态一律拒绝，不覆盖、不合并"
                 ),
                 SideEffect.READ_ONLY,
@@ -136,7 +139,7 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 "ade.prepare",
                 (
                     f"新建持久化 Maestro view 与 test={task.ade_prepare.test_name}，"
-                    f"design view={task.ade_prepare.design_view}，"
+                    f"design={design.library}/{design.cell}/{design.view}，"
                     f"simulator={task.ade_prepare.simulator}；不设置 analysis、"
                     "stimulus、sweep 或 output，交由人工继续调整"
                 ),
@@ -145,7 +148,7 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             _step(
                 "04-readback",
                 "ade.prepare.readback",
-                "重新打开持久化 setup，核对 Maestro view 和 test 名称",
+                "重新打开持久化 setup，核对 Maestro view、test 名称及其实际 design library/cell/view",
                 SideEffect.READ_ONLY,
             ),
             persist.model_copy(update={"id": "05-persist"}),
@@ -197,6 +200,7 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
 
     if task.operation is Operation.ADE_RUN:
         assert task.ade_run is not None
+        resume = task.ade_run.resume_history is not None
         output_requirement = (
             "必须读回非空逐点 output/spec 表"
             if task.ade_run.require_structured_outputs
@@ -207,6 +211,12 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             if task.ade_run.require_artifact_manifest
             else "允许缺少 history 产物清单，但 run record 只能记为 partial"
         )
+        consistency_requirement = (
+            "；必须把每个 test 的 exact input.scs 哈希绑定到 Maestro design 与"
+            "只读 OA instance/node/raw parameter 回读；PDK CDF 派生语义单独标记"
+            if task.ade_run.require_simulator_input_consistency
+            else ""
+        )
         return [
             probe,
             _step(
@@ -214,17 +224,31 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 "ade.run.preflight",
                 (
                     "确认目标 Maestro view 已存在，以独立后台 session 回读 setup tests；"
-                    "不要求或改变 GUI 焦点，不保存或修改 setup"
+                    "逐 test 把当前 session 的 project/results dir 临时重定向到"
+                    + (
+                        f"已声明恢复根 {task.ade_run.resume_runtime_scratch_root}，"
+                        f"并固定读取 history={task.ade_run.resume_history}；"
+                        if resume
+                        else " profile /data/xum 唯一新 run root，"
+                    )
+                    + "立即回读 analog run dir；不要求或"
+                    "改变 GUI 焦点，不保存或修改 setup，结束前恢复原 session 值"
                 ),
                 SideEffect.READ_ONLY,
             ),
             _step(
                 "03-run",
-                "ade.run",
+                "ade.run.resume" if resume else "ade.run",
                 (
-                    "通过 Bridge run_and_wait 执行已保存的 Maestro 原生 analysis/"
-                    f"parametric sweep 并等待本次返回的 history；{output_requirement}；"
-                    f"{artifact_requirement}；"
+                    (
+                        "不再次调用 run_and_wait；按显式 history 和唯一 runtime "
+                        "scratch 恢复先前已完成的 VDA 后台运行"
+                        if resume
+                        else "通过 Bridge run_and_wait 执行已保存的 Maestro 原生 "
+                        "analysis/parametric sweep 并等待本次返回的 history"
+                    )
+                    + f"；{output_requirement}；"
+                    f"{artifact_requirement}{consistency_requirement}；"
                     "history 命名/覆盖策略沿用已保存 setup，VDA 不改写也尚不能"
                     "证明名称唯一"
                 ),
@@ -234,11 +258,23 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 "04-results",
                 "ade.results.read",
                 (
-                    "按 run_and_wait 为本次调用返回的 history 回收每个 point 的"
+                    (
+                        "按显式恢复 history"
+                        if resume
+                        else "按 run_and_wait 为本次调用返回的 history"
+                    )
+                    + " 回收每个 point 的"
                     "变量、output、spec 和 pass/fail；通过 Bridge shell 在"
-                    " project/scratch 精确 history 路径只读枚举网表、PSF/结果和日志，"
+                    " project/scratch 精确 history 路径与唯一 runtime input 根"
+                    "只读枚举网表、PSF/结果和日志，"
                     "在 profile /data/xum run root 写入并保留小型 TSV，再下载"
                     "大小与 SHA-256；双路径同名内容冲突时失败"
+                    + (
+                        "；从唯一 runtime 根读取 input.scs 并核对 test design、"
+                        "OA 连接与显式 raw 参数映射"
+                        if task.ade_run.require_simulator_input_consistency
+                        else ""
+                    )
                 ),
                 SideEffect.REMOTE_COMPUTE,
             ),
@@ -246,9 +282,14 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 update={
                     "id": "05-persist",
                     "description": (
-                        "记录 setup test=bridge_readback、history/output=eda_result；"
-                        "后台运行成功不等于已满足 VDA constraints"
-                    ),
+                    "记录 setup test=bridge_readback、history/output=eda_result；"
+                    + (
+                        "resume 成功只补齐既有 history 证据，不重复计算；"
+                        if resume
+                        else ""
+                    )
+                    + "后台运行成功不等于已满足 VDA constraints"
+                ),
                 }
             ),
         ]

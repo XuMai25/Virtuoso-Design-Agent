@@ -84,6 +84,44 @@ def _install_fake_maestro_module(
     monkeypatch.setitem(sys.modules, "virtuoso_bridge.virtuoso.ops", ops)
 
 
+def _stub_background_runtime(monkeypatch: pytest.MonkeyPatch) -> dict:
+    scratch_root = "/data/xum/vda_runs/vda_ade_run_test_0123456789ab"
+    analog_run_dir = (
+        f"{scratch_root}/vda_test/vda_manual_tb/maestro/results/maestro/"
+        ".tmpADEDir_vda/0_AC/simulation/vda_manual_tb/spectre/schematic/netlist"
+    )
+    runtime = {
+        "scratch_root": scratch_root,
+        "tests": [
+            {
+                "test": "AC",
+                "previous": {
+                    "project_dir": "/home/xum/simulation/AC",
+                    "results_dir": "/home/xum/simulation/AC",
+                    "analog_run_dir": "/home/xum/simulation/AC/netlist",
+                },
+                "applied": {
+                    "project_dir": analog_run_dir.rsplit("/vda_manual_tb/", 1)[0],
+                    "results_dir": analog_run_dir.rsplit("/vda_manual_tb/", 1)[0],
+                    "analog_run_dir": analog_run_dir,
+                },
+            }
+        ],
+        "evidence_source": "bridge_readback",
+    }
+    monkeypatch.setattr(
+        bridge_worker,
+        "_configure_background_ade_runtime",
+        lambda *_args, **_kwargs: runtime,
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_restore_background_ade_runtime",
+        lambda *_args, **_kwargs: None,
+    )
+    return runtime
+
+
 def test_pdk_profile_contains_verified_nics4304_paths() -> None:
     profile = load_pdk_profile("nics4304_tsmc28")
     assert profile.tech_library == "tsmcN28"
@@ -183,6 +221,11 @@ def test_prepare_maestro_creates_new_persistent_test_and_reads_it_back(
                 )
             if "maeGetSetup" in expression:
                 return SimpleNamespace(output='("VDA_AC")', errors=[])
+            if "designObj" in expression:
+                return SimpleNamespace(
+                    output='("source_lib" "legacy_tb" "schematic")',
+                    errors=[],
+                )
             raise AssertionError(expression)
 
     sessions = iter(["fnxSession1", "fnxSession2"])
@@ -220,7 +263,11 @@ def test_prepare_maestro_creates_new_persistent_test_and_reads_it_back(
             "ade_prepare": {
                 "backend": "maestro",
                 "test_name": "VDA_AC",
-                "design_view": "schematic",
+                "design": {
+                    "library": "source_lib",
+                    "cell": "legacy_tb",
+                    "view": "schematic",
+                },
                 "simulator": "spectre",
             },
         }
@@ -228,10 +275,18 @@ def test_prepare_maestro_creates_new_persistent_test_and_reads_it_back(
 
     create_call = next(call for call in calls if call[0] == "create_test")
     assert create_call[1] == "VDA_AC"
+    assert create_call[2]["lib"] == "source_lib"
+    assert create_call[2]["cell"] == "legacy_tb"
     assert create_call[2]["view"] == "schematic"
     assert create_call[2]["simulator"] == "spectre"
     assert prepared["persistent_view_confirmed"] is True
     assert prepared["tests_readback"] == ["VDA_AC"]
+    assert prepared["design_target_confirmed"] is True
+    assert prepared["design_readback"] == {
+        "library": "source_lib",
+        "cell": "legacy_tb",
+        "view": "schematic",
+    }
     assert prepared["existing_maestro_overwritten"] is False
     assert prepared["schematic_oa_write_performed"] is False
     assert prepared["maestro_oa_write_performed"] is True
@@ -274,12 +329,96 @@ def test_prepare_maestro_refuses_an_existing_manual_view(
         )
 
 
+def test_background_ade_runtime_redirects_each_test_and_restores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str, str]] = []
+    states = {
+        "AC": {
+            "project_dir": "/home/xum/simulation/AC",
+            "results_dir": "/home/xum/simulation/AC",
+            "analog_run_dir": "/home/xum/simulation/AC/netlist",
+        },
+        "TRAN": {
+            "project_dir": "/home/xum/simulation/TRAN",
+            "results_dir": "/home/xum/simulation/TRAN",
+            "analog_run_dir": "/home/xum/simulation/TRAN/netlist",
+        },
+    }
+
+    class Client:
+        def execute_skill(self, expression, **kwargs):
+            parts = expression.split('"')
+            test = parts[1]
+            if "asiSetProjectDir" in expression:
+                project_dir, results_dir = parts[5], parts[7]
+                calls.append(("set", test, project_dir))
+                states[test] = {
+                    "project_dir": project_dir,
+                    "results_dir": results_dir,
+                    "analog_run_dir": (
+                        f"{project_dir}/vda_manual_tb/spectre/schematic/netlist"
+                    ),
+                }
+            state = states[test]
+            return SimpleNamespace(
+                output=(
+                    f'("{state["project_dir"]}" "{state["results_dir"]}" '
+                    f'"{state["analog_run_dir"]}")'
+                ),
+                errors=[],
+            )
+
+    _install_fake_maestro_module(monkeypatch)
+    client = Client()
+    runtime = bridge_worker._configure_background_ade_runtime(
+        client,
+        {
+            "task_id": "saved-maestro",
+            "profile": {"remote_run_root": "/data/xum/vda_runs"},
+        },
+        session="fnxBackground8",
+        tests=["AC", "TRAN"],
+        library="vda_test",
+        cell="vda_manual_tb",
+        view="maestro",
+    )
+
+    assert runtime["scratch_root"].startswith(
+        "/data/xum/vda_runs/vda_ade_run_saved-maestro_"
+    )
+    assert [item["test"] for item in runtime["tests"]] == ["AC", "TRAN"]
+    assert all(
+        item["applied"]["project_dir"].startswith(runtime["scratch_root"] + "/")
+        for item in runtime["tests"]
+    )
+    assert all(
+        "/vda_test/vda_manual_tb/maestro/results/maestro/" in
+        item["applied"]["analog_run_dir"]
+        for item in runtime["tests"]
+    )
+
+    bridge_worker._restore_background_ade_runtime(
+        client, session="fnxBackground8", runtime=runtime
+    )
+
+    assert states["AC"]["project_dir"] == "/home/xum/simulation/AC"
+    assert states["TRAN"]["project_dir"] == "/home/xum/simulation/TRAN"
+    assert [call[1] for call in calls[-2:]] == ["TRAN", "AC"]
+
+
 def test_background_maestro_run_uses_exact_new_history_and_closes_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple] = []
-    scratch_root = (
+    scratch_maestro_root = (
         "/data/xum/scratch/vda_test/vda_manual_tb/maestro/results/maestro"
+    )
+    project_maestro_root = "/data/xum/cds/vda_test/vda_manual_tb/maestro/results/maestro"
+    runtime_input_root = (
+        "/data/xum/vda_runs/vda_ade_run_test_0123456789ab/vda_test/"
+        "vda_manual_tb/maestro/results/maestro/.tmpADEDir_vda/0_AC/"
+        "simulation/vda_manual_tb/spectre/schematic/netlist"
     )
 
     class Client:
@@ -306,13 +445,19 @@ def test_background_maestro_run_uses_exact_new_history_and_closes_session(
         def download_file(self, remote_path, local_path, **kwargs):
             calls.append(("download", remote_path, kwargs))
             contents = ""
-            if remote_path.endswith("1_scratch.tsv"):
+            if remote_path.endswith("0_history_0_project.tsv"):
                 rows = [
-                    (12, "1" * 64, f"{scratch_root}/Interactive.8/1/AC/netlist/netlist"),
-                    (18, "2" * 64, f"{scratch_root}/Interactive.8/1/AC/netlist/input.scs"),
-                    (24, "3" * 64, f"{scratch_root}/Interactive.8/1/AC/psf/ac.ac"),
-                    (30, "4" * 64, f"{scratch_root}/Interactive.8.log"),
+                    (24, "3" * 64, f"{project_maestro_root}/Interactive.8.rdb"),
+                    (30, "4" * 64, f"{project_maestro_root}/Interactive.8.log"),
                 ]
+            elif remote_path.endswith("2_runtime_0.tsv"):
+                rows = [
+                    (12, "1" * 64, f"{runtime_input_root}/netlist"),
+                    (18, "2" * 64, f"{runtime_input_root}/input.scs"),
+                ]
+            else:
+                rows = []
+            if rows:
                 contents = "".join(
                     f"VDA_ARTIFACT\t{size}\t{digest}\t{path}\n"
                     for size, digest, path in rows
@@ -351,6 +496,7 @@ def test_background_maestro_run_uses_exact_new_history_and_closes_session(
         run_and_wait=fake_run_and_wait,
         read_results=fake_read_results,
     )
+    runtime = _stub_background_runtime(monkeypatch)
     monkeypatch.setattr(bridge_worker, "_client", Client)
 
     result = bridge_worker.run_background_maestro(
@@ -381,10 +527,16 @@ def test_background_maestro_run_uses_exact_new_history_and_closes_session(
     assert result["automated_simulation_performed"] is True
     assert result["oa_write_performed"] is False
     assert result["maestro_setup_write_performed"] is False
+    assert result["runtime_scratch_root"] == runtime["scratch_root"]
+    assert result["runtime_directory_persisted"] is False
+    assert result["runtime_directory_restored"] is True
+    assert result["runtime_artifacts_restricted_to_data_xum"] is True
     assert result["artifacts_captured"] is True
     assert result["artifact_manifest_complete"] is True
     assert result["artifact_history"] == "Interactive.8"
     assert result["artifact_history_path_binding_verified"] is True
+    assert result["artifact_runtime_input_binding_verified"] is True
+    assert result["artifact_run_binding_verified"] is True
     assert result["artifact_counts"] == {
         "simulator_input": 2,
         "eda_result": 1,
@@ -394,20 +546,97 @@ def test_background_maestro_run_uses_exact_new_history_and_closes_session(
     assert len(result["artifact_manifest"]) == 4
     assert result["simulation_fingerprint_sha256"]
     assert result["remote_manifest_directory"].startswith(
-        "/data/xum/vda_runs/vda_ade_manifest_run-saved-maestro_"
+        "/data/xum/vda_runs/vda_ade_manifest_"
     )
     assert ("run", {"session": "fnxBackground8", "timeout": 321}) in calls
     read_call = next(call for call in calls if call[0] == "results")
     assert read_call[2]["history"] == "Interactive.8"
     assert calls[-1] == ("close", "fnxBackground8")
     assert any(
-        call[0] == "download" and call[1].endswith("0_project.tsv")
+        call[0] == "download" and call[1].endswith("0_history_0_project.tsv")
         for call in calls
     )
     assert any(
-        call[0] == "download" and call[1].endswith("1_scratch.tsv")
+        call[0] == "download" and call[1].endswith("2_runtime_0.tsv")
         for call in calls
     )
+
+
+def test_background_maestro_resume_reads_exact_history_without_running_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+
+    class Client:
+        def execute_skill(self, expression, **kwargs):
+            if "ddGetObj" in expression:
+                return SimpleNamespace(output="t", errors=[])
+            if "maeGetSetup" in expression:
+                return SimpleNamespace(output='("VDA")', errors=[])
+            raise AssertionError(expression)
+
+    def unexpected_run(*_args, **_kwargs):
+        raise AssertionError("resume must not call run_and_wait")
+
+    def fake_read_results(_client, session, **kwargs):
+        calls.append(("results", session, kwargs))
+        return {
+            "history": "Interactive.0",
+            "points": [{"outputs": {"VoutAvg": {"value": "364m"}}}],
+        }
+
+    _install_fake_maestro_module(
+        monkeypatch,
+        open_session=lambda *_args: "fnxResume0",
+        close_session=lambda _client, session: calls.append(("close", session)),
+        run_and_wait=unexpected_run,
+        read_results=fake_read_results,
+    )
+    runtime = _stub_background_runtime(monkeypatch)
+    monkeypatch.setattr(bridge_worker, "_client", Client)
+    monkeypatch.setattr(
+        bridge_worker,
+        "_collect_background_ade_artifacts",
+        lambda *_args, **_kwargs: {
+            "artifact_history": "Interactive.0",
+            "artifact_history_path_binding_verified": True,
+            "artifact_runtime_input_binding_verified": True,
+            "artifact_run_binding_verified": True,
+            "artifact_manifest": [
+                {
+                    "path": "Interactive.0/runtime/VDA/input.scs",
+                    "category": "simulator_input",
+                }
+            ],
+            "artifact_counts": {"simulator_input": 1},
+            "artifact_manifest_complete": True,
+            "artifacts_captured": True,
+            "simulation_fingerprint_sha256": "a" * 64,
+        },
+    )
+
+    result = bridge_worker.run_background_maestro(
+        {
+            "task_id": "resume-saved-maestro",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "profile": {"remote_run_root": "/data/xum/vda_runs"},
+            "ade_run": {
+                "resume_history": "Interactive.0",
+                "resume_runtime_scratch_root": runtime["scratch_root"],
+            },
+        }
+    )
+
+    assert result["history"] == "Interactive.0"
+    assert result["run_status"] == "recovered"
+    assert result["history_recovery_performed"] is True
+    assert result["simulation_performed_by_this_invocation"] is False
+    assert calls[0][0] == "results"
+    assert calls[-1] == ("close", "fnxResume0")
 
 
 def test_background_maestro_run_rejects_empty_structured_results_and_closes(
@@ -436,6 +665,7 @@ def test_background_maestro_run_rejects_empty_structured_results_and_closes(
             "points": [],
         },
     )
+    _stub_background_runtime(monkeypatch)
     monkeypatch.setattr(bridge_worker, "_client", Client)
     monkeypatch.setattr(
         bridge_worker,
@@ -487,27 +717,251 @@ def test_remote_ade_manifest_rejects_a_different_history_path() -> None:
 
 
 def test_remote_ade_artifact_hash_command_is_single_line_and_shell_quoted() -> None:
-    command = bridge_worker._ade_artifact_hash_command(
-        history_root=(
-            "/data/xum/scratch/vda_test/cell/maestro/results/maestro/"
-            "Interactive.8"
+    tree_root = (
+        "/data/xum/scratch/vda_test/cell/maestro/results/maestro/"
+        "Interactive.8"
+    )
+    maestro_root = "/data/xum/scratch/vda_test/cell/maestro/results/maestro"
+    manifest_path = "/data/xum/vda runs/manifest/scratch.tsv"
+    commands = bridge_worker._ade_artifact_hash_commands(
+        tree_root=tree_root,
+        manifest_path=manifest_path,
+        companions=(
+            f"{maestro_root}/Interactive.8.log",
+            f"{maestro_root}/Interactive.8.rdb",
+            f"{maestro_root}/Interactive.8.msg.db",
         ),
-        maestro_root="/data/xum/scratch/vda_test/cell/maestro/results/maestro",
-        history="Interactive.8",
-        manifest_dir="/data/xum/vda runs/manifest",
-        manifest_path="/data/xum/vda runs/manifest/scratch.tsv",
     )
 
-    parts = shlex.split(command)
+    assert len(commands) == 7
+    assert all("\n" not in command for command in commands)
+    assert all(
+        len('csh("")' + command.replace("\\", "\\\\").replace('"', '\\"'))
+        < 768
+        for command in commands
+    )
+    parsed = [shlex.split(command) for command in commands]
+    assert all(parts[:2] == ["sh", "-c"] for parts in parsed)
+    assert all(parts[3] == "sh" for parts in parsed)
+    assert all(parts[4] == manifest_path for parts in parsed[:4])
+    assert all(
+        parts[4] == "/data/xum/vda runs/manifest" for parts in parsed[-3:]
+    )
+    assert all(parts[5] == "scratch.tsv" for parts in parsed[-3:])
+    assert all("$" not in parts[2].replace(r"\$", "") for parts in parsed)
+    assert parsed[0][5] == tree_root
+    assert parsed[3][-1] == f"{maestro_root}/Interactive.8.msg.db"
+    assert "sha256sum" in parsed[-3][2]
+    assert "wc -c" in parsed[-2][2]
+    assert "paste" in parsed[-1][2]
 
-    assert "\n" not in command
-    assert parts[:2] == ["sh", "-c"]
-    assert parts[3] == "sh"
-    assert parts[-2:] == [
-        "/data/xum/vda runs/manifest",
-        "/data/xum/vda runs/manifest/scratch.tsv",
+
+def test_remote_ade_manifest_accepts_joined_size_and_sha256_rows() -> None:
+    maestro_root = "/data/xum/scratch/vda_test/cell/maestro/results/maestro"
+    remote_path = f"{maestro_root}/Interactive.8.log"
+    text = f"24 {remote_path}\t{'a' * 64}  {remote_path}\n"
+
+    entries = bridge_worker._parse_remote_ade_artifact_manifest(
+        text,
+        history="Interactive.8",
+        source_location="scratch",
+        maestro_root=maestro_root,
+    )
+
+    assert entries == [
+        {
+            "path": "Interactive.8/Interactive.8.log",
+            "remote_path": remote_path,
+            "source_location": "scratch",
+            "size_bytes": 24,
+            "sha256": "a" * 64,
+            "category": "run_log",
+            "binding": "exact_history_companion",
+            "evidence_source": "eda_result",
+        }
     ]
-    assert "sha256sum" in parts[7]
+
+
+def test_remote_manifest_skill_fallback_reads_bounded_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_maestro_module(monkeypatch)
+    calls: list[str] = []
+    pages = iter(
+        [
+            '(2 "first\\nsecond\\n")',
+            '(1 "third\\n")',
+        ]
+    )
+
+    class Client:
+        def execute_skill(self, expression, **_kwargs):
+            calls.append(expression)
+            return SimpleNamespace(ok=True, output=next(pages), errors=[])
+
+    text = bridge_worker._read_remote_text_via_skill(
+        Client(),
+        "/data/xum/vda_runs/manifest.tsv",
+        page_lines=2,
+    )
+
+    assert text == "first\nsecond\nthird\n"
+    assert len(calls) == 2
+    assert "skipped<0" in calls[0]
+    assert "skipped<2" in calls[1]
+
+
+def test_bridge_results_csv_download_has_narrow_skill_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_maestro_module(monkeypatch)
+    remote_path = f"/tmp/vb_results_{'a' * 32}.csv"
+
+    class Client:
+        def download_file(self, remote, local, **_kwargs):
+            assert remote == remote_path
+            assert Path(local) == tmp_path / "results.csv"
+            return SimpleNamespace(ok=False, errors=["dns unavailable"])
+
+        def execute_skill(self, expression, **_kwargs):
+            assert remote_path in expression
+            return SimpleNamespace(
+                ok=True,
+                output='(1 "Point,Test,Output\\n")',
+                errors=[],
+            )
+
+    client = bridge_worker._BridgeTextDownloadFallback(Client())
+    local_path = tmp_path / "results.csv"
+
+    client.download_file(remote_path, local_path, timeout=60)
+
+    assert local_path.read_text(encoding="utf-8") == "Point,Test,Output\n"
+    assert client.skill_fallback_paths == [remote_path]
+
+
+def test_single_point_detail_csv_is_normalized_for_bridge_parser(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "detail.csv"
+    path.write_text(
+        ",Parameter,Nominal,,,\n\n\n"
+        "Test,Output,Nominal,Spec,Weight,Pass/Fail\n"
+        "VDA,Vin,,,,\n"
+        "VDA,VoutAvg,364e-3,> 0.1,,pass\n",
+        encoding="utf-8",
+    )
+
+    compatibility = bridge_worker._normalize_single_point_detail_csv(path)
+
+    assert compatibility is not None
+    assert compatibility["normalization"] == (
+        "cadence_single_point_detail_add_point_column"
+    )
+    assert compatibility["original_sha256"] != compatibility["normalized_sha256"]
+    normalized = path.read_text(encoding="utf-8")
+    assert "Point,Test,Output,Nominal,Spec,Weight,Pass/Fail" in normalized
+    assert "1,VDA,VoutAvg,364e-3,> 0.1,,pass" in normalized
+
+
+def test_ade_spectre_input_matches_oa_raw_parameters_but_excludes_wfg() -> None:
+    text = """// Design library name: vb_pdk_smoke
+// Design cell name: inverter_tb
+// Design view name: schematic
+simulator lang=spectre
+MP0 (OUT IN VDD VDD) pch_lvt_mac l=30n w=100n multi=1 nf=1
+MN0 (OUT IN 0 0) nch_lvt_mac l=30n w=100n multi=1 nf=1
+VIN0 (IN 0) vsource type=pulse val0=0 val1=900m period=100p delay=0 rise=5p fall=5p width=50p
+VDD0 (VDD 0) vsource dc=900m type=dc
+CL0 (OUT 0) capacitor c=2f
+tran tran stop=300p maxstep=1p
+save IN OUT
+"""
+    schematic = {
+        "instances": [
+            {
+                "name": "MP0",
+                "lib": "tsmcN28",
+                "cell": "pch_lvt_mac",
+                "params": {
+                    "model": "pch_lvt_mac",
+                    "l": "30n",
+                    "w": "100n",
+                    "Wfg": "1u",
+                    "nf": "1",
+                    "simM": "1",
+                },
+                "terms": {"D": "OUT", "G": "IN", "S": "VDD", "B": "VDD"},
+            },
+            {
+                "name": "MN0",
+                "lib": "tsmcN28",
+                "cell": "nch_lvt_mac",
+                "params": {
+                    "model": "nch_lvt_mac",
+                    "l": "30n",
+                    "w": "100n",
+                    "Wfg": "500n",
+                    "nf": "1",
+                    "simM": "1",
+                },
+                "terms": {"D": "OUT", "G": "IN", "S": "gnd!", "B": "gnd!"},
+            },
+            {
+                "name": "VIN0",
+                "lib": "analogLib",
+                "cell": "vpulse",
+                "params": {
+                    "v1": "0",
+                    "v2": "900m",
+                    "per": "100p",
+                    "td": "0",
+                    "tr": "5p",
+                    "tf": "5p",
+                    "pw": "50p",
+                    "srcType": "pulse",
+                },
+                "terms": {"PLUS": "IN", "MINUS": "gnd!"},
+            },
+            {
+                "name": "VDD0",
+                "lib": "analogLib",
+                "cell": "vdc",
+                "params": {"vdc": "900m", "srcType": "dc"},
+                "terms": {"PLUS": "VDD", "MINUS": "gnd!"},
+            },
+            {
+                "name": "CL0",
+                "lib": "analogLib",
+                "cell": "cap",
+                "params": {"c": "2f"},
+                "terms": {"PLUS": "OUT", "MINUS": "gnd!"},
+            },
+            {
+                "name": "GND0",
+                "lib": "analogLib",
+                "cell": "gnd",
+                "params": {},
+                "terms": {"gnd!": "gnd!"},
+            },
+        ]
+    }
+    design = {"library": "vb_pdk_smoke", "cell": "inverter_tb", "view": "schematic"}
+
+    comparison = bridge_worker._compare_ade_input_to_schematic(
+        bridge_worker._parse_ade_spectre_input(text),
+        schematic,
+        design=design,
+    )
+
+    assert comparison["verified_parameter_pairs"] == 19
+    assert comparison["omitted_ground_symbols"] == ["GND0"]
+    assert comparison["effective_pdk_width_semantics_verified"] is False
+    assert {item["instance"] for item in comparison["excluded_cdf_semantics"]} == {
+        "MN0",
+        "MP0",
+    }
 
 
 def test_remote_ade_manifest_deduplicates_identical_copies_and_rejects_conflict() -> None:
@@ -609,6 +1063,7 @@ def test_background_maestro_run_rejects_artifact_transport_failure_and_closes(
             "points": [{"outputs": {"BW": {"value": "1G"}}}],
         },
     )
+    _stub_background_runtime(monkeypatch)
     monkeypatch.setattr(bridge_worker, "_client", Client)
 
     with pytest.raises(RuntimeError, match="transport interrupted") as failure:
@@ -625,9 +1080,7 @@ def test_background_maestro_run_rejects_artifact_transport_failure_and_closes(
             }
         )
 
-    assert "/data/xum/vda_runs/vda_ade_manifest_transport-failure_" in str(
-        failure.value
-    )
+    assert "/data/xum/vda_runs/vda_ade_manifest_" in str(failure.value)
     assert calls[-1] == ("close", "fnxBackground8")
 
     calls.clear()
@@ -676,6 +1129,7 @@ def test_background_maestro_run_rejects_structured_history_mismatch_and_closes(
             "points": [{"outputs": {"BW": {"value": "1G"}}}],
         },
     )
+    _stub_background_runtime(monkeypatch)
     monkeypatch.setattr(bridge_worker, "_client", Client)
 
     with pytest.raises(RuntimeError, match="history does not match"):
@@ -1158,6 +1612,7 @@ def test_maestro_setup_readback_parser_preserves_skill_values_and_escapes(
                 )
             if "maeGetTestOutputs" in expression:
                 assert "axlGetSpecData" in expression
+                assert 'sprintf(nil "%L" o~>expression)' in expression
                 return SimpleNamespace(
                     output=(
                         '(1 "BW" \'point nil "bandwidth(mag(VF(\\"/OUT\\")) '

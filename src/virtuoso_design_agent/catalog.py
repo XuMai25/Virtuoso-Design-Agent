@@ -68,8 +68,9 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
         explicit_instance_parameters=True,
         evidence_gate=(
             "unfiltered Bridge schematic readback + targeted CDF value verification + "
-            "non-overwrite ADE prepare + human-operated capture + background exact-"
-            "history artifact run + CAS declared-scope variable/setup patch (live pending)"
+            "live non-overwrite ADE prepare/setup patch/background run-resume + exact-"
+            "history/result/log and OA-to-runtime-input consistency; human capture and "
+            "declared-scope variable patch live pending"
         ),
     ),
     CircuitKind.INVERTER: CircuitCapability(
@@ -87,8 +88,9 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
         explicit_instance_parameters=True,
         evidence_gate=(
             "OA readback + si netlist consistency + transient timing/supply energy + "
-            "bounded search + non-overwrite ADE prepare/capture/background exact-"
-            "history artifact run/CAS declared-scope variable/setup patch (live pending)"
+            "bounded search + live non-overwrite ADE prepare/setup patch/background "
+            "run-resume and OA-to-runtime-input consistency; capture/variable/corner "
+            "ADE gates pending"
         ),
     ),
     CircuitKind.COMMON_SOURCE: CircuitCapability(
@@ -110,8 +112,8 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "OA readback + si netlist consistency + DC region + complex AC + "
             "bounded W/RD/RS AC + AC/linearity/noise quality tuning, OA writeback, "
             "infeasible restore, checkpoint recovery, and non-overwrite ADE "
-            "prepare/capture/background exact-history artifact run/CAS declared-scope "
-            "variable/setup patch (live pending); "
+            "prepare/setup/background exact-history run-resume path live on the TSMC "
+            "inverter handoff; common-source capture/variable/corner ADE gates and "
             "L/VDD/corner pending"
         ),
     ),

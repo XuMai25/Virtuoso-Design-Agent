@@ -48,7 +48,7 @@ VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PD
 | `parameters.apply` | 应用指定参数并回读 | OA 写入 |
 | `ade.prepare` | 为已有 design 新建持久化 Spectre-backed Maestro view/test；拒绝已有 view | Maestro OA 写入 |
 | `ade.capture` | 捕获人工聚焦并已保存的 Maestro setup、history 和已有真实结果 | 远端只读 + 本地证据写入 |
-| `ade.run` | 在独立后台 session 运行已保存的 Maestro setup，读取本次 history 的逐点 output/spec 与 exact-history input/result/log 哈希清单 | 远端计算，不写 OA/setup |
+| `ade.run` | 在独立后台 session 运行或恢复已保存的 Maestro setup，读取逐点 output/spec、exact-history/result/log 与唯一 runtime input 哈希；可要求 OA→`input.scs` 一致性 | 远端计算，不写 OA/setup |
 | `ade.variables.apply` | 以 tests、可选 enabled corners 和逐 scope 旧值为前置条件修改 global/test/corner Maestro 变量，保存后独立重开回读 | Maestro setup 写入 |
 | `ade.setup.apply` | 对声明 analysis 做旧状态 CAS，并新增不存在的命名 output/spec；一次保存后独立重开回读 | Maestro setup 写入 |
 | `simulation.run` | 单点仿真并判规格 | scratch/计算 |
@@ -92,9 +92,11 @@ ADE 兼容是当前架构约束，不是 UI 附加项。VDA 可以规划、搜�
 
 无需 GUI 的自动分支由 `ade.run` 提供。worker 明确打开目标 cell 的独立 background Maestro session，回读非空 test 列表，通过 Bridge `run_and_wait` 取得本次调用返回的 history，再把该 history 传给 `read_results`。它不调用 `save_setup`、不改变窗口焦点、不写 schematic 或 Maestro OA。默认必须同时得到非空逐点 output/spec 与完整产物清单；任一要求被显式放宽且证据缺失时，executor 只记为 `partial`。setup test 标为 `bridge_readback`，history/output 与 simulator input/result/log 哈希标为 `eda_result`。
 
-后台产物不依赖聚焦窗口的 `snapshot`。VDA 经 Bridge SKILL channel 读取 library path 与当前 background session 的 `asiGetAnalogRunDir`，只接受 `/data/xum` 下且含声明 `library/cell/maestro/results/maestro` anchor 的路径；随后在 project 与 scratch 两个 Maestro 根下分别固定本次 history，调用 Bridge 公共 shell 通道生成远端 TSV 哈希清单，并用 Bridge 公共 file-transfer 下载该小文件。清单只含路径、大小和 SHA-256，不复制完整 PSF。每条路径必须位于确切 history 或其同名 `.log/.rdb/.msg.db`，`netlist`、`input.scs`、至少一个非空结果和至少一个非空日志是硬门；双根同一逻辑路径内容不同时拒绝。远端清单保留在 profile 的 run root 下，因此失败后仍可定位。
+后台产物不依赖聚焦窗口的 `snapshot`。VDA 对每个 test 的 Analog Session 临时设置 project/results dir，使 `asiGetAnalogRunDir` 落在 profile 的唯一 `/data/xum` scratch，并立即回读；退出前按逆序恢复原 session 值，不调用 `save_setup`。恢复任务必须同时给出 exact history 与原 runtime scratch，且不再次调用 `run_and_wait`。随后在 project/scratch 的 exact-history 路径收集 `.log/.rdb/.msg.db`，在唯一 runtime input 根收集普通文件，调用 Bridge 公共 shell 通道生成远端 TSV 大小/SHA-256 清单。每条路径必须绑定到这两类根之一；`netlist`、`input.scs`、至少一个非空结果和至少一个非空日志是硬门，重复逻辑路径内容不同时拒绝。
 
-这条证据链证明“返回的 history 名对应当前可见的输入/结果/日志路径内容”，不证明该 history 名在运行前不存在，也不证明保存 setup 中声明的 design variable 已以预期语义进入 netlist。history 命名和覆盖策略仍沿用已保存 setup，VDA 尚不能在运行前证明名称唯一；ADE output 也尚未映射为 VDA constraints。它是后台同源产物摄取契约，不是完整规格闭环。
+Bridge 的标准 `download_file` 仍是首选传输。nics4304 live smoke 暴露本机 DNS 暂时不能解析 `nics4304-cad1` 时，现有 Virtuoso tunnel/CIW 仍在线；VDA 因而只对自己生成的 `/data/xum/.../vda_ade_manifest_*.tsv` 和 Bridge 自己生成的 `/tmp/vb_results_<uuid>.csv` 提供有行数/字节上限的 SKILL 文本读取 fallback。它不传输 PSF 或任意远端文件，不替代 Bridge 的 SSH/SCP。IC6.1.8 单点 Detail CSV 缺少 `Point` 列时，VDA 只在临时本地 CSV 精确识别六列格式后补 `Point=1`，再交给 Bridge 原解析器；归一化前后 SHA-256 和 `software_inference` 标记进入证据。Bridge 源码没有修改。
+
+可选的 `require_simulator_input_consistency` 再从 manifest 精确读取每个 test 的 `input.scs`，先核对文件哈希和 Design library/cell/view header，再独立回读该 source schematic，比较实例集合、已知 primitive 的节点顺序和显式 raw 参数映射。当前 TSMC N28 smoke 覆盖 MOS `l/w/nf/simM→multi`、pulse/DC source 与 capacitor，共 19 组映射；`Wfg` 明确标为 PDK CDF 派生语义，不能用字面 `w` 相等代替。这个 Gate 证明当前输入与 OA raw state 同源，但不证明所有 PDK CDF 派生关系，也不证明 history 名在运行前不存在。history 命名/覆盖策略仍沿用已保存 setup，ADE output 也尚未映射为通用 VDA constraints；它不是完整规格闭环。
 
 自动微调 setup 的首个切片是 `ade.variables.apply`。任务必须给出 exact `expected_tests`；使用 corner scope 时还要给出 exact enabled `expected_corners`。每个变量必须给出 scope、可选 scope name、`expected_value`（`null` 表示该 scope 不存在）和新字符串。worker 在任何已配置 Maestro session 已打开时拒绝，随后以独立 background session 先读完所有声明 scope 的旧值；只有 tests/corners/旧值全部匹配才逐项 `set_var/get_var`，一次 `save_setup` 后关闭，并用全新 session 再次核对。global 读取复用 Bridge public `get_var`；test/corner 写入复用 public `set_var`，读取通过 Bridge SKILL channel 调用 Cadence public scoped `maeGetVar`，没有修改第三方仓库。请求属于 `user_input`，旧值、即时值和持久化值属于 `bridge_readback`。tests + 可选 corners + 声明 scope 形成 targeted 前后指纹，但不是完整 setup 指纹。逗号列表只说明该 scope 声明了 sweep；未声明 override、history 中各 sweep point 和最终 netlist/仿真是否采用该值仍未验证。
 
@@ -102,7 +104,7 @@ ADE 兼容是当前架构约束，不是 UI 附加项。VDA 可以规划、搜�
 
 首版本只新增不存在的命名 output，不替换已有 output：Bridge public writer 没有暴露删除接口，而仅凭同名 `add_output` 无法证明是更新、重复还是丢失未建模的 plot/save/description 状态。VDA 没有删除或屏蔽 Bridge 原有接口；需要直接使用 Bridge 的场景仍可独立进行。要把已有 output 替换纳入受控 operation，必须先扩充完整旧状态契约、删除/恢复语义和 live smoke。analysis options 当前只接受可精确回读的扁平 string/bool/null alist；嵌套 option 返回会保守失败而非丢弃。
 
-当前受支持的持久化后端是 `maestro`，因为这是 Bridge 已公开并带 setup/history/result API 的路径。Bridge 同时提供 ADE L state 到 Maestro 的迁移原语，但 VDA 尚未把迁移包装成 operation，也不会在没有备份、目标冲突检查和 live smoke 时改写旧 state。`ade.run` 已在本地实现后台原生 analysis/sweep、Detail 结果回收与 exact-history input/result/log manifest，`ade.variables.apply` 与 `ade.setup.apply` 分别实现变量逐 scope CAS、analysis CAS 和 output/spec 新增的持久化回读；三者都尚无 nics4304 live 证据。下一自动化 Gate 是在专用 cell 上验证“setup patch → background run → 清单/结果回读”，并核对声明变量与实际 netlist，再加入已有 output 安全替换与有限 corner；需要打开 ADE、旧 ADE L 迁移和人工数值对照的 Gate 已延期到 [`deferred-manual-gates.md`](deferred-manual-gates.md)。人工改动必须通过前置条件、setup 指纹或重新 snapshot 被发现，而不是被 VDA 静默覆盖。
+当前受支持的持久化后端是 `maestro`，因为这是 Bridge 已公开并带 setup/history/result API 的路径。Bridge 同时提供 ADE L state 到 Maestro 的迁移原语，但 VDA 尚未把迁移包装成 operation，也不会在没有备份、目标冲突检查和 live smoke 时改写旧 state。2026-07-21 已在 nics4304 真实通过 `ade.prepare → ade.setup.apply → ade.run/resume`：目标 Maestro test 指向另一个既有反相器 schematic，transient/output/spec 持久化回读，`Interactive.0` 的 Detail 结果、RDB/log 与 runtime `input.scs` 哈希闭合，OA→input raw 参数映射一致。`ade.variables.apply` 的逐 scope CAS、`ade.capture` 的人工入口、已有 output 安全替换和有限 corner 仍待 live；需要打开 ADE、旧 ADE L 迁移和人工数值对照的 Gate 已延期到 [`deferred-manual-gates.md`](deferred-manual-gates.md)。人工改动必须通过前置条件、setup 指纹或重新 snapshot 被发现，而不是被 VDA 静默覆盖。
 
 ## 反相器同源仿真路径
 

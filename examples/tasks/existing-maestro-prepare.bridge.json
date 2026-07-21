@@ -12,7 +12,11 @@
   "ade_prepare": {
     "backend": "maestro",
     "test_name": "VDA",
-    "design_view": "schematic",
+    "design": {
+      "library": "vb_pdk_smoke",
+      "cell": "bridge_tsmc28_mos_inv_tb_gnd_20260705_090720",
+      "view": "schematic"
+    },
     "simulator": "spectre"
   },
   "safety": {

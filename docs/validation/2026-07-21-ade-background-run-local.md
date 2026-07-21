@@ -1,6 +1,6 @@
 # 2026-07-21 ADE 后台运行与结果回收本地实现
 
-> 后续增量：exact-history simulator input/result/log 大小与 SHA-256 清单已在本地实现，详见 [`2026-07-21-ade-background-artifact-manifest-local.md`](2026-07-21-ade-background-artifact-manifest-local.md)。下文保留最初 background result-ingestion Gate 的验证快照；其中“不捕获产物”只描述该初始提交，不代表当前代码状态。
+> 后续增量：exact-history simulator input/result/log 大小与 SHA-256 清单已在本地实现，详见 [`2026-07-21-ade-background-artifact-manifest-local.md`](2026-07-21-ade-background-artifact-manifest-local.md)；nics4304 live 同源 Gate 见 [`2026-07-21-ade-background-same-source-live.md`](2026-07-21-ade-background-same-source-live.md)。下文保留最初 background result-ingestion Gate 的验证快照；其中“不捕获产物”只描述该初始提交，不代表当前代码状态。
 
 ## 目标
 

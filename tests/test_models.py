@@ -399,7 +399,11 @@ def test_ade_prepare_is_a_non_overwrite_persistent_handoff_contract() -> None:
             "ade_prepare": {
                 "backend": "maestro",
                 "test_name": "VDA_AC",
-                "design_view": "schematic",
+                "design": {
+                    "library": "source_lib",
+                    "cell": "legacy_tb",
+                    "view": "schematic",
+                },
                 "simulator": "spectre",
             },
         }
@@ -409,6 +413,8 @@ def test_ade_prepare_is_a_non_overwrite_persistent_handoff_contract() -> None:
 
     assert task.ade_prepare is not None
     assert task.ade_prepare.test_name == "VDA_AC"
+    assert task.ade_prepare.design is not None
+    assert task.ade_prepare.design.cell == "legacy_tb"
     assert plan.requires_remote_write
     assert not plan.requires_remote_compute
 
@@ -556,8 +562,67 @@ def test_ade_run_is_background_compute_without_oa_write() -> None:
     assert task.ade_run is not None
     assert task.ade_run.require_structured_outputs is True
     assert task.ade_run.require_artifact_manifest is True
+    assert task.ade_run.require_simulator_input_consistency is False
     assert plan.requires_remote_compute
     assert not plan.requires_remote_write
+
+
+def test_ade_run_resume_requires_an_exact_history_and_data_xum_runtime_pair() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "recover-saved-maestro",
+            "operation": "ade.run",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_run": {
+                "resume_history": "Interactive.0",
+                "resume_runtime_scratch_root": (
+                    "/data/xum/vda_runs/vda_ade_run_saved_1234"
+                ),
+            },
+        }
+    )
+
+    assert task.ade_run is not None
+    assert task.ade_run.resume_history == "Interactive.0"
+    assert build_plan(task).steps[2].capability == "ade.run.resume"
+
+    for ade_run in (
+        {"resume_history": "Interactive.0"},
+        {"resume_runtime_scratch_root": "/data/xum/vda_runs/run"},
+        {
+            "resume_history": "Interactive.0",
+            "resume_runtime_scratch_root": "/home/xum/simulation/run",
+        },
+    ):
+        with pytest.raises(ValidationError, match="resume|/data/xum"):
+            TaskSpec.model_validate(
+                task.model_dump(mode="json") | {"ade_run": ade_run}
+            )
+
+
+def test_ade_input_consistency_requires_artifact_manifest() -> None:
+    with pytest.raises(ValidationError, match="requires the artifact manifest"):
+        TaskSpec.model_validate(
+            {
+                "id": "run-without-input-manifest",
+                "operation": "ade.run",
+                "circuit": "existing_schematic",
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "ade_run": {
+                    "require_artifact_manifest": False,
+                    "require_simulator_input_consistency": True,
+                },
+            }
+        )
 
 
 @pytest.mark.parametrize(

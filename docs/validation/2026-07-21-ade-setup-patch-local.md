@@ -1,6 +1,8 @@
 # 2026-07-21 Maestro analysis/output setup patch 本地实现
 
-状态：**local declared-analysis CAS and add-only output/spec persistence contract implemented; nics4304 live pending**。
+> 后续 nics4304 live Gate 已完成，见 [`2026-07-21-ade-background-same-source-live.md`](2026-07-21-ade-background-same-source-live.md)。下文保留最初本地契约快照。
+
+状态：**local declared-analysis CAS and add-only output/spec persistence contract implemented**。
 
 ## 目标
 

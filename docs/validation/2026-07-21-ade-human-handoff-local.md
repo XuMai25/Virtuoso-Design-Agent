@@ -1,5 +1,7 @@
 # 2026-07-21 ADE 双向人工交接本地实现
 
+> 后续自动分支已在 nics4304 非覆盖创建新 Maestro view，并让该 test 指向另一个既有 schematic；见 [`2026-07-21-ade-background-same-source-live.md`](2026-07-21-ade-background-same-source-live.md)。人工打开/修改/重跑后的 `ade.capture` 仍按计划延期，因此本记录的“双向人工交接”状态没有整体升级。
+
 ## 目标
 
 把“VDA 给出可人工继续操作的 ADE 入口，人工调整后再把真实结果交回 VDA”提升为正式 operation，而不是依赖口头约定。首个纵向切片可以为已有 design 新建一个明确不存在的 ADE Explorer/Assembler Maestro view/test，也可以接收由用户保存、运行并聚焦的 view；不修改任何已有 Maestro 状态，不在本 Gate 自动配置 analysis/sweep 或运行仿真。
@@ -62,4 +64,4 @@
 
 ## 后续 Gate（人工部分已延期）
 
-人工 prepare/edit/capture、旧 ADE L 迁移和数值交叉检查已按用户决定延期，详见 [`../deferred-manual-gates.md`](../deferred-manual-gates.md)。global/test/corner 逐 scope 旧值 CAS 已由 [`ade.variables.apply`](2026-07-21-ade-scoped-variable-patch-local.md) 完成本地契约，analysis CAS 与 output/spec 新增由 [`ade.setup.apply`](2026-07-21-ade-setup-patch-local.md) 完成本地契约；[`ade.run`](2026-07-21-ade-background-run-local.md) 的 background exact-history input/result/log 清单也已完成[本地契约](2026-07-21-ade-background-artifact-manifest-local.md)。当前自动化 Gate 转为专用 cell live smoke 与网表参数核对；延期项目完成前不升级人工兼容状态。
+自动 `ade.prepare`、analysis/output patch 与 background same-source run/resume 已完成 live Gate。人工 edit/capture、旧 ADE L 迁移和数值交叉检查仍按用户决定延期，详见 [`../deferred-manual-gates.md`](../deferred-manual-gates.md)。global/test/corner 逐 scope 旧值 CAS 只有本地契约；下一自动化 Gate 是变量/sweep/corner 实际进入网表与逐点结果。延期项目完成前不升级人工兼容状态。

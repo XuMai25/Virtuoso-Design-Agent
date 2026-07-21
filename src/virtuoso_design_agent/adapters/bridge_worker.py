@@ -6,7 +6,9 @@ result. It intentionally keeps Bridge imports out of the main VDA environment.
 
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import re
 import shlex
@@ -959,6 +961,37 @@ def _maestro_tests_readback(client, session: str) -> list[str]:
     return re.findall(r'"([^"\\]+)"', raw_tests)
 
 
+def _maestro_test_design_readback(
+    client, test: str, *, session: str
+) -> dict[str, str]:
+    from virtuoso_bridge.virtuoso.ops import escape_skill_string
+
+    escaped_test = escape_skill_string(test)
+    escaped_session = escape_skill_string(session)
+    expression = (
+        "let((a d) "
+        f'a=maeGetTestSession("{escaped_test}" ?session "{escaped_session}") '
+        "d=a~>data~>designObj "
+        "list(d~>libName d~>cellName d~>viewName))"
+    )
+    readback = client.execute_skill(expression, timeout=30)
+    errors = getattr(readback, "errors", None) or []
+    if errors:
+        raise RuntimeError(
+            f"Maestro design readback failed for test {test}: {errors[0]}"
+        )
+    parsed = _parse_skill_sexpr(getattr(readback, "output", ""))
+    if (
+        not isinstance(parsed, list)
+        or len(parsed) != 3
+        or not all(isinstance(value, str) and value for value in parsed)
+    ):
+        raise RuntimeError(
+            f"invalid Maestro design readback for test {test}: {parsed!r}"
+        )
+    return {"library": parsed[0], "cell": parsed[1], "view": parsed[2]}
+
+
 def _maestro_corners_readback(client, session: str) -> list[str]:
     readback = client.execute_skill(
         f'maeGetSetup(?typeName "corners" ?enabled t ?session "{session}")',
@@ -1100,16 +1133,27 @@ def prepare_maestro(payload: dict[str, Any]) -> dict[str, Any]:
     target_view = str(payload["target"].get("view") or "")
     if target_view != "maestro":
         raise RuntimeError("ADE prepare target view must be maestro")
-    design_view = str(settings.get("design_view") or "schematic")
+    requested_design = settings.get("design") or {}
+    design_library = str(requested_design.get("library") or library)
+    design_cell = str(requested_design.get("cell") or cell)
+    design_view = str(
+        requested_design.get("view") or settings.get("design_view") or "schematic"
+    )
+    design = {
+        "library": design_library,
+        "cell": design_cell,
+        "view": design_view,
+    }
     test_name = str(settings.get("test_name") or "VDA")
     simulator = str(settings.get("simulator") or "spectre")
     if simulator != "spectre":
         raise RuntimeError("ADE prepare currently supports only the Spectre simulator")
 
     client = _client()
-    if not _cellview_exists(client, library, cell, design_view):
+    if not _cellview_exists(client, design_library, design_cell, design_view):
         raise RuntimeError(
-            f"ADE prepare requires existing design {library}/{cell}/{design_view}"
+            "ADE prepare requires existing design "
+            f"{design_library}/{design_cell}/{design_view}"
         )
     if _cellview_exists(client, library, cell, "maestro"):
         raise RuntimeError(
@@ -1121,8 +1165,8 @@ def prepare_maestro(payload: dict[str, Any]) -> dict[str, Any]:
         create_test(
             client,
             test_name,
-            lib=library,
-            cell=cell,
+            lib=design_library,
+            cell=design_cell,
             view=design_view,
             simulator=simulator,
             session=session,
@@ -1142,13 +1186,23 @@ def prepare_maestro(payload: dict[str, Any]) -> dict[str, Any]:
                 "persistent Maestro setup did not read back exactly the requested "
                 f"test {test_name!r}; got {tests!r}"
             )
+        persisted_design = _maestro_test_design_readback(
+            client, test_name, session=verify_session
+        )
+        if persisted_design != design:
+            raise RuntimeError(
+                "persistent Maestro test design did not read back exactly the "
+                f"requested target: expected {design!r}, got {persisted_design!r}"
+            )
     finally:
         close_session(client, verify_session)
 
     return {
         "backend": "maestro",
         "target": {"library": library, "cell": cell, "view": "maestro"},
-        "design": {"library": library, "cell": cell, "view": design_view},
+        "design": design,
+        "design_readback": persisted_design,
+        "design_target_confirmed": True,
         "test_name": test_name,
         "simulator_requested": simulator,
         "requested_setup_evidence_source": "user_input",
@@ -1577,7 +1631,8 @@ let((outs o sdb)
       else
         o = car(outs)
         sdb = axlGetMainSetupDB("{escaped_session}")
-        list(1 o~>name o~>type o~>signal o~>expression o~>evalType
+        list(1 o~>name o~>type o~>signal
+          if(o~>expression sprintf(nil "%L" o~>expression) nil) o~>evalType
           o~>plot o~>save axlGetSpecData(sdb "{escaped_name}" "{escaped_test}"))
     )
   )
@@ -2240,10 +2295,216 @@ def _unwrap_single_skill_value(value: Any) -> Any:
     return current
 
 
+def _maestro_test_runtime_path_state(
+    client,
+    *,
+    session: str,
+    test: str,
+) -> dict[str, str]:
+    """Read the transient Analog Session directories for one Maestro test."""
+
+    from virtuoso_bridge.virtuoso.ops import escape_skill_string
+
+    escaped_session = escape_skill_string(session)
+    escaped_test = escape_skill_string(test)
+    expression = (
+        "let((a) "
+        f'a=maeGetTestSession("{escaped_test}" ?session "{escaped_session}") '
+        "list(asiGetProjectDir(a) asiGetResultsDir(a) asiGetAnalogRunDir(a)))"
+    )
+    readback = client.execute_skill(expression, timeout=30)
+    errors = getattr(readback, "errors", None) or []
+    if errors:
+        raise RuntimeError(
+            f"Maestro runtime directory readback failed for test {test}: {errors[0]}"
+        )
+    parsed = _parse_skill_sexpr(getattr(readback, "output", ""))
+    if (
+        not isinstance(parsed, list)
+        or len(parsed) != 3
+        or not all(isinstance(value, str) and value for value in parsed)
+    ):
+        raise RuntimeError(
+            f"invalid Maestro runtime directory readback for test {test}: {parsed!r}"
+        )
+    return {
+        "project_dir": parsed[0],
+        "results_dir": parsed[1],
+        "analog_run_dir": parsed[2],
+    }
+
+
+def _set_maestro_test_runtime_paths(
+    client,
+    *,
+    session: str,
+    test: str,
+    project_dir: str,
+    results_dir: str,
+) -> dict[str, str]:
+    """Set and immediately read back one test's in-memory run directories."""
+
+    from virtuoso_bridge.virtuoso.ops import escape_skill_string
+
+    escaped_session = escape_skill_string(session)
+    escaped_test = escape_skill_string(test)
+    escaped_project = escape_skill_string(project_dir)
+    escaped_results = escape_skill_string(results_dir)
+    expression = (
+        "let((a) "
+        f'a=maeGetTestSession("{escaped_test}" ?session "{escaped_session}") '
+        f'asiSetProjectDir(a "{escaped_project}") '
+        f'asiSetResultsDir(a "{escaped_results}") '
+        "list(asiGetProjectDir(a) asiGetResultsDir(a) asiGetAnalogRunDir(a)))"
+    )
+    readback = client.execute_skill(expression, timeout=30)
+    errors = getattr(readback, "errors", None) or []
+    if errors:
+        raise RuntimeError(
+            f"Maestro runtime directory update failed for test {test}: {errors[0]}"
+        )
+    parsed = _parse_skill_sexpr(getattr(readback, "output", ""))
+    if (
+        not isinstance(parsed, list)
+        or len(parsed) != 3
+        or not all(isinstance(value, str) and value for value in parsed)
+    ):
+        raise RuntimeError(
+            f"invalid Maestro runtime directory update readback for test {test}: "
+            f"{parsed!r}"
+        )
+    return {
+        "project_dir": parsed[0],
+        "results_dir": parsed[1],
+        "analog_run_dir": parsed[2],
+    }
+
+
+def _configure_background_ade_runtime(
+    client,
+    payload: dict[str, Any],
+    *,
+    session: str,
+    tests: list[str],
+    library: str,
+    cell: str,
+    view: str,
+    scratch_root: str | None = None,
+) -> dict[str, Any]:
+    """Redirect every test's transient run state beneath the profile run root."""
+
+    profile = payload.get("profile") or {}
+    run_root = _validated_ade_remote_path(
+        profile.get("remote_run_root"), "ADE runtime root"
+    )
+    task_slug = re.sub(
+        r"[^A-Za-z0-9_.-]", "_", str(payload.get("task_id") or "task")
+    )
+    if scratch_root is None:
+        scratch_root = _validated_ade_remote_path(
+            f"{run_root}/vda_ade_run_{task_slug}_{uuid.uuid4().hex[:12]}",
+            "ADE scratch root",
+        )
+    else:
+        scratch_root = _validated_ade_remote_path(
+            scratch_root, "resumed ADE scratch root"
+        )
+        if not scratch_root.startswith(f"{run_root}/"):
+            raise RuntimeError(
+                "resumed ADE scratch root must stay below the active profile "
+                f"run root {run_root!r}: {scratch_root!r}"
+            )
+    marker = f"/{library}/{cell}/{view}/results/maestro"
+    configured: list[dict[str, Any]] = []
+    try:
+        for index, test in enumerate(tests):
+            before = _maestro_test_runtime_path_state(
+                client, session=session, test=test
+            )
+            test_slug = re.sub(r"[^A-Za-z0-9_.-]", "_", test) or "test"
+            runtime_dir = _validated_ade_remote_path(
+                f"{scratch_root}/{library}/{cell}/{view}/results/maestro/"
+                f".tmpADEDir_vda/{index}_{test_slug}/simulation",
+                f"ADE runtime directory for test {test}",
+            )
+            after = _set_maestro_test_runtime_paths(
+                client,
+                session=session,
+                test=test,
+                project_dir=runtime_dir,
+                results_dir=runtime_dir,
+            )
+            if after["project_dir"] != runtime_dir or after["results_dir"] != runtime_dir:
+                raise RuntimeError(
+                    f"Maestro runtime directory did not read back for test {test}: "
+                    f"{after!r}"
+                )
+            analog_run_dir = _validated_ade_remote_path(
+                after["analog_run_dir"],
+                f"Maestro analog run directory for test {test}",
+            )
+            if not analog_run_dir.startswith(f"{scratch_root}/") or marker not in analog_run_dir:
+                raise RuntimeError(
+                    f"Maestro analog run directory escaped the declared scratch root "
+                    f"or target anchor for test {test}: {analog_run_dir!r}"
+                )
+            configured.append(
+                {
+                    "test": test,
+                    "previous": before,
+                    "applied": {**after, "analog_run_dir": analog_run_dir},
+                }
+            )
+    except Exception:
+        for item in reversed(configured):
+            previous = item["previous"]
+            _set_maestro_test_runtime_paths(
+                client,
+                session=session,
+                test=item["test"],
+                project_dir=previous["project_dir"],
+                results_dir=previous["results_dir"],
+            )
+        raise
+    return {
+        "scratch_root": scratch_root,
+        "tests": configured,
+        "evidence_source": "bridge_readback",
+    }
+
+
+def _restore_background_ade_runtime(
+    client,
+    *,
+    session: str,
+    runtime: dict[str, Any],
+) -> None:
+    """Restore all transient directory values before closing the session."""
+
+    for item in reversed(runtime.get("tests") or []):
+        previous = item["previous"]
+        restored = _set_maestro_test_runtime_paths(
+            client,
+            session=session,
+            test=item["test"],
+            project_dir=previous["project_dir"],
+            results_dir=previous["results_dir"],
+        )
+        if (
+            restored["project_dir"] != previous["project_dir"]
+            or restored["results_dir"] != previous["results_dir"]
+        ):
+            raise RuntimeError(
+                f"Maestro runtime directory restoration failed for test "
+                f"{item['test']}: {restored!r}"
+            )
+
+
 def _maestro_history_locations(
     client,
     *,
     session: str,
+    test: str,
     library: str,
     cell: str,
     view: str,
@@ -2255,7 +2516,8 @@ def _maestro_history_locations(
     expression = (
         "list("
         f'ddGetObj("{escape_skill_string(library)}")~>readPath '
-        "errset(asiGetAnalogRunDir(asiGetSession("
+        "errset(asiGetAnalogRunDir(maeGetTestSession("
+        f'"{escape_skill_string(test)}" ?session '
         f'"{escape_skill_string(session)}"))))'
     )
     readback = client.execute_skill(expression, timeout=30)
@@ -2313,53 +2575,65 @@ def _maestro_history_locations(
     return unique
 
 
-def _ade_artifact_hash_command(
+def _ade_artifact_hash_commands(
     *,
-    history_root: str,
-    maestro_root: str,
-    history: str,
-    manifest_dir: str,
+    tree_root: str,
     manifest_path: str,
-) -> str:
-    netlist_names = sorted(_ADE_RUN_INPUT_FILENAMES | {"netlist"})
-    psf_names = sorted(
-        _ADE_RUN_LOG_FILENAMES
-        | {"dcOp.dc", "dcOpInfo.info", "variables_file"}
-        | {f"*{suffix}" for suffix in _ADE_RUN_RESULT_SUFFIXES}
+    companions: tuple[str, ...] = (),
+) -> list[str]:
+    # IC6.1.8 csh() expands dollar expressions before the nested sh receives
+    # them and applies a small command buffer. Protect sh's dollars from csh,
+    # then keep independent calls below the observed safe size.
+    discover = (
+        'set -eu;m=$1;t=$2;mkdir -p "${m%/*}";:>"$m.paths";'
+        'if [ -d "$t" ];then find "$t" -type f -print0>>"$m.paths";fi'
     )
-
-    def names_clause(names: list[str]) -> str:
-        return " -o ".join(f"-name {shlex.quote(name)}" for name in names)
-
-    hasher = (
-        'manifest=$1; shift; for artifact; do [ -f "$artifact" ] || continue; '
-        'hash_line=$(sha256sum "$artifact") || exit 81; '
-        'hash=${hash_line%% *}; [ ${#hash} -eq 64 ] || exit 82; '
-        'size=$(wc -c < "$artifact") || exit 83; '
-        'printf "VDA_ARTIFACT\\t%s\\t%s\\t%s\\n" '
-        '"$size" "$hash" "$artifact" >> "$manifest"; done'
+    commands = [
+        "sh -c {} sh {} {}".format(
+            shlex.quote(discover.replace("$", r"\$")),
+            shlex.quote(manifest_path),
+            shlex.quote(tree_root),
+        )
+    ]
+    if companions:
+        append = (
+            'set -eu;m=$1;p=$2;if [ -f "$p" ];then find "$p" '
+            '-maxdepth 0 -type f -print0>>"$m.paths";fi'
+        )
+        commands.extend(
+            "sh -c {} sh {} {}".format(
+                shlex.quote(append.replace("$", r"\$")),
+                shlex.quote(manifest_path),
+                shlex.quote(path),
+            )
+            for path in companions
+        )
+    manifest_dir, manifest_name = manifest_path.rsplit("/", 1)
+    digest_stages = (
+        'set -eu;d=$1;n=$2;cd "$d";xargs -0 -r sha256sum'
+        '<"$n.paths">"$n.sha256"',
+        'set -eu;d=$1;n=$2;cd "$d";xargs -0 -r -n1 wc -c'
+        '<"$n.paths">"$n.sizes"',
+        'set -eu;d=$1;n=$2;cd "$d";paste "$n.sizes" "$n.sha256">"$n"',
     )
-    outer = (
-        "set -eu; history_root=$1; maestro_root=$2; history=$3; hasher=$4; "
-        "manifest_dir=$5; manifest=$6; mkdir -p \"$manifest_dir\"; "
-        ": > \"$manifest\"; if [ -d \"$history_root\" ]; then "
-        f'find "$history_root" \\( -type f -o -type l \\) \\( '
-        f'\\( -path "*/netlist/*" \\( {names_clause(netlist_names)} \\) \\) -o '
-        f'\\( -path "*/psf/*" \\( {names_clause(psf_names)} \\) \\) '
-        '\\) -exec sh -c "$hasher" sh "$manifest" {} +; fi; '
-        'sh -c "$hasher" sh "$manifest" '
-        '"$maestro_root/$history.log" "$maestro_root/$history.rdb" '
-        '"$maestro_root/$history.msg.db"'
+    commands.extend(
+        "sh -c {} sh {} {}".format(
+            shlex.quote(stage.replace("$", r"\$")),
+            shlex.quote(manifest_dir),
+            shlex.quote(manifest_name),
+        )
+        for stage in digest_stages
     )
-    return "sh -c {} sh {} {} {} {} {} {}".format(
-        shlex.quote(outer),
-        shlex.quote(history_root),
-        shlex.quote(maestro_root),
-        shlex.quote(history),
-        shlex.quote(hasher),
-        shlex.quote(manifest_dir),
-        shlex.quote(manifest_path),
-    )
+    for command in commands:
+        skill_expression_size = len(
+            'csh("")' + command.replace("\\", "\\\\").replace('"', '\\"')
+        )
+        if skill_expression_size >= 768:
+            raise RuntimeError(
+                "ADE artifact hash command exceeds the 768-byte escaped csh safety "
+                f"limit: {skill_expression_size}"
+            )
+    return commands
 
 
 def _parse_remote_ade_artifact_manifest(
@@ -2368,6 +2642,8 @@ def _parse_remote_ade_artifact_manifest(
     history: str,
     source_location: str,
     maestro_root: str,
+    runtime_input_root: str | None = None,
+    runtime_test: str | None = None,
 ) -> list[dict[str, Any]]:
     history_root = f"{maestro_root}/{history}"
     extras = {
@@ -2379,18 +2655,58 @@ def _parse_remote_ade_artifact_manifest(
     for raw_line in str(text or "").splitlines():
         if not raw_line:
             continue
-        if not raw_line.startswith(_ADE_ARTIFACT_LINE_PREFIX):
-            raise RuntimeError(f"unexpected ADE artifact manifest line: {raw_line!r}")
-        fields = raw_line.split("\t", 3)
-        if len(fields) != 4:
-            raise RuntimeError(f"malformed ADE artifact manifest line: {raw_line!r}")
-        _, size_raw, digest, remote_path = fields
+        if raw_line.startswith(_ADE_ARTIFACT_LINE_PREFIX):
+            fields = raw_line.split("\t", 3)
+            if len(fields) != 4:
+                raise RuntimeError(
+                    f"malformed ADE artifact manifest line: {raw_line!r}"
+                )
+            _, size_raw, digest, remote_path = fields
+        else:
+            fields = raw_line.split("\t", 1)
+            size_match = re.fullmatch(r"\s*(\d+)\s+(.+)", fields[0])
+            digest_match = (
+                re.fullmatch(r"([0-9A-Fa-f]{64}) ([ *])(.+)", fields[1])
+                if len(fields) == 2
+                else None
+            )
+            if size_match is None or digest_match is None:
+                raise RuntimeError(
+                    f"unexpected ADE artifact manifest line: {raw_line!r}"
+                )
+            size_raw, size_path = size_match.groups()
+            digest, _, remote_path = digest_match.groups()
+            if size_path != remote_path:
+                raise RuntimeError(
+                    "ADE size/hash manifests named different artifacts: "
+                    f"{size_path!r} != {remote_path!r}"
+                )
         if any(ord(character) < 32 for character in remote_path):
             raise RuntimeError("ADE artifact path contained control characters")
-        if remote_path.startswith(f"{history_root}/"):
+        if runtime_input_root is not None:
+            runtime_prefix = f"{runtime_input_root}/"
+            if not remote_path.startswith(runtime_prefix):
+                raise RuntimeError(
+                    "ADE runtime input artifact escaped the unique invocation root: "
+                    f"{remote_path!r}"
+                )
+            relative = remote_path[len(runtime_prefix) :]
+            test_token = re.sub(
+                r"[^A-Za-z0-9_.-]", "_", str(runtime_test or "test")
+            )
+            logical_path = f"{history}/runtime/{test_token}/{relative}"
+            category = "simulator_input"
+            binding = "unique_runtime_session"
+        elif remote_path.startswith(f"{history_root}/"):
             relative = remote_path[len(history_root) + 1 :]
+            logical_path = f"{history}/{relative}"
+            category = _ade_artifact_category(logical_path)
+            binding = "exact_history_path"
         elif remote_path in extras:
             relative = remote_path.rsplit("/", 1)[-1]
+            logical_path = f"{history}/{relative}"
+            category = _ade_artifact_category(logical_path)
+            binding = "exact_history_companion"
         else:
             raise RuntimeError(
                 "ADE artifact escaped the exact returned history: "
@@ -2409,8 +2725,6 @@ def _parse_remote_ade_artifact_manifest(
             raise RuntimeError(
                 f"invalid ADE artifact hash record for {remote_path!r}"
             )
-        logical_path = f"{history}/{relative}"
-        category = _ade_artifact_category(logical_path)
         entries.append(
             {
                 "path": logical_path,
@@ -2419,6 +2733,7 @@ def _parse_remote_ade_artifact_manifest(
                 "size_bytes": size,
                 "sha256": normalized_digest,
                 "category": category,
+                "binding": binding,
                 "evidence_source": (
                     "eda_result"
                     if category in {"simulator_input", "eda_result", "run_log"}
@@ -2427,6 +2742,157 @@ def _parse_remote_ade_artifact_manifest(
             }
         )
     return entries
+
+
+def _read_remote_text_via_skill(
+    client,
+    remote_path: str,
+    *,
+    allow_bridge_results_csv: bool = False,
+    page_lines: int = 4,
+    max_lines: int = 4096,
+    max_bytes: int = 2_000_000,
+) -> str:
+    """Read a bounded text artifact over the existing Bridge SKILL channel."""
+
+    from virtuoso_bridge.virtuoso.ops import escape_skill_string
+
+    candidate = str(remote_path or "").strip()
+    if allow_bridge_results_csv and re.fullmatch(
+        r"/tmp/vb_results_[0-9a-f]{32}\.csv", candidate
+    ):
+        path = candidate
+    else:
+        path = _validated_ade_remote_path(candidate, "ADE manifest fallback path")
+    escaped_path = escape_skill_string(path)
+    offset = 0
+    pages: list[str] = []
+    total_bytes = 0
+    while offset < max_lines:
+        expression = (
+            "let((port line text skipped count) "
+            f'port=infile("{escaped_path}") '
+            'unless(port error("VDA_MANIFEST_OPEN_FAILED")) '
+            'text="" skipped=0 '
+            f"while(skipped<{offset} && gets(line port) skipped=skipped+1) "
+            f"count=0 while(count<{page_lines} && gets(line port) "
+            "text=strcat(text line) count=count+1) "
+            "close(port) list(count text))"
+        )
+        result = client.execute_skill(expression, timeout=30)
+        _require_bridge_result(result, "read ADE text manifest via SKILL fallback")
+        parsed = _parse_skill_sexpr(getattr(result, "output", ""))
+        if not isinstance(parsed, list) or len(parsed) != 2:
+            raise RuntimeError("ADE SKILL manifest fallback returned malformed data")
+        try:
+            count = int(str(parsed[0]))
+        except ValueError as exc:
+            raise RuntimeError(
+                "ADE SKILL manifest fallback returned an invalid line count"
+            ) from exc
+        text = parsed[1]
+        if count < 0 or count > page_lines or not isinstance(text, str):
+            raise RuntimeError("ADE SKILL manifest fallback returned invalid page data")
+        encoded_size = len(text.encode("utf-8"))
+        total_bytes += encoded_size
+        if total_bytes > max_bytes:
+            raise RuntimeError("ADE text manifest exceeded the SKILL fallback byte limit")
+        pages.append(text)
+        offset += count
+        if count < page_lines:
+            return "".join(pages)
+    raise RuntimeError("ADE text manifest exceeded the SKILL fallback line limit")
+
+
+def _normalize_single_point_detail_csv(path: Path) -> dict[str, str] | None:
+    """Adapt IC6.1.8's six-column single-point Detail CSV for Bridge 0.7.0."""
+
+    text = path.read_text(encoding="utf-8", errors="replace")
+    rows = list(csv.reader(text.splitlines()))
+    expected_header = ["Test", "Output", "Nominal", "Spec", "Weight", "Pass/Fail"]
+    header_index = next(
+        (
+            index
+            for index, row in enumerate(rows)
+            if [cell.strip() for cell in row[:6]] == expected_header
+        ),
+        None,
+    )
+    if header_index is None or any(
+        row and row[0].strip() == "Point" for row in rows
+    ):
+        return None
+    data_indices = [
+        index
+        for index, row in enumerate(rows)
+        if index > header_index and any(cell.strip() for cell in row)
+    ]
+    if not data_indices or any(len(rows[index]) < 6 for index in data_indices):
+        return None
+
+    normalized_rows: list[list[str]] = []
+    for index, row in enumerate(rows):
+        if index == header_index:
+            normalized_rows.append(["Point", *row])
+        elif index in data_indices:
+            normalized_rows.append(["1", *row])
+        else:
+            normalized_rows.append(row)
+    buffer = io.StringIO(newline="")
+    csv.writer(buffer, lineterminator="\n").writerows(normalized_rows)
+    normalized = buffer.getvalue()
+    path.write_text(normalized, encoding="utf-8")
+    return {
+        "normalization": "cadence_single_point_detail_add_point_column",
+        "original_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "normalized_sha256": hashlib.sha256(
+            normalized.encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+class _BridgeTextDownloadFallback:
+    """Preserve Bridge downloads, with a narrow fallback for its Detail CSV."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.skill_fallback_paths: list[str] = []
+        self.detail_csv_compatibility: list[dict[str, str]] = []
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def download_file(self, remote_path, local_path, **kwargs):
+        result = self._inner.download_file(remote_path, local_path, **kwargs)
+        try:
+            _require_bridge_result(result, "download Bridge Maestro Detail CSV")
+        except RuntimeError as exc:
+            candidate = str(remote_path)
+            if not re.fullmatch(r"/tmp/vb_results_[0-9a-f]{32}\.csv", candidate):
+                return result
+            try:
+                text = _read_remote_text_via_skill(
+                    self._inner,
+                    candidate,
+                    allow_bridge_results_csv=True,
+                )
+            except RuntimeError as fallback_exc:
+                raise RuntimeError(
+                    f"{exc}; bounded SKILL Detail-CSV fallback also failed: "
+                    f"{fallback_exc}"
+                ) from fallback_exc
+            Path(local_path).write_text(text, encoding="utf-8")
+            self.skill_fallback_paths.append(candidate)
+        candidate = str(remote_path)
+        if re.fullmatch(r"/tmp/vb_results_[0-9a-f]{32}\.csv", candidate):
+            local = Path(local_path)
+            if local.is_file():
+                compatibility = _normalize_single_point_detail_csv(local)
+                if compatibility is not None:
+                    self.detail_csv_compatibility.append(
+                        {"remote_path": candidate, **compatibility}
+                    )
+        return result
 
 
 def _merge_remote_ade_artifacts(
@@ -2494,58 +2960,104 @@ def _collect_background_ade_artifacts(
     payload: dict[str, Any],
     *,
     session: str,
+    test: str,
     history: str,
     library: str,
     cell: str,
     view: str,
+    runtime: dict[str, Any],
 ) -> dict[str, Any]:
-    locations = _maestro_history_locations(
+    history_locations = _maestro_history_locations(
         client,
         session=session,
+        test=test,
         library=library,
         cell=cell,
         view=view,
     )
+    locations: list[dict[str, Any]] = []
+    for index, location in enumerate(history_locations):
+        maestro_root = location["maestro_root"]
+        locations.append(
+            {
+                **location,
+                "manifest_token": f"history_{index}_{location['source_location']}",
+                "tree_root": f"{maestro_root}/{history}",
+                "companions": (
+                    f"{maestro_root}/{history}.log",
+                    f"{maestro_root}/{history}.rdb",
+                    f"{maestro_root}/{history}.msg.db",
+                ),
+                "binding": "exact_history",
+            }
+        )
+    runtime_scratch_root = _validated_ade_remote_path(
+        runtime.get("scratch_root"), "ADE runtime scratch root"
+    )
+    for index, item in enumerate(runtime.get("tests") or []):
+        applied = item.get("applied") or {}
+        analog_run_dir = _validated_ade_remote_path(
+            applied.get("analog_run_dir"),
+            f"ADE analog run directory for test {item.get('test')}",
+        )
+        if not analog_run_dir.startswith(f"{runtime_scratch_root}/"):
+            raise RuntimeError(
+                "ADE runtime input root escaped the unique invocation scratch root: "
+                f"{analog_run_dir!r}"
+            )
+        locations.append(
+            {
+                "source_location": "runtime",
+                "manifest_token": f"runtime_{index}",
+                "tree_root": analog_run_dir,
+                "companions": (),
+                "binding": "unique_runtime_session",
+                "runtime_input_root": analog_run_dir,
+                "runtime_test": str(item.get("test") or "test"),
+            }
+        )
     profile = payload.get("profile") or {}
     run_root = _validated_ade_remote_path(
         profile.get("remote_run_root"), "ADE manifest run root"
     )
-    task_slug = re.sub(r"[^A-Za-z0-9_.-]", "_", str(payload.get("task_id") or "task"))
     manifest_dir = _validated_ade_remote_path(
-        f"{run_root}/vda_ade_manifest_{task_slug}_{uuid.uuid4().hex[:12]}",
+        f"{run_root}/vda_ade_manifest_{uuid.uuid4().hex[:12]}",
         "ADE manifest directory",
     )
     all_entries: list[dict[str, Any]] = []
     remote_manifests: list[dict[str, Any]] = []
+    skill_manifest_fallback_used = False
     with tempfile.TemporaryDirectory(prefix="vda_ade_manifest_") as temp_dir:
         local_root = Path(temp_dir)
         for index, location in enumerate(locations):
-            maestro_root = location["maestro_root"]
-            history_root = f"{maestro_root}/{history}"
-            remote_manifest = f"{manifest_dir}/{index}_{location['source_location']}.tsv"
-            command = _ade_artifact_hash_command(
-                history_root=history_root,
-                maestro_root=maestro_root,
-                history=history,
-                manifest_dir=manifest_dir,
-                manifest_path=remote_manifest,
+            maestro_root = str(location.get("maestro_root") or "")
+            tree_root = str(location["tree_root"])
+            remote_manifest = (
+                f"{manifest_dir}/{index}_{location['manifest_token']}.tsv"
             )
-            shell_result = client.run_shell_command(command, timeout=120)
-            try:
-                _require_bridge_result(
-                    shell_result,
-                    "hash exact Maestro history artifacts at "
-                    f"{location['source_location']}",
-                )
-            except RuntimeError as exc:
-                raise RuntimeError(
-                    f"{exc}; remote ADE manifest directory retained at "
-                    f"{manifest_dir}"
-                ) from exc
+            commands = _ade_artifact_hash_commands(
+                tree_root=tree_root,
+                manifest_path=remote_manifest,
+                companions=tuple(location.get("companions") or ()),
+            )
+            for stage, command in enumerate(commands, start=1):
+                shell_result = client.run_shell_command(command, timeout=120)
+                try:
+                    _require_bridge_result(
+                        shell_result,
+                        "hash exact Maestro artifacts at "
+                        f"{location['source_location']} stage {stage}/{len(commands)}",
+                    )
+                except RuntimeError as exc:
+                    raise RuntimeError(
+                        f"{exc}; remote ADE manifest directory retained at "
+                        f"{manifest_dir}"
+                    ) from exc
             local_manifest = local_root / f"{index}.tsv"
             download = client.download_file(
                 remote_manifest, local_manifest, timeout=60
             )
+            manifest_transport = "bridge_public_download"
             try:
                 _require_bridge_result(
                     download,
@@ -2553,22 +3065,35 @@ def _collect_background_ade_artifacts(
                     f"{location['source_location']}",
                 )
             except RuntimeError as exc:
-                raise RuntimeError(
-                    f"{exc}; remote ADE manifest retained at {remote_manifest}"
-                ) from exc
-            try:
-                manifest_text = local_manifest.read_text(encoding="utf-8")
-            except (OSError, UnicodeError) as exc:
-                raise RuntimeError(
-                    "downloaded ADE artifact manifest was unreadable; remote copy "
-                    f"retained at {remote_manifest}"
-                ) from exc
+                try:
+                    manifest_text = _read_remote_text_via_skill(
+                        client, remote_manifest
+                    )
+                except RuntimeError as fallback_exc:
+                    raise RuntimeError(
+                        f"{exc}; SKILL text-manifest fallback also failed: "
+                        f"{fallback_exc}; remote ADE manifest retained at "
+                        f"{remote_manifest}"
+                    ) from fallback_exc
+                local_manifest.write_text(manifest_text, encoding="utf-8")
+                manifest_transport = "bridge_public_skill_text_fallback"
+                skill_manifest_fallback_used = True
+            else:
+                try:
+                    manifest_text = local_manifest.read_text(encoding="utf-8")
+                except (OSError, UnicodeError) as exc:
+                    raise RuntimeError(
+                        "downloaded ADE artifact manifest was unreadable; remote copy "
+                        f"retained at {remote_manifest}"
+                    ) from exc
             try:
                 entries = _parse_remote_ade_artifact_manifest(
                     manifest_text,
                     history=history,
                     source_location=location["source_location"],
                     maestro_root=maestro_root,
+                    runtime_input_root=location.get("runtime_input_root"),
+                    runtime_test=location.get("runtime_test"),
                 )
             except RuntimeError as exc:
                 raise RuntimeError(
@@ -2578,9 +3103,15 @@ def _collect_background_ade_artifacts(
             remote_manifests.append(
                 {
                     "source_location": location["source_location"],
-                    "maestro_root": maestro_root,
-                    "history_root": history_root,
+                    "binding": location["binding"],
+                    "tree_root": tree_root,
+                    "maestro_root": maestro_root or None,
+                    "history_root": (
+                        tree_root if location["binding"] == "exact_history" else None
+                    ),
+                    "runtime_test": location.get("runtime_test"),
                     "remote_manifest_path": remote_manifest,
+                    "manifest_transport": manifest_transport,
                     "manifest_sha256": _sha256_path(local_manifest),
                     "entry_count": len(entries),
                 }
@@ -2595,13 +3126,20 @@ def _collect_background_ade_artifacts(
     return {
         "artifact_history": history,
         "artifact_history_path_binding_verified": True,
+        "artifact_runtime_input_binding_verified": any(
+            item.get("binding") == "unique_runtime_session"
+            and item.get("category") == "simulator_input"
+            for item in manifest
+        ),
+        "artifact_run_binding_verified": True,
         "artifact_manifest": manifest,
         "artifact_counts": counts,
         "artifact_manifest_complete": True,
         "artifacts_captured": True,
         "artifact_collection_method": (
-            "bridge_public_shell_hash_to_remote_manifest_and_public_download"
+            "bridge_public_shell_hash_to_remote_manifest_then_public_text_transfer"
         ),
+        "artifact_manifest_skill_fallback_used": skill_manifest_fallback_used,
         "artifact_locations_checked": remote_manifests,
         "remote_manifest_directory": manifest_dir,
         "simulation_fingerprint_sha256": _manifest_fingerprint(
@@ -2633,31 +3171,58 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(f"ADE run requires existing {library}/{cell}/{view}")
 
     session = open_session(client, library, cell)
+    runtime: dict[str, Any] | None = None
+    runtime_restored = False
     artifact_evidence: dict[str, Any] = {
         "artifact_history": None,
         "artifact_history_path_binding_verified": False,
+        "artifact_runtime_input_binding_verified": False,
+        "artifact_run_binding_verified": False,
         "artifact_manifest": [],
         "artifact_counts": {},
         "artifact_manifest_complete": False,
         "artifacts_captured": False,
         "simulation_fingerprint_sha256": None,
+        "simulator_input_consistency_verified": False,
+        "simulator_input_consistency": [],
     }
     try:
         tests = _maestro_tests_readback(client, session)
         if not tests:
             raise RuntimeError("saved Maestro setup did not contain any tests")
-        raw_history, run_status = run_and_wait(
+        resume_history = settings.get("resume_history")
+        resume_scratch_root = settings.get("resume_runtime_scratch_root")
+        runtime = _configure_background_ade_runtime(
             client,
+            payload,
             session=session,
-            timeout=int(payload.get("timeout_seconds") or 600),
+            tests=tests,
+            library=library,
+            cell=cell,
+            view=view,
+            scratch_root=(
+                str(resume_scratch_root) if resume_scratch_root is not None else None
+            ),
         )
-        history = _normalized_maestro_history(raw_history)
-        if str(run_status).strip().lower() != "done":
-            raise RuntimeError(
-                f"Maestro background run did not reach done status: {run_status!r}"
+        if resume_history is not None:
+            history = _normalized_maestro_history(resume_history)
+            run_status = "recovered"
+            simulation_performed_by_this_invocation = False
+        else:
+            raw_history, run_status = run_and_wait(
+                client,
+                session=session,
+                timeout=int(payload.get("timeout_seconds") or 600),
             )
+            history = _normalized_maestro_history(raw_history)
+            if str(run_status).strip().lower() != "done":
+                raise RuntimeError(
+                    f"Maestro background run did not reach done status: {run_status!r}"
+                )
+            simulation_performed_by_this_invocation = True
+        results_client = _BridgeTextDownloadFallback(client)
         results = read_results(
-            client,
+            results_client,
             session,
             lib=library,
             cell=cell,
@@ -2675,15 +3240,40 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
                 client,
                 payload,
                 session=session,
+                test=tests[0],
                 history=history,
                 library=library,
                 cell=cell,
                 view=view,
+                runtime=runtime,
             )
         except RuntimeError as exc:
             if settings.get("require_artifact_manifest", True):
-                raise
+                raise RuntimeError(
+                    f"{exc}; recoverable Maestro history={history}; "
+                    f"runtime scratch={runtime['scratch_root']}"
+                ) from exc
             artifact_evidence["artifact_capture_error"] = str(exc)
+        if settings.get("require_simulator_input_consistency", False):
+            try:
+                artifact_evidence.update(
+                    _verify_ade_simulator_inputs(
+                        client,
+                        session=session,
+                        tests=tests,
+                        artifact_evidence=artifact_evidence,
+                    )
+                )
+            except RuntimeError as exc:
+                retained = artifact_evidence.get("remote_manifest_directory")
+                raise RuntimeError(
+                    f"{exc}"
+                    + (
+                        f"; remote ADE manifests retained at {retained}"
+                        if retained
+                        else ""
+                    )
+                ) from exc
         if settings.get("require_structured_outputs", True) and not structured_outputs:
             retained = artifact_evidence.get("remote_manifest_directory")
             raise RuntimeError(
@@ -2696,7 +3286,14 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
                 )
             )
     finally:
-        close_session(client, session)
+        try:
+            if runtime is not None:
+                _restore_background_ade_runtime(
+                    client, session=session, runtime=runtime
+                )
+                runtime_restored = True
+        finally:
+            close_session(client, session)
 
     return {
         "backend": "maestro",
@@ -2713,13 +3310,48 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
         "structured_results_available": structured_outputs,
         "structured_results": results,
         "structured_results_evidence_source": "eda_result",
+        "structured_results_transfer_method": (
+            "bridge_read_results_with_bounded_skill_text_fallback"
+            if results_client.skill_fallback_paths
+            else "bridge_public_read_results"
+        ),
+        "structured_results_skill_fallback_used": bool(
+            results_client.skill_fallback_paths
+        ),
+        "structured_results_csv_compatibility": (
+            results_client.detail_csv_compatibility
+        ),
+        "structured_results_compatibility_evidence_source": (
+            "software_inference"
+            if results_client.detail_csv_compatibility
+            else None
+        ),
         "automated_simulation_performed": True,
+        "simulation_performed_by_this_invocation": (
+            simulation_performed_by_this_invocation
+        ),
+        "history_recovery_performed": resume_history is not None,
+        "history_recovery_request_evidence_source": (
+            "user_input" if resume_history is not None else None
+        ),
         "oa_write_performed": False,
         "maestro_setup_write_performed": False,
+        "runtime_directory_policy": "transient_per_test_session_override",
+        "runtime_scratch_root": runtime["scratch_root"] if runtime else None,
+        "runtime_directory_overrides": runtime["tests"] if runtime else [],
+        "runtime_directory_evidence_source": "bridge_readback",
+        "runtime_directory_persisted": False,
+        "runtime_directory_restored": runtime_restored,
+        "runtime_artifacts_restricted_to_data_xum": bool(runtime),
         **artifact_evidence,
         "completion_scope": (
-            "saved Maestro setup executed in a background session and the history "
-            "returned for this invocation was read; exact-history simulator input, "
+            (
+                "an explicitly named existing Maestro history was recovered without "
+                "running simulation again"
+                if resume_history is not None
+                else "the saved Maestro setup was executed in a background session"
+            )
+            + "; exact-history simulator input, "
             "result, and log artifacts were hashed across project and scratch "
             "locations when required; history name uniqueness and VDA constraint "
             "mapping were not proved"
@@ -3458,6 +4090,334 @@ def _logical_netlist_records(text: str) -> list[str]:
     if current:
         records.append(current)
     return records
+
+
+_SPECTRE_SCALAR = re.compile(
+    r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)([A-Za-z]*)$"
+)
+
+
+def _spectre_scalar(value: Any) -> float | None:
+    match = _SPECTRE_SCALAR.fullmatch(str(value).strip().strip('"'))
+    if match is None:
+        return None
+    suffix = match.group(2)
+    scales = {
+        "": 1.0,
+        "f": 1e-15,
+        "p": 1e-12,
+        "n": 1e-9,
+        "u": 1e-6,
+        "m": 1e-3,
+        "k": 1e3,
+        "K": 1e3,
+        "meg": 1e6,
+        "g": 1e9,
+        "G": 1e9,
+        "t": 1e12,
+        "T": 1e12,
+        "P": 1e15,
+    }
+    if suffix not in scales:
+        return None
+    return float(match.group(1)) * scales[suffix]
+
+
+def _spectre_values_equal(left: Any, right: Any) -> bool:
+    if str(left).strip().strip('"') == str(right).strip().strip('"'):
+        return True
+    left_value = _spectre_scalar(left)
+    right_value = _spectre_scalar(right)
+    if left_value is None or right_value is None:
+        return False
+    tolerance = max(abs(left_value), abs(right_value), 1e-30) * 1e-9
+    return abs(left_value - right_value) <= tolerance
+
+
+def _parse_ade_spectre_input(text: str) -> dict[str, Any]:
+    headers: dict[str, str] = {}
+    for key, label in (
+        ("library", "library"),
+        ("cell", "cell"),
+        ("view", "view"),
+    ):
+        match = re.search(
+            rf"^// Design {label} name:\s*(\S+)\s*$", text, re.MULTILINE
+        )
+        if match is None:
+            raise RuntimeError(f"ADE Spectre input is missing Design {label} header")
+        headers[key] = match.group(1)
+
+    instances: dict[str, dict[str, Any]] = {}
+    analyses: list[str] = []
+    saves: list[str] = []
+    for record in _logical_netlist_records(text):
+        instance_match = re.match(
+            r"^(\S+)\s*\(([^)]*)\)\s+(\S+)(?:\s+(.*))?$", record
+        )
+        if instance_match is not None:
+            name, nodes_text, model, parameter_text = instance_match.groups()
+            if name in instances:
+                raise RuntimeError(f"ADE Spectre input repeats instance {name}")
+            parameters = {
+                match.group(1): match.group(2).strip('"')
+                for match in re.finditer(
+                    r"(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=(\"[^\"]*\"|\S+)",
+                    parameter_text or "",
+                )
+            }
+            instances[name] = {
+                "nodes": nodes_text.split(),
+                "model": model,
+                "parameters": parameters,
+            }
+            continue
+        if re.match(r"^(ac|dc|noise|tran)\s+", record):
+            analyses.append(record)
+        elif record.startswith("save "):
+            saves.append(record)
+    if not instances:
+        raise RuntimeError("ADE Spectre input contains no top-level instances")
+    return {
+        "design": headers,
+        "instances": instances,
+        "analysis_records": analyses,
+        "save_records": saves,
+    }
+
+
+def _normalized_net_name(value: Any) -> str:
+    name = str(value)
+    return "0" if name in {"0", "gnd!"} else name
+
+
+def _ade_instance_contract(instance: dict[str, Any]) -> dict[str, Any] | None:
+    cell = str(instance.get("cell") or "")
+    terminals = instance.get("terms") or {}
+    if {"D", "G", "S", "B"}.issubset(terminals):
+        return {
+            "model": str((instance.get("params") or {}).get("model") or cell),
+            "terminal_order": ("D", "G", "S", "B"),
+            "parameter_map": (("l", "l"), ("w", "w"), ("nf", "nf"), ("simM", "multi")),
+        }
+    analog_contracts = {
+        "cap": {
+            "model": "capacitor",
+            "terminal_order": ("PLUS", "MINUS"),
+            "parameter_map": (("c", "c"),),
+        },
+        "res": {
+            "model": "resistor",
+            "terminal_order": ("PLUS", "MINUS"),
+            "parameter_map": (("r", "r"),),
+        },
+        "vdc": {
+            "model": "vsource",
+            "terminal_order": ("PLUS", "MINUS"),
+            "parameter_map": (("vdc", "dc"), ("srcType", "type")),
+        },
+        "vpulse": {
+            "model": "vsource",
+            "terminal_order": ("PLUS", "MINUS"),
+            "parameter_map": (
+                ("v1", "val0"),
+                ("v2", "val1"),
+                ("per", "period"),
+                ("td", "delay"),
+                ("tr", "rise"),
+                ("tf", "fall"),
+                ("pw", "width"),
+                ("srcType", "type"),
+            ),
+        },
+    }
+    return analog_contracts.get(cell)
+
+
+def _compare_ade_input_to_schematic(
+    parsed: dict[str, Any],
+    schematic: dict[str, Any],
+    *,
+    design: dict[str, str],
+) -> dict[str, Any]:
+    if parsed["design"] != design:
+        raise RuntimeError(
+            "ADE Spectre input design header does not match Maestro test design: "
+            f"{parsed['design']!r} != {design!r}"
+        )
+    oa_instances = {
+        str(item.get("name")): item for item in schematic.get("instances", [])
+    }
+    omitted_ground_symbols = sorted(
+        name
+        for name, item in oa_instances.items()
+        if str(item.get("cell") or "").lower() in {"gnd", "vss"}
+    )
+    expected_names = set(oa_instances) - set(omitted_ground_symbols)
+    actual_names = set(parsed["instances"])
+    if expected_names != actual_names:
+        raise RuntimeError(
+            "ADE Spectre/OA instance set mismatch: "
+            f"missing={sorted(expected_names - actual_names)}, "
+            f"extra={sorted(actual_names - expected_names)}"
+        )
+
+    comparisons: list[dict[str, Any]] = []
+    excluded_cdf_semantics: list[dict[str, str]] = []
+    verified_parameter_pairs = 0
+    for name in sorted(expected_names):
+        oa_instance = oa_instances[name]
+        contract = _ade_instance_contract(oa_instance)
+        if contract is None:
+            raise RuntimeError(
+                "ADE same-source consistency has no explicit primitive contract for "
+                f"{name} ({oa_instance.get('lib')}/{oa_instance.get('cell')})"
+            )
+        netlist_instance = parsed["instances"][name]
+        if netlist_instance["model"] != contract["model"]:
+            raise RuntimeError(
+                f"ADE Spectre model mismatch for {name}: "
+                f"{netlist_instance['model']!r} != {contract['model']!r}"
+            )
+        terminals = oa_instance.get("terms") or {}
+        expected_nodes = [
+            _normalized_net_name(terminals[terminal])
+            for terminal in contract["terminal_order"]
+        ]
+        if netlist_instance["nodes"] != expected_nodes:
+            raise RuntimeError(
+                f"ADE Spectre node mismatch for {name}: "
+                f"{netlist_instance['nodes']!r} != {expected_nodes!r}"
+            )
+        oa_parameters = oa_instance.get("params") or {}
+        netlist_parameters = netlist_instance["parameters"]
+        parameter_checks: list[dict[str, str]] = []
+        for oa_name, netlist_name in contract["parameter_map"]:
+            if oa_name not in oa_parameters or netlist_name not in netlist_parameters:
+                raise RuntimeError(
+                    f"ADE Spectre parameter mapping is missing {name}."
+                    f"{oa_name}->{netlist_name}"
+                )
+            oa_value = str(oa_parameters[oa_name])
+            netlist_value = str(netlist_parameters[netlist_name])
+            if not _spectre_values_equal(oa_value, netlist_value):
+                raise RuntimeError(
+                    f"ADE Spectre parameter mismatch for {name}."
+                    f"{oa_name}->{netlist_name}: {oa_value!r} != {netlist_value!r}"
+                )
+            parameter_checks.append(
+                {
+                    "oa_parameter": oa_name,
+                    "netlist_parameter": netlist_name,
+                    "oa_value": oa_value,
+                    "netlist_value": netlist_value,
+                }
+            )
+            verified_parameter_pairs += 1
+        if "Wfg" in oa_parameters:
+            excluded_cdf_semantics.append(
+                {
+                    "instance": name,
+                    "parameter": "Wfg",
+                    "reason": "PDK CDF effective-width relation is not a literal netlist w equality",
+                }
+            )
+        comparisons.append(
+            {
+                "instance": name,
+                "oa_master": f"{oa_instance.get('lib')}/{oa_instance.get('cell')}",
+                "netlist_model": netlist_instance["model"],
+                "nodes": netlist_instance["nodes"],
+                "parameter_checks": parameter_checks,
+            }
+        )
+    payload = {
+        "design": design,
+        "instances": comparisons,
+        "omitted_ground_symbols": omitted_ground_symbols,
+    }
+    return {
+        **payload,
+        "design_identity_verified": True,
+        "instance_set_verified": True,
+        "node_connectivity_verified": True,
+        "verified_parameter_pairs": verified_parameter_pairs,
+        "raw_parameter_mapping_verified": True,
+        "excluded_cdf_semantics": excluded_cdf_semantics,
+        "effective_pdk_width_semantics_verified": False,
+        "comparison_sha256": hashlib.sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def _verify_ade_simulator_inputs(
+    client,
+    *,
+    session: str,
+    tests: list[str],
+    artifact_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    manifest = artifact_evidence.get("artifact_manifest") or []
+    evidence: list[dict[str, Any]] = []
+    for test in tests:
+        test_token = re.sub(r"[^A-Za-z0-9_.-]", "_", test)
+        suffix = f"/runtime/{test_token}/input.scs"
+        matches = [
+            item
+            for item in manifest
+            if item.get("binding") == "unique_runtime_session"
+            and str(item.get("path") or "").endswith(suffix)
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"ADE input consistency requires one exact input.scs for {test}; "
+                f"found {len(matches)}"
+            )
+        manifest_item = matches[0]
+        input_text = _read_remote_text_via_skill(
+            client, str(manifest_item["remote_path"]), page_lines=8
+        )
+        digest = hashlib.sha256(input_text.encode("utf-8")).hexdigest()
+        if digest != manifest_item.get("sha256"):
+            raise RuntimeError(
+                f"ADE input.scs content hash changed after manifest capture for {test}"
+            )
+        design = _maestro_test_design_readback(client, test, session=session)
+        if design["view"] != "schematic":
+            raise RuntimeError(
+                "ADE input consistency currently requires a schematic source view: "
+                f"{design!r}"
+            )
+        schematic = _read_schematic(client, design["library"], design["cell"])
+        comparison = _compare_ade_input_to_schematic(
+            _parse_ade_spectre_input(input_text),
+            schematic,
+            design=design,
+        )
+        evidence.append(
+            {
+                "test": test,
+                "input_path": manifest_item["path"],
+                "input_remote_path": manifest_item["remote_path"],
+                "input_sha256": digest,
+                **comparison,
+            }
+        )
+    return {
+        "simulator_input_consistency_verified": bool(evidence),
+        "simulator_input_consistency": evidence,
+        "simulator_input_consistency_evidence_sources": {
+            "maestro_design_and_oa": "bridge_readback",
+            "spectre_input": "eda_result",
+            "comparison": "software_inference",
+        },
+    }
 
 
 def _parse_inverter_netlist(
