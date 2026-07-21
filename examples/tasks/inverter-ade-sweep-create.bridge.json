@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "inverter-ade-sweep-create",
+  "operation": "schematic.create",
+  "circuit": "inverter",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_ade_sweep_inv_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "parameters": {
+    "nmos_width_um": 0.5,
+    "pmos_width_um": 1.0,
+    "length_um": 0.03
+  },
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 180}
+}

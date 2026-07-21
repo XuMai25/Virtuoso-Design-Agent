@@ -29,6 +29,7 @@ from virtuoso_design_agent.metrics import (
     extract_inverter_metrics,
     extract_supply_metrics,
 )
+from virtuoso_design_agent.spectre_values import spectre_values_equal
 
 _MARKER = "VDA_RESULT="
 
@@ -1114,6 +1115,85 @@ def _maestro_variable_fingerprint(
         ensure_ascii=False,
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
+
+
+def _read_maestro_sweep_setup(
+    client,
+    get_var,
+    verification: dict[str, Any],
+    *,
+    session: str,
+) -> dict[str, Any]:
+    """Read the exact saved variable scopes declared by a sweep Gate."""
+
+    expected_tests = [str(value) for value in verification.get("expected_tests") or []]
+    variables = list(verification.get("variables") or [])
+    if not expected_tests or not variables:
+        raise RuntimeError(
+            "ADE sweep verification requires expected_tests and variables"
+        )
+    tests = _maestro_tests_readback(client, session)
+    if tests != expected_tests:
+        raise RuntimeError(
+            "Maestro tests changed before sweep execution: "
+            f"expected {expected_tests!r}, got {tests!r}"
+        )
+    expected_corners_raw = verification.get("expected_corners")
+    expected_corners = (
+        None
+        if expected_corners_raw is None
+        else [str(value) for value in expected_corners_raw]
+    )
+    corners = (
+        _maestro_corners_readback(client, session)
+        if expected_corners is not None
+        else None
+    )
+    if corners != expected_corners:
+        raise RuntimeError(
+            "Maestro corners changed before sweep execution: "
+            f"expected {expected_corners!r}, got {corners!r}"
+        )
+
+    values: dict[str, str | None] = {}
+    methods: dict[str, str] = {}
+    for variable in variables:
+        if not isinstance(variable, dict):
+            raise RuntimeError("ADE sweep variable expectation must be an object")
+        expectation = {
+            **variable,
+            "value": variable.get("expected_value"),
+        }
+        _validate_maestro_variable_update(expectation)
+        identity = _maestro_variable_identity(variable)
+        if identity in values:
+            raise RuntimeError(
+                f"ADE sweep verification repeats variable identity {identity}"
+            )
+        values[identity] = _read_maestro_variable(
+            client, get_var, variable, session=session
+        )
+        expected_value = variable.get("expected_value")
+        if values[identity] != expected_value:
+            raise RuntimeError(
+                f"Maestro sweep variable mismatch for {identity}: expected "
+                f"{expected_value!r}, got {values[identity]!r}"
+            )
+        scope = str(variable.get("scope") or "global")
+        methods[identity] = (
+            "bridge_public_get_var"
+            if scope == "global"
+            else "cadence_maeGetVar_via_bridge_skill_channel"
+        )
+    return {
+        "tests": tests,
+        "corners": corners,
+        "variables": values,
+        "variable_readback_methods": methods,
+        "fingerprint_sha256": _maestro_variable_fingerprint(
+            tests, corners, values
+        ),
+    }
 
 
 def prepare_maestro(payload: dict[str, Any]) -> dict[str, Any]:
@@ -3185,11 +3265,27 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
         "simulation_fingerprint_sha256": None,
         "simulator_input_consistency_verified": False,
         "simulator_input_consistency": [],
+        "sweep_setup_readback_before": None,
+        "sweep_setup_readback_after": None,
+        "sweep_point_consistency_verified": False,
+        "sweep_point_consistency": [],
+        "effective_simulation_values_verified": False,
+        "exact_point_input_result_binding_verified": False,
     }
+    sweep_verification = settings.get("sweep_verification")
+    sweep_setup_before: dict[str, Any] | None = None
     try:
         tests = _maestro_tests_readback(client, session)
         if not tests:
             raise RuntimeError("saved Maestro setup did not contain any tests")
+        if sweep_verification is not None:
+            if not isinstance(sweep_verification, dict):
+                raise RuntimeError("ADE sweep_verification must be an object")
+            from virtuoso_bridge.virtuoso.maestro import get_var
+
+            sweep_setup_before = _read_maestro_sweep_setup(
+                client, get_var, sweep_verification, session=session
+            )
         resume_history = settings.get("resume_history")
         resume_scratch_root = settings.get("resume_runtime_scratch_root")
         runtime = _configure_background_ade_runtime(
@@ -3256,14 +3352,24 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
             artifact_evidence["artifact_capture_error"] = str(exc)
         if settings.get("require_simulator_input_consistency", False):
             try:
-                artifact_evidence.update(
-                    _verify_ade_simulator_inputs(
+                if sweep_verification is not None:
+                    consistency_evidence = _verify_ade_sweep_consistency(
+                        client,
+                        session=session,
+                        tests=tests,
+                        history=history,
+                        results=results,
+                        artifact_evidence=artifact_evidence,
+                        verification=sweep_verification,
+                    )
+                else:
+                    consistency_evidence = _verify_ade_simulator_inputs(
                         client,
                         session=session,
                         tests=tests,
                         artifact_evidence=artifact_evidence,
                     )
-                )
+                artifact_evidence.update(consistency_evidence)
             except RuntimeError as exc:
                 retained = artifact_evidence.get("remote_manifest_directory")
                 raise RuntimeError(
@@ -3274,6 +3380,24 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
                         else ""
                     )
                 ) from exc
+        if sweep_verification is not None:
+            from virtuoso_bridge.virtuoso.maestro import get_var
+
+            sweep_setup_after = _read_maestro_sweep_setup(
+                client, get_var, sweep_verification, session=session
+            )
+            if sweep_setup_before != sweep_setup_after:
+                raise RuntimeError(
+                    "Maestro sweep setup changed while ade.run was executing"
+                )
+            artifact_evidence.update(
+                {
+                    "sweep_setup_readback_before": sweep_setup_before,
+                    "sweep_setup_readback_after": sweep_setup_after,
+                    "sweep_setup_readback_evidence_source": "bridge_readback",
+                    "expected_sweep_evidence_source": "user_input",
+                }
+            )
         if settings.get("require_structured_outputs", True) and not structured_outputs:
             retained = artifact_evidence.get("remote_manifest_directory")
             raise RuntimeError(
@@ -3353,8 +3477,15 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
             )
             + "; exact-history simulator input, "
             "result, and log artifacts were hashed across project and scratch "
-            "locations when required; history name uniqueness and VDA constraint "
-            "mapping were not proved"
+            "locations when required"
+            + (
+                "; every declared native sweep point was bound to saved variable "
+                "scope readback, exact-history input.scs, OA parameter references, "
+                "and structured results"
+                if sweep_verification is not None
+                else ""
+            )
+            + "; history name uniqueness and VDA constraint mapping were not proved"
         ),
     }
 
@@ -4092,48 +4223,6 @@ def _logical_netlist_records(text: str) -> list[str]:
     return records
 
 
-_SPECTRE_SCALAR = re.compile(
-    r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)([A-Za-z]*)$"
-)
-
-
-def _spectre_scalar(value: Any) -> float | None:
-    match = _SPECTRE_SCALAR.fullmatch(str(value).strip().strip('"'))
-    if match is None:
-        return None
-    suffix = match.group(2)
-    scales = {
-        "": 1.0,
-        "f": 1e-15,
-        "p": 1e-12,
-        "n": 1e-9,
-        "u": 1e-6,
-        "m": 1e-3,
-        "k": 1e3,
-        "K": 1e3,
-        "meg": 1e6,
-        "g": 1e9,
-        "G": 1e9,
-        "t": 1e12,
-        "T": 1e12,
-        "P": 1e15,
-    }
-    if suffix not in scales:
-        return None
-    return float(match.group(1)) * scales[suffix]
-
-
-def _spectre_values_equal(left: Any, right: Any) -> bool:
-    if str(left).strip().strip('"') == str(right).strip().strip('"'):
-        return True
-    left_value = _spectre_scalar(left)
-    right_value = _spectre_scalar(right)
-    if left_value is None or right_value is None:
-        return False
-    tolerance = max(abs(left_value), abs(right_value), 1e-30) * 1e-9
-    return abs(left_value - right_value) <= tolerance
-
-
 def _parse_ade_spectre_input(text: str) -> dict[str, Any]:
     headers: dict[str, str] = {}
     for key, label in (
@@ -4149,9 +4238,24 @@ def _parse_ade_spectre_input(text: str) -> dict[str, Any]:
         headers[key] = match.group(1)
 
     instances: dict[str, dict[str, Any]] = {}
+    design_variables: dict[str, str] = {}
     analyses: list[str] = []
     saves: list[str] = []
     for record in _logical_netlist_records(text):
+        if record.startswith("parameters "):
+            for match in re.finditer(
+                r"(?:^|\s)([A-Za-z_][A-Za-z0-9_$]*)=(\"[^\"]*\"|\S+)",
+                record[len("parameters ") :],
+            ):
+                name = match.group(1)
+                value = match.group(2).strip('"')
+                if name in design_variables and design_variables[name] != value:
+                    raise RuntimeError(
+                        f"ADE Spectre input repeats design variable {name} with "
+                        "different values"
+                    )
+                design_variables[name] = value
+            continue
         instance_match = re.match(
             r"^(\S+)\s*\(([^)]*)\)\s+(\S+)(?:\s+(.*))?$", record
         )
@@ -4180,6 +4284,7 @@ def _parse_ade_spectre_input(text: str) -> dict[str, Any]:
         raise RuntimeError("ADE Spectre input contains no top-level instances")
     return {
         "design": headers,
+        "design_variables": design_variables,
         "instances": instances,
         "analysis_records": analyses,
         "save_records": saves,
@@ -4239,6 +4344,7 @@ def _compare_ade_input_to_schematic(
     schematic: dict[str, Any],
     *,
     design: dict[str, str],
+    sweep_bindings: dict[tuple[str, str], dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     if parsed["design"] != design:
         raise RuntimeError(
@@ -4265,6 +4371,8 @@ def _compare_ade_input_to_schematic(
     comparisons: list[dict[str, Any]] = []
     excluded_cdf_semantics: list[dict[str, str]] = []
     verified_parameter_pairs = 0
+    verified_sweep_bindings: set[tuple[str, str]] = set()
+    requested_sweep_bindings = sweep_bindings or {}
     for name in sorted(expected_names):
         oa_instance = oa_instances[name]
         contract = _ade_instance_contract(oa_instance)
@@ -4300,19 +4408,66 @@ def _compare_ade_input_to_schematic(
                 )
             oa_value = str(oa_parameters[oa_name])
             netlist_value = str(netlist_parameters[netlist_name])
-            if not _spectre_values_equal(oa_value, netlist_value):
-                raise RuntimeError(
-                    f"ADE Spectre parameter mismatch for {name}."
-                    f"{oa_name}->{netlist_name}: {oa_value!r} != {netlist_value!r}"
+            binding = requested_sweep_bindings.get((name, oa_name))
+            if binding is None:
+                if not spectre_values_equal(oa_value, netlist_value):
+                    raise RuntimeError(
+                        f"ADE Spectre parameter mismatch for {name}."
+                        f"{oa_name}->{netlist_name}: {oa_value!r} != "
+                        f"{netlist_value!r}"
+                    )
+                parameter_checks.append(
+                    {
+                        "oa_parameter": oa_name,
+                        "netlist_parameter": netlist_name,
+                        "oa_value": oa_value,
+                        "netlist_value": netlist_value,
+                    }
                 )
-            parameter_checks.append(
-                {
-                    "oa_parameter": oa_name,
-                    "netlist_parameter": netlist_name,
-                    "oa_value": oa_value,
-                    "netlist_value": netlist_value,
-                }
-            )
+            else:
+                variable = str(binding["variable"])
+                point_value = str(binding["point_value"])
+                if oa_value != variable:
+                    raise RuntimeError(
+                        f"ADE sweep binding expected OA {name}.{oa_name} to "
+                        f"reference {variable!r}, got {oa_value!r}"
+                    )
+                if spectre_values_equal(netlist_value, point_value):
+                    effective_value = netlist_value
+                    resolution = "resolved_instance_parameter"
+                elif netlist_value == variable:
+                    design_value = (parsed.get("design_variables") or {}).get(
+                        variable
+                    )
+                    if design_value is None or not spectre_values_equal(
+                        design_value, point_value
+                    ):
+                        raise RuntimeError(
+                            "ADE effective sweep value mismatch for "
+                            f"{variable} at {name}.{oa_name}: expected "
+                            f"{point_value!r}, input declared {design_value!r}"
+                        )
+                    effective_value = str(design_value)
+                    resolution = "spectre_design_variable"
+                else:
+                    raise RuntimeError(
+                        "ADE effective sweep value mismatch for "
+                        f"{variable} at {name}.{oa_name}: expected "
+                        f"{point_value!r}, netlist used {netlist_value!r}"
+                    )
+                parameter_checks.append(
+                    {
+                        "oa_parameter": oa_name,
+                        "netlist_parameter": netlist_name,
+                        "oa_value": oa_value,
+                        "netlist_value": netlist_value,
+                        "sweep_variable": variable,
+                        "point_value": point_value,
+                        "effective_value": effective_value,
+                        "resolution": resolution,
+                    }
+                )
+                verified_sweep_bindings.add((name, oa_name))
             verified_parameter_pairs += 1
         if "Wfg" in oa_parameters:
             excluded_cdf_semantics.append(
@@ -4331,10 +4486,22 @@ def _compare_ade_input_to_schematic(
                 "parameter_checks": parameter_checks,
             }
         )
+    missing_sweep_bindings = sorted(
+        set(requested_sweep_bindings) - verified_sweep_bindings
+    )
+    if missing_sweep_bindings:
+        raise RuntimeError(
+            "ADE sweep bindings were not covered by known primitive parameter "
+            f"contracts: {missing_sweep_bindings}"
+        )
     payload = {
         "design": design,
         "instances": comparisons,
         "omitted_ground_symbols": omitted_ground_symbols,
+        "verified_sweep_bindings": [
+            {"instance": instance, "oa_parameter": parameter}
+            for instance, parameter in sorted(verified_sweep_bindings)
+        ],
     }
     return {
         **payload,
@@ -4343,6 +4510,10 @@ def _compare_ade_input_to_schematic(
         "node_connectivity_verified": True,
         "verified_parameter_pairs": verified_parameter_pairs,
         "raw_parameter_mapping_verified": True,
+        "verified_sweep_binding_pairs": len(verified_sweep_bindings),
+        "effective_sweep_bindings_verified": (
+            bool(verified_sweep_bindings) if requested_sweep_bindings else False
+        ),
         "excluded_cdf_semantics": excluded_cdf_semantics,
         "effective_pdk_width_semantics_verified": False,
         "comparison_sha256": hashlib.sha256(
@@ -4415,6 +4586,302 @@ def _verify_ade_simulator_inputs(
         "simulator_input_consistency_evidence_sources": {
             "maestro_design_and_oa": "bridge_readback",
             "spectre_input": "eda_result",
+            "comparison": "software_inference",
+        },
+    }
+
+
+def _ade_point_artifacts(
+    manifest: list[dict[str, Any]],
+    *,
+    history: str,
+    point: int,
+    test: str,
+    category: str,
+    allow_unlabeled: bool,
+    filename: str | None = None,
+) -> list[dict[str, Any]]:
+    prefix = f"{history}/{point}/"
+    test_token = re.sub(r"[^A-Za-z0-9_.-]", "_", test)
+    point_candidates = [
+        item
+        for item in manifest
+        if item.get("binding") == "exact_history_path"
+        and item.get("category") == category
+        and int(item.get("size_bytes") or 0) > 0
+        and str(item.get("path") or "").startswith(prefix)
+        and (
+            filename is None
+            or Path(str(item.get("path") or "")).name == filename
+        )
+    ]
+    test_candidates = [
+        item
+        for item in point_candidates
+        if test in str(item.get("path") or "").split("/")[2:-1]
+        or test_token in str(item.get("path") or "").split("/")[2:-1]
+    ]
+    if test_candidates:
+        return test_candidates
+    return point_candidates if allow_unlabeled else []
+
+
+def _remote_manifest_item_path(item: dict[str, Any]) -> str:
+    remote_path = str(item.get("remote_path") or "")
+    if remote_path:
+        return remote_path
+    remote_paths = item.get("remote_paths")
+    if isinstance(remote_paths, list) and remote_paths:
+        return str(remote_paths[0])
+    raise RuntimeError(
+        f"ADE artifact {item.get('path')!r} has no retained remote path"
+    )
+
+
+def _verify_ade_sweep_consistency(
+    client,
+    *,
+    session: str,
+    tests: list[str],
+    history: str,
+    results: dict[str, Any],
+    artifact_evidence: dict[str, Any],
+    verification: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind every declared native sweep point to OA, input.scs, and results."""
+
+    expected_tests = [str(value) for value in verification.get("expected_tests") or []]
+    if tests != expected_tests:
+        raise RuntimeError(
+            "ADE sweep test mismatch: "
+            f"expected {expected_tests!r}, got {tests!r}"
+        )
+    variables = list(verification.get("variables") or [])
+    variable_names = [str(variable.get("name") or "") for variable in variables]
+    if not variable_names or len(variable_names) != len(set(variable_names)):
+        raise RuntimeError("ADE sweep verification has invalid variable names")
+    expected_points = list(verification.get("points") or [])
+    if len(expected_points) < 2:
+        raise RuntimeError("ADE sweep verification requires at least two points")
+    bindings = list(verification.get("input_bindings") or [])
+    if not bindings:
+        raise RuntimeError("ADE sweep verification requires OA input bindings")
+
+    raw_points = results.get("points")
+    if not isinstance(raw_points, list):
+        raise RuntimeError("ADE sweep structured results did not contain points")
+    actual_points: dict[int, dict[str, Any]] = {}
+    for item in raw_points:
+        if not isinstance(item, dict):
+            raise RuntimeError("ADE sweep structured result point is not an object")
+        try:
+            point_number = int(item.get("point"))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("ADE sweep result has an invalid point number") from exc
+        if point_number in actual_points:
+            raise RuntimeError(f"ADE sweep result repeats point {point_number}")
+        actual_points[point_number] = item
+    expected_numbers = [int(item.get("point")) for item in expected_points]
+    if sorted(actual_points) != expected_numbers:
+        raise RuntimeError(
+            "ADE sweep result point set mismatch: "
+            f"expected {expected_numbers!r}, got {sorted(actual_points)!r}"
+        )
+
+    manifest = artifact_evidence.get("artifact_manifest") or []
+    if not isinstance(manifest, list) or not manifest:
+        raise RuntimeError("ADE sweep verification requires a non-empty artifact manifest")
+    designs: dict[str, dict[str, str]] = {}
+    schematics: dict[str, dict[str, Any]] = {}
+    for test in tests:
+        design = _maestro_test_design_readback(client, test, session=session)
+        if design["view"] != "schematic":
+            raise RuntimeError(
+                "ADE sweep input consistency currently requires schematic source "
+                f"views: {design!r}"
+            )
+        designs[test] = design
+        schematics[test] = _read_schematic(
+            client, design["library"], design["cell"]
+        )
+
+    input_evidence: list[dict[str, Any]] = []
+    point_evidence: list[dict[str, Any]] = []
+    for expected in expected_points:
+        point_number = int(expected["point"])
+        expected_values = {
+            str(name): str(value)
+            for name, value in (expected.get("values") or {}).items()
+        }
+        if set(expected_values) != set(variable_names):
+            raise RuntimeError(
+                f"ADE sweep point {point_number} has an invalid expected variable set"
+            )
+        actual = actual_points[point_number]
+        actual_parameters = actual.get("parameters")
+        if not isinstance(actual_parameters, dict):
+            raise RuntimeError(
+                f"ADE sweep point {point_number} did not expose result parameters"
+            )
+        for name, expected_value in expected_values.items():
+            actual_value = actual_parameters.get(name)
+            if actual_value is None or not spectre_values_equal(
+                actual_value, expected_value
+            ):
+                raise RuntimeError(
+                    f"ADE sweep result parameter mismatch at point {point_number} "
+                    f"for {name}: expected {expected_value!r}, got {actual_value!r}"
+                )
+        outputs = actual.get("outputs")
+        scalar_outputs = {
+            str(name): str(info.get("value") or "")
+            for name, info in (outputs or {}).items()
+            if isinstance(info, dict) and str(info.get("value") or "").strip()
+        }
+        if not scalar_outputs:
+            raise RuntimeError(
+                f"ADE sweep point {point_number} had no non-empty scalar output"
+            )
+
+        point_tests: list[dict[str, Any]] = []
+        for test in tests:
+            allow_unlabeled = len(tests) == 1
+            point_inputs = _ade_point_artifacts(
+                manifest,
+                history=history,
+                point=point_number,
+                test=test,
+                category="simulator_input",
+                allow_unlabeled=allow_unlabeled,
+                filename="input.scs",
+            )
+            if not point_inputs:
+                raise RuntimeError(
+                    f"ADE sweep point {point_number} test {test} had no "
+                    "exact-history input.scs"
+                )
+            point_results = _ade_point_artifacts(
+                manifest,
+                history=history,
+                point=point_number,
+                test=test,
+                category="eda_result",
+                allow_unlabeled=allow_unlabeled,
+            )
+            if not point_results:
+                raise RuntimeError(
+                    f"ADE sweep point {point_number} test {test} had no non-empty "
+                    "exact-history result"
+                )
+            test_bindings = [
+                binding
+                for binding in bindings
+                if isinstance(binding, dict) and binding.get("test") == test
+            ]
+            sweep_binding_map = {
+                (str(binding["instance"]), str(binding["oa_parameter"])): {
+                    "variable": str(binding["variable"]),
+                    "point_value": expected_values[str(binding["variable"])],
+                }
+                for binding in test_bindings
+            }
+            if not sweep_binding_map:
+                raise RuntimeError(
+                    f"ADE sweep point {point_number} test {test} has no OA bindings"
+                )
+            test_inputs: list[dict[str, Any]] = []
+            for manifest_item in point_inputs:
+                remote_path = _remote_manifest_item_path(manifest_item)
+                input_text = _read_remote_text_via_skill(
+                    client, remote_path, page_lines=32
+                )
+                digest = hashlib.sha256(input_text.encode("utf-8")).hexdigest()
+                if digest != manifest_item.get("sha256"):
+                    raise RuntimeError(
+                        "ADE sweep input.scs content hash changed after manifest "
+                        f"capture at point {point_number} test {test}"
+                    )
+                comparison = _compare_ade_input_to_schematic(
+                    _parse_ade_spectre_input(input_text),
+                    schematics[test],
+                    design=designs[test],
+                    sweep_bindings=sweep_binding_map,
+                )
+                if comparison.get("effective_sweep_bindings_verified") is not True:
+                    raise RuntimeError(
+                        f"ADE sweep point {point_number} test {test} did not verify "
+                        "effective variable bindings"
+                    )
+                item_evidence = {
+                    "point": point_number,
+                    "test": test,
+                    "input_path": manifest_item["path"],
+                    "input_remote_path": remote_path,
+                    "input_sha256": digest,
+                    **comparison,
+                }
+                input_evidence.append(item_evidence)
+                test_inputs.append(
+                    {
+                        "path": manifest_item["path"],
+                        "sha256": digest,
+                        "comparison_sha256": comparison["comparison_sha256"],
+                    }
+                )
+            result_artifacts = [
+                {
+                    "path": item["path"],
+                    "sha256": item["sha256"],
+                    "size_bytes": item["size_bytes"],
+                }
+                for item in point_results
+            ]
+            point_tests.append(
+                {
+                    "test": test,
+                    "inputs": test_inputs,
+                    "result_artifacts": result_artifacts,
+                }
+            )
+        point_payload = {
+            "point": point_number,
+            "expected_parameters": expected_values,
+            "result_parameters": {
+                str(name): str(value) for name, value in actual_parameters.items()
+            },
+            "scalar_outputs": scalar_outputs,
+            "tests": point_tests,
+        }
+        point_evidence.append(
+            {
+                **point_payload,
+                "point_binding_sha256": hashlib.sha256(
+                    json.dumps(
+                        point_payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+
+    return {
+        "simulator_input_consistency_verified": bool(input_evidence),
+        "simulator_input_consistency": input_evidence,
+        "simulator_input_consistency_evidence_sources": {
+            "maestro_design_and_oa": "bridge_readback",
+            "spectre_input": "eda_result",
+            "comparison": "software_inference",
+        },
+        "sweep_point_consistency_verified": bool(point_evidence),
+        "sweep_point_consistency": point_evidence,
+        "effective_simulation_values_verified": bool(point_evidence),
+        "exact_point_input_result_binding_verified": bool(point_evidence),
+        "sweep_consistency_evidence_sources": {
+            "expected_sweep": "user_input",
+            "maestro_setup_and_oa": "bridge_readback",
+            "spectre_input_and_results": "eda_result",
             "comparison": "software_inference",
         },
     }

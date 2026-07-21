@@ -255,6 +255,237 @@ class AdePrepareSpec(StrictModel):
     simulator: str = Field(default="spectre", pattern=r"^spectre$")
 
 
+class AdeSweepVariableExpectation(StrictModel):
+    """One saved Maestro sweep declaration that must drive simulation."""
+
+    name: StrictStr = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$",
+    )
+    expected_value: StrictStr = Field(min_length=1, max_length=1024)
+    scope: AdeVariableScope = AdeVariableScope.GLOBAL
+    scope_name: StrictStr | None = Field(default=None, min_length=1, max_length=128)
+
+    @field_validator("expected_value")
+    @classmethod
+    def validate_expected_value(cls, value: str) -> str:
+        if any(
+            character in ('"', "\\")
+            or ord(character) < 32
+            or ord(character) == 127
+            for character in value
+        ):
+            raise ValueError(
+                "Maestro sweep values cannot contain quotes, backslashes, or "
+                "control characters"
+            )
+        values = [item.strip() for item in value.split(",")]
+        if len(values) < 2 or any(not item for item in values):
+            raise ValueError(
+                "Maestro sweep expected_value must declare at least two "
+                "comma-separated values"
+            )
+        if len(values) != len(set(values)):
+            raise ValueError("Maestro sweep expected_value contains duplicates")
+        return value
+
+    @field_validator("scope_name")
+    @classmethod
+    def validate_scope_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if any(
+            character in ('"', "\\")
+            or ord(character) < 32
+            or ord(character) == 127
+            for character in value
+        ):
+            raise ValueError(
+                "Maestro sweep scope names cannot contain quotes, backslashes, "
+                "or control characters"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> "AdeSweepVariableExpectation":
+        if self.scope is AdeVariableScope.GLOBAL and self.scope_name is not None:
+            raise ValueError("global Maestro sweep variables cannot declare scope_name")
+        if self.scope is not AdeVariableScope.GLOBAL and self.scope_name is None:
+            raise ValueError("test/corner Maestro sweep variables require scope_name")
+        return self
+
+    def evidence_key(self) -> str:
+        if self.scope is AdeVariableScope.GLOBAL:
+            return self.name
+        return f"{self.scope.value}:{self.scope_name}:{self.name}"
+
+    def declared_values(self) -> list[str]:
+        return [item.strip() for item in self.expected_value.split(",")]
+
+
+class AdeSweepPointExpectation(StrictModel):
+    point: int = Field(ge=1, le=256)
+    values: dict[StrictStr, StrictStr] = Field(min_length=1, max_length=32)
+
+    @field_validator("values")
+    @classmethod
+    def validate_values(cls, value: dict[str, str]) -> dict[str, str]:
+        for name, point_value in value.items():
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", name):
+                raise ValueError(f"invalid Maestro sweep point variable: {name!r}")
+            if not point_value or any(
+                character in ('"', "\\")
+                or ord(character) < 32
+                or ord(character) == 127
+                for character in point_value
+            ):
+                raise ValueError(
+                    f"invalid Maestro sweep point value for {name!r}"
+                )
+        return value
+
+
+class AdeSweepInputBinding(StrictModel):
+    """Bind an effective ADE variable to one known OA instance parameter."""
+
+    test: StrictStr = Field(min_length=1, max_length=128)
+    variable: StrictStr = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$",
+    )
+    instance: StrictStr = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$",
+    )
+    oa_parameter: StrictStr = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$",
+    )
+
+    def identity(self) -> tuple[str, str, str, str]:
+        return self.test, self.variable, self.instance, self.oa_parameter
+
+
+class AdeSweepVerificationSpec(StrictModel):
+    """Exact expected point set and OA bindings for a native Maestro sweep."""
+
+    expected_tests: list[StrictStr] = Field(min_length=1, max_length=32)
+    expected_corners: list[StrictStr] | None = Field(
+        default=None, min_length=1, max_length=64
+    )
+    variables: list[AdeSweepVariableExpectation] = Field(
+        min_length=1, max_length=32
+    )
+    points: list[AdeSweepPointExpectation] = Field(min_length=2, max_length=256)
+    input_bindings: list[AdeSweepInputBinding] = Field(
+        min_length=1, max_length=128
+    )
+
+    @model_validator(mode="after")
+    def validate_sweep_contract(self) -> "AdeSweepVerificationSpec":
+        for label, names in (
+            ("test", self.expected_tests),
+            ("corner", self.expected_corners or []),
+        ):
+            for name in names:
+                if (
+                    not name
+                    or len(name) > 128
+                    or any(
+                        character in ('"', "\\")
+                        or ord(character) < 32
+                        or ord(character) == 127
+                        for character in name
+                    )
+                ):
+                    raise ValueError(f"invalid Maestro sweep {label} name: {name!r}")
+            if len(names) != len(set(names)):
+                raise ValueError(
+                    f"Maestro sweep expected_{label}s cannot contain duplicates"
+                )
+
+        variable_names = [variable.name for variable in self.variables]
+        if len(variable_names) != len(set(variable_names)):
+            raise ValueError("Maestro sweep variables must have unique names")
+        for variable in self.variables:
+            if (
+                variable.scope is AdeVariableScope.TEST
+                and variable.scope_name not in self.expected_tests
+            ):
+                raise ValueError(
+                    f"test-scoped sweep variable {variable.name!r} must target one "
+                    "of expected_tests"
+                )
+            if variable.scope is AdeVariableScope.CORNER:
+                if self.expected_corners is None:
+                    raise ValueError(
+                        "corner-scoped sweep variables require expected_corners"
+                    )
+                if variable.scope_name not in self.expected_corners:
+                    raise ValueError(
+                        f"corner-scoped sweep variable {variable.name!r} must target "
+                        "one of expected_corners"
+                    )
+
+        point_numbers = [point.point for point in self.points]
+        if point_numbers != list(range(1, len(self.points) + 1)):
+            raise ValueError(
+                "Maestro sweep points must be ordered and contiguous from point 1"
+            )
+        expected_names = set(variable_names)
+        combinations: list[tuple[str, ...]] = []
+        for point in self.points:
+            if set(point.values) != expected_names:
+                raise ValueError(
+                    f"Maestro sweep point {point.point} must declare exactly "
+                    f"{sorted(expected_names)}"
+                )
+            combinations.append(tuple(point.values[name] for name in variable_names))
+        if len(combinations) != len(set(combinations)):
+            raise ValueError("Maestro sweep points contain duplicate value combinations")
+        for variable in self.variables:
+            actual_values = {point.values[variable.name] for point in self.points}
+            if actual_values != set(variable.declared_values()):
+                raise ValueError(
+                    f"Maestro sweep points do not cover the declared values for "
+                    f"{variable.name!r}"
+                )
+
+        identities = [binding.identity() for binding in self.input_bindings]
+        if len(identities) != len(set(identities)):
+            raise ValueError("Maestro sweep input bindings cannot contain duplicates")
+        for binding in self.input_bindings:
+            if binding.test not in self.expected_tests:
+                raise ValueError(
+                    f"Maestro sweep binding test {binding.test!r} must be one of "
+                    "expected_tests"
+                )
+            if binding.variable not in expected_names:
+                raise ValueError(
+                    f"Maestro sweep binding variable {binding.variable!r} was not "
+                    "declared"
+                )
+        bound_pairs = {
+            (binding.test, binding.variable) for binding in self.input_bindings
+        }
+        required_pairs = {
+            (test, variable)
+            for test in self.expected_tests
+            for variable in variable_names
+        }
+        if bound_pairs != required_pairs:
+            missing = sorted(required_pairs - bound_pairs)
+            raise ValueError(
+                "each Maestro sweep test/variable pair needs an OA input binding; "
+                f"missing={missing}"
+            )
+        return self
+
+
 class AdeRunSpec(StrictModel):
     """Run one saved Maestro setup in a background session."""
 
@@ -262,6 +493,7 @@ class AdeRunSpec(StrictModel):
     require_structured_outputs: bool = True
     require_artifact_manifest: bool = True
     require_simulator_input_consistency: bool = False
+    sweep_verification: AdeSweepVerificationSpec | None = None
     resume_history: str | None = Field(
         default=None,
         min_length=1,
@@ -282,6 +514,15 @@ class AdeRunSpec(StrictModel):
         ):
             raise ValueError(
                 "ADE simulator input consistency requires the artifact manifest"
+            )
+        if self.sweep_verification is not None and not (
+            self.require_structured_outputs
+            and self.require_artifact_manifest
+            and self.require_simulator_input_consistency
+        ):
+            raise ValueError(
+                "ADE sweep verification requires structured outputs, artifact "
+                "manifest, and simulator input consistency"
             )
         if (self.resume_history is None) != (
             self.resume_runtime_scratch_root is None

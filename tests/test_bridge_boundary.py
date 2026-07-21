@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import shlex
 import sys
 from copy import deepcopy
@@ -962,6 +963,497 @@ save IN OUT
         "MN0",
         "MP0",
     }
+
+
+def _native_sweep_verification() -> dict:
+    return {
+        "expected_tests": ["VDA"],
+        "expected_corners": None,
+        "variables": [
+            {
+                "name": "CL",
+                "expected_value": "1f,2f",
+                "scope": "global",
+                "scope_name": None,
+            }
+        ],
+        "points": [
+            {"point": 1, "values": {"CL": "1f"}},
+            {"point": 2, "values": {"CL": "2f"}},
+        ],
+        "input_bindings": [
+            {
+                "test": "VDA",
+                "variable": "CL",
+                "instance": "CL0",
+                "oa_parameter": "c",
+            }
+        ],
+    }
+
+
+def _native_sweep_schematic() -> dict:
+    return {
+        "instances": [
+            {
+                "name": "CL0",
+                "lib": "analogLib",
+                "cell": "cap",
+                "params": {"c": "CL"},
+                "terms": {"PLUS": "OUT", "MINUS": "gnd!"},
+            },
+            {
+                "name": "GND0",
+                "lib": "analogLib",
+                "cell": "gnd",
+                "params": {},
+                "terms": {"gnd!": "gnd!"},
+            },
+        ]
+    }
+
+
+def _native_sweep_input(value: str) -> str:
+    return f"""// Design library name: vda_test
+// Design cell name: vda_sweep_tb
+// Design view name: schematic
+simulator lang=spectre
+parameters CL={value}
+CL0 (OUT 0) capacitor c=CL
+tran tran stop=1n
+save OUT
+"""
+
+
+def test_ade_spectre_input_resolves_a_declared_oa_sweep_binding() -> None:
+    parsed = bridge_worker._parse_ade_spectre_input(_native_sweep_input("2f"))
+
+    comparison = bridge_worker._compare_ade_input_to_schematic(
+        parsed,
+        _native_sweep_schematic(),
+        design={
+            "library": "vda_test",
+            "cell": "vda_sweep_tb",
+            "view": "schematic",
+        },
+        sweep_bindings={
+            ("CL0", "c"): {"variable": "CL", "point_value": "2f"}
+        },
+    )
+
+    assert parsed["design_variables"] == {"CL": "2f"}
+    assert comparison["effective_sweep_bindings_verified"] is True
+    assert comparison["verified_sweep_binding_pairs"] == 1
+    check = comparison["instances"][0]["parameter_checks"][0]
+    assert check["oa_value"] == "CL"
+    assert check["netlist_value"] == "CL"
+    assert check["effective_value"] == "2f"
+
+
+def test_ade_spectre_input_rejects_a_sweep_point_value_mismatch() -> None:
+    with pytest.raises(RuntimeError, match="effective sweep value mismatch"):
+        bridge_worker._compare_ade_input_to_schematic(
+            bridge_worker._parse_ade_spectre_input(_native_sweep_input("4f")),
+            _native_sweep_schematic(),
+            design={
+                "library": "vda_test",
+                "cell": "vda_sweep_tb",
+                "view": "schematic",
+            },
+            sweep_bindings={
+                ("CL0", "c"): {"variable": "CL", "point_value": "2f"}
+            },
+        )
+
+
+def test_native_ade_sweep_does_not_reuse_unlabeled_artifacts_across_tests() -> None:
+    manifest = [
+        {
+            "path": "Interactive.12/1/netlist/input.scs",
+            "binding": "exact_history_path",
+            "category": "simulator_input",
+            "size_bytes": 64,
+        }
+    ]
+
+    assert bridge_worker._ade_point_artifacts(
+        manifest,
+        history="Interactive.12",
+        point=1,
+        test="VDA",
+        category="simulator_input",
+        allow_unlabeled=True,
+        filename="input.scs",
+    ) == manifest
+    assert bridge_worker._ade_point_artifacts(
+        manifest,
+        history="Interactive.12",
+        point=1,
+        test="VDA",
+        category="simulator_input",
+        allow_unlabeled=False,
+        filename="input.scs",
+    ) == []
+
+
+def test_native_ade_sweep_binds_each_structured_point_to_input_and_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    history = "Interactive.12"
+    manifest: list[dict] = []
+    texts: dict[str, str] = {}
+    for point, value in ((1, "1f"), (2, "2f")):
+        input_path = (
+            f"/data/xum/results/{history}/{point}/VDA/netlist/input.scs"
+        )
+        text = _native_sweep_input(value)
+        texts[input_path] = text
+        manifest.extend(
+            [
+                {
+                    "path": f"{history}/{point}/VDA/netlist/input.scs",
+                    "remote_path": input_path,
+                    "remote_paths": [input_path],
+                    "binding": "exact_history_path",
+                    "category": "simulator_input",
+                    "size_bytes": len(text.encode("utf-8")),
+                    "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    "evidence_source": "eda_result",
+                },
+                {
+                    "path": f"{history}/{point}/VDA/psf/tran.tran",
+                    "remote_path": (
+                        f"/data/xum/results/{history}/{point}/VDA/psf/tran.tran"
+                    ),
+                    "remote_paths": [
+                        f"/data/xum/results/{history}/{point}/VDA/psf/tran.tran"
+                    ],
+                    "binding": "exact_history_path",
+                    "category": "eda_result",
+                    "size_bytes": 64,
+                    "sha256": str(point) * 64,
+                    "evidence_source": "eda_result",
+                },
+            ]
+        )
+    results = {
+        "history": history,
+        "points": [
+            {
+                "point": 1,
+                "parameters": {"CL": "1e-15"},
+                "outputs": {"VoutAvg": {"value": "0.45", "pass_fail": "pass"}},
+            },
+            {
+                "point": 2,
+                "parameters": {"CL": "2e-15"},
+                "outputs": {"VoutAvg": {"value": "0.40", "pass_fail": "pass"}},
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        bridge_worker,
+        "_maestro_test_design_readback",
+        lambda *_args, **_kwargs: {
+            "library": "vda_test",
+            "cell": "vda_sweep_tb",
+            "view": "schematic",
+        },
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_read_schematic",
+        lambda *_args, **_kwargs: _native_sweep_schematic(),
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_read_remote_text_via_skill",
+        lambda _client, path, **_kwargs: texts[path],
+    )
+
+    evidence = bridge_worker._verify_ade_sweep_consistency(
+        object(),
+        session="fnxSweep12",
+        tests=["VDA"],
+        history=history,
+        results=results,
+        artifact_evidence={"artifact_manifest": manifest},
+        verification=_native_sweep_verification(),
+    )
+
+    assert evidence["sweep_point_consistency_verified"] is True
+    assert evidence["effective_simulation_values_verified"] is True
+    assert evidence["exact_point_input_result_binding_verified"] is True
+    assert len(evidence["sweep_point_consistency"]) == 2
+    assert len(evidence["simulator_input_consistency"]) == 2
+    assert {
+        point["result_parameters"]["CL"]
+        for point in evidence["sweep_point_consistency"]
+    } == {"1e-15", "2e-15"}
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda results, manifest: results["points"][1]["parameters"].update(
+                {"CL": "4f"}
+            ),
+            "result parameter mismatch",
+        ),
+        (
+            lambda results, manifest: results["points"][1].update(
+                {"outputs": {"VoutAvg": {"value": ""}}}
+            ),
+            "no non-empty scalar output",
+        ),
+        (
+            lambda results, manifest: manifest.__setitem__(
+                slice(None),
+                [
+                    item
+                    for item in manifest
+                    if not item["path"].endswith("2/VDA/netlist/input.scs")
+                ],
+            ),
+            "no exact-history input.scs",
+        ),
+        (
+            lambda results, manifest: manifest.__setitem__(
+                slice(None),
+                [
+                    item
+                    for item in manifest
+                    if not item["path"].endswith("2/VDA/psf/tran.tran")
+                ],
+            ),
+            "no non-empty exact-history result",
+        ),
+    ],
+)
+def test_native_ade_sweep_rejects_incomplete_point_evidence(
+    mutation, message: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    history = "Interactive.12"
+    results = {
+        "history": history,
+        "points": [
+            {
+                "point": 1,
+                "parameters": {"CL": "1f"},
+                "outputs": {"VoutAvg": {"value": "0.45"}},
+            },
+            {
+                "point": 2,
+                "parameters": {"CL": "2f"},
+                "outputs": {"VoutAvg": {"value": "0.40"}},
+            },
+        ],
+    }
+    texts: dict[str, str] = {}
+    manifest: list[dict] = []
+    for point, value in ((1, "1f"), (2, "2f")):
+        remote = f"/data/xum/results/{history}/{point}/VDA/netlist/input.scs"
+        text = _native_sweep_input(value)
+        texts[remote] = text
+        manifest.extend(
+            [
+                {
+                    "path": f"{history}/{point}/VDA/netlist/input.scs",
+                    "remote_path": remote,
+                    "binding": "exact_history_path",
+                    "category": "simulator_input",
+                    "size_bytes": len(text),
+                    "sha256": hashlib.sha256(text.encode()).hexdigest(),
+                },
+                {
+                    "path": f"{history}/{point}/VDA/psf/tran.tran",
+                    "remote_path": f"/data/xum/results/{history}/{point}/result",
+                    "binding": "exact_history_path",
+                    "category": "eda_result",
+                    "size_bytes": 64,
+                    "sha256": str(point) * 64,
+                },
+            ]
+        )
+    mutation(results, manifest)
+    monkeypatch.setattr(
+        bridge_worker,
+        "_maestro_test_design_readback",
+        lambda *_args, **_kwargs: {
+            "library": "vda_test",
+            "cell": "vda_sweep_tb",
+            "view": "schematic",
+        },
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_read_schematic",
+        lambda *_args, **_kwargs: _native_sweep_schematic(),
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_read_remote_text_via_skill",
+        lambda _client, path, **_kwargs: texts[path],
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        bridge_worker._verify_ade_sweep_consistency(
+            object(),
+            session="fnxSweep12",
+            tests=["VDA"],
+            history=history,
+            results=results,
+            artifact_evidence={"artifact_manifest": manifest},
+            verification=_native_sweep_verification(),
+        )
+
+
+def test_native_ade_sweep_setup_readback_requires_the_exact_saved_declaration() -> None:
+    class Client:
+        def execute_skill(self, expression, **_kwargs):
+            assert "maeGetSetup" in expression
+            return SimpleNamespace(output='("VDA")', errors=[])
+
+    readback = bridge_worker._read_maestro_sweep_setup(
+        Client(),
+        lambda _client, name, **_kwargs: (
+            '"1f,2f"' if name == "CL" else "nil"
+        ),
+        _native_sweep_verification(),
+        session="fnxSweep12",
+    )
+
+    assert readback["tests"] == ["VDA"]
+    assert readback["variables"] == {"CL": "1f,2f"}
+    assert readback["variable_readback_methods"] == {
+        "CL": "bridge_public_get_var"
+    }
+    assert re.fullmatch(r"[0-9a-f]{64}", readback["fingerprint_sha256"])
+
+    with pytest.raises(RuntimeError, match="sweep variable mismatch"):
+        bridge_worker._read_maestro_sweep_setup(
+            Client(),
+            lambda *_args, **_kwargs: '"4f"',
+            _native_sweep_verification(),
+            session="fnxSweep12",
+        )
+
+
+def test_background_maestro_run_wires_native_sweep_preflight_and_point_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup_calls: list[str] = []
+
+    class Client:
+        def execute_skill(self, expression, **_kwargs):
+            if "ddGetObj" in expression:
+                return SimpleNamespace(output="t", errors=[])
+            if "maeGetSetup" in expression:
+                return SimpleNamespace(output='("VDA")', errors=[])
+            raise AssertionError(expression)
+
+    _install_fake_maestro_module(
+        monkeypatch,
+        open_session=lambda *_args: "fnxSweep12",
+        close_session=lambda *_args: None,
+        run_and_wait=lambda *_args, **_kwargs: ('"Interactive.12"', "done"),
+        read_results=lambda *_args, **_kwargs: {
+            "history": "Interactive.12",
+            "points": [
+                {
+                    "point": 1,
+                    "parameters": {"CL": "1f"},
+                    "outputs": {"VoutAvg": {"value": "0.45"}},
+                },
+                {
+                    "point": 2,
+                    "parameters": {"CL": "2f"},
+                    "outputs": {"VoutAvg": {"value": "0.40"}},
+                },
+            ],
+        },
+        get_var=lambda *_args, **_kwargs: '"1f,2f"',
+    )
+    _stub_background_runtime(monkeypatch)
+    monkeypatch.setattr(bridge_worker, "_client", Client)
+    monkeypatch.setattr(
+        bridge_worker,
+        "_read_maestro_sweep_setup",
+        lambda *_args, **_kwargs: (
+            setup_calls.append("read")
+            or {
+                "tests": ["VDA"],
+                "corners": None,
+                "variables": {"CL": "1f,2f"},
+                "variable_readback_methods": {"CL": "bridge_public_get_var"},
+                "fingerprint_sha256": "a" * 64,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_collect_background_ade_artifacts",
+        lambda *_args, **_kwargs: {
+            "artifact_history": "Interactive.12",
+            "artifact_history_path_binding_verified": True,
+            "artifact_runtime_input_binding_verified": True,
+            "artifact_run_binding_verified": True,
+            "artifact_manifest": [{"path": "Interactive.12/1/VDA/input.scs"}],
+            "artifact_counts": {"simulator_input": 1},
+            "artifact_manifest_complete": True,
+            "artifacts_captured": True,
+            "simulation_fingerprint_sha256": "b" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_verify_ade_sweep_consistency",
+        lambda *_args, **_kwargs: {
+            "simulator_input_consistency_verified": True,
+            "simulator_input_consistency": [{"point": 1}, {"point": 2}],
+            "simulator_input_consistency_evidence_sources": {
+                "maestro_design_and_oa": "bridge_readback",
+                "spectre_input": "eda_result",
+                "comparison": "software_inference",
+            },
+            "sweep_point_consistency_verified": True,
+            "sweep_point_consistency": [{"point": 1}, {"point": 2}],
+            "effective_simulation_values_verified": True,
+            "exact_point_input_result_binding_verified": True,
+            "sweep_consistency_evidence_sources": {
+                "expected_sweep": "user_input",
+                "maestro_setup_and_oa": "bridge_readback",
+                "spectre_input_and_results": "eda_result",
+                "comparison": "software_inference",
+            },
+        },
+    )
+
+    result = bridge_worker.run_background_maestro(
+        {
+            "task_id": "run-native-sweep",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_sweep_tb",
+                "view": "maestro",
+            },
+            "profile": {"remote_run_root": "/data/xum/vda_runs"},
+            "ade_run": {
+                "require_structured_outputs": True,
+                "require_artifact_manifest": True,
+                "require_simulator_input_consistency": True,
+                "sweep_verification": _native_sweep_verification(),
+            },
+        }
+    )
+
+    assert setup_calls == ["read", "read"]
+    assert result["sweep_setup_readback_before"] == result[
+        "sweep_setup_readback_after"
+    ]
+    assert result["sweep_point_consistency_verified"] is True
+    assert result["exact_point_input_result_binding_verified"] is True
 
 
 def test_remote_ade_manifest_deduplicates_identical_copies_and_rejects_conflict() -> None:
@@ -2193,6 +2685,46 @@ def test_subprocess_ade_run_payload_has_no_configuration_or_analysis(
     assert payload["ade_run"]["require_structured_outputs"] is True
     assert payload["ade_run"]["require_artifact_manifest"] is True
     assert payload["ade_run_user_fields"] == ["require_structured_outputs"]
+
+
+def test_subprocess_ade_run_payload_preserves_native_sweep_expectations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "run-native-cl-sweep",
+            "operation": "ade.run",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_sweep_tb",
+                "view": "maestro",
+            },
+            "ade_run": {
+                "require_simulator_input_consistency": True,
+                "sweep_verification": _native_sweep_verification(),
+            },
+            "safety": {"allow_remote_compute": True},
+        }
+    )
+    adapter = SubprocessBridgeAdapter(tmp_path / "bridge-python.exe")
+    request: dict[str, object] = {}
+
+    def fake_request(action, payload, *, timeout):
+        request.update(action=action, payload=payload, timeout=timeout)
+        return {"structured_results_available": True}
+
+    monkeypatch.setattr(adapter, "_request", fake_request)
+
+    adapter.run_ade(task)
+
+    payload = request["payload"]
+    assert isinstance(payload, dict)
+    assert payload["ade_run"]["sweep_verification"] == _native_sweep_verification()
+    assert set(payload["ade_run_user_fields"]) == {
+        "require_simulator_input_consistency",
+        "sweep_verification",
+    }
 
 
 def test_subprocess_ade_variable_payload_preserves_exact_strings(

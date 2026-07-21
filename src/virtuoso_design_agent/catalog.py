@@ -69,8 +69,9 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
         evidence_gate=(
             "unfiltered Bridge schematic readback + targeted CDF value verification + "
             "live non-overwrite ADE prepare/setup patch/background run-resume + exact-"
-            "history/result/log and OA-to-runtime-input consistency; human capture and "
-            "declared-scope variable patch live pending"
+            "history/result/log and OA-to-runtime-input consistency; optional native-"
+            "sweep point/input/result binding implemented locally; human capture, "
+            "declared-scope variable patch, and sweep binding live pending"
         ),
     ),
     CircuitKind.INVERTER: CircuitCapability(
@@ -89,8 +90,9 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
         evidence_gate=(
             "OA readback + si netlist consistency + transient timing/supply energy + "
             "bounded search + live non-overwrite ADE prepare/setup patch/background "
-            "run-resume and OA-to-runtime-input consistency; capture/variable/corner "
-            "ADE gates pending"
+            "run-resume and OA-to-runtime-input consistency; native sweep exact-point "
+            "contract implemented locally; capture/variable/sweep/corner ADE live "
+            "gates pending"
         ),
     ),
     CircuitKind.COMMON_SOURCE: CircuitCapability(
@@ -113,8 +115,9 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "bounded W/RD/RS AC + AC/linearity/noise quality tuning, OA writeback, "
             "infeasible restore, checkpoint recovery, and non-overwrite ADE "
             "prepare/setup/background exact-history run-resume path live on the TSMC "
-            "inverter handoff; common-source capture/variable/corner ADE gates and "
-            "L/VDD/corner pending"
+            "inverter handoff; native sweep exact-point contract implemented locally; "
+            "common-source capture/variable/sweep/corner ADE gates and L/VDD/corner "
+            "pending"
         ),
     ),
     CircuitKind.SOURCE_DEGENERATED_COMMON_SOURCE: CircuitCapability(

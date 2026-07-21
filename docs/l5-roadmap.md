@@ -47,6 +47,8 @@ Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发�
 
 现在又新增正交的 `ade.setup.apply`：在 exact tests 下，对声明 analysis 的完整旧 enabled/options 做 CAS，并只新增明确不存在的命名 net/point output 与可选 lt/gt spec。worker 在首个 writer 前读完全部旧 analysis 和 output absence；随后复用 Bridge public analysis/output/spec writer，逐项立即回读，只保存一次，再独立重开核对。已有 output 不会被替换，未声明 setup 状态也不会被包装成已核验；analysis/output 配置仍是 `bridge_readback`，没有仿真就没有 `eda_result`。2026-07-21 nics4304 live Gate 已把默认 disabled transient 改为 `stop=300p/maxstep=1p`，新增 `/IN`、`/OUT` 和带 `>0.1` spec 的 `average(VT("/OUT"))`，并在独立重开中全部匹配；首次 expression 序列化失败发生在 save 前且重开证明零持久化。状态升级为 **live declared-analysis CAS and add-only output/spec persistence verified**；已有 output 替换、变量/corner scope 与完整 setup 指纹仍待验证。
 
+2026-07-22 为 `ade.run` 增加可选 `sweep_verification` 严格门：任务必须声明 exact tests/corners、各 scope 保存的逗号 sweep、连续 expected points 和 OA `instance.parameter` 绑定。worker 在运行前后回读同一 setup；每个 point 必须同时有匹配的 Detail 参数、非空 scalar output、exact-history `input.scs`、非空结果，并证明 OA raw 参数引用变量而 Spectre 输入采用该 point 的有效值。point/input/result 对应、单位等价点值和 OA/input comparison 指纹由 executor 再核对，普通未声明严格门的 `ade.run` 不被收窄。空 output、缺输入/结果、多 test 产物歧义、shadow 后值不符、未知 primitive 和输入 hash 漂移均有失败测试；本地回归 `276 passed`、`58/58` example plans。状态是 **native Maestro sweep exact-point input/result consistency contract implemented locally**；真实 IC6.1.8 逐点目录、可能的独立 variables file、二维 sweep 和 corner 仍待 live，不能把本地测试写成变量已进入真实 Spectre。
+
 需要用户操作 Virtuoso/ADE 的验证已按用户决定延期，并集中记录在 [`deferred-manual-gates.md`](deferred-manual-gates.md)：包括人工修改/保存/重跑后的双向交接、旧 ADE L state 备份后迁移与重开，以及相同 history/output 的人工数值交叉检查。这些项目不阻塞后台自动化实现，但在真实完成前仍保留为未验证边界；延期记录本身不构成远端授权。
 
 ## L5B：单模块设计代理（产品目标）
@@ -86,7 +88,7 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> 有限 AC trade-off 与失败/预算/恢复路径（已通过）
   -> 功耗 + transient 线性度 + noise（单点只读 live 已通过）
   -> 多 analysis 质量约束与受预算调优（W/RD/RS 写回、失败门与恢复已通过）
-  -> ADE 双路径（prepare + analysis/output add-only patch + background run/resume/raw-input consistency 已 live；capture、变量 CAS、人工交接与 corner 待验证）
+  -> ADE 双路径（prepare + analysis/output add-only patch + background run/resume/raw-input consistency 已 live；原生 sweep 逐点严格门已本地实现，capture、变量 CAS、sweep/corner live 与人工交接待验证）
   -> L/VDD + 多 analysis + 有限 corner
   -> 差分对
   -> L5B 单模块闭环

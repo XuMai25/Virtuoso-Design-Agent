@@ -69,6 +69,8 @@ py -3.13 -m venv .venv
 .\.venv\Scripts\vda.exe plan examples\tasks\existing-maestro-scoped-variables-apply.bridge.json
 .\.venv\Scripts\vda.exe plan examples\tasks\existing-maestro-setup-apply.bridge.json
 .\.venv\Scripts\vda.exe plan examples\tasks\existing-maestro-run.bridge.json
+.\.venv\Scripts\vda.exe plan examples\tasks\inverter-ade-sweep-create.bridge.json
+.\.venv\Scripts\vda.exe plan examples\tasks\inverter-ade-sweep-run.bridge.json
 ```
 
 计划会打印确认 token。复制该 token 后运行离线闭环：
@@ -111,7 +113,9 @@ C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe 
 
 人工 ADE 交接先用可选的 `ade.prepare`，再用 `ade.capture`。两者的 `target.view` 都必须为 `maestro`。`prepare` 需要 OA 写授权、library 白名单和 cell 前缀，只创建一个新 Maestro view/test；若目标已经存在则失败，因此不会覆盖人工状态。`capture` 默认要求 setup 已保存且存在非空 EDA result artifacts；可用 `ade_capture.history` 固定某个 `Interactive.N` 等 history，并用 `require_structured_outputs: true` 要求 ADE Detail output/spec 表可读。捕获前由用户自己打开、调整、运行、保存并聚焦目标窗口；VDA 不会抢焦点或修改它。setup 标为 `bridge_readback`，网表、PSF、Spectre log 和结构化 output/spec 标为 `eda_result`，自动选择最新 history 标为 `software_inference`，显式 history 标为 `user_input`。
 
-不需要人工窗口的已保存 setup 可用 `ade.run`。它要求 `target.view: "maestro"`、`ade_run` 设置和 `allow_remote_compute: true`，但不要求 `allow_remote_write`；worker 新开 background session，回读 tests，运行 setup，并用本次调用返回的 history 读取逐点 output/spec。默认同时启用 `require_structured_outputs: true` 和 `require_artifact_manifest: true`：后者从 Cadence 暴露的 library/analog-run 路径推导 project 与 scratch Maestro 根，只枚举确切 history 下的核心 `netlist`、`input.scs`、PSF/结果、Spectre log 及同名 `.rdb/.msg.db`，用远端 `sha256sum` 生成小型清单，再经 Bridge 公共下载接口读回。核心网表、非空结果或日志缺失，路径逃逸，或者 project/scratch 同一逻辑文件内容冲突都会失败；显式关闭任一要求且证据缺失时 run record 只能是 `partial`。远端清单保留在 profile 的 `/data/xum` run root 下，本操作不下载完整波形、不配置/保存 setup、不写 OA，也不把 ADE output 自动映射成 VDA constraints。精确 history 路径绑定不等于名称唯一：命名/覆盖策略仍由已保存 setup 决定，VDA 当前不能在运行前证明该名称不存在。有限 corner、配置值到网表的语义核对和 nics4304 live smoke 仍是后续 Gate；人工相关验证见 `docs/deferred-manual-gates.md`。
+不需要人工窗口的已保存 setup 可用 `ade.run`。它要求 `target.view: "maestro"`、`ade_run` 设置和 `allow_remote_compute: true`，但不要求 `allow_remote_write`；worker 新开 background session，回读 tests，运行 setup，并用本次调用返回的 history 读取逐点 output/spec。默认同时启用 `require_structured_outputs: true` 和 `require_artifact_manifest: true`：后者从 Cadence 暴露的 library/analog-run 路径推导 project 与 scratch Maestro 根，只枚举确切 history 下的核心 `netlist`、`input.scs`、PSF/结果、Spectre log 及同名 `.rdb/.msg.db`，用远端 `sha256sum` 生成小型清单，再经 Bridge 公共下载接口读回。核心网表、非空结果或日志缺失，路径逃逸，或者 project/scratch 同一逻辑文件内容冲突都会失败；显式关闭任一要求且证据缺失时 run record 只能是 `partial`。远端清单保留在 profile 的 `/data/xum` run root 下，本操作不下载完整波形、不配置/保存 setup、不写 OA，也不把 ADE output 自动映射成 VDA constraints。精确 history 路径绑定不等于名称唯一：命名/覆盖策略仍由已保存 setup 决定，VDA 当前不能在运行前证明该名称不存在。单点 nics4304 live 已覆盖 OA 到真实 `input.scs` 的 raw 参数核对；有限 corner、原生 sweep 逐点有效值和通用 constraint 映射仍是后续 Gate。人工相关验证见 `docs/deferred-manual-gates.md`。
+
+需要证明原生 parametric sweep 真正进入仿真时，可在 `ade_run.sweep_verification` 中额外声明 exact tests/corners、各 scope 保存的逗号变量值、连续 expected points，以及每个 test/variable 对应的 `instance.oa_parameter`。该可选严格门强制同时打开 structured outputs、artifact manifest 和 simulator input consistency：运行前后精确回读 setup；每个 point 必须在 Detail 表中给出匹配变量和非空 scalar output，在 exact history 下有非空 `input.scs` 与结果，并证明 OA raw 参数引用变量且 Spectre 输入采用该 point 值。任务预期属于 `user_input`，setup/OA 属于 `bridge_readback`，input/result 属于 `eda_result`，对应与哈希聚合属于 `software_inference`。未声明该字段的普通 `ade.run` 不受限制。当前契约和失败门已本地通过，nics4304 live 仍待下一次受控 Gate；见 `examples/tasks/inverter-ade-sweep-*.bridge.json`。
 
 自动修改 design variable 使用 `ade.variables.apply`。任务必须列出 `expected_tests`；使用 corner scope 时还必须列出 exact `expected_corners`。每个 update 给出 `name`、显式 `expected_value`、`value`，以及可选的 `scope: global|test|corner`/`scope_name`；`expected_value: null` 表示要求变量在该 scope 不存在。同名变量可分别出现在不同 scope，但同一 scope 不能重复。任何已配置 Maestro session 已打开时都会保守拒绝。该 operation 需要完整 OA-write 授权，只在所有 tests/corners/旧值匹配后逐项 set/get，保存一次 setup，再用全新 session 逐 scope 回读；不运行仿真或修改 schematic/test/analysis/output/corner membership。逗号列表只是该 scope 的 sweep 声明，不能排除未声明 override，也不能证明 simulator 采用新值。
 
@@ -172,4 +176,5 @@ C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe 
 - [2026-07-21 Maestro 全局变量 CAS patch 本地实现](docs/validation/2026-07-21-ade-variable-patch-local.md)
 - [2026-07-21 Maestro scoped 变量 CAS 扩展本地实现](docs/validation/2026-07-21-ade-scoped-variable-patch-local.md)
 - [2026-07-21 Maestro analysis/output setup patch 本地实现](docs/validation/2026-07-21-ade-setup-patch-local.md)
+- [2026-07-22 ADE 原生 sweep 逐点同源证据本地实现](docs/validation/2026-07-22-ade-native-sweep-consistency-local.md)
 - [延期的人工 ADE Gate](docs/deferred-manual-gates.md)

@@ -625,6 +625,144 @@ def test_ade_input_consistency_requires_artifact_manifest() -> None:
         )
 
 
+def _sweep_verification() -> dict:
+    return {
+        "expected_tests": ["VDA"],
+        "variables": [
+            {
+                "name": "CL",
+                "scope": "global",
+                "expected_value": "1f,2f,4f",
+            }
+        ],
+        "points": [
+            {"point": 1, "values": {"CL": "1f"}},
+            {"point": 2, "values": {"CL": "2f"}},
+            {"point": 3, "values": {"CL": "4f"}},
+        ],
+        "input_bindings": [
+            {
+                "test": "VDA",
+                "variable": "CL",
+                "instance": "CL0",
+                "oa_parameter": "c",
+            }
+        ],
+    }
+
+
+def test_ade_run_accepts_an_exact_native_sweep_verification_contract() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "run-native-cl-sweep",
+            "operation": "ade.run",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_sweep_tb",
+                "view": "maestro",
+            },
+            "ade_run": {
+                "require_simulator_input_consistency": True,
+                "sweep_verification": _sweep_verification(),
+            },
+        }
+    )
+
+    assert task.ade_run is not None
+    sweep = task.ade_run.sweep_verification
+    assert sweep is not None
+    assert sweep.variables[0].evidence_key() == "CL"
+    assert sweep.variables[0].declared_values() == ["1f", "2f", "4f"]
+    assert [point.point for point in sweep.points] == [1, 2, 3]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda data: data["points"].__setitem__(
+                1, {"point": 3, "values": {"CL": "2f"}}
+            ),
+            "ordered and contiguous",
+        ),
+        (
+            lambda data: data["points"][1].update(
+                {"values": {"UNBOUND": "2f"}}
+            ),
+            "declare exactly",
+        ),
+        (
+            lambda data: data.update({"input_bindings": []}),
+            "at least 1 item",
+        ),
+        (
+            lambda data: data["variables"][0].update(
+                {"scope": "test", "scope_name": "OTHER"}
+            ),
+            "must target one of expected_tests",
+        ),
+        (
+            lambda data: data["variables"][0].update(
+                {"expected_value": "1f"}
+            ),
+            "at least two comma-separated",
+        ),
+    ],
+)
+def test_ade_sweep_verification_rejects_ambiguous_point_or_binding_contracts(
+    mutate, message: str
+) -> None:
+    sweep = _sweep_verification()
+    mutate(sweep)
+    with pytest.raises(ValidationError, match=message):
+        TaskSpec.model_validate(
+            {
+                "id": "invalid-native-sweep",
+                "operation": "ade.run",
+                "circuit": "existing_schematic",
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_sweep_tb",
+                    "view": "maestro",
+                },
+                "ade_run": {
+                    "require_simulator_input_consistency": True,
+                    "sweep_verification": sweep,
+                },
+            }
+        )
+
+
+def test_ade_sweep_verification_requires_every_result_and_input_gate() -> None:
+    for disabled in (
+        "require_structured_outputs",
+        "require_artifact_manifest",
+        "require_simulator_input_consistency",
+    ):
+        settings = {
+            "require_structured_outputs": True,
+            "require_artifact_manifest": True,
+            "require_simulator_input_consistency": True,
+            "sweep_verification": _sweep_verification(),
+        }
+        settings[disabled] = False
+        with pytest.raises(ValidationError, match="requires"):
+            TaskSpec.model_validate(
+                {
+                    "id": f"invalid-native-sweep-{disabled}",
+                    "operation": "ade.run",
+                    "circuit": "existing_schematic",
+                    "target": {
+                        "library": "vda_test",
+                        "cell": "vda_sweep_tb",
+                        "view": "maestro",
+                    },
+                    "ade_run": settings,
+                }
+            )
+
+
 @pytest.mark.parametrize(
     ("update", "message"),
     [

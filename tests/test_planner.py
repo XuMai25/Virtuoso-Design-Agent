@@ -177,6 +177,50 @@ def test_ade_run_resume_plan_skips_new_simulation_and_discloses_exact_paths() ->
     assert not plan.requires_remote_write
 
 
+def test_ade_native_sweep_plan_discloses_point_input_and_result_binding() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "run-native-cl-sweep",
+            "operation": "ade.run",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_sweep_tb",
+                "view": "maestro",
+            },
+            "ade_run": {
+                "require_simulator_input_consistency": True,
+                "sweep_verification": {
+                    "expected_tests": ["VDA"],
+                    "variables": [
+                        {"name": "CL", "expected_value": "1f,2f,4f"}
+                    ],
+                    "points": [
+                        {"point": 1, "values": {"CL": "1f"}},
+                        {"point": 2, "values": {"CL": "2f"}},
+                        {"point": 3, "values": {"CL": "4f"}},
+                    ],
+                    "input_bindings": [
+                        {
+                            "test": "VDA",
+                            "variable": "CL",
+                            "instance": "CL0",
+                            "oa_parameter": "c",
+                        }
+                    ],
+                },
+            },
+        }
+    )
+
+    plan = build_plan(task)
+
+    assert "3 个声明 point" in plan.steps[2].description
+    assert "exact-history input.scs" in plan.steps[2].description
+    assert "Detail 参数" in plan.steps[3].description
+    assert "仍不等于已满足 VDA constraints" in plan.steps[4].description
+
+
 def test_ade_variable_patch_plan_discloses_cas_and_single_setup_save() -> None:
     task = TaskSpec.model_validate(
         {

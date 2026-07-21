@@ -217,6 +217,18 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             if task.ade_run.require_simulator_input_consistency
             else ""
         )
+        sweep_requirement = ""
+        if task.ade_run.sweep_verification is not None:
+            sweep = task.ade_run.sweep_verification
+            variables = ", ".join(
+                variable.evidence_key() for variable in sweep.variables
+            )
+            sweep_requirement = (
+                f"；必须精确回读 tests={sweep.expected_tests!r} 与 sweep "
+                f"variables={variables}，并把 {len(sweep.points)} 个声明 point "
+                "逐一绑定到 Detail 参数/非空 output、exact-history input.scs、"
+                "非空结果产物及 OA 变量引用"
+            )
         return [
             probe,
             _step(
@@ -248,7 +260,8 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                         "analysis/parametric sweep 并等待本次返回的 history"
                     )
                     + f"；{output_requirement}；"
-                    f"{artifact_requirement}{consistency_requirement}；"
+                    f"{artifact_requirement}{consistency_requirement}"
+                    f"{sweep_requirement}；"
                     "history 命名/覆盖策略沿用已保存 setup，VDA 不改写也尚不能"
                     "证明名称唯一"
                 ),
@@ -270,8 +283,13 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                     "在 profile /data/xum run root 写入并保留小型 TSV，再下载"
                     "大小与 SHA-256；双路径同名内容冲突时失败"
                     + (
-                        "；从唯一 runtime 根读取 input.scs 并核对 test design、"
-                        "OA 连接与显式 raw 参数映射"
+                        (
+                            "；从 exact-history 逐 point 输入读取 input.scs，核对 "
+                            "Detail 参数、OA 变量引用与有效 Spectre 值"
+                            if task.ade_run.sweep_verification is not None
+                            else "；从唯一 runtime 根读取 input.scs 并核对 test "
+                            "design、OA 连接与显式 raw 参数映射"
+                        )
                         if task.ade_run.require_simulator_input_consistency
                         else ""
                     )
@@ -288,7 +306,12 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                         if resume
                         else ""
                     )
-                    + "后台运行成功不等于已满足 VDA constraints"
+                    + (
+                        "原生 sweep 值进入逐点输入和结果仍不等于已满足 VDA "
+                        "constraints"
+                        if task.ade_run.sweep_verification is not None
+                        else "后台运行成功不等于已满足 VDA constraints"
+                    )
                 ),
                 }
             ),

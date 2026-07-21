@@ -29,6 +29,7 @@ from .models import (
     TaskSpec,
 )
 from .safety import authorize_execution
+from .spectre_values import spectre_values_equal
 
 T = TypeVar("T")
 
@@ -399,6 +400,256 @@ class TaskExecutor:
                         f"{instance}.{name}: requested={value!r}, "
                         f"readback={confirmed[instance].get(name)!r}"
                     )
+
+    @staticmethod
+    def _assert_ade_sweep_evidence(task: TaskSpec, data: dict[str, Any]) -> None:
+        assert task.ade_run is not None
+        sweep = task.ade_run.sweep_verification
+        if sweep is None:
+            return
+        expected_variables = {
+            variable.evidence_key(): variable.expected_value
+            for variable in sweep.variables
+        }
+        expected_methods = {
+            variable.evidence_key(): (
+                "bridge_public_get_var"
+                if variable.scope.value == "global"
+                else "cadence_maeGetVar_via_bridge_skill_channel"
+            )
+            for variable in sweep.variables
+        }
+        setup_readbacks: list[dict[str, Any]] = []
+        for field in (
+            "sweep_setup_readback_before",
+            "sweep_setup_readback_after",
+        ):
+            readback = data.get(field)
+            if not isinstance(readback, dict):
+                raise RuntimeError(f"ADE sweep evidence lacked {field}")
+            if (
+                readback.get("tests") != list(sweep.expected_tests)
+                or readback.get("corners")
+                != (
+                    None
+                    if sweep.expected_corners is None
+                    else list(sweep.expected_corners)
+                )
+                or readback.get("variables") != expected_variables
+                or readback.get("variable_readback_methods") != expected_methods
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(readback.get("fingerprint_sha256") or ""),
+                )
+            ):
+                raise RuntimeError(
+                    "ADE sweep setup readback did not match the declared exact "
+                    "tests, corners, and variable scopes"
+                )
+            setup_readbacks.append(readback)
+        if setup_readbacks[0] != setup_readbacks[1]:
+            raise RuntimeError("ADE sweep setup changed during background execution")
+        if (
+            data.get("sweep_setup_readback_evidence_source") != "bridge_readback"
+            or data.get("expected_sweep_evidence_source") != "user_input"
+            or data.get("sweep_point_consistency_verified") is not True
+            or data.get("effective_simulation_values_verified") is not True
+            or data.get("exact_point_input_result_binding_verified") is not True
+            or data.get("sweep_consistency_evidence_sources")
+            != {
+                "expected_sweep": "user_input",
+                "maestro_setup_and_oa": "bridge_readback",
+                "spectre_input_and_results": "eda_result",
+                "comparison": "software_inference",
+            }
+        ):
+            raise RuntimeError(
+                "ADE sweep evidence did not preserve its setup/input/result sources"
+            )
+
+        raw_points = data.get("sweep_point_consistency")
+        if not isinstance(raw_points, list) or len(raw_points) != len(sweep.points):
+            raise RuntimeError("ADE sweep evidence did not cover every declared point")
+        manifest = data.get("artifact_manifest")
+        if not isinstance(manifest, list):
+            raise RuntimeError("ADE sweep evidence lacked the artifact manifest")
+        manifest_by_path = {
+            str(item.get("path")): item
+            for item in manifest
+            if isinstance(item, dict) and item.get("path")
+        }
+        history = str(data.get("history") or "")
+        raw_input_consistency = data.get("simulator_input_consistency")
+        if not isinstance(raw_input_consistency, list) or not raw_input_consistency:
+            raise RuntimeError("ADE sweep evidence lacked OA/input comparisons")
+        binding_counts = {
+            test: sum(
+                1 for binding in sweep.input_bindings if binding.test == test
+            )
+            for test in sweep.expected_tests
+        }
+        input_consistency_by_key: dict[tuple[int, str, str], dict[str, Any]] = {}
+        for item in raw_input_consistency:
+            if not isinstance(item, dict):
+                raise RuntimeError("ADE sweep OA/input comparison is not an object")
+            try:
+                item_point = int(item.get("point"))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "ADE sweep OA/input comparison has an invalid point"
+                ) from exc
+            item_test = str(item.get("test") or "")
+            item_path = str(item.get("input_path") or "")
+            key = (item_point, item_test, item_path)
+            if (
+                item_test not in binding_counts
+                or not item_path
+                or key in input_consistency_by_key
+                or item.get("effective_sweep_bindings_verified") is not True
+                or item.get("verified_sweep_binding_pairs")
+                != binding_counts[item_test]
+            ):
+                raise RuntimeError(
+                    "ADE sweep OA/input comparison did not uniquely verify every "
+                    "declared binding"
+                )
+            input_consistency_by_key[key] = item
+        expected_points = {point.point: point for point in sweep.points}
+        seen_points: set[int] = set()
+        seen_input_consistency: set[tuple[int, str, str]] = set()
+        for point_evidence in raw_points:
+            if not isinstance(point_evidence, dict):
+                raise RuntimeError("ADE sweep point evidence is not an object")
+            try:
+                point_number = int(point_evidence.get("point"))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("ADE sweep point evidence has an invalid index") from exc
+            expected_point = expected_points.get(point_number)
+            if expected_point is None or point_number in seen_points:
+                raise RuntimeError("ADE sweep point evidence repeated an unknown point")
+            seen_points.add(point_number)
+            tests = point_evidence.get("tests")
+            scalar_outputs = point_evidence.get("scalar_outputs")
+            result_parameters = point_evidence.get("result_parameters")
+            if (
+                point_evidence.get("expected_parameters") != expected_point.values
+                or not isinstance(result_parameters, dict)
+                or not isinstance(scalar_outputs, dict)
+                or not scalar_outputs
+                or any(not str(value).strip() for value in scalar_outputs.values())
+                or not isinstance(tests, list)
+                or [item.get("test") for item in tests if isinstance(item, dict)]
+                != list(sweep.expected_tests)
+            ):
+                raise RuntimeError(
+                    f"ADE sweep point {point_number} lacked declared parameters, "
+                    "tests, or non-empty scalar outputs"
+                )
+            for name, expected_value in expected_point.values.items():
+                result_value = result_parameters.get(name)
+                if result_value is None or not spectre_values_equal(
+                    result_value, expected_value
+                ):
+                    raise RuntimeError(
+                        f"ADE sweep point {point_number} result parameter {name} "
+                        "did not match the declared effective value"
+                    )
+            payload = {
+                "point": point_number,
+                "expected_parameters": point_evidence["expected_parameters"],
+                "result_parameters": point_evidence["result_parameters"],
+                "scalar_outputs": scalar_outputs,
+                "tests": tests,
+            }
+            expected_hash = hashlib.sha256(
+                json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            if point_evidence.get("point_binding_sha256") != expected_hash:
+                raise RuntimeError(
+                    f"ADE sweep point {point_number} binding fingerprint mismatch"
+                )
+            for test_evidence in tests:
+                if not isinstance(test_evidence, dict):
+                    raise RuntimeError(
+                        f"ADE sweep point {point_number} test evidence is malformed"
+                    )
+                test_name = str(test_evidence.get("test") or "")
+                inputs = test_evidence.get("inputs")
+                results = test_evidence.get("result_artifacts")
+                if not isinstance(inputs, list) or not inputs:
+                    raise RuntimeError(
+                        f"ADE sweep point {point_number} lacked input evidence"
+                    )
+                if not isinstance(results, list) or not results:
+                    raise RuntimeError(
+                        f"ADE sweep point {point_number} lacked result evidence"
+                    )
+                for input_item in inputs:
+                    if not isinstance(input_item, dict):
+                        raise RuntimeError(
+                            f"ADE sweep point {point_number} input is malformed"
+                        )
+                    input_path = str(input_item.get("path") or "")
+                    manifest_item = manifest_by_path.get(input_path)
+                    comparison = input_consistency_by_key.get(
+                        (point_number, test_name, input_path)
+                    )
+                    if (
+                        not isinstance(manifest_item, dict)
+                        or manifest_item.get("category") != "simulator_input"
+                        or manifest_item.get("binding") != "exact_history_path"
+                        or not input_path.startswith(f"{history}/{point_number}/")
+                        or manifest_item.get("sha256") != input_item.get("sha256")
+                        or int(manifest_item.get("size_bytes") or 0) <= 0
+                        or not re.fullmatch(
+                            r"[0-9a-f]{64}",
+                            str(input_item.get("comparison_sha256") or ""),
+                        )
+                        or not isinstance(comparison, dict)
+                        or comparison.get("input_sha256")
+                        != input_item.get("sha256")
+                        or comparison.get("comparison_sha256")
+                        != input_item.get("comparison_sha256")
+                    ):
+                        raise RuntimeError(
+                            f"ADE sweep point {point_number} input did not match "
+                            "the exact-history manifest and OA/input comparison"
+                        )
+                    seen_input_consistency.add(
+                        (point_number, test_name, input_path)
+                    )
+                for result_item in results:
+                    if not isinstance(result_item, dict):
+                        raise RuntimeError(
+                            f"ADE sweep point {point_number} result is malformed"
+                        )
+                    result_path = str(result_item.get("path") or "")
+                    manifest_item = manifest_by_path.get(result_path)
+                    if (
+                        not isinstance(manifest_item, dict)
+                        or manifest_item.get("category") != "eda_result"
+                        or manifest_item.get("binding") != "exact_history_path"
+                        or not result_path.startswith(f"{history}/{point_number}/")
+                        or manifest_item.get("sha256") != result_item.get("sha256")
+                        or manifest_item.get("size_bytes")
+                        != result_item.get("size_bytes")
+                        or int(result_item.get("size_bytes") or 0) <= 0
+                    ):
+                        raise RuntimeError(
+                            f"ADE sweep point {point_number} result did not match "
+                            "the exact-history manifest"
+                        )
+        if seen_points != set(expected_points):
+            raise RuntimeError("ADE sweep evidence omitted a declared point")
+        if seen_input_consistency != set(input_consistency_by_key):
+            raise RuntimeError(
+                "ADE sweep OA/input comparisons did not map one-to-one to point inputs"
+            )
 
     @classmethod
     def _validate_checkpoint(
@@ -1068,6 +1319,17 @@ class TaskExecutor:
                             "ADE run did not prove the requested OA-to-input.scs "
                             "consistency"
                         )
+                if (
+                    task.ade_run is not None
+                    and task.ade_run.sweep_verification is not None
+                ):
+                    self._assert_ade_sweep_evidence(task, ran.data)
+                    notes.append(
+                        "verified every declared native Maestro sweep point against "
+                        "saved variable scope readback, exact-history input.scs, OA "
+                        "parameter references, non-empty results, and structured "
+                        "point parameters"
+                    )
                 if ran.data.get("history_recovery_performed") is True:
                     notes.append(
                         "recovered the explicitly named Maestro history without "
