@@ -1,20 +1,18 @@
 {
   "schema_version": 1,
-  "id": "inverter-ade-sweep-bind",
-  "operation": "parameters.apply",
-  "circuit": "existing_schematic",
+  "id": "inverter-ade-sweep-testbench",
+  "operation": "schematic.transform",
+  "circuit": "inverter",
   "target": {
     "library": "vb_pdk_smoke",
     "cell": "vda_ade_sweep_inv_001",
     "view": "schematic"
   },
   "pdk_profile": "nics4304_tsmc28",
-  "instance_parameter_updates": [
-    {
-      "instance": "CL0",
-      "parameters": {"c": "CL"}
-    }
-  ],
+  "parameters": {
+    "vdd_v": 0.9,
+    "load_ff": 2.0
+  },
   "safety": {
     "allow_remote_compute": false,
     "allow_remote_write": true,

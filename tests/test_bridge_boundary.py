@@ -19,6 +19,7 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     _apply_explicit_instance_parameters,
     _assert_common_source,
     _assert_common_source_transform_preserved,
+    _assert_inverter_testbench_transform_preserved,
     _assert_parameter_consistency,
     _assert_focused_maestro,
     _cellview_exists,
@@ -42,6 +43,7 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     _parse_common_source_netlist,
     _parse_inverter_netlist,
     _preflight_mn0_source_label,
+    _rename_inverter_ground_labels_operation,
     _rename_mn0_source_label_operation,
     ParameterReadbackMismatch,
     _read_nonempty_text,
@@ -3409,6 +3411,97 @@ def test_source_degeneration_delta_preserves_existing_oa_objects() -> None:
         _assert_common_source_transform_preserved(before, after, 1_000.0)
 
 
+def _inverter_core_readback() -> dict:
+    return {
+        "instances": [
+            {
+                "name": "MN0",
+                "lib": "tsmcN28",
+                "cell": "nch_lvt_mac",
+                "params": {"Wfg": "500n", "l": "30n", "w": "500n"},
+                "terms": {"D": "OUT", "G": "IN", "S": "VSS", "B": "VSS"},
+                "xy": [0.0, 0.0],
+                "orient": "R0",
+            },
+            {
+                "name": "MP0",
+                "lib": "tsmcN28",
+                "cell": "pch_lvt_mac",
+                "params": {"Wfg": "1u", "l": "30n", "w": "1u"},
+                "terms": {"D": "OUT", "G": "IN", "S": "VDD", "B": "VDD"},
+                "xy": [0.0, 1.0],
+                "orient": "R0",
+            },
+        ],
+        "nets": {name: {} for name in ("IN", "OUT", "VDD", "VSS")},
+        "pins": {name: {} for name in ("IN", "OUT", "VDD", "VSS")},
+    }
+
+
+def test_inverter_testbench_delta_preserves_the_core_and_binds_ground() -> None:
+    before = _inverter_core_readback()
+    after = deepcopy(before)
+    after["instances"][0]["terms"].update({"S": "gnd!", "B": "gnd!"})
+    after["instances"].extend(
+        [
+            {
+                "name": "VDD0",
+                "lib": "analogLib",
+                "cell": "vdc",
+                "params": {"vdc": "900m", "srcType": "dc"},
+                "terms": {"PLUS": "VDD", "MINUS": "gnd!"},
+            },
+            {
+                "name": "VIN0",
+                "lib": "analogLib",
+                "cell": "vpulse",
+                "params": {
+                    "v1": "0",
+                    "v2": "900m",
+                    "per": "100p",
+                    "td": "0",
+                    "tr": "5p",
+                    "tf": "5p",
+                    "pw": "50p",
+                    "srcType": "pulse",
+                },
+                "terms": {"PLUS": "IN", "MINUS": "gnd!"},
+            },
+            {
+                "name": "CL0",
+                "lib": "analogLib",
+                "cell": "cap",
+                "params": {"c": "2f"},
+                "terms": {"PLUS": "OUT", "MINUS": "gnd!"},
+            },
+            {
+                "name": "GND0",
+                "lib": "analogLib",
+                "cell": "gnd",
+                "params": {},
+                "terms": {"gnd!": "gnd!"},
+            },
+        ]
+    )
+    after["nets"]["gnd!"] = {}
+
+    _assert_inverter_testbench_transform_preserved(before, after, 0.9, 2.0)
+
+    after["instances"][0]["params"]["Wfg"] = "9u"
+    with pytest.raises(RuntimeError, match="changed MN0 beyond grounding"):
+        _assert_inverter_testbench_transform_preserved(before, after, 0.9, 2.0)
+
+
+def test_inverter_testbench_ground_label_edit_is_terminal_scoped() -> None:
+    operation = _rename_inverter_ground_labels_operation()
+
+    assert operation.count('x~>theLabel == "VSS"') == 2
+    assert 'rbTermName = "S"' in operation
+    assert 'rbTermName = "B"' in operation
+    assert operation.count("length(rbLabels) == 1") == 2
+    assert operation.count('rbLabel~>theLabel = "gnd!"') == 2
+
+
 def test_source_label_edit_is_strict_and_parameter_updates_are_partial() -> None:
     operation = _rename_mn0_source_label_operation()
     assert 'x~>theLabel == "VSS"' in operation
@@ -4019,7 +4112,7 @@ def test_inverter_simulation_worker_returns_structured_evidence(
     )
     monkeypatch.setattr(
         "virtuoso_design_agent.adapters.bridge_worker._assert_inverter",
-        lambda *args: None,
+        lambda *args: "inverter_core",
     )
     oa = {"nmos_width_um": 0.5, "pmos_width_um": 1.0, "length_um": 0.03}
     monkeypatch.setattr(

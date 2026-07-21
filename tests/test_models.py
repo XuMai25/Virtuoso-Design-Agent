@@ -1414,7 +1414,7 @@ def test_source_degeneration_cannot_be_hidden_inside_schematic_create() -> None:
         build_plan(task)
 
 
-def test_transform_requires_parameters_and_is_not_exposed_to_inverter() -> None:
+def test_transform_requires_parameters_and_inverter_testbench_is_exact() -> None:
     with pytest.raises(ValidationError, match="schematic.transform requires parameters"):
         TaskSpec.model_validate(
             {
@@ -1426,12 +1426,20 @@ def test_transform_requires_parameters_and_is_not_exposed_to_inverter() -> None:
         )
     inverter = TaskSpec.model_validate(
         {
-            "id": "invalid-inverter-transform",
+            "id": "inverter-testbench-transform",
             "operation": "schematic.transform",
             "circuit": "inverter",
             "target": {"library": "vda_test", "cell": "vda_inv"},
-            "parameters": {"source_resistance_ohm": 1_000.0},
+            "parameters": {"vdd_v": 0.9, "load_ff": 2.0},
         }
     )
-    with pytest.raises(UnsupportedCapability, match="not executable yet"):
-        build_plan(inverter)
+    plan = build_plan(inverter)
+    assert plan.requires_remote_write
+    assert not plan.requires_remote_compute
+
+    with pytest.raises(UnsupportedCapability, match="vdd_v and load_ff"):
+        build_plan(
+            inverter.model_copy(
+                update={"parameters": {"vdd_v": 0.9}}
+            )
+        )

@@ -651,3 +651,27 @@ def test_source_degeneration_plan_discloses_minimal_in_place_delta() -> None:
     assert "新增 RS0" in transform.description
     assert "不新建或替换" in transform.description
     assert [step.capability for step in plan.steps].count("schematic.inspect") == 2
+
+
+def test_inverter_testbench_plan_discloses_fixed_minimal_delta() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "inverter-testbench-transform",
+            "operation": "schematic.transform",
+            "circuit": "inverter",
+            "target": {"library": "vda_test", "cell": "vda_inv"},
+            "parameters": {"vdd_v": 0.9, "load_ff": 2.0},
+        }
+    )
+
+    plan = build_plan(task)
+    transform = next(
+        step
+        for step in plan.steps
+        if step.capability == "schematic.transform.inverter-testbench"
+    )
+
+    assert transform.side_effect is SideEffect.REMOTE_WRITE
+    assert "VDD0/VIN0/CL0/GND0" in transform.description
+    assert "同一 cellview" in transform.description
+    assert "不替换" in transform.description

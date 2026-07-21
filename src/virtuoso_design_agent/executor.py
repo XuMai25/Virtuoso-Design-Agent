@@ -311,6 +311,129 @@ class TaskExecutor:
             )
 
     @classmethod
+    def _assert_inverter_testbench_delta(
+        cls,
+        before: AdapterResult,
+        after: AdapterResult,
+        vdd_v: float,
+        load_ff: float,
+    ) -> None:
+        before_data = before.data
+        after_data = after.data
+        before_instances = cls._instances_by_name(before_data)
+        after_instances = cls._instances_by_name(after_data)
+        core_names = {"MN0", "MP0"}
+        testbench_names = core_names | {"VDD0", "VIN0", "CL0", "GND0"}
+        before_names = frozenset(before_instances)
+        if before_names not in {frozenset(core_names), frozenset(testbench_names)}:
+            raise RuntimeError(
+                "inverter-testbench transform requires the exact inverter core or "
+                "testbench instance set"
+            )
+        if set(after_instances) != testbench_names:
+            raise RuntimeError(
+                "inverter-testbench transform did not produce exactly "
+                "MN0/MP0/VDD0/VIN0/CL0/GND0"
+            )
+        expected_terminals = {
+            "MN0": {"D": "OUT", "G": "IN", "S": "gnd!", "B": "gnd!"},
+            "MP0": {"D": "OUT", "G": "IN", "S": "VDD", "B": "VDD"},
+            "VDD0": {"PLUS": "VDD", "MINUS": "gnd!"},
+            "VIN0": {"PLUS": "IN", "MINUS": "gnd!"},
+            "CL0": {"PLUS": "OUT", "MINUS": "gnd!"},
+            "GND0": {"gnd!": "gnd!"},
+        }
+        if any(
+            after_instances[name].get("terminals") != terminals
+            for name, terminals in expected_terminals.items()
+        ):
+            raise RuntimeError(
+                "inverter-testbench transform produced unexpected terminal nets"
+            )
+        expected_masters = {
+            "VDD0": ("analogLib", "vdc"),
+            "VIN0": ("analogLib", "vpulse"),
+            "CL0": ("analogLib", "cap"),
+            "GND0": ("analogLib", "gnd"),
+        }
+        for name, expected in expected_masters.items():
+            actual = (
+                after_instances[name].get("library"),
+                after_instances[name].get("cell"),
+            )
+            if actual != expected:
+                raise RuntimeError(
+                    f"inverter-testbench transform used unexpected {name} master"
+                )
+        if before_data.get("pins") != after_data.get("pins"):
+            raise RuntimeError("inverter-testbench transform unexpectedly changed pins")
+        before_nets = set(before_data.get("nets", []))
+        after_nets = set(after_data.get("nets", []))
+        expected_nets = before_nets | (
+            {"gnd!"} if before_names == frozenset(core_names) else set()
+        )
+        if after_nets != expected_nets:
+            raise RuntimeError(
+                "inverter-testbench transform changed nets beyond adding gnd!"
+            )
+        before_parameters = before_data.get("instance_parameters")
+        after_parameters = after_data.get("instance_parameters")
+        if not isinstance(before_parameters, dict) or not isinstance(
+            after_parameters, dict
+        ):
+            raise RuntimeError(
+                "inverter-testbench transform is missing full parameter readback"
+            )
+        for name in sorted(core_names):
+            if before_parameters.get(name) != after_parameters.get(name):
+                raise RuntimeError(
+                    f"inverter-testbench transform changed {name} parameters"
+                )
+        immutable_fields = (
+            "library",
+            "cell",
+            "xy",
+            "orient",
+            "bBox",
+            "numInst",
+            "view",
+            "parameters",
+        )
+        for name in sorted(core_names):
+            for field in immutable_fields:
+                if before_instances[name].get(field) != after_instances[name].get(field):
+                    raise RuntimeError(
+                        f"inverter-testbench transform changed {name}.{field}"
+                    )
+        expected_parameters = {
+            "VDD0": {"vdc": f"{vdd_v:.12g}", "srcType": "dc"},
+            "VIN0": {
+                "v1": "0",
+                "v2": f"{vdd_v:.12g}",
+                "per": "100p",
+                "td": "0",
+                "tr": "5p",
+                "tf": "5p",
+                "pw": "50p",
+                "srcType": "pulse",
+            },
+            "CL0": {"c": f"{load_ff:.12g}f"},
+        }
+        for instance, parameters in expected_parameters.items():
+            actual_parameters = after_parameters.get(instance)
+            if not isinstance(actual_parameters, dict):
+                raise RuntimeError(
+                    f"inverter-testbench transform omitted {instance} parameters"
+                )
+            for name, expected in parameters.items():
+                actual = actual_parameters.get(name)
+                if actual is None or not spectre_values_equal(actual, expected):
+                    raise RuntimeError(
+                        f"inverter-testbench transform did not confirm "
+                        f"{instance}.{name}"
+                    )
+
+    @classmethod
     def _applied_semantic_parameters(
         cls, result: AdapterResult, task: TaskSpec
     ) -> dict[str, float]:
@@ -978,19 +1101,32 @@ class TaskExecutor:
                     "schematic.inspect.before",
                     lambda: self.adapter.inspect_schematic(task),
                 )
+                transform_action = (
+                    "schematic.transform.inverter-testbench"
+                    if task.circuit is CircuitKind.INVERTER
+                    else "schematic.transform.source-degeneration"
+                )
                 self._action(
-                    "schematic.transform.source-degeneration",
+                    transform_action,
                     lambda: self.adapter.transform_schematic(task),
                 )
                 after = self._action(
                     "schematic.inspect.after",
                     lambda: self.adapter.inspect_schematic(task),
                 )
-                self._assert_source_degeneration_delta(
-                    before,
-                    after,
-                    float(task.parameters["source_resistance_ohm"]),
-                )
+                if task.circuit is CircuitKind.INVERTER:
+                    self._assert_inverter_testbench_delta(
+                        before,
+                        after,
+                        float(task.parameters["vdd_v"]),
+                        float(task.parameters["load_ff"]),
+                    )
+                else:
+                    self._assert_source_degeneration_delta(
+                        before,
+                        after,
+                        float(task.parameters["source_resistance_ohm"]),
+                    )
                 selected_parameters = dict(task.parameters)
             elif operation is Operation.PARAMETERS_APPLY:
                 self._action(

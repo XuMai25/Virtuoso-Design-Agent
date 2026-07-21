@@ -78,7 +78,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
         circuit=CircuitKind.INVERTER,
         stage="L5A vertical slice",
         executable=True,
-        operations=_STANDARD_OPERATIONS,
+        operations=_STANDARD_OPERATIONS + (Operation.SCHEMATIC_TRANSFORM,),
         parameters=(
             "nmos_width_um",
             "pmos_width_um",
@@ -162,8 +162,17 @@ def validate_task_capability(task: TaskSpec) -> None:
             f"unsupported parameters for {task.circuit.value}: {', '.join(unknown)}"
         )
     if task.operation is Operation.SCHEMATIC_TRANSFORM:
-        expected = {"source_resistance_ohm"}
+        expected = (
+            {"vdd_v", "load_ff"}
+            if task.circuit is CircuitKind.INVERTER
+            else {"source_resistance_ohm"}
+        )
         if supplied != expected:
+            if task.circuit is CircuitKind.INVERTER:
+                raise UnsupportedCapability(
+                    "schematic.transform for inverter requires exactly vdd_v and "
+                    "load_ff"
+                )
             raise UnsupportedCapability(
                 "schematic.transform for common_source requires exactly "
                 "source_resistance_ohm"

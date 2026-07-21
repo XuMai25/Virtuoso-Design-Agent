@@ -149,11 +149,20 @@ def _existing_schematic_summary(data: dict[str, Any]) -> dict[str, Any]:
 
 def _assert_inverter(
     data: dict[str, Any], profile: dict[str, Any] | None = None
-) -> None:
-    names = {str(item.get("name")) for item in data.get("instances", [])}
+) -> str:
+    by_name = {str(item.get("name")): item for item in data.get("instances", [])}
+    names = set(by_name)
+    core_names = {"MN0", "MP0"}
+    testbench_names = core_names | {"VDD0", "VIN0", "CL0", "GND0"}
+    if names == core_names:
+        variant = "inverter_core"
+    elif names == testbench_names:
+        variant = "inverter_testbench"
+    else:
+        raise RuntimeError(
+            f"existing schematic is not the VDA inverter: instances={sorted(names)}"
+        )
     pins = set(data.get("pins", {}).keys())
-    if names != {"MN0", "MP0"}:
-        raise RuntimeError(f"existing schematic is not the VDA inverter: instances={sorted(names)}")
     missing_pins = {"IN", "OUT", "VDD", "VSS"} - pins
     if missing_pins:
         raise RuntimeError(
@@ -164,8 +173,44 @@ def _assert_inverter(
         raise RuntimeError(
             f"existing schematic is not the VDA inverter: missing nets={sorted(missing_nets)}"
         )
+    expected_terminals = {
+        "MP0": {"D": "OUT", "G": "IN", "S": "VDD", "B": "VDD"},
+        "MN0": {
+            "D": "OUT",
+            "G": "IN",
+            "S": "gnd!" if variant == "inverter_testbench" else "VSS",
+            "B": "gnd!" if variant == "inverter_testbench" else "VSS",
+        },
+    }
+    if variant == "inverter_testbench":
+        expected_terminals.update(
+            {
+                "VDD0": {"PLUS": "VDD", "MINUS": "gnd!"},
+                "VIN0": {"PLUS": "IN", "MINUS": "gnd!"},
+                "CL0": {"PLUS": "OUT", "MINUS": "gnd!"},
+                "GND0": {"gnd!": "gnd!"},
+            }
+        )
+        expected_analog_masters = {
+            "VDD0": ("analogLib", "vdc"),
+            "VIN0": ("analogLib", "vpulse"),
+            "CL0": ("analogLib", "cap"),
+            "GND0": ("analogLib", "gnd"),
+        }
+        for name, expected in expected_analog_masters.items():
+            actual = (by_name[name].get("lib"), by_name[name].get("cell"))
+            if actual != expected:
+                raise RuntimeError(
+                    f"existing inverter testbench has {name} master {actual!r}, "
+                    f"expected {expected!r}"
+                )
+    for name, expected in expected_terminals.items():
+        if by_name[name].get("terms") != expected:
+            raise RuntimeError(
+                f"existing VDA inverter has unexpected {name} terminals: "
+                f"{by_name[name].get('terms')!r}"
+            )
     if profile is not None:
-        by_name = {str(item.get("name")): item for item in data.get("instances", [])}
         expected_masters = {
             "MN0": (profile["tech_library"], profile["nmos_cell"]),
             "MP0": (profile["tech_library"], profile["pmos_cell"]),
@@ -177,6 +222,7 @@ def _assert_inverter(
                     f"existing schematic is not the VDA inverter: {name} master "
                     f"is {actual!r}, expected {expected!r}"
                 )
+    return variant
 
 
 def _assert_common_source(
@@ -3864,6 +3910,239 @@ def _discard_failed_existing_schematic_edit(
         raise RuntimeError(f"failed-edit cleanup failed: {errors[0]}")
 
 
+def _mn0_ground_label_selection_operation(
+    terminal: str, *, rename: bool
+) -> str:
+    final_action = 'rbLabel~>theLabel = "gnd!" rbLabel' if rename else "rbLabel"
+    return (
+        "let((rbInst rbTerm rbPin rbFig rbBBox rbCtr rbLabels rbLabel rbDx rbDy "
+        "rbTermName) "
+        'rbInst = car(setof(x cv~>instances x~>name == "MN0")) '
+        'unless(rbInst error("MN0 not found during inverter-testbench transform")) '
+        f'rbTermName = "{terminal}" '
+        "rbTerm = car(setof(x rbInst~>master~>terminals "
+        "x~>name == rbTermName)) "
+        'unless(rbTerm error("MN0 terminal not found during inverter-testbench transform")) '
+        "rbPin = car(rbTerm~>pins) "
+        "rbFig = when(rbPin car(rbPin~>figs)) "
+        "rbBBox = when(rbFig dbTransformBBox(rbFig~>bBox rbInst~>transform)) "
+        "rbCtr = when(rbBBox list("
+        "(xCoord(car(rbBBox)) + xCoord(cadr(rbBBox))) / 2.0 "
+        "(yCoord(car(rbBBox)) + yCoord(cadr(rbBBox))) / 2.0)) "
+        'unless(rbCtr error("MN0 terminal center could not be resolved")) '
+        "rbLabels = setof(x cv~>shapes "
+        'x~>objType == "label" && x~>theLabel == "VSS" && x~>xy && '
+        "let((dx dy) dx = xCoord(x~>xy) - xCoord(rbCtr) "
+        "dy = yCoord(x~>xy) - yCoord(rbCtr) "
+        "dx * dx + dy * dy <= 0.02)) "
+        'unless(length(rbLabels) == 1 error("MN0 VSS label selection was not unique")) '
+        "rbLabel = car(rbLabels) "
+        f"{final_action})"
+    )
+
+
+def _rename_inverter_ground_labels_operation() -> str:
+    """Ground only the VDA-created VSS labels nearest MN0.S and MN0.B."""
+
+    return " ".join(
+        _mn0_ground_label_selection_operation(terminal, rename=True)
+        for terminal in ("S", "B")
+    )
+
+
+def _preflight_inverter_ground_labels(client, library: str, cell: str) -> None:
+    from virtuoso_bridge.virtuoso.ops import escape_skill_string
+
+    selections = " ".join(
+        _mn0_ground_label_selection_operation(terminal, rename=False)
+        for terminal in ("S", "B")
+    )
+    skill = " ".join(
+        [
+            "let((cv)",
+            "cv = dbOpenCellViewByType("
+            f'"{escape_skill_string(library)}" "{escape_skill_string(cell)}" '
+            '"schematic" "schematic" "r")',
+            'unless(cv error("target schematic not found during transform preflight"))',
+            'when(cv~>modified error("target schematic has unsaved changes"))',
+            selections,
+            "t)",
+        ]
+    )
+    result = client.execute_skill(skill, timeout=60)
+    errors = getattr(result, "errors", None) or []
+    if errors:
+        raise RuntimeError(f"inverter-testbench transform preflight failed: {errors[0]}")
+    output = str(getattr(result, "output", "")).strip().strip('"').lower()
+    if output != "t":
+        raise RuntimeError(
+            f"unexpected inverter-testbench preflight result: {output!r}"
+        )
+
+
+def _assert_inverter_testbench_transform_preserved(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    vdd_v: float,
+    load_ff: float,
+) -> None:
+    before_variant = _assert_inverter(before)
+    after_variant = _assert_inverter(after)
+    if after_variant != "inverter_testbench":
+        raise RuntimeError("inverter-testbench transform did not produce the testbench")
+    if before.get("pins") != after.get("pins"):
+        raise RuntimeError("inverter-testbench transform changed top-level pins")
+    before_nets = set((before.get("nets") or {}).keys())
+    after_nets = set((after.get("nets") or {}).keys())
+    expected_nets = before_nets | ({"gnd!"} if before_variant == "inverter_core" else set())
+    if after_nets != expected_nets:
+        raise RuntimeError(
+            "inverter-testbench transform changed nets beyond grounding the testbench"
+        )
+
+    before_by_name = {
+        str(item.get("name")): item for item in before.get("instances", [])
+    }
+    after_by_name = {
+        str(item.get("name")): item for item in after.get("instances", [])
+    }
+    for name in ("MN0", "MP0"):
+        before_without_terms = {
+            key: value for key, value in before_by_name[name].items() if key != "terms"
+        }
+        after_without_terms = {
+            key: value for key, value in after_by_name[name].items() if key != "terms"
+        }
+        if before_without_terms != after_without_terms:
+            raise RuntimeError(
+                f"inverter-testbench transform changed {name} beyond grounding"
+            )
+    if before_variant == "inverter_testbench":
+        for name in ("MN0", "MP0"):
+            if before_by_name[name].get("terms") != after_by_name[name].get("terms"):
+                raise RuntimeError(
+                    f"repeated inverter-testbench transform changed {name} topology"
+                )
+
+    expected_parameters = {
+        "VDD0": {"vdc": f"{vdd_v:.12g}", "srcType": "dc"},
+        "VIN0": {
+            "v1": "0",
+            "v2": f"{vdd_v:.12g}",
+            "per": "100p",
+            "td": "0",
+            "tr": "5p",
+            "tf": "5p",
+            "pw": "50p",
+            "srcType": "pulse",
+        },
+        "CL0": {"c": f"{load_ff:.12g}f"},
+    }
+    for instance, parameters in expected_parameters.items():
+        actual_parameters = after_by_name[instance].get("params") or {}
+        for name, expected in parameters.items():
+            actual = actual_parameters.get(name)
+            if actual is None or not spectre_values_equal(actual, expected):
+                raise RuntimeError(
+                    f"inverter-testbench {instance}.{name} mismatch: expected "
+                    f"{expected!r}, got {actual!r}"
+                )
+
+
+def transform_inverter_testbench(payload: dict[str, Any]) -> dict[str, Any]:
+    from virtuoso_bridge.virtuoso.schematic.ops import (
+        schematic_create_inst_by_master_name as inst,
+        schematic_label_instance_term as label_term,
+    )
+    from virtuoso_bridge.virtuoso.schematic.params import set_instance_params
+
+    client = _client()
+    library, cell = _target(payload)
+    before = _read_schematic(client, library, cell)
+    variant = _assert_inverter(before, payload["profile"])
+    topology_changed = variant == "inverter_core"
+    if topology_changed:
+        _preflight_inverter_ground_labels(client, library, cell)
+        try:
+            with _edit_existing_schematic(
+                client, library, cell, timeout=120
+            ) as schematic:
+                schematic.add(_rename_inverter_ground_labels_operation())
+                schematic.add(
+                    inst("analogLib", "vdc", "symbol", "VDD0", 2.5, 1.5, "R0")
+                )
+                schematic.add(
+                    inst("analogLib", "vpulse", "symbol", "VIN0", -2.5, 0.5, "R0")
+                )
+                schematic.add(
+                    inst("analogLib", "cap", "symbol", "CL0", 2.5, 0.0, "R0")
+                )
+                schematic.add(
+                    inst("analogLib", "gnd", "symbol", "GND0", 0.0, -2.0, "R0")
+                )
+                schematic.add(label_term("VDD0", "PLUS", "VDD"))
+                schematic.add(label_term("VDD0", "MINUS", "gnd!"))
+                schematic.add(label_term("VIN0", "PLUS", "IN"))
+                schematic.add(label_term("VIN0", "MINUS", "gnd!"))
+                schematic.add(label_term("CL0", "PLUS", "OUT"))
+                schematic.add(label_term("CL0", "MINUS", "gnd!"))
+        except Exception as edit_error:
+            try:
+                _discard_failed_existing_schematic_edit(client, library, cell)
+            except Exception as cleanup_error:
+                raise RuntimeError(
+                    "inverter-testbench edit failed and unsaved-edit cleanup also "
+                    f"failed: {cleanup_error}"
+                ) from edit_error
+            raise
+
+    vdd_v = float(payload["parameters"]["vdd_v"])
+    load_ff = float(payload["parameters"]["load_ff"])
+    client.open_window(library, cell, view="schematic")
+    set_instance_params(
+        client,
+        "VDD0",
+        param_filters=None,
+        vdc=f"{vdd_v:.12g}",
+        srcType="dc",
+    )
+    set_instance_params(
+        client,
+        "VIN0",
+        param_filters=None,
+        v1="0",
+        v2=f"{vdd_v:.12g}",
+        per="100p",
+        td="0",
+        tr="5p",
+        tf="5p",
+        pw="50p",
+        srcType="pulse",
+    )
+    set_instance_params(
+        client,
+        "CL0",
+        param_filters=None,
+        c=f"{load_ff:.12g}f",
+    )
+    after = _read_schematic(client, library, cell)
+    _assert_inverter_testbench_transform_preserved(before, after, vdd_v, load_ff)
+    return {
+        "transformed": topology_changed,
+        "already_transformed": not topology_changed,
+        "topology_delta": {
+            "grounded_terminals": ["MN0.S", "MN0.B"] if topology_changed else [],
+            "added_instances": (
+                ["VDD0", "VIN0", "CL0", "GND0"] if topology_changed else []
+            ),
+            "preserved_instances": ["MN0", "MP0"],
+            "preserved_pins": sorted((before.get("pins") or {}).keys()),
+        },
+        "requested_testbench_parameters": {"vdd_v": vdd_v, "load_ff": load_ff},
+        "readback": _summary(after),
+    }
+
+
 def _assert_common_source_transform_preserved(
     before: dict[str, Any], after: dict[str, Any], source_resistance_ohm: float
 ) -> None:
@@ -5726,7 +6005,11 @@ def simulate_inverter(payload: dict[str, Any]) -> dict[str, Any]:
     client = _client()
     library, cell = _target(payload)
     schematic = _read_schematic(client, library, cell)
-    _assert_inverter(schematic, profile)
+    if _assert_inverter(schematic, profile) != "inverter_core":
+        raise RuntimeError(
+            "simulation.run uses the VDA-generated wrapper and therefore requires "
+            "an inverter core, not an OA testbench with its own sources"
+        )
     oa_parameters = _semantic_parameters_from_schematic(schematic)
     requested_device_parameters = {
         name: float(payload.get("parameters", {})[name])
@@ -6306,6 +6589,7 @@ _ACTIONS = {
     "apply_existing_schematic_parameters": apply_existing_schematic_parameters,
     "create_inverter": create_inverter,
     "inspect_inverter": inspect_inverter,
+    "transform_inverter_testbench": transform_inverter_testbench,
     "apply_inverter_parameters": apply_inverter_parameters,
     "simulate_inverter": simulate_inverter,
     "create_common_source": create_common_source,

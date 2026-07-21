@@ -148,7 +148,36 @@ class DeterministicDemoAdapter:
                             },
                         ]
                         if common_source
-                        else ["MN0", "MP0"]
+                        else [
+                            {
+                                "name": "MN0",
+                                "library": "demo_pdk",
+                                "cell": "nmos",
+                                "parameters": dict(instance_parameters["MN0"]),
+                                "terminals": {
+                                    "D": "OUT",
+                                    "G": "IN",
+                                    "S": "VSS",
+                                    "B": "VSS",
+                                },
+                                "xy": [0.0, 0.0],
+                                "orient": "R0",
+                            },
+                            {
+                                "name": "MP0",
+                                "library": "demo_pdk",
+                                "cell": "pmos",
+                                "parameters": dict(instance_parameters["MP0"]),
+                                "terminals": {
+                                    "D": "OUT",
+                                    "G": "IN",
+                                    "S": "VDD",
+                                    "B": "VDD",
+                                },
+                                "xy": [0.0, 1.0],
+                                "orient": "R0",
+                            },
+                        ]
                     )
                 ),
                 "nets": (
@@ -210,11 +239,84 @@ class DeterministicDemoAdapter:
         )
 
     def transform_schematic(self, task: TaskSpec) -> AdapterResult:
-        if task.circuit is not CircuitKind.COMMON_SOURCE:
-            raise RuntimeError("demo transform supports only common_source")
         schematic = self._schematics.get(self._key(task))
         if schematic is None:
             raise RuntimeError("demo schematic does not exist")
+        if task.circuit is CircuitKind.INVERTER:
+            variant = schematic.get("topology_variant")
+            changed = variant == "inverter"
+            if variant not in {"inverter", "inverter_testbench"}:
+                raise RuntimeError(f"unsupported demo topology variant: {variant}")
+            vdd_v = float(task.parameters["vdd_v"])
+            load_ff = float(task.parameters["load_ff"])
+            if changed:
+                for item in schematic["instances"]:
+                    if item["name"] == "MN0":
+                        item["terminals"].update({"S": "gnd!", "B": "gnd!"})
+                schematic["instances"].extend(
+                    [
+                        {
+                            "name": "VDD0",
+                            "library": "analogLib",
+                            "cell": "vdc",
+                            "parameters": {},
+                            "terminals": {"PLUS": "VDD", "MINUS": "gnd!"},
+                        },
+                        {
+                            "name": "VIN0",
+                            "library": "analogLib",
+                            "cell": "vpulse",
+                            "parameters": {},
+                            "terminals": {"PLUS": "IN", "MINUS": "gnd!"},
+                        },
+                        {
+                            "name": "CL0",
+                            "library": "analogLib",
+                            "cell": "cap",
+                            "parameters": {},
+                            "terminals": {"PLUS": "OUT", "MINUS": "gnd!"},
+                        },
+                        {
+                            "name": "GND0",
+                            "library": "analogLib",
+                            "cell": "gnd",
+                            "parameters": {},
+                            "terminals": {"gnd!": "gnd!"},
+                        },
+                    ]
+                )
+                schematic["nets"] = sorted(set(schematic["nets"]) | {"gnd!"})
+                schematic["topology_variant"] = "inverter_testbench"
+            source_parameters = {
+                "VDD0": {"vdc": f"{vdd_v:.12g}", "srcType": "dc"},
+                "VIN0": {
+                    "v1": "0",
+                    "v2": f"{vdd_v:.12g}",
+                    "per": "100p",
+                    "td": "0",
+                    "tr": "5p",
+                    "tf": "5p",
+                    "pw": "50p",
+                    "srcType": "pulse",
+                },
+                "CL0": {"c": f"{load_ff:.12g}f"},
+                "GND0": {},
+            }
+            schematic["instance_parameters"].update(source_parameters)
+            schematic["parameters"].update({"vdd_v": vdd_v, "load_ff": load_ff})
+            return AdapterResult(
+                data={
+                    "transformed": changed,
+                    "already_transformed": not changed,
+                    "requested_testbench_parameters": {
+                        "vdd_v": vdd_v,
+                        "load_ff": load_ff,
+                    },
+                },
+                evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+            )
+        if task.circuit is not CircuitKind.COMMON_SOURCE:
+            raise RuntimeError("demo transform supports inverter or common_source")
         resistance = float(task.parameters["source_resistance_ohm"])
         variant = schematic.get("topology_variant")
         changed = variant == "common_source"

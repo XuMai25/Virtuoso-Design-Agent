@@ -2582,6 +2582,75 @@ def _source_degeneration_transform(resistance_ohm: float = 1_000.0) -> TaskSpec:
     )
 
 
+def _inverter_testbench_transform() -> TaskSpec:
+    return TaskSpec.model_validate(
+        {
+            "id": "inverter-testbench-transform",
+            "operation": "schematic.transform",
+            "circuit": "inverter",
+            "target": {"library": "vda_test", "cell": "vda_inv"},
+            "parameters": {"vdd_v": 0.9, "load_ff": 2.0},
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+
+
+def test_inverter_testbench_is_an_in_place_audited_delta() -> None:
+    task = _inverter_testbench_transform()
+    adapter = DeterministicDemoAdapter()
+    adapter.create_schematic(task)
+    before = adapter.inspect_schematic(task).data
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+    after = adapter.inspect_schematic(task).data
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert record.selected_parameters == {"vdd_v": 0.9, "load_ff": 2.0}
+    assert before["pins"] == after["pins"]
+    assert set(after["nets"]) == set(before["nets"]) | {"gnd!"}
+    assert set(after["instance_parameters"]) == {
+        "MN0",
+        "MP0",
+        "VDD0",
+        "VIN0",
+        "CL0",
+        "GND0",
+    }
+    action = next(
+        item
+        for item in record.actions
+        if item.action == "schematic.transform.inverter-testbench"
+    )
+    assert action.details["transformed"] is True
+
+
+def test_executor_rejects_inverter_testbench_transform_that_changes_mos_size() -> None:
+    class CorruptingTransformAdapter(DeterministicDemoAdapter):
+        def transform_schematic(self, task):
+            result = super().transform_schematic(task)
+            self._schematics[self._key(task)]["instance_parameters"]["MN0"][
+                "Wfg"
+            ] = "9u"
+            return result
+
+    task = _inverter_testbench_transform()
+    adapter = CorruptingTransformAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.FAILED
+    assert any("changed MN0 parameters" in note for note in record.notes)
+
+
 def test_source_degeneration_is_an_in_place_audited_delta() -> None:
     task = _source_degeneration_transform()
     adapter = DeterministicDemoAdapter()

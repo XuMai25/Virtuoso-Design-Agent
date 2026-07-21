@@ -27,6 +27,7 @@ _WORKER_ACTIONS = {
     CircuitKind.INVERTER: {
         "create": "create_inverter",
         "inspect": "inspect_inverter",
+        "transform": "transform_inverter_testbench",
         "apply": "apply_inverter_parameters",
         "simulate": "simulate_inverter",
     },

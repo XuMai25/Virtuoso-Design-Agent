@@ -445,17 +445,27 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             persist.model_copy(update={"id": "03-persist"}),
         ]
     if task.operation is Operation.SCHEMATIC_TRANSFORM:
+        if task.circuit is CircuitKind.INVERTER:
+            capability = "schematic.transform.inverter-testbench"
+            description = (
+                "在同一 cellview 内保留 MN0/MP0 与 pins，新增固定边界的 "
+                "VDD0/VIN0/CL0/GND0 testbench，把 MN0.S/B 接到 gnd!，并按 "
+                "vdd_v/load_ff 设置源和负载；不替换或另建 cellview"
+            )
+        else:
+            capability = "schematic.transform.source-degeneration"
+            description = (
+                "在同一 cellview 内仅把 MN0.S 的 VSS 标签改为 NSRC，"
+                "新增 RS0(NSRC, VSS) 并设置退化电阻；保留 MN0、RD0、"
+                "pins 与已有实例参数，不新建或替换 cellview"
+            )
         return [
             probe,
             inspect.model_copy(update={"id": "02-before"}),
             _step(
                 "03-transform",
-                "schematic.transform.source-degeneration",
-                (
-                    "在同一 cellview 内仅把 MN0.S 的 VSS 标签改为 NSRC，"
-                    "新增 RS0(NSRC, VSS) 并设置退化电阻；保留 MN0、RD0、"
-                    "pins 与已有实例参数，不新建或替换 cellview"
-                ),
+                capability,
+                description,
                 SideEffect.REMOTE_WRITE,
             ),
             inspect.model_copy(update={"id": "04-after"}),
