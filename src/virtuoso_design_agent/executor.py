@@ -855,12 +855,6 @@ class TaskExecutor:
                     ]
                     if not feasible:
                         status = RunStatus.PARTIAL
-                        if candidates:
-                            best_attempt = min(
-                                candidates, key=lambda item: self._rank(task, item)
-                            )
-                            selected_parameters = best_attempt.parameters
-                            selected_metrics = best_attempt.metrics
                         if candidate_oa_write:
                             apply_with_checkpoint(
                                 "parameters.restore", initial_parameters

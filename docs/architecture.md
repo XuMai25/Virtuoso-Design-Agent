@@ -120,7 +120,7 @@ Spectre 的通用 `dcOpInfo` 在当前 Bridge parser 中以器件聚合对象出
 
 工作区分类不读取一个未验证的模型枚举值：`saturation_region` 由 Spectre 给出的 `VDS`、`VDSAT` 和 `IDS` 按显式规则推导，标为 `software_inference`；原始器件量、节点量和从它们计算的连续指标标为 `eda_result`。Gate 2A 已在 `vb_pdk_smoke/vda_cs_gate2a_001/schematic` 完成 6 点真实搜索和最终独立 OA→si→DC OP 复核。
 
-源极退化沿用该路径而不复制 executor：结构回读动态返回 `topology_variant`；`si` parser 在同一 common-source action 中要求 `MN0(OUT IN NSRC VSS)` 与 `RS0(NSRC VSS)`，并把 RS0.r 纳入 OA/网表参数一致性；DC wrapper 额外保存 NSRC，器件 VGS/VDS 改由 NSRC 计算，同时核对 MN0/RD0 与 MN0/RS0 两组 KCL。`source_resistance_ohm` 可直接进入原有有限 `parameter_space`。2026-07-20 的真实 smoke 已完成原位 transform、DC/AC、有限搜索、W/RD/RS AC design tuning、checkpoint 恢复和最佳回读；尚未闭合的是更完整的设计质量与 corner，而不是基本 gain/bandwidth 执行路径。
+源极退化沿用该路径而不复制 executor：结构回读动态返回 `topology_variant`；`si` parser 在同一 common-source action 中要求 `MN0(OUT IN NSRC VSS)` 与 `RS0(NSRC VSS)`，并把 RS0.r 纳入 OA/网表参数一致性；DC wrapper 额外保存 NSRC，器件 VGS/VDS 改由 NSRC 计算，同时核对 MN0/RD0 与 MN0/RS0 两组 KCL。`source_resistance_ohm` 可直接进入原有有限 `parameter_space`。2026-07-20 的真实 smoke 已完成原位 transform、DC/AC、有限搜索、W/RD/RS AC design tuning、checkpoint 恢复和最佳回读；2026-07-21 又把同一参数 staging/writeback 路径接入多 analysis 质量组合。尚未闭合的是 L/VDD、corner 和更复杂拓扑，而不是基本 gain/bandwidth 或 W/RD/RS 质量调优执行路径。
 
 AC 没有第二套 topology、netlister 或 executor。相同 wrapper 保留 `dcOp/info`，把 VIN 设为 DC bias + unit AC source，可选加入任务声明的 `CL0=load_ff`，再运行对数 AC sweep。Bridge 现有 PSFASCII parser 原样返回 `ac_freq/ac_IN/ac_OUT` 的复数向量；VDA 不修改 Bridge，也不把幅度解析复制回第三方库，而是在 worker 内计算复数传递函数 `H(f)=VOUT/VIN`。
 
@@ -147,6 +147,8 @@ AC 核心结果只有在 DC 工作点为饱和、低频参考足够平坦且扫�
 `analysis: "quality"` 在 VDA worker 内把 AC、transient linearity 和 noise 组成一个固定原子证据门，而不复制 executor 或修改 Bridge。每个候选只读取一次 OA、生成并核对一次 `si` 结构网表；三个独立 wrapper 都引用这一远端网表。合并前要求实际参数表完全一致，重复 DC 指标在数值容差内一致，且同名指标的证据来源一致。任一子分析 `analysis_complete=false` 会使整个候选不可行；参数或共享指标不一致则停止合并，不平均、不以后一次结果覆盖。run record 顶层保存组合完成状态，并在 `evidence.analyses` 下分别保留 testbench、DC OP、响应诊断和工具版本。组合选择和一致性判断是 `software_inference`，OA 是 `bridge_readback`，`si`/Spectre 连续指标仍是 `eda_result`。
 
 2026-07-21 的真实 4 点 `bias_v×load_ff` 质量搜索已验证该路径：四个候选均复用各自的一份 OA/`si` 网表完成三项分析，结构网表 SHA-256 全部一致；两个 0.40 V 点虽包含全网格最高 GBW，却因 THD 和实际 VDD 功耗超限而被拒绝，最终选择 0.35 V/1 fF。2/4 预算任务没有把前缀最优包装成全空间最优，全不可行任务没有写 OA；一次首候选 `si -batch` transport 失败被保留为 `system_event`，从独立 OA 回读后用同一 checkpoint 恢复。worker 现在还会把失败 `si` scratch 的保留路径写入错误，便于远端审计；该修正仍位于 VDA 边界，没有修改 Bridge。
+
+同日的 8 点 W/RD/RS 质量搜索把上述证据门接入原有 OA candidate staging：每个候选先写入并回读，再从该 OA 生成一份网表供三项分析复用。候选 4 的 Spectre upload timeout 后，自动恢复 readback 也失败，checkpoint 因此保留 3 个完成候选和未确认 OA 状态；连接恢复后 `schematic.inspect.resume` 发现 OA 仍为候选 4，只重跑 4–8，最终写回并回读 GBW 最优点。全不可行任务恢复初始 OA 后，run record 不再把“最接近但未提交”的候选放进 `selected_parameters`；尝试证据仍完整保留在 `candidates`。另一个只改变 objective 的两点任务自动把 RS 从 1 kΩ 写为 2 kΩ，证明 THD 优先时同一工作流会选择不同于 GBW 优先的设计，而不是只生成更多指标。
 
 ## 证据链
 

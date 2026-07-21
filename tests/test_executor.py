@@ -261,7 +261,8 @@ def test_infeasible_search_does_not_write_best_attempt_to_oa() -> None:
         task, plan, token=plan.confirmation_token
     )
     assert record.status is RunStatus.PARTIAL
-    assert record.selected_parameters is not None
+    assert record.selected_parameters is None
+    assert record.selected_metrics is None
     assert not any(action.action == "parameters.apply.best" for action in record.actions)
     assert any(action.action == "parameters.restore" for action in record.actions)
     assert adapter.inspect_schematic(task).data["semantic_parameters"] == {
@@ -948,6 +949,72 @@ def test_common_source_quality_testbench_tuning_is_bounded_and_does_not_write_oa
         for action in record.actions
     )
     assert any("budget exhausted" in note for note in record.notes)
+
+
+def test_common_source_quality_design_tuning_writes_and_reads_back_best_oa() -> None:
+    task = _common_source_quality_task(
+        id="cs-quality-design-tune",
+        operation="design.tune",
+        parameters={
+            "length_um": 0.03,
+            "bias_v": 0.35,
+            "vdd_v": 0.9,
+            "load_ff": 1.0,
+        },
+        parameter_space={
+            "device_width_um": [0.5, 1.0],
+            "load_resistance_ohm": [20_000.0, 22_000.0],
+            "source_resistance_ohm": [1_000.0, 2_000.0],
+        },
+        objective={"metric": "gain_bandwidth_product_hz", "goal": "maximize"},
+        safety={
+            "allow_remote_compute": True,
+            "allow_remote_write": True,
+            "allowed_library": "vda_test",
+        },
+        limits={"max_iterations": 8, "timeout_seconds": 600},
+    )
+    adapter = DeterministicDemoAdapter()
+    adapter.create_schematic(task)
+    adapter.transform_schematic(
+        TaskSpec.model_validate(
+            {
+                "id": "cs-quality-design-tune-transform",
+                "operation": "schematic.transform",
+                "circuit": "common_source",
+                "target": task.target.model_dump(),
+                "parameters": {"source_resistance_ohm": 1_000.0},
+                "safety": {
+                    "allow_remote_write": True,
+                    "allowed_library": "vda_test",
+                },
+            }
+        )
+    )
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+    after = adapter.inspect_schematic(task).data["semantic_parameters"]
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert plan.requires_remote_write is True
+    assert len(record.candidates) == 8
+    assert all(candidate.analysis_complete for candidate in record.candidates)
+    assert record.selected_parameters is not None
+    for name in (
+        "device_width_um",
+        "load_resistance_ohm",
+        "source_resistance_ohm",
+    ):
+        assert after[name] == pytest.approx(record.selected_parameters[name])
+    assert sum(
+        action.action.startswith("parameters.stage.") for action in record.actions
+    ) == 8
+    assert any(
+        action.action == "parameters.apply.best" for action in record.actions
+    )
 
 
 def test_common_source_ac_short_sweep_is_partial_not_a_fake_bandwidth() -> None:

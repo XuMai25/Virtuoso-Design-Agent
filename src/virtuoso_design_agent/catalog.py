@@ -77,7 +77,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     ),
     CircuitKind.COMMON_SOURCE: CircuitCapability(
         circuit=CircuitKind.COMMON_SOURCE,
-        stage="Gate 2 read-only quality tuning/recovery verified",
+        stage="Gate 2 quality design tuning/recovery verified",
         executable=True,
         operations=_STANDARD_OPERATIONS + (Operation.SCHEMATIC_TRANSFORM,),
         parameters=(
@@ -92,8 +92,8 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
         explicit_instance_parameters=True,
         evidence_gate=(
             "OA readback + si netlist consistency + DC region + complex AC + "
-            "bounded W/RD/RS tuning/recovery + live AC/linearity/noise quality "
-            "bias/load tuning/recovery; design writeback/corner pending"
+            "bounded W/RD/RS AC + AC/linearity/noise quality tuning, OA writeback, "
+            "infeasible restore, and checkpoint recovery; L/VDD/corner pending"
         ),
     ),
     CircuitKind.SOURCE_DEGENERATED_COMMON_SOURCE: CircuitCapability(

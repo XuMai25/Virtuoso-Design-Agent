@@ -30,6 +30,8 @@ Gate 2A 又把相同执行语义扩展到电阻负载 NMOS 共源级：新 OA ce
 
 2026-07-21 已实现并真实验证固定 `analysis: quality` 组合：同一候选只生成一次经 OA/`si` 一致性核对的网表，再分别运行 AC、相干 transient 和 noise；三项指标共同进入原有 constraints/objective、候选预算和 checkpoint 语义。参数或共享 DC 指标不一致会硬失败，任一子分析不完整会拒绝整个候选。4 点 bias/load 搜索得到 2 个可行和 2 个 THD/功耗超限点，最高 GBW 点被质量约束正确拒绝；2/4 预算耗尽、全不可行和真实首候选 transport 中断后的 checkpoint 恢复也已通过，before/after OA 参数完全一致。状态升级为 **read-only multi-analysis common-source quality tuning and recovery verified**；设计参数质量写回和 corner 仍待验证。
 
+随后同一专用 cell 完成 8 点 W/RD/RS 质量搜索：8/8 候选都完成 OA 写入回读、同源 netlist、AC、linearity 和 noise；候选 4 的真实 transport 中断在独立 OA 回读后从 4 恢复，没有重复 1–3。GBW objective 写回 `W=1 µm/RD=20 kΩ/RS=1 kΩ`；全不可行任务恢复该基线且 selection 为空。线性度优先的两点控制任务则自动写回 RS=2 kΩ，使 THD 降低 41.93%、P1dB 提升 37.26%、DC 功耗降低 17.27%，代价是 GBW 降低 29.30% 与输入参考噪声增加 15.03%。状态升级为 **bounded common-source multi-analysis design-parameter tuning, writeback, and recovery verified**。
+
 实例参数面现已在任务契约、planner、demo、Bridge worker 和双重定向回读中实现。`existing_schematic` 不要求目标符合反相器或共源模板，可保留 Bridge 的完整结构读取并向任意已有实例透传 Bridge 字符串参数；空值或长值不再因通用摘要不可见而被 VDA 拒绝。固定模板还允许 semantic 与实例参数组合，并以最终 OA 同时满足两组请求为成功条件。通用只读 live smoke 在 Gate 2A cell 上读到 MN0 的 233 个 CDF 字段、RD0 的 2 个字段及完整 geometry/nets/pins；专用 `vda_param_surface_001` 又闭合 `fingers=2`、`r=22K` 的 callback、立即回读和独立 after 回读。`m=2` 被 PDK callback 恢复为 `1`，且多字段失败留下已保存前缀，证明该能力不能外推为任意字段可持久化或事务式写入。
 
 Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发送前的 tunnel 自愈。新的 9 点压力任务仍在候选 8 发生一次本地端口拒绝，但 OA 恢复、候选前缀和续跑均正确，最终 9/9 与最佳写回成功；确定性同-client smoke 已覆盖 pre-send 自愈。payload 发送后的不确定错误仍不自动重放，这是保留的可靠性边界而不是跳过的工作。
@@ -69,7 +71,7 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> 各拓扑 AC gain/bandwidth（nominal/退化只读同源 smoke 已通过）
   -> 有限 AC trade-off 与失败/预算/恢复路径（已通过）
   -> 功耗 + transient 线性度 + noise（单点只读 live 已通过）
-  -> 多 analysis 质量约束与受预算调优（只读 live 调优、失败门与恢复已通过）
+  -> 多 analysis 质量约束与受预算调优（W/RD/RS 写回、失败门与恢复已通过）
   -> 差分对
   -> 多 analysis + corner
   -> L5B 单模块闭环
@@ -78,4 +80,4 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
 
 每一级只有在真实 Bridge smoke、结构回读、指标解析和失败注入均通过后才升级状态。
 
-反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化原位 transform/DC tuning、只读 AC 条件搜索、W/RD/RS AC 写入调优、单项功耗/linearity/noise，以及多 analysis 只读质量搜索均已有 live 证据。Gate 2A 现在具备有边界的 DC+AC 参数闭环、质量约束驱动的 bias/load 搜索、预算/不可行保护和 transport 恢复；下一道硬门是在现有专用 cell 上做很小的 W/RD/RS 质量搜索，验证逐候选写入、最佳 OA 写回、全不可行恢复和 checkpoint。之后才加入 L/VDD 与有限 corner。通过这些项前不能升级为可重复的 L5B 单模块规格闭环。
+反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化原位 transform/DC tuning、只读 AC 条件搜索、W/RD/RS AC 与多 analysis 质量写回、单项功耗/linearity/noise，以及预算/不可行/transport 恢复均已有 live 证据。Gate 2A 现在可以让不同 objective 在同一候选证据上得到不同 OA 设计。下一道硬门不再继续扩大当前 W/RD/RS 网格，而是加入 L/VDD 与有限 corner，验证跨工作条件的可重复规格；之后进入差分对。通过这些项前不能升级为可重复的 L5B 单模块规格闭环。

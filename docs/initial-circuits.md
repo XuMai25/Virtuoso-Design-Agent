@@ -15,7 +15,7 @@
 
 ## Gate 2：单 MOS 共源与源极退化
 
-状态：Gate 2A 电阻负载 NMOS 共源与源极退化的 DC、复数 AC、bias/load 条件搜索和 W/RD/RS 写入调优已真实通过。专用 cell 还完成同参数只加 RS 的控制变量比较、3/8 预算耗尽、2 点不可行恢复、多次 transport checkpoint/resume、最佳 OA 写回，以及 5 点 transient 线性度/真实功耗和 211 点 ordinary noise 只读 live smoke。AC+linearity+noise 的固定质量组合又完成真实 4 点 bias/load 搜索、2/4 预算耗尽、全不可行和 transport 恢复；设计参数质量写回、corner 和 L/VDD 联合搜索仍未闭合，因此尚不是完整 L5B 单模块设计代理。
+状态：Gate 2A 电阻负载 NMOS 共源与源极退化的 DC、复数 AC、bias/load 条件搜索和 W/RD/RS 写入调优已真实通过。专用 cell 还完成同参数只加 RS 的控制变量比较、3/8 预算耗尽、2 点不可行恢复、多次 transport checkpoint/resume、最佳 OA 写回，以及 5 点 transient 线性度/真实功耗和 211 点 ordinary noise 只读 live smoke。AC+linearity+noise 的固定质量组合又完成真实 bias/load 条件搜索、8 点 W/RD/RS 逐候选写入与最佳回读、全不可行恢复和改变 objective 后的不同设计写回；corner 和 L/VDD 联合搜索仍未闭合，因此尚不是完整 L5B 单模块设计代理。
 
 - OA：`MN0` 与 `analogLib/RD0`，连接 `IN/OUT/VDD/VSS`，W/L/R 创建后结构化回读。
 - 同源：`si` 网表中的 MN0/RD0/可选 RS0 master、端口和 W/L/R 与 OA 一致；DC wrapper 只提供 VDD/VIN/VSS。AC 复用同一网表和 DC OP，额外提供 unit AC input、显式 sweep 和可选 `load_ff`，不复制器件 topology。
@@ -31,7 +31,8 @@
 - 设计质量 live：DC/各动态分析都保存实际 `VDD_SRC:p`；100 MHz 相干 nested sweep 的 5 个输入幅度均有完整样本，得到 `P1dB=88.32 mV peak`、150 mV 点 `THD=13.16%`；1 kHz–10 GHz ordinary noise PSF 有 211 点，输出/输入参考积分噪声为 3.304/0.983 mV RMS。P1dB 未跨越、空 sweep、幅度/PSF 形状不一致仍会显式失败或 unresolved。
 - 调优边界：W/L/RD/RS 维度仍逐候选写 OA 和回读；纯 bias/load 条件搜索不写 OA。两种路径都复用原有 constraints/objective、预算和 checkpoint 语义。
 - 质量组合：`analysis: quality` 强制声明 AC、linearity、noise 三组 sweep；每候选复用一次 OA/`si` 网表，任一子分析不完整或共享证据不一致即拒绝。真实 4 点搜索得到 2 个可行点；两个 0.40 V 点虽有更高 GBW，但因 THD 与 DC 功耗超限被拒绝，最终选择 `0.35 V/1 fF`。预算、全不可行和首候选 transport 恢复均正确，before/after OA 参数一致。
-- 当前最近的硬门：在现有专用 cell 上做很小的 W/RD/RS 质量写回搜索，覆盖逐候选 OA 写入、最佳可行回读、全不可行恢复与 checkpoint；随后再做 L/VDD 和有限 corner。不能用只读 bias/load 结果或当前 GBW 网格代替完整放大器设计质量。
+- 质量写回：8 点 W/RD/RS 搜索全部三项完整，候选 4 transport 中断后从独立 OA 回读恢复；GBW objective 写回 `1 µm/20 kΩ/1 kΩ`。线性度 objective 随后选择 `RS=2 kΩ`，真实获得 THD/P1dB/功耗改善并接受 GBW/noise 代价。2 点全不可行任务恢复初始 OA，selection 保持为空。
+- 当前最近的硬门：加入 L/VDD 和有限 corner，检查同一设计在多个工作条件下能否重复满足规格；通过后进入差分对。不能用 nominal W/RD/RS 网格代替跨条件放大器设计质量。
 
 跨拓扑的参数基础：`existing_schematic` 可以不依赖固定模板读取已有 schematic，并用 `instance_parameter_updates` 人工指定实例原始 CDF 参数和值字符串；固定模板还可把它与 W/L/R semantic parameters 组合。写入必须经过 callback、立即定向 OA 回读和独立再次回读。通用只读 live smoke 已保留完整 Bridge 结构并枚举 MN0 的 233 个 CDF 字段；专用新 cell 上又真实闭合 `MN0.fingers=2` 和 `RD0.r=22K` 的双重回读。`MN0.m=2` 被当前 PDK callback 恢复为 `1`，因此保留为字段不可持久化边界。它只证明“按名字尝试修改并以 OA 值确认”，不证明 VDA 理解任意参数的物理作用，也不自动允许该参数参与调优。
 
