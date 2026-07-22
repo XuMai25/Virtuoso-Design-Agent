@@ -15,7 +15,7 @@
 
 ## Gate 2：单 MOS 共源与源极退化
 
-状态：Gate 2A 电阻负载 NMOS 共源与源极退化的 DC、复数 AC、bias/load 条件搜索和 W/RD/RS 写入调优已真实通过。专用 cell 还完成同参数只加 RS 的控制变量比较、预算/不可行/transport 恢复、5 点 transient 线性度/真实功耗和 ordinary noise。AC+linearity+noise 固定质量组合已经覆盖 bias/load、W/RD/RS 和 L/VDD；随后同一 OA/`si` 网表又通过 TT/SS/FF 三个显式温度/供电条件，并完成可选的两候选 PVT-aware bias 调优。当前状态是 **optional PVT-aware common-source quality tuning verified**；真实 OA 设计变量跨 PVT 写回、差分对和完整 L5B 仍未闭合。
+状态：Gate 2A 电阻负载 NMOS 共源与源极退化的 DC、复数 AC、bias/load 条件搜索和 W/RD/RS 写入调优已真实通过。专用 cell 还完成同参数只加 RS 的控制变量比较、预算/不可行/transport 恢复、5 点 transient 线性度/真实功耗和 ordinary noise。AC+linearity+noise 固定质量组合已经覆盖 bias/load、W/RD/RS 和 L/VDD；随后同一 OA/`si` 网表又通过 TT/SS/FF 三个显式温度/供电条件，并完成可选的两候选 PVT-aware bias 调优。2026-07-23 在全新 cell 上又完成 source degeneration add→DC/AC→remove；恢复后的 placement、nominal `si` 网表和全部 DC/AC 指标与 add 前相同。当前状态是 **reversible controlled common-source topology patch verified**；真实 OA 设计变量跨 PVT 写回、任意实例参数搜索、差分对和完整 L5B 仍未闭合。
 
 - OA：`MN0` 与 `analogLib/RD0`，连接 `IN/OUT/VDD/VSS`，W/L/R 创建后结构化回读。
 - 同源：`si` 网表中的 MN0/RD0/可选 RS0 master、端口和 W/L/R 与 OA 一致；DC wrapper 只提供 VDD/VIN/VSS。AC 复用同一网表和 DC OP，额外提供 unit AC input、显式 sweep 和可选 `load_ff`，不复制器件 topology。
@@ -38,7 +38,7 @@
 
 跨拓扑的基础有两条。`existing_schematic` 可以不依赖固定模板读取已有 schematic，并用 `instance_parameter_updates` 人工指定实例原始 CDF 参数和值字符串；固定模板还可把它与 W/L/R semantic parameters 组合。写入必须经过 callback、立即定向 OA 回读和独立再次回读。ADE 路径保留 prepare/capture/corner/variable/setup/run 的正交能力和明确真源；当前 ADE live 证据仍不证明真实 process/temperature corner、history 名唯一或 multi-test 通用映射。direct `si`/Spectre 已证明三条件 PVT，但不会把该状态静默包装成 Maestro setup。通用 OA smoke 已枚举 MN0 的 233 个 CDF 字段；专用新 cell 上又真实闭合 `MN0.fingers=2` 和 `RD0.r=22K` 的双重回读。`MN0.m=2` 被当前 PDK callback 恢复为 `1`，因此保留为字段不可持久化边界。这些能力只证明“按名字修改并以 OA 值确认”或“准备、修改声明 setup 范围、运行当前 ADE 状态”，不证明 VDA 理解任意参数的物理作用，也不自动允许该参数参与调优。
 
-Gate 2 已分别覆盖 bias/load、W/RD/RS 和 L/VDD 网格，能对固定 OA 设计执行有限 PVT 验证，也能在任务显式要求时让每个 testbench 候选跨相同 PVT 集合评估；该能力不默认启用，也没有把全部维度塞入一个爆炸式联合搜索。OA 设计变量跨 PVT 的写回路径已有本地测试，尚未 live。实现不要求为源极退化新建模板或复制执行器：`schematic.transform` 在同一既有 common-source cellview 上应用固定最小 delta，`source_resistance_ohm` 随后直接进入原有 `parameters.apply`/`design.tune`。当前未实现自动逆变换，且保存成功后的后置审计失败尚无通用 snapshot 回滚；任何拓扑都必须先满足偏置和工作区，再比较增益/带宽。
+Gate 2 已分别覆盖 bias/load、W/RD/RS 和 L/VDD 网格，能对固定 OA 设计执行有限 PVT 验证，也能在任务显式要求时让每个 testbench 候选跨相同 PVT 集合评估；该能力不默认启用，也没有把全部维度塞入一个爆炸式联合搜索。OA 设计变量跨 PVT 的写回路径已有本地测试，尚未 live。实现不要求为源极退化新建模板或复制执行器：`schematic.transform` 在同一 common-source cellview 上应用固定 add/remove delta，`source_resistance_ohm` 随后直接进入原有 `parameters.apply`/`design.tune`。remove 可绑定 add 前 placement 哈希，但保存成功后的任意后置失败仍没有通用 OA snapshot 回滚；任何拓扑都必须先满足偏置和工作区，再比较增益/带宽。
 
 ## Gate 3：差分对
 

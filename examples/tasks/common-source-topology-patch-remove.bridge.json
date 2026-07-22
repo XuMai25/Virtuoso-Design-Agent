@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "common-source-topology-patch-remove",
+  "operation": "schematic.transform",
+  "circuit": "common_source",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_cs_topology_patch_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "schematic_transform": {
+    "action": "remove_source_degeneration",
+    "expected_restored_placement_sha256": "b59661b2047674c4a7da81b56fe745a76bac56082e08bdd92d0e7d2f6433ea35"
+  },
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}

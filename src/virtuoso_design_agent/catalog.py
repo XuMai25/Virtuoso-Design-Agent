@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
-from .models import AnalysisKind, CircuitKind, Operation, TaskSpec
+from .models import (
+    AnalysisKind,
+    CircuitKind,
+    Operation,
+    SchematicTransformAction,
+    TaskSpec,
+)
 
 
 class UnsupportedCapability(ValueError):
@@ -182,20 +188,25 @@ def validate_task_capability(task: TaskSpec) -> None:
                 + ", ".join(missing_corners)
             )
     if task.operation is Operation.SCHEMATIC_TRANSFORM:
-        expected = (
-            {"vdd_v", "load_ff"}
-            if task.circuit is CircuitKind.INVERTER
-            else {"source_resistance_ohm"}
-        )
+        transform_action = task.resolved_schematic_transform_action()
+        if task.circuit is CircuitKind.INVERTER:
+            expected = {"vdd_v", "load_ff"}
+        elif transform_action is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION:
+            expected = set()
+        else:
+            expected = {"source_resistance_ohm"}
         if supplied != expected:
             if task.circuit is CircuitKind.INVERTER:
                 raise UnsupportedCapability(
                     "schematic.transform for inverter requires exactly vdd_v and "
                     "load_ff"
                 )
+            if transform_action is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION:
+                raise UnsupportedCapability(
+                    "remove_source_degeneration does not accept parameters"
+                )
             raise UnsupportedCapability(
-                "schematic.transform for common_source requires exactly "
-                "source_resistance_ohm"
+                "add_source_degeneration requires exactly source_resistance_ohm"
             )
     if (
         task.circuit is CircuitKind.COMMON_SOURCE

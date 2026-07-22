@@ -813,6 +813,31 @@ def test_source_degeneration_plan_discloses_minimal_in_place_delta() -> None:
     assert [step.capability for step in plan.steps].count("schematic.inspect") == 2
 
 
+def test_source_degeneration_removal_plan_discloses_exact_inverse_delta() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "source-degeneration-removal",
+            "operation": "schematic.transform",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "schematic_transform": {"action": "remove_source_degeneration"},
+        }
+    )
+
+    plan = build_plan(task)
+    transform = next(
+        step
+        for step in plan.steps
+        if step.capability == "schematic.transform.source-degeneration.remove"
+    )
+
+    assert transform.side_effect is SideEffect.REMOTE_WRITE
+    assert "删除 RS0" in transform.description
+    assert "NSRC 标签恢复为 VSS" in transform.description
+    assert "不新建或替换" in transform.description
+    assert [step.capability for step in plan.steps].count("schematic.inspect") == 2
+
+
 def test_inverter_testbench_plan_discloses_fixed_minimal_delta() -> None:
     task = TaskSpec.model_validate(
         {

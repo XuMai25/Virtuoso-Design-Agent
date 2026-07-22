@@ -11,7 +11,13 @@ from ..metrics import (
     extract_common_source_dc_metrics,
     extract_common_source_noise_metrics,
 )
-from ..models import AnalysisKind, CircuitKind, EvidenceSource, TaskSpec
+from ..models import (
+    AnalysisKind,
+    CircuitKind,
+    EvidenceSource,
+    SchematicTransformAction,
+    TaskSpec,
+)
 from .base import AdapterResult, merge_analysis_bundle
 
 
@@ -317,11 +323,47 @@ class DeterministicDemoAdapter:
             )
         if task.circuit is not CircuitKind.COMMON_SOURCE:
             raise RuntimeError("demo transform supports inverter or common_source")
-        resistance = float(task.parameters["source_resistance_ohm"])
         variant = schematic.get("topology_variant")
-        changed = variant == "common_source"
         if variant not in {"common_source", "source_degenerated_common_source"}:
             raise RuntimeError(f"unsupported demo topology variant: {variant}")
+        transform_action = task.resolved_schematic_transform_action()
+        if transform_action is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION:
+            changed = variant == "source_degenerated_common_source"
+            if changed:
+                for item in schematic["instances"]:
+                    if isinstance(item, dict) and item.get("name") == "MN0":
+                        item["terminals"]["S"] = "VSS"
+                schematic["instances"] = [
+                    item
+                    for item in schematic["instances"]
+                    if not isinstance(item, dict) or item.get("name") != "RS0"
+                ]
+                schematic["nets"] = sorted(set(schematic["nets"]) - {"NSRC"})
+                schematic["topology_variant"] = "common_source"
+                schematic["semantic_parameters"].pop(
+                    "source_resistance_ohm", None
+                )
+                schematic["parameters"].pop("source_resistance_ohm", None)
+                schematic["instance_parameters"].pop("RS0", None)
+            return AdapterResult(
+                data={
+                    "transformed": changed,
+                    "already_removed": not changed,
+                    "transform_action": transform_action.value,
+                    "topology_delta": {
+                        "renamed_terminal_net": (
+                            "MN0.S: NSRC -> VSS" if changed else None
+                        ),
+                        "removed_instance": "RS0" if changed else None,
+                        "removed_net": "NSRC" if changed else None,
+                    },
+                    "readback": self.inspect_schematic(task).data,
+                },
+                evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+            )
+
+        resistance = float(task.parameters["source_resistance_ohm"])
+        changed = variant == "common_source"
         if changed:
             for item in schematic["instances"]:
                 if isinstance(item, dict) and item.get("name") == "MN0":
@@ -349,6 +391,7 @@ class DeterministicDemoAdapter:
             data={
                 "transformed": changed,
                 "already_transformed": not changed,
+                "transform_action": transform_action.value,
                 "resistance_changed": previous is None or previous != resistance,
                 "topology_delta": {
                     "renamed_terminal_net": "MN0.S: VSS -> NSRC" if changed else None,

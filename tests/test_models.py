@@ -2157,7 +2157,9 @@ def test_source_degeneration_cannot_be_hidden_inside_schematic_create() -> None:
 
 
 def test_transform_requires_parameters_and_inverter_testbench_is_exact() -> None:
-    with pytest.raises(ValidationError, match="schematic.transform requires parameters"):
+    with pytest.raises(
+        ValidationError, match="add_source_degeneration requires source_resistance_ohm"
+    ):
         TaskSpec.model_validate(
             {
                 "id": "empty-transform",
@@ -2184,4 +2186,79 @@ def test_transform_requires_parameters_and_inverter_testbench_is_exact() -> None
             inverter.model_copy(
                 update={"parameters": {"vdd_v": 0.9}}
             )
+        )
+
+
+def test_source_degeneration_removal_is_explicit_and_parameter_free() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "remove-source-degeneration",
+            "operation": "schematic.transform",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "schematic_transform": {"action": "remove_source_degeneration"},
+        }
+    )
+
+    assert task.resolved_schematic_transform_action().value == (
+        "remove_source_degeneration"
+    )
+    assert task.parameters == {}
+    assert build_plan(task).requires_remote_write
+
+    with pytest.raises(
+        ValidationError, match="remove_source_degeneration does not accept parameters"
+    ):
+        TaskSpec.model_validate(
+            {
+                **task.model_dump(mode="json"),
+                "parameters": {"source_resistance_ohm": 1_000.0},
+            }
+        )
+
+
+def test_schematic_transform_spec_is_scoped_to_common_source_transform() -> None:
+    with pytest.raises(
+        ValidationError, match="currently support only common_source"
+    ):
+        TaskSpec.model_validate(
+            {
+                "id": "invalid-inverter-remove",
+                "operation": "schematic.transform",
+                "circuit": "inverter",
+                "target": {"library": "vda_test", "cell": "vda_inv"},
+                "schematic_transform": {"action": "remove_source_degeneration"},
+                "parameters": {"vdd_v": 0.9, "load_ff": 2.0},
+            }
+        )
+
+    with pytest.raises(
+        ValidationError, match="valid only for remove_source_degeneration"
+    ):
+        TaskSpec.model_validate(
+            {
+                "id": "invalid-add-restoration-fingerprint",
+                "operation": "schematic.transform",
+                "circuit": "common_source",
+                "target": {"library": "vda_test", "cell": "vda_cs"},
+                "schematic_transform": {
+                    "action": "add_source_degeneration",
+                    "expected_restored_placement_sha256": "0" * 64,
+                },
+                "parameters": {"source_resistance_ohm": 1_000.0},
+            }
+        )
+
+    with pytest.raises(
+        ValidationError,
+        match="schematic_transform settings require operation='schematic.transform'",
+    ):
+        TaskSpec.model_validate(
+            {
+                "id": "invalid-inspect-remove",
+                "operation": "schematic.inspect",
+                "circuit": "common_source",
+                "target": {"library": "vda_test", "cell": "vda_cs"},
+                "schematic_transform": {"action": "remove_source_degeneration"},
+            }
         )

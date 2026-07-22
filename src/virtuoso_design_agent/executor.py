@@ -29,6 +29,7 @@ from .models import (
     Relation,
     RunRecord,
     RunStatus,
+    SchematicTransformAction,
     TaskSpec,
 )
 from .safety import authorize_execution
@@ -532,6 +533,136 @@ class TaskExecutor:
         if abs(actual - float(source_resistance_ohm)) > tolerance:
             raise RuntimeError(
                 "RS0 resistance does not match the requested source degeneration"
+            )
+
+    @classmethod
+    def _assert_source_degeneration_removal_delta(
+        cls,
+        before: AdapterResult,
+        after: AdapterResult,
+    ) -> None:
+        before_data = before.data
+        after_data = after.data
+        before_instances = cls._instances_by_name(before_data)
+        after_instances = cls._instances_by_name(after_data)
+        base_names = {"MN0", "RD0"}
+        degenerated_names = base_names | {"RS0"}
+        before_names = set(before_instances)
+        if frozenset(before_names) not in {
+            frozenset(base_names),
+            frozenset(degenerated_names),
+        }:
+            raise RuntimeError(
+                "source-degeneration removal requires the exact VDA common-source "
+                f"instance set; got {sorted(before_names)}"
+            )
+        if set(after_instances) != base_names:
+            raise RuntimeError(
+                "source-degeneration removal did not restore exactly MN0/RD0"
+            )
+
+        expected_before_mn_terms = {
+            "D": "OUT",
+            "G": "IN",
+            "S": "NSRC" if before_names == degenerated_names else "VSS",
+            "B": "VSS",
+        }
+        expected_after_mn_terms = {
+            "D": "OUT",
+            "G": "IN",
+            "S": "VSS",
+            "B": "VSS",
+        }
+        if before_instances["MN0"].get("terminals") != expected_before_mn_terms:
+            raise RuntimeError(
+                "source-degeneration removal found an unexpected MN0 topology"
+            )
+        if before_instances["RD0"].get("terminals") != {
+            "PLUS": "VDD",
+            "MINUS": "OUT",
+        }:
+            raise RuntimeError(
+                "source-degeneration removal found an unexpected RD0 topology"
+            )
+        if (
+            before_names == degenerated_names
+            and before_instances["RS0"].get("terminals")
+            != {"PLUS": "NSRC", "MINUS": "VSS"}
+        ):
+            raise RuntimeError(
+                "source-degeneration removal found an unexpected RS0 topology"
+            )
+        if after_instances["MN0"].get("terminals") != expected_after_mn_terms:
+            raise RuntimeError(
+                "source-degeneration removal did not restore MN0.S to VSS"
+            )
+        if after_instances["RD0"].get("terminals") != {
+            "PLUS": "VDD",
+            "MINUS": "OUT",
+        }:
+            raise RuntimeError("source-degeneration removal changed RD0 topology")
+
+        if before_data.get("pins") != after_data.get("pins"):
+            raise RuntimeError(
+                "source-degeneration removal unexpectedly changed pins"
+            )
+        before_nets = set(before_data.get("nets", []))
+        after_nets = set(after_data.get("nets", []))
+        expected_after_nets = before_nets - (
+            {"NSRC"} if before_names == degenerated_names else set()
+        )
+        if after_nets != expected_after_nets:
+            raise RuntimeError(
+                "source-degeneration removal changed nets beyond removing NSRC"
+            )
+
+        before_parameters = before_data.get("instance_parameters")
+        after_parameters = after_data.get("instance_parameters")
+        if not isinstance(before_parameters, dict) or not isinstance(
+            after_parameters, dict
+        ):
+            raise RuntimeError(
+                "source-degeneration removal is missing full instance parameter "
+                "readback"
+            )
+        if set(before_parameters) != before_names or set(after_parameters) != base_names:
+            raise RuntimeError(
+                "source-degeneration removal returned inconsistent instance "
+                "parameter readback"
+            )
+        for name in sorted(base_names):
+            if before_parameters[name] != after_parameters[name]:
+                raise RuntimeError(
+                    "source-degeneration removal unexpectedly changed "
+                    f"{name} parameters"
+                )
+
+        immutable_fields = (
+            "library",
+            "cell",
+            "xy",
+            "orient",
+            "bBox",
+            "numInst",
+            "view",
+            "parameters",
+        )
+        for name in sorted(base_names):
+            for field in immutable_fields:
+                if before_instances[name].get(field) != after_instances[name].get(field):
+                    raise RuntimeError(
+                        "source-degeneration removal unexpectedly changed "
+                        f"{name}.{field}"
+                    )
+
+        semantic = after_data.get("semantic_parameters")
+        if not isinstance(semantic, dict):
+            raise RuntimeError(
+                "source-degeneration removal is missing semantic OA readback"
+            )
+        if "source_resistance_ohm" in semantic:
+            raise RuntimeError(
+                "source-degeneration removal left source_resistance_ohm in OA readback"
             )
 
     @classmethod
@@ -2036,15 +2167,43 @@ class TaskExecutor:
                     "schematic.inspect.before",
                     lambda: self.adapter.inspect_schematic(task),
                 )
-                transform_action = (
-                    "schematic.transform.inverter-testbench"
-                    if task.circuit is CircuitKind.INVERTER
-                    else "schematic.transform.source-degeneration"
-                )
-                self._action(
+                resolved_transform = task.resolved_schematic_transform_action()
+                transform_action = "schematic.transform.inverter-testbench"
+                if task.circuit is CircuitKind.COMMON_SOURCE:
+                    transform_action = (
+                        "schematic.transform.source-degeneration.remove"
+                        if resolved_transform
+                        is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION
+                        else "schematic.transform.source-degeneration"
+                    )
+                transformed = self._action(
                     transform_action,
                     lambda: self.adapter.transform_schematic(task),
                 )
+                if (
+                    resolved_transform
+                    is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION
+                    and task.schematic_transform is not None
+                    and task.schematic_transform.expected_restored_placement_sha256
+                    is not None
+                ):
+                    expected_placement = (
+                        task.schematic_transform.expected_restored_placement_sha256
+                    )
+                    placement_after = transformed.data.get("placement_after")
+                    actual_placement = (
+                        placement_after.get("sha256")
+                        if isinstance(placement_after, dict)
+                        else None
+                    )
+                    if (
+                        transformed.data.get("restored_placement_match") is not True
+                        or actual_placement != expected_placement
+                    ):
+                        raise RuntimeError(
+                            "source-degeneration removal did not confirm the "
+                            "declared restored placement fingerprint"
+                        )
                 after = self._action(
                     "schematic.inspect.after",
                     lambda: self.adapter.inspect_schematic(task),
@@ -2056,6 +2215,11 @@ class TaskExecutor:
                         float(task.parameters["vdd_v"]),
                         float(task.parameters["load_ff"]),
                     )
+                elif (
+                    resolved_transform
+                    is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION
+                ):
+                    self._assert_source_degeneration_removal_delta(before, after)
                 else:
                     self._assert_source_degeneration_delta(
                         before,

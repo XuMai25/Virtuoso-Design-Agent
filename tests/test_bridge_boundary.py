@@ -18,6 +18,7 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     _ade_capture_manifest,
     _apply_explicit_instance_parameters,
     _assert_common_source,
+    _assert_common_source_removal_preserved,
     _assert_common_source_transform_preserved,
     _assert_inverter_testbench_transform_preserved,
     _assert_parameter_consistency,
@@ -35,6 +36,7 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     _complex_signal,
     _complete_si_env,
     _discard_failed_existing_schematic_edit,
+    _delete_source_degeneration_operation,
     _edit_existing_schematic,
     _generate_oa_netlist,
     _focus_target_schematic,
@@ -45,9 +47,12 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     _merge_common_source_operating_condition_results,
     _parse_common_source_netlist,
     _parse_inverter_netlist,
+    _placement_snapshot_from_readback,
     _preflight_mn0_source_label,
+    _preflight_source_degeneration_removal,
     _rename_inverter_ground_labels_operation,
     _rename_mn0_source_label_operation,
+    _restore_mn0_source_label_operation,
     ParameterReadbackMismatch,
     _read_nonempty_text,
     _requested_instance_parameters,
@@ -4844,6 +4849,17 @@ def test_source_degeneration_delta_preserves_existing_oa_objects() -> None:
         _assert_common_source_transform_preserved(before, after, 1_000.0)
 
 
+def test_source_degeneration_removal_preserves_existing_oa_objects() -> None:
+    before = _common_source_readback(degenerated=True)
+    after = _common_source_readback(degenerated=False)
+
+    _assert_common_source_removal_preserved(before, after)
+
+    after["instances"][1]["params"]["r"] = "99k"
+    with pytest.raises(RuntimeError, match="changed RD0"):
+        _assert_common_source_removal_preserved(before, after)
+
+
 def _inverter_core_readback() -> dict:
     return {
         "instances": [
@@ -4942,6 +4958,18 @@ def test_source_label_edit_is_strict_and_parameter_updates_are_partial() -> None
     assert "length(rbLabels) == 1" in operation
     assert 'rbLabel~>theLabel = "NSRC"' in operation
 
+    restore = _restore_mn0_source_label_operation()
+    assert 'x~>theLabel == "NSRC"' in restore
+    assert 'rbLabel~>theLabel = "VSS"' in restore
+    assert "length(rbLabels) == 1" in restore
+
+    deletion = _delete_source_degeneration_operation()
+    assert deletion.count("dbDeleteObject(rbLabel)") == 2
+    assert deletion.count("dbDeleteObject(rbWire)") == 2
+    assert 'x~>objType == "line"' in deletion
+    assert "length(rbWires) == 1" in deletion
+    assert "dbDeleteObject(rbInst)" in deletion
+
     updates = _common_source_instance_parameter_updates(
         {"source_resistance_ohm": 1_000.0}
     )
@@ -4997,6 +5025,72 @@ def test_transform_preflight_rejects_unsaved_target_edits(monkeypatch) -> None:
         "skill"
     ]
     assert captured["timeout"] == 60
+
+
+def test_removal_preflight_is_read_only_and_checks_owned_stubs(monkeypatch) -> None:
+    import sys
+    from types import ModuleType
+
+    ops_module = ModuleType("virtuoso_bridge.virtuoso.ops")
+    ops_module.escape_skill_string = lambda value: value
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.virtuoso.ops", ops_module)
+    captured = {}
+
+    class Client:
+        def execute_skill(self, skill, timeout):
+            captured.update({"skill": skill, "timeout": timeout})
+            return SimpleNamespace(output="t", errors=[])
+
+    _preflight_source_degeneration_removal(
+        Client(), "vda_test", "vda_existing"
+    )
+
+    assert '"schematic" "schematic" "r"' in captured["skill"]
+    assert "target schematic has unsaved changes" in captured["skill"]
+    assert 'x~>theLabel == "NSRC"' in captured["skill"]
+    assert captured["skill"].count("length(rbWires) == 1") == 2
+    assert captured["timeout"] == 60
+
+
+def test_bridge_payload_preserves_explicit_removal_action() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "remove-source-degeneration",
+            "operation": "schematic.transform",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "schematic_transform": {"action": "remove_source_degeneration"},
+        }
+    )
+
+    payload = SubprocessBridgeAdapter._task_payload(task)
+
+    assert payload["schematic_transform"] == {
+        "action": "remove_source_degeneration"
+    }
+    assert payload["parameters"] == {}
+
+
+def test_placement_snapshot_is_order_independent_and_shape_sensitive() -> None:
+    first = {
+        "instances": [{"name": "RD0"}, {"name": "MN0"}],
+        "pins": [{"name": "OUT"}, {"name": "IN"}],
+        "labels": [
+            {"text": "OUT", "xy": "(1 0)"},
+            {"text": "IN", "xy": "(-1 0)"},
+        ],
+        "wires": ["((1 0) (2 0))", "((-1 0) (0 0))"],
+    }
+    reordered = {
+        field: list(reversed(values)) for field, values in first.items()
+    }
+
+    baseline = _placement_snapshot_from_readback(first)
+    assert _placement_snapshot_from_readback(reordered) == baseline
+    reordered["wires"].append("((0 -1) (0 -2))")
+    changed = _placement_snapshot_from_readback(reordered)
+    assert changed["sha256"] != baseline["sha256"]
+    assert changed["counts"]["wires"] == baseline["counts"]["wires"] + 1
 
 
 def test_failed_transform_cleanup_purges_only_unsaved_target_view(monkeypatch) -> None:

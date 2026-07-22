@@ -12,6 +12,7 @@ from .models import (
     ExecutionPlan,
     Operation,
     PlanStep,
+    SchematicTransformAction,
     SideEffect,
     TaskSpec,
 )
@@ -587,12 +588,33 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 "vdd_v/load_ff 设置源和负载；不替换或另建 cellview"
             )
         else:
-            capability = "schematic.transform.source-degeneration"
-            description = (
-                "在同一 cellview 内仅把 MN0.S 的 VSS 标签改为 NSRC，"
-                "新增 RS0(NSRC, VSS) 并设置退化电阻；保留 MN0、RD0、"
-                "pins 与已有实例参数，不新建或替换 cellview"
-            )
+            transform_action = task.resolved_schematic_transform_action()
+            if (
+                transform_action
+                is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION
+            ):
+                capability = "schematic.transform.source-degeneration.remove"
+                description = (
+                    "在同一 cellview 内仅删除 RS0 及其 VDA 创建的端子 stub，"
+                    "把 MN0.S 的 NSRC 标签恢复为 VSS，并移除 NSRC；保留 "
+                    "MN0、RD0、pins 与已有实例参数，不新建或替换 cellview"
+                )
+                if (
+                    task.schematic_transform is not None
+                    and task.schematic_transform.expected_restored_placement_sha256
+                    is not None
+                ):
+                    description += (
+                        "；恢复后的实例/pin/标签/导线 placement SHA-256 必须与"
+                        "声明基线完全一致"
+                    )
+            else:
+                capability = "schematic.transform.source-degeneration"
+                description = (
+                    "在同一 cellview 内仅把 MN0.S 的 VSS 标签改为 NSRC，"
+                    "新增 RS0(NSRC, VSS) 并设置退化电阻；保留 MN0、RD0、"
+                    "pins 与已有实例参数，不新建或替换 cellview"
+                )
         return [
             probe,
             inspect.model_copy(update={"id": "02-before"}),

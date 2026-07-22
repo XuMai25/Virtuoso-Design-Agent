@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "common-source-topology-patch-add",
+  "operation": "schematic.transform",
+  "circuit": "common_source",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_cs_topology_patch_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "schematic_transform": {"action": "add_source_degeneration"},
+  "parameters": {"source_resistance_ohm": 1000.0},
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}

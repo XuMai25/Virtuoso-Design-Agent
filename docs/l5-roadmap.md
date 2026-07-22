@@ -25,7 +25,7 @@ PDK 路线默认按晶圆厂 CMOS 工艺推进：当前以 TSMC N28 为基线，
 
 Gate 2A 又把相同执行语义扩展到电阻负载 NMOS 共源级：新 OA cellview 的 MN0/RD0 结构、W/L/R 回读和 `si` 网表一致性通过；显式保存的 Spectre DC OP 提供 Id/VGS/VDS/VDSAT/gm/gds，6 点 W/Vbias 搜索完成 3 个可行点、3 个线性区点、最佳 W 写回和最终独立紧规格复核。该结果只闭合 common-source nominal DC；当时 AC、source degeneration、noise 和 corner 均未验证。
 
-2026-07-20 已按“微调已有 schematic、避免重建”的目标实现并真实验证源极退化原位 transform：同一 cellview 只改 MN0.S 网名并新增 RS0/NSRC，前后审计保护 MN0/RD0、pins、位置和未点名参数；同一个 common-source adapter 随后读写 RS、自动解析退化网表、提取 NSRC DC 指标并完成 6 点 Vbias×RS 搜索。一次 transport 中断从候选 3 续跑，最佳 `Vbias=0.35 V, RS=2 kΩ` 写回并由全新 worker 独立回读。该证据把 source-degenerated DC execution/tuning smoke 升级为 live verified；随后只读 AC 也已过门，但 AC 调优和完整设计质量闭环仍未通过。
+2026-07-20 已按“微调已有 schematic、避免重建”的目标实现并真实验证源极退化原位 add：同一 cellview 只改 MN0.S 网名并新增 RS0/NSRC，前后审计保护 MN0/RD0、pins、位置和未点名参数；同一个 common-source adapter 随后读写 RS、自动解析退化网表、提取 NSRC DC 指标并完成有限搜索。2026-07-23 又补齐显式 remove：仅删除 RS0 与两条 VDA stub、恢复 MN0.S/VSS，并可把 add 前 placement SHA-256 作为 CAS 基线。新 cell 的 add→DC/AC→remove 一次通过，恢复后的 OA placement、nominal `si` 网表和连续 EDA 指标完全一致；该能力仍是已知拓扑的固定 delta，不是通用图重写。
 
 同日已把共源 AC 做成正式能力，而不是一次性脚本：同一 OA→`si` 网表运行 DC OP 和复数 AC，并提取 gain、首个 −3 dB bandwidth、GBW、unity-gain 与相位。nominal/退化只读 smoke、各 6 点 bias/load 搜索、同参数只加 RS 的控制变量对比，以及 W/RD/RS 预算/不可行/完整 8 点搜索均已真实通过。完整搜索选择并回读 W=1.0 µm、RD=20 kΩ、RS=1 kΩ；多次 transport 中断都在 OA 恢复或独立 readback 后从 checkpoint 继续。状态升级为 **bounded common-source AC design-parameter tuning and recovery verified**。
 
@@ -110,4 +110,4 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
 
 每一级只有在真实 Bridge smoke、结构回读、指标解析和失败注入均通过后才升级状态。
 
-反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化原位 transform/DC tuning、AC/quality、W/RD/RS/L/VDD 写回、固定设计 TT/SS/FF、可选 PVT-aware bias 选优，以及预算/不可行/transport 恢复均已有 live 证据。跨 PVT 不再是进入下一拓扑的强制默认门；需要加严时，可继续做 OA 设计变量的 PVT 最佳写回、全不可行、预算耗尽和 completed-prefix checkpoint live。默认主线可进入差分对或下一项受控拓扑能力。ADE 的真实 PVT/multi-test、已有 output 安全替换，以及人工打开/修改/重跑和旧 ADE L 迁移继续是独立 Gate；完成前仍不能升级为可重复的 L5B 单模块规格闭环。
+反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化可逆 transform/DC/AC、quality、W/RD/RS/L/VDD 写回、固定设计 TT/SS/FF、可选 PVT-aware bias 选优，以及预算/不可行/transport 恢复均已有 live 证据。跨 PVT 不再是进入下一拓扑的强制默认门；需要加严时，可继续做 OA 设计变量的 PVT 最佳写回、全不可行、预算耗尽和 completed-prefix checkpoint live。默认主线先把已支持的任意实例参数从单点 apply 扩展到受控有限搜索，再进入差分对或下一项受控拓扑。ADE 的真实 PVT/multi-test、已有 output 安全替换，以及人工打开/修改/重跑和旧 ADE L 迁移继续是独立 Gate；完成前仍不能升级为可重复的 L5B 单模块规格闭环。

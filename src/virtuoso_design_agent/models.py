@@ -50,6 +50,19 @@ class CircuitKind(str, Enum):
     DIFFERENTIAL_PAIR = "differential_pair"
 
 
+class SchematicTransformAction(str, Enum):
+    ADD_SOURCE_DEGENERATION = "add_source_degeneration"
+    REMOVE_SOURCE_DEGENERATION = "remove_source_degeneration"
+
+
+class SchematicTransformSpec(StrictModel):
+    action: SchematicTransformAction
+    expected_restored_placement_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+
 class AnalysisKind(str, Enum):
     TRANSIENT = "transient"
     DC = "dc"
@@ -1368,6 +1381,7 @@ class TaskSpec(StrictModel):
     ade_variables: AdeVariablesApplySpec | None = None
     ade_corners: AdeCornersApplySpec | None = None
     ade_setup: AdeSetupApplySpec | None = None
+    schematic_transform: SchematicTransformSpec | None = None
     operating_conditions: list[OperatingCondition] = Field(
         default_factory=list,
         max_length=5,
@@ -1719,14 +1733,50 @@ class TaskSpec(StrictModel):
                 "parameters.apply requires parameters or instance_parameter_updates"
             )
         if self.operation is Operation.SCHEMATIC_TRANSFORM:
-            if not self.parameters:
-                raise ValueError("schematic.transform requires parameters")
             if self.instance_parameter_updates:
                 raise ValueError(
                     "schematic.transform does not accept instance_parameter_updates"
                 )
             if self.parameter_space:
                 raise ValueError("schematic.transform does not accept parameter_space")
+            if self.circuit is CircuitKind.COMMON_SOURCE:
+                action = self.resolved_schematic_transform_action()
+                if (
+                    action is SchematicTransformAction.ADD_SOURCE_DEGENERATION
+                    and not self.parameters
+                ):
+                    raise ValueError(
+                        "add_source_degeneration requires source_resistance_ohm"
+                    )
+                if (
+                    action is SchematicTransformAction.ADD_SOURCE_DEGENERATION
+                    and self.schematic_transform is not None
+                    and self.schematic_transform.expected_restored_placement_sha256
+                    is not None
+                ):
+                    raise ValueError(
+                        "expected_restored_placement_sha256 is valid only for "
+                        "remove_source_degeneration"
+                    )
+                if (
+                    action is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION
+                    and self.parameters
+                ):
+                    raise ValueError(
+                        "remove_source_degeneration does not accept parameters"
+                    )
+            else:
+                if self.schematic_transform is not None:
+                    raise ValueError(
+                        "schematic_transform settings currently support only "
+                        "common_source"
+                    )
+                if not self.parameters:
+                    raise ValueError("schematic.transform requires parameters")
+        elif self.schematic_transform is not None:
+            raise ValueError(
+                "schematic_transform settings require operation='schematic.transform'"
+            )
         if self.operation in _TUNING_OPERATIONS:
             if not self.parameter_space:
                 raise ValueError(f"{self.operation.value} requires parameter_space")
@@ -1752,6 +1802,18 @@ class TaskSpec(StrictModel):
                 AnalysisKind.NOISE,
             )
         return (analysis,)
+
+    def resolved_schematic_transform_action(
+        self,
+    ) -> SchematicTransformAction | None:
+        if (
+            self.operation is not Operation.SCHEMATIC_TRANSFORM
+            or self.circuit is not CircuitKind.COMMON_SOURCE
+        ):
+            return None
+        if self.schematic_transform is None:
+            return SchematicTransformAction.ADD_SOURCE_DEGENERATION
+        return self.schematic_transform.action
 
 
 class PlanStep(StrictModel):

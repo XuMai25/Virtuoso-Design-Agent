@@ -11,10 +11,10 @@ PDK 默认面向晶圆厂 CMOS 设计。当前缺省 profile 为 `nics4304_tsmc2
 ## 当前能做什么
 
 - 将任务编译为带副作用标记的稳定执行计划。
-- 单独规划或执行：`schematic.create`、`schematic.inspect`、`schematic.transform`、`parameters.apply`、`ade.prepare`、`ade.capture`、`ade.corners.apply`、`ade.variables.apply`、`ade.setup.apply`、`ade.run`、`simulation.run`、`design.tune`、`design.close_loop`。当前 `schematic.transform` 开放共源级的受控源极退化补丁，以及反相器 core→ADE source/load testbench 的固定小变更。
+- 单独规划或执行：`schematic.create`、`schematic.inspect`、`schematic.transform`、`parameters.apply`、`ade.prepare`、`ade.capture`、`ade.corners.apply`、`ade.variables.apply`、`ade.setup.apply`、`ade.run`、`simulation.run`、`design.tune`、`design.close_loop`。当前 `schematic.transform` 开放共源级源极退化的受控 add/remove，以及反相器 core→ADE source/load testbench 的固定小变更。
 - 用确定性 demo adapter 离线验证闭环、规格判定和参数选择；结果明确标为 `software_inference`。
 - 通过独立 worker 调用本机 `virtuoso-bridge-lite` 环境。反相器支持 `OA -> si -> Spectre transient` 的 timing、过冲/欠冲和周期供电能量；共源级支持同一 `OA -> si` 网表上的 DC OP、复数 AC、相干正弦 transient 幅度 sweep 和普通 noise sweep。可提取 `Id/VGS/VDS/VDSAT/gm/gds`、真实 VDD 功耗与 KCL、低频增益、首个 −3 dB 带宽、GBW、unity、HD2/HD3、THD、P1dB，以及频带积分的输出/输入参考噪声；单项执行与提取均有 live 证据。`analysis: "quality"` 已在一次 OA/`si` 核对后依次运行 AC、linearity、noise，并完成 bias/load、W/RD/RS、L/VDD 搜索、固定设计 TT/SS/FF 验证和显式启用的 PVT-aware bias 调优；每个 PVT 条件保留原始 `eda_result`，跨条件约束和最坏值聚合标为 `software_inference`。
-- 源极退化不新建第二套模板或仿真器：在同一 common-source cellview 中把 `MN0.S: VSS -> NSRC`，只新增 `RS0(NSRC,VSS)`；随后由同一 inspect、参数应用、`si` 网表解析、DC 指标和有限搜索路径动态识别该变体。
+- 源极退化不新建第二套模板或仿真器：add 在同一 common-source cellview 中把 `MN0.S: VSS -> NSRC`，只新增 `RS0(NSRC,VSS)`；remove 只删除 VDA 创建的 RS0 两条端子 stub/标签、恢复 `MN0.S: NSRC -> VSS`。同一 inspect、参数应用、`si` 网表解析、DC/AC 指标和有限搜索路径动态识别两种变体。
 - `existing_schematic` 提供不依赖固定电路模板的 Bridge 能力面：`schematic.inspect` 保留 Bridge 的完整结构结果和所有可回读 CDF 参数；`parameters.apply` 可按实例透传 Bridge 接受的参数字符串，写入后用定向 CDF 读取再次核对。反相器/共源模板仍可在同一任务中组合 semantic parameters 与原始实例参数。
 - `ade.prepare` 与 `ade.capture` 保留显式人工介入边界。`prepare` 只在目标 Maestro view 不存在时新建持久化 Spectre test，可显式指向另一个既有 design schematic；已有 view 一律拒绝，也不预设 analysis/stimulus/sweep/output。`capture` 核对人工聚焦的目标，捕获 setup、history、真实 Spectre netlist/PSF/log 哈希和逐点 output/spec。自动分支中，`ade.corners.apply` 只在 exact tests 与旧 corner 有序列表匹配时 add-only 新增 corner；`ade.variables.apply` 只有在 expected tests、可选 enabled corners、全部声明 scope 旧值和目标 global-selection 状态匹配时才更新变量或 selection；`ade.setup.apply` 对声明 analysis 做旧状态 CAS，并只新增不存在的命名 net/point output 与可选 spec。三个 setup 写 operation 都只保存一次并独立重开回读，已有已配置 session 时拒绝。`ade.run` 为每个 test 临时把 background session 的 project/results dir 定向到唯一 `/data/xum` scratch，运行或按显式 history/scratch 恢复后还原原值；它读取逐点 output/spec，并对 exact-history companion 与唯一 runtime input 根生成大小/SHA-256 清单。任务可显式要求把哈希绑定的 `input.scs` 或 `input.scs`+sibling `netlist` 输入束的 design header、实例、节点和已知 primitive raw 参数映射与 Maestro/OA 回读核对；原生 sweep 又可严格绑定 setup、global-variable selections、共享符号输入束、RDB point/corner 和 completion log。corner 模式通过 Bridge 公开 `include_raw=True` 取得原始 Detail CSV，在 VDA 层保留 Bridge 0.7.0 尚未结构化的正交 corner 列；不会修改 Bridge。若 Bridge completion wait 超时，只有运行前后恰好新增一个名称且其 log 已 completed 时才继续，多个新 history、同名覆盖或未完成日志均拒绝。配置/OA 回读属于 `bridge_readback`，运行输入与结果属于 `eda_result`，兼容性归一化、history 选择和一致性判断属于 `software_inference`。可选 `result_mapping` 再固定 exact scalar output expression、单位 scale 和 VDA constraints/objective。若人工旧 output 在声明点必然产生 calculator `eval err`，`expected_output_evaluation_errors` 只能按 exact test/output/point selector 声明未映射项；worker 与 executor 都要求 RDB 单元格和 log error 数完全相等、未解释错误为零，不能作为通用忽略开关。未声明时保持普通 Bridge-preserving run。它不能证明 history 名称此前不存在。旧 ADE L state 的非破坏迁移尚未纳入已验证 VDA operation。
 - 对远端计算和 OA 写入分别授权；真实执行还需要计划 token，避免一句模糊指令直接改库。
@@ -142,9 +142,9 @@ C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe 
 
 2026-07-20 的专用 `vda_param_surface_001` live smoke 已闭合 `MN0.fingers=2` 和 `RD0.r=22K` 的 callback、立即 OA 回读和独立再次回读。相同任务中的 `MN0.m=2` 被 PDK callback 恢复为 `1`，因此保留为失败边界；这说明“VDA 能尝试 Bridge 参数”不等于“每个 PDK CDF 字段都可物理持久化”。多字段写入不是 OA 事务，失败可能留下已保存的前缀字段。
 
-源极退化的增量实现不会重置未点名参数：共源 semantic 写入只向 Bridge 发送任务实际包含的 `W/L/RD/RS` 字段，不再附带 `fingers=1` 或 `m=1`。transform 强制用 append mode 打开已有 cellview，拒绝已有未保存改动，编辑 batch 失败时 purge 本次未保存缓存；前后独立回读再逐项核对 MN0/RD0 的完整参数、master、位置、pins 和 nets。只有 MN0.S 改接 NSRC、增加 RS0/NSRC 以及任务给定的 RS0.r 被允许。重复 transform 幂等；已退化拓扑上改变阻值只写 RS0。
+源极退化的增量实现不会重置未点名参数：共源 semantic 写入只向 Bridge 发送任务实际包含的 `W/L/RD/RS` 字段，不再附带 `fingers=1` 或 `m=1`。transform 强制用 append mode 打开已有 cellview，拒绝已有未保存改动，编辑 batch 失败时 purge 本次未保存缓存；前后独立回读再逐项核对 MN0/RD0 的完整参数、master、位置、pins 和 nets。add 只允许 MN0.S 改接 NSRC、增加 RS0/NSRC 和设置 RS0.r；remove 只接受无参数的显式动作，并几何唯一选择 RS0 两条 VDA stub 后删除。两者均幂等。remove 可绑定 add 前由 Bridge 回读的实例/pin/标签/导线 placement SHA-256，保存后不一致即失败。
 
-`vda_param_surface_001` 和 `vda_cs_ac_tradeoff_001` 已依次覆盖同一 cellview 原位退化、DC、nominal/退化 AC、bias/load、W/RD/RS、线性度/功耗/noise 和三分析质量调优；多次 transport 失败都保留为 `system_event` 并经 OA readback/checkpoint 恢复。2026-07-22 闭合 L/VDD 四点写回和固定设计三条件 PVT 验证；2026-07-23 又闭合不写 OA 的两候选 PVT-aware bias 搜索。尚未 live 闭合的是 OA 设计变量跨 PVT 写回、自动逆变换和更复杂拓扑。完整 live 证据见 `docs/validation/2026-07-20-source-degeneration-live.md`、`docs/validation/2026-07-20-common-source-ac-live.md`、`docs/validation/2026-07-21-common-source-quality-design-tuning-live.md`、`docs/validation/2026-07-22-common-source-length-vdd-pvt-live.md` 和 `docs/validation/2026-07-23-common-source-optional-pvt-tuning-live.md`。
+`vda_param_surface_001` 和 `vda_cs_ac_tradeoff_001` 已依次覆盖同一 cellview 原位退化、DC、nominal/退化 AC、bias/load、W/RD/RS、线性度/功耗/noise 和三分析质量调优；多次 transport 失败都保留为 `system_event` 并经 OA readback/checkpoint 恢复。2026-07-22 闭合 L/VDD 四点写回和固定设计三条件 PVT 验证；2026-07-23 又闭合不写 OA 的两候选 PVT-aware bias 搜索，并在独立新 cell 上完成 source degeneration add→DC/AC→remove 的可逆 Gate。恢复后 placement、`si` 网表 SHA-256 及 17 个 DC/28 个 AC 指标均与 add 前完全一致。尚未 live 闭合的是 OA 设计变量跨 PVT 写回、任意实例参数有限搜索和更复杂拓扑。完整 live 证据见 `docs/validation/` 下对应记录。
 
 ## 安全模型
 
@@ -177,6 +177,7 @@ C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe 
 - [2026-07-19 显式实例参数能力验证](docs/validation/2026-07-19-explicit-instance-parameters.md)
 - [2026-07-20 源极退化原位变更实现验证](docs/validation/2026-07-20-source-degeneration-in-place.md)
 - [2026-07-20 源极退化原位微调与同源 DC 真实验证](docs/validation/2026-07-20-source-degeneration-live.md)
+- [2026-07-23 共源源极退化可逆拓扑微调真实验证](docs/validation/2026-07-23-common-source-reversible-topology-live.md)
 - [2026-07-20 共源复数 AC 指标与调优能力实现](docs/validation/2026-07-20-common-source-ac-implementation.md)
 - [2026-07-20 共源与源极退化只读同源 AC 真实验证](docs/validation/2026-07-20-common-source-ac-live.md)
 - [2026-07-20 共源 AC 控制变量与 W/RD/RS 真实调优](docs/validation/2026-07-20-common-source-ac-design-tuning-live.md)

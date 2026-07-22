@@ -112,6 +112,11 @@ class SubprocessBridgeAdapter:
             "target": task.target.model_dump(mode="json"),
             "profile": load_pdk_profile(task.pdk_profile).model_dump(mode="json"),
             "parameters": task.parameters,
+            "schematic_transform": (
+                task.schematic_transform.model_dump(mode="json", exclude_none=True)
+                if task.schematic_transform is not None
+                else None
+            ),
             "instance_parameter_updates": [
                 update.model_dump(mode="json")
                 for update in task.instance_parameter_updates

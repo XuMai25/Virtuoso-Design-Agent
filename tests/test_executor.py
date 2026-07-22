@@ -4148,6 +4148,22 @@ def _source_degeneration_transform(resistance_ohm: float = 1_000.0) -> TaskSpec:
     )
 
 
+def _source_degeneration_removal() -> TaskSpec:
+    return TaskSpec.model_validate(
+        {
+            "id": "source-degeneration-removal",
+            "operation": "schematic.transform",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "schematic_transform": {"action": "remove_source_degeneration"},
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+
+
 def _inverter_testbench_transform() -> TaskSpec:
     return TaskSpec.model_validate(
         {
@@ -4280,6 +4296,104 @@ def test_source_degeneration_transform_is_idempotent_and_can_retarget_only_rs0()
     assert after["instance_parameters"]["MN0"] == baseline["instance_parameters"]["MN0"]
     assert after["instance_parameters"]["RD0"] == baseline["instance_parameters"]["RD0"]
     assert after["instance_parameters"]["RS0"]["r"] == "2000"
+
+
+def test_source_degeneration_add_remove_restores_the_nominal_readback() -> None:
+    adapter = DeterministicDemoAdapter()
+    remove = _source_degeneration_removal()
+    adapter.create_schematic(remove)
+    nominal = adapter.inspect_schematic(remove).data
+
+    add = _source_degeneration_transform()
+    add_plan = build_plan(add)
+    add_record = TaskExecutor(adapter).execute(
+        add, add_plan, token=add_plan.confirmation_token
+    )
+    assert add_record.status is RunStatus.SUCCEEDED
+
+    remove_plan = build_plan(remove)
+    remove_record = TaskExecutor(adapter).execute(
+        remove, remove_plan, token=remove_plan.confirmation_token
+    )
+    restored = adapter.inspect_schematic(remove).data
+
+    assert remove_record.status is RunStatus.SUCCEEDED
+    assert remove_record.selected_parameters == {}
+    assert restored == nominal
+    action = next(
+        item
+        for item in remove_record.actions
+        if item.action == "schematic.transform.source-degeneration.remove"
+    )
+    assert action.details["transformed"] is True
+    assert action.details["already_removed"] is False
+
+
+def test_source_degeneration_removal_is_idempotent() -> None:
+    adapter = DeterministicDemoAdapter()
+    remove = _source_degeneration_removal()
+    adapter.create_schematic(remove)
+    plan = build_plan(remove)
+
+    record = TaskExecutor(adapter).execute(
+        remove, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    action = next(
+        item
+        for item in record.actions
+        if item.action == "schematic.transform.source-degeneration.remove"
+    )
+    assert action.details["transformed"] is False
+    assert action.details["already_removed"] is True
+
+
+def test_executor_requires_declared_restoration_fingerprint_confirmation() -> None:
+    adapter = DeterministicDemoAdapter()
+    payload = _source_degeneration_removal().model_dump(mode="json")
+    payload["schematic_transform"] = {
+        "action": "remove_source_degeneration",
+        "expected_restored_placement_sha256": "0" * 64,
+    }
+    remove = TaskSpec.model_validate(payload)
+    adapter.create_schematic(remove)
+    plan = build_plan(remove)
+
+    record = TaskExecutor(adapter).execute(
+        remove, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.FAILED
+    assert any(
+        "did not confirm the declared restored placement fingerprint" in note
+        for note in record.notes
+    )
+
+
+def test_executor_rejects_source_degeneration_removal_that_changes_rd0() -> None:
+    class CorruptingRemovalAdapter(DeterministicDemoAdapter):
+        def transform_schematic(self, task):
+            result = super().transform_schematic(task)
+            if task.schematic_transform is not None:
+                self._schematics[self._key(task)]["instance_parameters"]["RD0"][
+                    "r"
+                ] = "99k"
+            return result
+
+    adapter = CorruptingRemovalAdapter()
+    remove = _source_degeneration_removal()
+    adapter.create_schematic(remove)
+    add = _source_degeneration_transform()
+    adapter.transform_schematic(add)
+    plan = build_plan(remove)
+
+    record = TaskExecutor(adapter).execute(
+        remove, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.FAILED
+    assert any("changed RD0 parameters" in note for note in record.notes)
 
 
 def test_executor_rejects_transform_that_changes_an_existing_instance() -> None:

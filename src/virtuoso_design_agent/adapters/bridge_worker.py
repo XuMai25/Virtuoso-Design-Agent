@@ -65,6 +65,50 @@ def _read_schematic(client, library: str, cell: str) -> dict[str, Any]:
     )
 
 
+def _placement_snapshot_from_readback(
+    placement: dict[str, Any],
+) -> dict[str, Any]:
+    canonical: dict[str, list[Any]] = {}
+    for field in ("instances", "pins", "labels", "wires"):
+        values = placement.get(field, [])
+        if not isinstance(values, list):
+            raise RuntimeError(f"invalid schematic placement field: {field}")
+        canonical[field] = sorted(
+            values,
+            key=lambda value: json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ),
+        )
+    encoded = json.dumps(
+        canonical,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return {
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "counts": {field: len(values) for field, values in canonical.items()},
+        "label_texts": sorted(
+            str(item.get("text"))
+            for item in canonical["labels"]
+            if isinstance(item, dict)
+        ),
+    }
+
+
+def _schematic_placement_snapshot(
+    client, library: str, cell: str
+) -> dict[str, Any]:
+    from virtuoso_bridge.virtuoso.schematic.reader import read_placement
+
+    return _placement_snapshot_from_readback(
+        read_placement(client, library, cell)
+    )
+
+
 def _cellview_exists(client, library: str, cell: str, view: str) -> bool:
     result = client.execute_skill(
         f'let((v) v=ddGetObj("{library}" "{cell}" "{view}") if(v t nil))',
@@ -4891,9 +4935,16 @@ def apply_inverter_parameters(payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _mn0_source_label_selection_operation(*, rename: bool) -> str:
+def _mn0_source_label_selection_operation(
+    *,
+    rename: bool,
+    current_label: str = "VSS",
+    replacement_label: str = "NSRC",
+) -> str:
     final_action = (
-        'rbLabel~>theLabel = "NSRC" rbLabel' if rename else "rbLabel"
+        f'rbLabel~>theLabel = "{replacement_label}" rbLabel'
+        if rename
+        else "rbLabel"
     )
     return (
         "let((rbInst rbTerm rbPin rbFig rbBBox rbCtr rbLabels rbLabel rbDx rbDy) "
@@ -4909,11 +4960,11 @@ def _mn0_source_label_selection_operation(*, rename: bool) -> str:
         "(yCoord(car(rbBBox)) + yCoord(cadr(rbBBox))) / 2.0)) "
         'unless(rbCtr error("MN0.S center could not be resolved")) '
         "rbLabels = setof(x cv~>shapes "
-        'x~>objType == "label" && x~>theLabel == "VSS" && x~>xy && '
+        f'x~>objType == "label" && x~>theLabel == "{current_label}" && x~>xy && '
         "let((dx dy) dx = xCoord(x~>xy) - xCoord(rbCtr) "
         "dy = yCoord(x~>xy) - yCoord(rbCtr) "
         "dx * dx + dy * dy <= 0.02)) "
-        'unless(length(rbLabels) == 1 error("MN0.S VSS label selection was not unique")) '
+        f'unless(length(rbLabels) == 1 error("MN0.S {current_label} label selection was not unique")) '
         "rbLabel = car(rbLabels) "
         f"{final_action})"
     )
@@ -4922,6 +4973,74 @@ def _mn0_source_label_selection_operation(*, rename: bool) -> str:
 def _rename_mn0_source_label_operation() -> str:
     """Rename only the VDA-created VSS label nearest the MN0 source terminal."""
     return _mn0_source_label_selection_operation(rename=True)
+
+
+def _restore_mn0_source_label_operation() -> str:
+    """Restore only the VDA-created NSRC label nearest MN0.S to VSS."""
+    return _mn0_source_label_selection_operation(
+        rename=True,
+        current_label="NSRC",
+        replacement_label="VSS",
+    )
+
+
+def _rs0_terminal_stub_selection_operation(
+    terminal: str,
+    net_name: str,
+    *,
+    delete: bool,
+) -> str:
+    """Select one VDA-created RS0 terminal label and wire stub by geometry."""
+    final_action = (
+        "dbDeleteObject(rbLabel) dbDeleteObject(rbWire) t"
+        if delete
+        else "t"
+    )
+    return (
+        "let((rbInst rbTerm rbPin rbFig rbBBox rbCtr rbLabels rbLabel rbWires "
+        "rbWire) "
+        'rbInst = car(setof(x cv~>instances x~>name == "RS0")) '
+        'unless(rbInst error("RS0 not found during source-degeneration removal")) '
+        f'rbTerm = car(setof(x rbInst~>master~>terminals x~>name == "{terminal}")) '
+        'unless(rbTerm error("RS0 terminal not found during source-degeneration removal")) '
+        "rbPin = car(rbTerm~>pins) "
+        "rbFig = when(rbPin car(rbPin~>figs)) "
+        "rbBBox = when(rbFig dbTransformBBox(rbFig~>bBox rbInst~>transform)) "
+        "rbCtr = when(rbBBox list("
+        "(xCoord(car(rbBBox)) + xCoord(cadr(rbBBox))) / 2.0 "
+        "(yCoord(car(rbBBox)) + yCoord(cadr(rbBBox))) / 2.0)) "
+        'unless(rbCtr error("RS0 terminal center could not be resolved")) '
+        "rbLabels = setof(x cv~>shapes "
+        f'x~>objType == "label" && x~>theLabel == "{net_name}" && x~>xy && '
+        "let((dx dy) dx = xCoord(x~>xy) - xCoord(rbCtr) "
+        "dy = yCoord(x~>xy) - yCoord(rbCtr) "
+        "dx * dx + dy * dy <= 0.02)) "
+        'unless(length(rbLabels) == 1 error("RS0 terminal label selection was not unique")) '
+        "rbLabel = car(rbLabels) "
+        "rbWires = setof(x cv~>shapes "
+        'x~>objType == "line" && x~>points && '
+        "exists(rbPoint x~>points let((dx dy) "
+        "dx = xCoord(rbPoint) - xCoord(rbCtr) "
+        "dy = yCoord(rbPoint) - yCoord(rbCtr) "
+        "dx * dx + dy * dy <= 1e-8))) "
+        'unless(length(rbWires) == 1 error("RS0 terminal wire selection was not unique")) '
+        "rbWire = car(rbWires) "
+        f"{final_action})"
+    )
+
+
+def _delete_source_degeneration_operation() -> str:
+    return " ".join(
+        [
+            _restore_mn0_source_label_operation(),
+            _rs0_terminal_stub_selection_operation("PLUS", "NSRC", delete=True),
+            _rs0_terminal_stub_selection_operation("MINUS", "VSS", delete=True),
+            "let((rbInst) "
+            'rbInst = car(setof(x cv~>instances x~>name == "RS0")) '
+            'unless(rbInst error("RS0 not found during source-degeneration removal")) '
+            "dbDeleteObject(rbInst) t)",
+        ]
+    )
 
 
 def _edit_existing_schematic(client, library: str, cell: str, *, timeout: int = 90):
@@ -4954,6 +5073,43 @@ def _preflight_mn0_source_label(client, library: str, cell: str) -> None:
     if output != "t":
         raise RuntimeError(
             f"unexpected source-degeneration preflight result: {output!r}"
+        )
+
+
+def _preflight_source_degeneration_removal(
+    client, library: str, cell: str
+) -> None:
+    from virtuoso_bridge.virtuoso.ops import escape_skill_string
+
+    skill = " ".join(
+        [
+            "let((cv rbLabel)",
+            "cv = dbOpenCellViewByType("
+            f'"{escape_skill_string(library)}" "{escape_skill_string(cell)}" '
+            '"schematic" "schematic" "r")',
+            'unless(cv error("target schematic not found during transform preflight"))',
+            'when(cv~>modified error("target schematic has unsaved changes"))',
+            "rbLabel = "
+            + _mn0_source_label_selection_operation(
+                rename=False,
+                current_label="NSRC",
+                replacement_label="VSS",
+            ),
+            _rs0_terminal_stub_selection_operation("PLUS", "NSRC", delete=False),
+            _rs0_terminal_stub_selection_operation("MINUS", "VSS", delete=False),
+            "if(rbLabel t nil))",
+        ]
+    )
+    result = client.execute_skill(skill, timeout=60)
+    errors = getattr(result, "errors", None) or []
+    if errors:
+        raise RuntimeError(
+            f"source-degeneration removal preflight failed: {errors[0]}"
+        )
+    output = str(getattr(result, "output", "")).strip().strip('"').lower()
+    if output != "t":
+        raise RuntimeError(
+            f"unexpected source-degeneration removal preflight result: {output!r}"
         )
 
 
@@ -5271,6 +5427,117 @@ def _assert_common_source_transform_preserved(
     )
 
 
+def _assert_common_source_removal_preserved(
+    before: dict[str, Any], after: dict[str, Any]
+) -> None:
+    before_variant = _assert_common_source(before)
+    after_variant = _assert_common_source(after)
+    if after_variant != "common_source":
+        raise RuntimeError(
+            "source-degeneration removal did not restore the nominal topology"
+        )
+    if before.get("pins") != after.get("pins"):
+        raise RuntimeError("source-degeneration removal changed top-level pins")
+    before_nets = set(before.get("nets", {}).keys())
+    after_nets = set(after.get("nets", {}).keys())
+    expected_after_nets = before_nets - (
+        {"NSRC"}
+        if before_variant == "source_degenerated_common_source"
+        else set()
+    )
+    if after_nets != expected_after_nets:
+        raise RuntimeError(
+            "source-degeneration removal changed nets beyond removing NSRC"
+        )
+
+    before_by_name = {
+        str(item.get("name")): item for item in before.get("instances", [])
+    }
+    after_by_name = {
+        str(item.get("name")): item for item in after.get("instances", [])
+    }
+    before_mn0_without_terms = {
+        key: value for key, value in before_by_name["MN0"].items() if key != "terms"
+    }
+    after_mn0_without_terms = {
+        key: value for key, value in after_by_name["MN0"].items() if key != "terms"
+    }
+    if before_mn0_without_terms != after_mn0_without_terms:
+        raise RuntimeError("source-degeneration removal changed MN0 beyond its S net")
+    if before_by_name["RD0"] != after_by_name["RD0"]:
+        raise RuntimeError("source-degeneration removal changed RD0")
+    semantic = _common_source_semantic_parameters_from_schematic(after)
+    if "source_resistance_ohm" in semantic:
+        raise RuntimeError(
+            "source-degeneration removal left source_resistance_ohm in OA readback"
+        )
+
+
+def _remove_common_source_source_degeneration(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    client = _client()
+    library, cell = _target(payload)
+    before = _read_schematic(client, library, cell)
+    placement_before = _schematic_placement_snapshot(client, library, cell)
+    variant = _assert_common_source(before, payload["profile"])
+    topology_changed = variant == "source_degenerated_common_source"
+    if topology_changed:
+        _preflight_source_degeneration_removal(client, library, cell)
+        try:
+            with _edit_existing_schematic(
+                client, library, cell, timeout=90
+            ) as schematic:
+                schematic.add(_delete_source_degeneration_operation())
+        except Exception as edit_error:
+            try:
+                _discard_failed_existing_schematic_edit(client, library, cell)
+            except Exception as cleanup_error:
+                raise RuntimeError(
+                    "source-degeneration removal failed and unsaved-edit cleanup "
+                    f"also failed: {cleanup_error}"
+                ) from edit_error
+            raise
+    after = _read_schematic(client, library, cell)
+    placement_after = _schematic_placement_snapshot(client, library, cell)
+    _assert_common_source_removal_preserved(before, after)
+    transform_spec = payload.get("schematic_transform") or {}
+    expected_placement = transform_spec.get(
+        "expected_restored_placement_sha256"
+    )
+    if (
+        expected_placement is not None
+        and placement_after["sha256"] != expected_placement
+    ):
+        raise RuntimeError(
+            "source-degeneration removal did not restore the declared placement "
+            f"fingerprint: expected {expected_placement}, got "
+            f"{placement_after['sha256']}"
+        )
+    return {
+        "transformed": topology_changed,
+        "already_removed": not topology_changed,
+        "transform_action": "remove_source_degeneration",
+        "placement_before": placement_before,
+        "placement_after": placement_after,
+        "restored_placement_match": (
+            placement_after["sha256"] == expected_placement
+            if expected_placement is not None
+            else None
+        ),
+        "topology_delta": {
+            "renamed_terminal_net": (
+                "MN0.S: NSRC -> VSS" if topology_changed else None
+            ),
+            "removed_instance": "RS0" if topology_changed else None,
+            "removed_net": "NSRC" if topology_changed else None,
+            "preserved_instances": ["MN0", "RD0"],
+            "preserved_pins": sorted(before.get("pins", {}).keys()),
+        },
+        "readback": _common_source_summary(after),
+    }
+
+
 def transform_common_source_source_degeneration(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
@@ -5279,9 +5546,19 @@ def transform_common_source_source_degeneration(
         schematic_label_instance_term as label_term,
     )
 
+    transform_spec = payload.get("schematic_transform") or {}
+    transform_action = transform_spec.get("action", "add_source_degeneration")
+    if transform_action == "remove_source_degeneration":
+        return _remove_common_source_source_degeneration(payload)
+    if transform_action != "add_source_degeneration":
+        raise RuntimeError(
+            f"unsupported common-source transform action: {transform_action!r}"
+        )
+
     client = _client()
     library, cell = _target(payload)
     before = _read_schematic(client, library, cell)
+    placement_before = _schematic_placement_snapshot(client, library, cell)
     variant = _assert_common_source(before, payload["profile"])
     resistance = float(payload["parameters"]["source_resistance_ohm"])
     before_semantic = _common_source_semantic_parameters_from_schematic(before)
@@ -5331,9 +5608,13 @@ def transform_common_source_source_degeneration(
         after = _read_schematic(client, library, cell)
         summary = _common_source_summary(after)
     _assert_common_source_transform_preserved(before, after, resistance)
+    placement_after = _schematic_placement_snapshot(client, library, cell)
     return {
         "transformed": topology_changed,
         "already_transformed": not topology_changed,
+        "transform_action": "add_source_degeneration",
+        "placement_before": placement_before,
+        "placement_after": placement_after,
         "resistance_changed": resistance_changed,
         "topology_delta": {
             "renamed_terminal_net": "MN0.S: VSS -> NSRC" if topology_changed else None,
@@ -5353,13 +5634,37 @@ def preflight_common_source_source_degeneration(
     library, cell = _target(payload)
     schematic = _read_schematic(client, library, cell)
     variant = _assert_common_source(schematic, payload["profile"])
-    if variant == "common_source":
+    transform_spec = payload.get("schematic_transform") or {}
+    transform_action = transform_spec.get("action", "add_source_degeneration")
+    if transform_action == "add_source_degeneration" and variant == "common_source":
         _preflight_mn0_source_label(client, library, cell)
+    elif (
+        transform_action == "remove_source_degeneration"
+        and variant == "source_degenerated_common_source"
+    ):
+        _preflight_source_degeneration_removal(client, library, cell)
+    elif transform_action not in {
+        "add_source_degeneration",
+        "remove_source_degeneration",
+    }:
+        raise RuntimeError(
+            f"unsupported common-source transform action: {transform_action!r}"
+        )
     return {
         "target": payload["target"],
         "topology_variant": variant,
+        "transform_action": transform_action,
         "source_label_selection": (
-            "unique" if variant == "common_source" else "not_applicable"
+            "unique"
+            if (
+                transform_action == "add_source_degeneration"
+                and variant == "common_source"
+            )
+            or (
+                transform_action == "remove_source_degeneration"
+                and variant == "source_degenerated_common_source"
+            )
+            else "not_applicable"
         ),
         "semantic_parameters": _common_source_semantic_parameters_from_schematic(
             schematic

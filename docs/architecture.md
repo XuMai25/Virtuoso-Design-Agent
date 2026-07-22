@@ -62,7 +62,7 @@ VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PD
 
 `operating_conditions` 是独立于设计参数的显式可选有限验证集合。省略时 common-source `simulation.run`、`design.tune` 和 `design.close_loop` 保持原有单条件行为与旧 token；声明时每项给出唯一名称、PDK profile 已映射的 `process_corner`、温度和可选 VDD，同一任务最多五项。对调优任务，每个候选只暂存一次 OA 并生成、核对一份 `si` 网表，再为每个条件生成 AC/transient/noise wrapper；完整候选 bundle 才能写入 checkpoint。executor 保留逐条件原始指标和判定，要求全部完整且全部满足约束；maximize objective 取各条件最小值，minimize objective 取最大值。跨条件聚合是 `software_inference`，不能覆盖各条件 `eda_result`。逐条件 VDD 存在时拒绝 task/搜索空间中的 `vdd_v`；全部条件省略 VDD 时则共同继承当前候选的 VDD，避免同一个供电出现两套真源。
 
-`schematic.transform` 不等同于重建模板。共源 transform 要求目标先通过 VDA common-source 结构检查，然后在同一 cellview 中把 MN0 源极标签从 VSS 改为内部网 `NSRC`，新增 `analogLib/RS0(NSRC,VSS)` 并设置 `source_resistance_ohm`。反相器 testbench transform 则要求现有 cell 是 MN0/MP0 core 或已经完成同一变更；它保留 MOS/pins，只把地归一到 `gnd!` 并增加固定的 `VDD0/VIN0/CL0/GND0`，其中供电和负载来自显式任务参数。两者都强制使用 Bridge editor append mode；preflight 拒绝带未保存改动的目标，编辑 batch 失败时只 purge 未保存缓存且不保存。前后回读必须证明未点名器件的完整参数、master、位置和顶层 pins 保持不变，重复调用幂等。为了避免把任意图编辑伪装成安全能力，当前没有通用图重写 DSL，也没有自动逆变换。若保存已成功而后置审计失败，目前会保留失败和真实 OA 状态，尚没有通用 snapshot 回滚。
+`schematic.transform` 不等同于重建模板。共源 transform 有两个显式动作：`add_source_degeneration` 要求 nominal VDA common-source，在同一 cellview 中把 MN0 源极标签从 VSS 改为内部网 `NSRC`，新增 `analogLib/RS0(NSRC,VSS)` 并设置 `source_resistance_ohm`；`remove_source_degeneration` 不接受参数，只在退化变体上唯一选择 MN0.S 的 NSRC 标签和 RS0 两条由 VDA 创建的 wire/label stub，删除 RS0 后恢复 VSS。remove 可带 `expected_restored_placement_sha256`，把 add 前 Bridge placement 回读中的实例、pin、标签和导线完整绑定进 plan token，并在保存后强制相等。反相器 testbench transform 则要求现有 cell 是 MN0/MP0 core 或已经完成同一变更；它保留 MOS/pins，只把地归一到 `gnd!` 并增加固定的 `VDD0/VIN0/CL0/GND0`。所有已有对象编辑都强制 Bridge editor append mode；preflight 拒绝未保存改动，编辑 batch 失败时只 purge 未保存缓存且不保存。前后回读必须证明未点名器件的完整参数、master、位置和顶层 pins 保持，重复调用幂等。为了避免把任意图编辑伪装成安全能力，当前仍没有通用图重写 DSL；若保存已成功而后置审计失败，会保留失败和真实 OA 状态，尚没有通用 snapshot 回滚。
 
 ## 两层参数契约
 
@@ -173,7 +173,7 @@ Spectre 的通用 `dcOpInfo` 在当前 Bridge parser 中以器件聚合对象出
 
 工作区分类不读取一个未验证的模型枚举值：`saturation_region` 由 Spectre 给出的 `VDS`、`VDSAT` 和 `IDS` 按显式规则推导，标为 `software_inference`；原始器件量、节点量和从它们计算的连续指标标为 `eda_result`。Gate 2A 已在 `vb_pdk_smoke/vda_cs_gate2a_001/schematic` 完成 6 点真实搜索和最终独立 OA→si→DC OP 复核。
 
-源极退化沿用该路径而不复制 executor：结构回读动态返回 `topology_variant`；`si` parser 在同一 common-source action 中要求 `MN0(OUT IN NSRC VSS)` 与 `RS0(NSRC VSS)`，并把 RS0.r 纳入 OA/网表参数一致性；DC wrapper 额外保存 NSRC，器件 VGS/VDS 改由 NSRC 计算，同时核对 MN0/RD0 与 MN0/RS0 两组 KCL。`source_resistance_ohm` 可直接进入原有有限 `parameter_space`。2026-07-20/21 的真实 smoke 已完成原位 transform、DC/AC、W/RD/RS 搜索、多 analysis 质量组合、checkpoint 恢复和最佳回读；2026-07-22 又闭合 L/VDD 四点质量搜索和固定设计的有限 PVT 验证。尚未闭合的是 PVT-aware 设计参数调优和更复杂拓扑，而不是基本 gain/bandwidth、W/RD/RS/L/VDD 或固定设计 corner 验证路径。
+源极退化沿用该路径而不复制 executor：结构回读动态返回 `topology_variant`；`si` parser 在同一 common-source action 中要求 nominal `MN0(OUT IN VSS VSS)` 或退化 `MN0(OUT IN NSRC VSS)`+`RS0(NSRC VSS)`，并把 RS0.r 纳入 OA/网表参数一致性；DC wrapper 额外保存 NSRC，器件 VGS/VDS 改由 NSRC 计算，同时核对 MN0/RD0 与 MN0/RS0 两组 KCL。`source_resistance_ohm` 可直接进入原有有限 `parameter_space`。2026-07-20/21 的真实 smoke 已完成原位 add、DC/AC、W/RD/RS 搜索、多 analysis 质量组合、checkpoint 恢复和最佳回读；2026-07-22/23 又闭合 L/VDD、固定 PVT、可选 PVT-aware bias 和 add/remove 可逆拓扑。尚未闭合的是 PVT-aware OA 设计参数 live 写回、任意实例参数有限搜索和更复杂拓扑。
 
 AC 没有第二套 topology、netlister 或 executor。相同 wrapper 保留 `dcOp/info`，把 VIN 设为 DC bias + unit AC source，可选加入任务声明的 `CL0=load_ff`，再运行对数 AC sweep。Bridge 现有 PSFASCII parser 原样返回 `ac_freq/ac_IN/ac_OUT` 的复数向量；VDA 不修改 Bridge，也不把幅度解析复制回第三方库，而是在 worker 内计算复数传递函数 `H(f)=VOUT/VIN`。
 
