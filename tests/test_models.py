@@ -651,6 +651,37 @@ def _sweep_verification() -> dict:
     }
 
 
+def _result_mapping() -> dict:
+    return {
+        "parameters": [
+            {
+                "source": "CL",
+                "parameter": "load_ff",
+                "scale": 1e15,
+                "unit": "fF",
+            }
+        ],
+        "metrics": [
+            {
+                "test": "VDA",
+                "output": "Delay",
+                "expected_expression": "average(VT(\"/OUT\"))",
+                "metric": "delay_ps",
+                "scale": 1e12,
+                "unit": "ps",
+            },
+            {
+                "test": "VDA",
+                "output": "Energy",
+                "expected_expression": "integ(IT(\"/VDD0/PLUS\"))",
+                "metric": "supply_energy_per_cycle_fj",
+                "scale": 1e15,
+                "unit": "fJ",
+            },
+        ],
+    }
+
+
 def test_ade_run_accepts_an_exact_native_sweep_verification_contract() -> None:
     task = TaskSpec.model_validate(
         {
@@ -675,6 +706,130 @@ def test_ade_run_accepts_an_exact_native_sweep_verification_contract() -> None:
     assert sweep.variables[0].evidence_key() == "CL"
     assert sweep.variables[0].declared_values() == ["1f", "2f", "4f"]
     assert [point.point for point in sweep.points] == [1, 2, 3]
+
+
+def test_ade_run_accepts_strict_result_mapping_constraints_and_objective() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "evaluate-native-cl-sweep",
+            "operation": "ade.run",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_sweep_tb",
+                "view": "maestro",
+            },
+            "ade_run": {
+                "require_simulator_input_consistency": True,
+                "sweep_verification": _sweep_verification(),
+                "result_mapping": _result_mapping(),
+            },
+            "constraints": [
+                {"metric": "delay_ps", "relation": "<=", "value": 5.0}
+            ],
+            "objective": {
+                "metric": "supply_energy_per_cycle_fj",
+                "goal": "minimize",
+            },
+        }
+    )
+
+    assert task.ade_run is not None
+    assert task.ade_run.result_mapping is not None
+    assert task.ade_run.result_mapping.parameters[0].parameter == "load_ff"
+    assert {
+        binding.metric for binding in task.ade_run.result_mapping.metrics
+    } == {"delay_ps", "supply_energy_per_cycle_fj"}
+    descriptions = "\n".join(step.description for step in build_plan(task).steps)
+    assert "显式 scale 映射" in descriptions
+    assert "constraint 判定" in descriptions
+    assert "software_inference" in descriptions
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda data: data["ade_run"].pop("sweep_verification"),
+            "requires strict native sweep verification",
+        ),
+        (
+            lambda data: data["ade_run"]["result_mapping"].update(
+                {"parameters": []}
+            ),
+            "at least 1 item",
+        ),
+        (
+            lambda data: data["ade_run"]["result_mapping"]["parameters"][0].pop(
+                "unit"
+            ),
+            "Field required",
+        ),
+        (
+            lambda data: data["ade_run"]["result_mapping"]["metrics"][0].pop(
+                "unit"
+            ),
+            "Field required",
+        ),
+        (
+            lambda data: data["ade_run"]["result_mapping"]["metrics"][0].update(
+                {"test": "OTHER"}
+            ),
+            "sole expected test",
+        ),
+        (
+            lambda data: data["constraints"][0].update(
+                {"metric": "unmapped_delay_ps"}
+            ),
+            "missing constraint/objective metrics",
+        ),
+    ],
+)
+def test_ade_result_mapping_rejects_ambiguous_or_unmapped_contracts(
+    mutate, message: str
+) -> None:
+    data = {
+        "id": "invalid-result-mapping",
+        "operation": "ade.run",
+        "circuit": "existing_schematic",
+        "target": {
+            "library": "vda_test",
+            "cell": "vda_sweep_tb",
+            "view": "maestro",
+        },
+        "ade_run": {
+            "require_simulator_input_consistency": True,
+            "sweep_verification": _sweep_verification(),
+            "result_mapping": _result_mapping(),
+        },
+        "constraints": [
+            {"metric": "delay_ps", "relation": "<=", "value": 5.0}
+        ],
+    }
+    mutate(data)
+
+    with pytest.raises(ValidationError, match=message):
+        TaskSpec.model_validate(data)
+
+
+def test_ade_run_constraints_require_an_explicit_result_mapping() -> None:
+    with pytest.raises(ValidationError, match="require an explicit result_mapping"):
+        TaskSpec.model_validate(
+            {
+                "id": "unbound-ade-constraints",
+                "operation": "ade.run",
+                "circuit": "existing_schematic",
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_sweep_tb",
+                    "view": "maestro",
+                },
+                "ade_run": {},
+                "constraints": [
+                    {"metric": "delay_ps", "relation": "<=", "value": 5.0}
+                ],
+            }
+        )
 
 
 @pytest.mark.parametrize(

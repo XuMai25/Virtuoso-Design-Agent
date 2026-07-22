@@ -49,6 +49,8 @@ Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发�
 
 2026-07-22 为 `ade.run` 增加可选 `sweep_verification` 严格门，并在 TSMC N28 上真实闭合。任务声明 exact tests/corners、各 scope 保存的逗号 sweep、连续 expected points 和 OA `instance.parameter` 绑定；worker 在运行前后回读同一 setup，RDB 每点必须有匹配参数和非空 scalar output。原先本地实现假设 exact history 会保留逐点 `input.scs`；live 运行证明 IC6.1.8 实际只保留共享 runtime `input.scs` + sibling `netlist` 和 exact-history RDB。VDA 因而保留两个互斥严格模式：出现任意逐点目录就要求全点 input/result 完整；完全没有时才允许共享符号输入束 + exact-history RDB/completion log，且必须同时核对 include 关系、两份输入 hash、OA/Spectre 变量引用、一个声明 retained point、RDB 全点值/非空 output、精确完成点数和零仿真错误。数据库模式明确保持 `exact_point_input_result_binding_verified=false`，不把共享 netlist 冒充逐点文件。最终 `Interactive.0` 给出 CL=`1f/2f/4f` 和 `VoutAvg=415.5/419.8/428.3 mV`，3 点完成、0 错误；证据失败后按固定 history/scratch 恢复，没有重算。最终本地回归 `288 passed`、`59/59` example plans。状态升级为 **native Maestro single-variable sweep same-source execution and evidence recovery verified**；二维 sweep、corner、多 test/multi-analysis 和通用 constraint 映射仍待 live。
 
+同日继续闭合有物理意义的 ADE 质量 Gate：以 add-only 方式保存并独立重开核对 `Tphl/Tplh/Delay/Rise/Fall/RiseFallSkew/SupplyEnergyCycle`，再把 exact output、预期 calculator expression、SI-to-ps/fJ scale 与 VDA metric 显式绑定。worker 在 run 前后指纹化 output state；executor 只从严格 sweep 的有限 RDB scalar 构造候选，原始值保留为 `eda_result`，换算、constraints 和选优标为 `software_inference`。`Interactive.1` 的 CL=1/2/4 fF 分别得到 delay=2.882/3.766/5.503 ps、skew=1.223/2.112/3.939 ps、周期供电能量=1.659/2.497/4.147 fJ；三点都通过 6 ps/5 ps/5 fJ 约束，能量 objective 选中 1 fF。随后固定同一 history/scratch 的表达式指纹恢复没有重算或写 OA/setup。最终本地回归为 `314 passed`、`61/61` example plans。状态升级为 **native Maestro inverter scalar-to-constraint quality selection verified**；周期供电能量包含泄漏与短路电流，不称为纯动态能量。
+
 需要用户操作 Virtuoso/ADE 的验证已按用户决定延期，并集中记录在 [`deferred-manual-gates.md`](deferred-manual-gates.md)：包括人工修改/保存/重跑后的双向交接、旧 ADE L state 备份后迁移与重开，以及相同 history/output 的人工数值交叉检查。这些项目不阻塞后台自动化实现，但在真实完成前仍保留为未验证边界；延期记录本身不构成远端授权。
 
 ## L5B：单模块设计代理（产品目标）
@@ -88,7 +90,7 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> 有限 AC trade-off 与失败/预算/恢复路径（已通过）
   -> 功耗 + transient 线性度 + noise（单点只读 live 已通过）
   -> 多 analysis 质量约束与受预算调优（W/RD/RS 写回、失败门与恢复已通过）
-  -> ADE 双路径（prepare + analysis/output add-only patch + background run/resume/raw-input consistency + global CL 变量 CAS/原生 3 点 sweep 已 live；capture、test/corner scope、多维 sweep/corner 与人工交接待验证）
+  -> ADE 双路径（prepare + analysis/output add-only patch + background run/resume/raw-input consistency + global CL 原生 3 点 sweep + delay/skew/energy constraint mapping 已 live；capture、test/corner scope、多维 sweep/corner 与人工交接待验证）
   -> L/VDD + 多 analysis + 有限 corner
   -> 差分对
   -> L5B 单模块闭环
@@ -97,4 +99,4 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
 
 每一级只有在真实 Bridge smoke、结构回读、指标解析和失败注入均通过后才升级状态。
 
-反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化原位 transform/DC tuning、只读 AC 条件搜索、W/RD/RS AC 与多 analysis 质量写回、单项功耗/linearity/noise，以及预算/不可行/transport 恢复均已有 live 证据。Gate 2A 现在可以让不同 objective 在同一候选证据上得到不同 OA 设计。ADE 的 prepare、analysis/output add-only patch、background run/resume、exact-history/result/log 与 unique-runtime input manifest、OA→input raw 参数一致性，以及 global CL 原生 sweep 的输入束/RDB 逐点结果也已有 live 证据。下一自动化硬门转为有物理意义的 delay/skew/energy ADE output 与 VDA constraint 映射、受限二维 `VDD×CL`、有限 corner、已有 output 安全替换，以及 L/VDD 联合搜索。需要人工打开/修改/重跑、旧 ADE L 迁移和数值交叉检查的 Gate 已按用户决定延期，不再阻塞自动实现，但完成前仍不能升级为可重复的 L5B 单模块规格闭环。
+反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化原位 transform/DC tuning、只读 AC 条件搜索、W/RD/RS AC 与多 analysis 质量写回、单项功耗/linearity/noise，以及预算/不可行/transport 恢复均已有 live 证据。Gate 2A 现在可以让不同 objective 在同一候选证据上得到不同 OA 设计。ADE 的 prepare、analysis/output add-only patch、background run/resume、exact-history/result/log 与 unique-runtime input manifest、OA→input raw 参数一致性、global CL 原生 sweep，以及表达式固定的 delay/skew/周期供电能量到 VDA constraints/objective 的映射也已有 live 证据。下一自动化硬门转为受限二维 `VDD×CL`：先把供电源幅度和输入高电平变为同一个 OA/Spectre `VDD` 符号，再使用 VDD-aware add-only outputs 完成 6 点 sweep、映射和恢复；其后才进入有限 corner、test/corner scope、已有 output 安全替换和 L/VDD 联合搜索。需要人工打开/修改/重跑、旧 ADE L 迁移和数值交叉检查的 Gate 已按用户决定延期，不再阻塞自动实现，但完成前仍不能升级为可重复的 L5B 单模块规格闭环。

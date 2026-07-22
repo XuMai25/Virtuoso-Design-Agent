@@ -232,6 +232,18 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 "逐点文件时则强制核对唯一 runtime 符号输入束、exact-history "
                 "RDB 和完成日志"
             )
+        result_requirement = ""
+        if task.ade_run.result_mapping is not None:
+            mapped_metrics = ", ".join(
+                binding.metric for binding in task.ade_run.result_mapping.metrics
+            )
+            result_requirement = (
+                "；必须在 run 前后回读并固定 sole test 中每个声明 output 的 "
+                "calculator expression，再从 exact-history RDB 逐点读取 scalar "
+                f"outputs，按显式 scale 映射为 VDA metrics={mapped_metrics}，"
+                "再独立判定 constraints/objective；空值、非有限值或缺 output "
+                "属于证据失败，不得降级成不可行候选"
+            )
         return [
             probe,
             _step(
@@ -264,7 +276,7 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                     )
                     + f"；{output_requirement}；"
                     f"{artifact_requirement}{consistency_requirement}"
-                    f"{sweep_requirement}；"
+                    f"{sweep_requirement}{result_requirement}；"
                     "history 命名/覆盖策略沿用已保存 setup，VDA 不改写也尚不能"
                     "证明名称唯一"
                 ),
@@ -313,10 +325,15 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                         else ""
                     )
                     + (
-                        "原生 sweep 值与输入束、RDB 逐点结果完成一致性绑定仍不"
-                        "等于已满足 VDA constraints"
-                        if task.ade_run.sweep_verification is not None
-                        else "后台运行成功不等于已满足 VDA constraints"
+                        "原始 scalar output=eda_result；显式单位换算、constraint "
+                        "判定与 point 选优=software_inference"
+                        if task.ade_run.result_mapping is not None
+                        else (
+                            "原生 sweep 值与输入束、RDB 逐点结果完成一致性绑定仍不"
+                            "等于已满足 VDA constraints"
+                            if task.ade_run.sweep_verification is not None
+                            else "后台运行成功不等于已满足 VDA constraints"
+                        )
                     )
                 ),
                 }

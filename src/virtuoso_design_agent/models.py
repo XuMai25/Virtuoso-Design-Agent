@@ -486,6 +486,116 @@ class AdeSweepVerificationSpec(StrictModel):
         return self
 
 
+class AdeResultParameterBinding(StrictModel):
+    """Normalize one native Maestro point parameter for a VDA candidate."""
+
+    source: StrictStr = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$",
+    )
+    parameter: StrictStr = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_]*$",
+    )
+    scale: float = Field(default=1.0, gt=0.0)
+    unit: StrictStr = Field(min_length=1, max_length=32)
+
+    @field_validator("unit")
+    @classmethod
+    def validate_unit(cls, value: str) -> str:
+        if any(
+            character in ('"', "\\")
+            or ord(character) < 32
+            or ord(character) == 127
+            for character in value
+        ):
+            raise ValueError(
+                "ADE result parameter unit cannot contain quotes, backslashes, or "
+                "control characters"
+            )
+        return value
+
+    @field_validator("scale")
+    @classmethod
+    def validate_scale(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("ADE result parameter scale must be finite")
+        return value
+
+
+class AdeResultMetricBinding(StrictModel):
+    """Bind one exact Maestro scalar output to one normalized VDA metric."""
+
+    test: StrictStr = Field(min_length=1, max_length=128)
+    output: StrictStr = Field(min_length=1, max_length=128)
+    expected_expression: StrictStr = Field(min_length=1, max_length=4096)
+    metric: StrictStr = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_]*$",
+    )
+    scale: float = Field(default=1.0, gt=0.0)
+    unit: StrictStr = Field(min_length=1, max_length=32)
+
+    @field_validator("test", "output", "unit")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        if any(
+            character in ('"', "\\")
+            or ord(character) < 32
+            or ord(character) == 127
+            for character in value
+        ):
+            raise ValueError(
+                "ADE result binding text cannot contain quotes, backslashes, or "
+                "control characters"
+            )
+        return value
+
+    @field_validator("expected_expression")
+    @classmethod
+    def validate_expression(cls, value: str) -> str:
+        if any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("ADE result expression cannot contain control characters")
+        return value
+
+    @field_validator("scale")
+    @classmethod
+    def validate_scale(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("ADE result metric scale must be finite")
+        return value
+
+
+class AdeResultMappingSpec(StrictModel):
+    """Strict native-sweep point/output mapping into VDA evaluation records."""
+
+    parameters: list[AdeResultParameterBinding] = Field(
+        min_length=1, max_length=32
+    )
+    metrics: list[AdeResultMetricBinding] = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_bindings(self) -> "AdeResultMappingSpec":
+        parameter_sources = [binding.source for binding in self.parameters]
+        parameter_names = [binding.parameter for binding in self.parameters]
+        metric_outputs = [
+            (binding.test, binding.output) for binding in self.metrics
+        ]
+        metric_names = [binding.metric for binding in self.metrics]
+        for label, identities in (
+            ("parameter sources", parameter_sources),
+            ("parameter names", parameter_names),
+            ("metric outputs", metric_outputs),
+            ("metric names", metric_names),
+        ):
+            if len(identities) != len(set(identities)):
+                raise ValueError(f"ADE result mapping {label} must be unique")
+        return self
+
+
 class AdeRunSpec(StrictModel):
     """Run one saved Maestro setup in a background session."""
 
@@ -494,6 +604,7 @@ class AdeRunSpec(StrictModel):
     require_artifact_manifest: bool = True
     require_simulator_input_consistency: bool = False
     sweep_verification: AdeSweepVerificationSpec | None = None
+    result_mapping: AdeResultMappingSpec | None = None
     resume_history: str | None = Field(
         default=None,
         min_length=1,
@@ -524,6 +635,34 @@ class AdeRunSpec(StrictModel):
                 "ADE sweep verification requires structured outputs, artifact "
                 "manifest, and simulator input consistency"
             )
+        if self.result_mapping is not None:
+            if self.sweep_verification is None:
+                raise ValueError(
+                    "ADE result mapping requires strict native sweep verification"
+                )
+            expected_tests = self.sweep_verification.expected_tests
+            if len(expected_tests) != 1:
+                raise ValueError(
+                    "ADE result mapping currently requires exactly one Maestro test"
+                )
+            expected_test = expected_tests[0]
+            if any(
+                binding.test != expected_test for binding in self.result_mapping.metrics
+            ):
+                raise ValueError(
+                    "ADE result metric bindings must target the sole expected test"
+                )
+            expected_variables = {
+                variable.name for variable in self.sweep_verification.variables
+            }
+            mapped_variables = {
+                binding.source for binding in self.result_mapping.parameters
+            }
+            if mapped_variables != expected_variables:
+                raise ValueError(
+                    "ADE result parameter bindings must cover every declared sweep "
+                    "variable exactly"
+                )
         if (self.resume_history is None) != (
             self.resume_runtime_scratch_root is None
         ):
@@ -1032,14 +1171,32 @@ class TaskSpec(StrictModel):
                 self.parameters
                 or self.instance_parameter_updates
                 or self.parameter_space
-                or self.constraints
-                or self.objective is not None
                 or self.create_if_missing
             ):
                 raise ValueError(
                     "ade.run executes the saved Maestro setup and does not accept "
-                    "parameters, search, constraints, objective, or creation requests"
+                    "parameters, search, or creation requests"
                 )
+            result_mapping = self.ade_run.result_mapping
+            if result_mapping is None and (self.constraints or self.objective is not None):
+                raise ValueError(
+                    "ade.run constraints/objective require an explicit result_mapping"
+                )
+            if result_mapping is not None:
+                if not self.constraints:
+                    raise ValueError(
+                        "ade.run result_mapping requires at least one VDA constraint"
+                    )
+                mapped_metrics = {binding.metric for binding in result_mapping.metrics}
+                required_metrics = {item.metric for item in self.constraints}
+                if self.objective is not None:
+                    required_metrics.add(self.objective.metric)
+                missing_metrics = sorted(required_metrics - mapped_metrics)
+                if missing_metrics:
+                    raise ValueError(
+                        "ADE result mapping is missing constraint/objective metrics: "
+                        f"{missing_metrics}"
+                    )
             if self.safety.replace_existing:
                 raise ValueError("ade.run never replaces an existing Maestro view")
         elif self.ade_run is not None:

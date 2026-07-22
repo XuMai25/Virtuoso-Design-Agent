@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from .adapters.base import AdapterInterrupted, AdapterResult, DesignAdapter
+from .calculator_expressions import calculator_expressions_equal
 from .catalog import task_requests_oa_parameter_write
 from .metrics import evaluate_constraints
 from .models import (
@@ -29,7 +30,7 @@ from .models import (
     TaskSpec,
 )
 from .safety import authorize_execution
-from .spectre_values import spectre_values_equal
+from .spectre_values import spectre_scalar, spectre_values_equal
 
 T = TypeVar("T")
 
@@ -992,6 +993,245 @@ class TaskExecutor:
             )
 
     @classmethod
+    def _evaluate_ade_result_mapping(
+        cls, task: TaskSpec, data: dict[str, Any]
+    ) -> tuple[list[CandidateEvaluation], dict[str, Any]]:
+        assert task.ade_run is not None
+        mapping = task.ade_run.result_mapping
+        sweep = task.ade_run.sweep_verification
+        if mapping is None or sweep is None:
+            raise RuntimeError("ADE result mapping contract disappeared at execution")
+
+        setup_readbacks: list[dict[str, Any]] = []
+        for field in (
+            "result_mapping_setup_readback_before",
+            "result_mapping_setup_readback_after",
+        ):
+            readback = data.get(field)
+            if not isinstance(readback, dict):
+                raise RuntimeError(f"ADE result mapping lacked {field}")
+            outputs = readback.get("outputs")
+            fingerprint = str(readback.get("fingerprint_sha256") or "")
+            if not isinstance(outputs, list) or len(outputs) != len(mapping.metrics):
+                raise RuntimeError("ADE result mapping output setup was incomplete")
+            for binding, row in zip(mapping.metrics, outputs, strict=True):
+                state = row.get("state") if isinstance(row, dict) else None
+                if (
+                    not isinstance(row, dict)
+                    or row.get("test") != binding.test
+                    or row.get("output") != binding.output
+                    or row.get("metric") != binding.metric
+                    or not isinstance(state, dict)
+                    or binding.output != state.get("name")
+                    or "point" not in {state.get("type"), state.get("eval_type")}
+                    or state.get("signal_name") is not None
+                    or not calculator_expressions_equal(
+                        binding.expected_expression, state.get("expression")
+                    )
+                ):
+                    raise RuntimeError(
+                        "ADE result mapping output expression did not match the "
+                        "declared saved setup"
+                    )
+            expected_fingerprint = hashlib.sha256(
+                json.dumps(
+                    outputs,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            if fingerprint != expected_fingerprint:
+                raise RuntimeError("ADE result mapping setup fingerprint mismatch")
+            setup_readbacks.append(readback)
+        if (
+            setup_readbacks[0] != setup_readbacks[1]
+            or data.get("result_mapping_setup_unchanged") is not True
+            or data.get("result_mapping_setup_readback_evidence_source")
+            != "bridge_readback"
+            or data.get("expected_result_mapping_evidence_source") != "user_input"
+        ):
+            raise RuntimeError(
+                "ADE result mapping setup changed or lost its evidence provenance"
+            )
+
+        results = data.get("structured_results")
+        if not isinstance(results, dict):
+            raise RuntimeError("ADE result mapping lacked structured RDB results")
+        if results.get("history") != data.get("history"):
+            raise RuntimeError("ADE result mapping history did not match the exact run")
+        if results.get("tests") != list(sweep.expected_tests):
+            raise RuntimeError("ADE result mapping tests did not match the strict sweep")
+        raw_points = results.get("points")
+        if not isinstance(raw_points, list) or len(raw_points) != len(sweep.points):
+            raise RuntimeError("ADE result mapping did not cover every strict sweep point")
+        trusted_points = data.get("sweep_point_consistency")
+        if not isinstance(trusted_points, list):
+            raise RuntimeError("ADE result mapping lacked verified point evidence")
+        trusted_by_point = {
+            int(item["point"]): item
+            for item in trusted_points
+            if isinstance(item, dict) and isinstance(item.get("point"), int)
+        }
+        if len(trusted_by_point) != len(sweep.points):
+            raise RuntimeError("ADE result mapping point evidence was incomplete")
+
+        expected_points = {point.point: point for point in sweep.points}
+        seen_points: set[int] = set()
+        evaluations: list[CandidateEvaluation] = []
+        mapped_points: list[dict[str, Any]] = []
+        for raw_point in raw_points:
+            if not isinstance(raw_point, dict):
+                raise RuntimeError("ADE result mapping encountered a malformed point")
+            try:
+                point_number = int(raw_point.get("point"))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("ADE result mapping encountered an invalid point") from exc
+            expected_point = expected_points.get(point_number)
+            if expected_point is None or point_number in seen_points:
+                raise RuntimeError("ADE result mapping repeated an unknown point")
+            seen_points.add(point_number)
+
+            raw_parameters = raw_point.get("parameters")
+            raw_outputs = raw_point.get("outputs")
+            if not isinstance(raw_parameters, dict) or not isinstance(raw_outputs, dict):
+                raise RuntimeError(
+                    f"ADE result mapping point {point_number} lacked parameter/output tables"
+                )
+            trusted_point = trusted_by_point.get(point_number)
+            trusted_outputs = (
+                trusted_point.get("scalar_outputs")
+                if isinstance(trusted_point, dict)
+                else None
+            )
+            if not isinstance(trusted_outputs, dict):
+                raise RuntimeError(
+                    f"ADE result mapping point {point_number} lacked trusted scalars"
+                )
+
+            parameters: dict[str, float] = {}
+            parameter_rows: list[dict[str, Any]] = []
+            for binding in mapping.parameters:
+                raw_value = raw_parameters.get(binding.source)
+                expected_value = expected_point.values.get(binding.source)
+                if raw_value is None or expected_value is None or not spectre_values_equal(
+                    raw_value, expected_value
+                ):
+                    raise RuntimeError(
+                        f"ADE result mapping point {point_number} parameter "
+                        f"{binding.source} did not match the strict sweep"
+                    )
+                scalar = spectre_scalar(raw_value)
+                normalized = None if scalar is None else scalar * binding.scale
+                if normalized is None or not math.isfinite(normalized):
+                    raise RuntimeError(
+                        f"ADE result mapping point {point_number} parameter "
+                        f"{binding.source} was not a finite Spectre scalar"
+                    )
+                parameters[binding.parameter] = normalized
+                parameter_rows.append(
+                    {
+                        "source": binding.source,
+                        "parameter": binding.parameter,
+                        "raw_value": str(raw_value),
+                        "scale": binding.scale,
+                        "unit": binding.unit,
+                        "normalized_value": normalized,
+                    }
+                )
+
+            metrics: dict[str, float] = {}
+            metric_rows: list[dict[str, Any]] = []
+            for binding in mapping.metrics:
+                output = raw_outputs.get(binding.output)
+                if not isinstance(output, dict):
+                    raise RuntimeError(
+                        f"ADE result mapping point {point_number} lacked scalar output "
+                        f"{binding.output!r}"
+                    )
+                raw_value = output.get("value")
+                trusted_value = trusted_outputs.get(binding.output)
+                if trusted_value is None or not spectre_values_equal(
+                    raw_value, trusted_value
+                ):
+                    raise RuntimeError(
+                        f"ADE result mapping point {point_number} output "
+                        f"{binding.output!r} did not match verified point evidence"
+                    )
+                scalar = spectre_scalar(raw_value)
+                normalized = None if scalar is None else scalar * binding.scale
+                if normalized is None or not math.isfinite(normalized):
+                    raise RuntimeError(
+                        f"ADE result mapping point {point_number} output "
+                        f"{binding.output!r} was empty or non-finite"
+                    )
+                metrics[binding.metric] = normalized
+                metric_rows.append(
+                    {
+                        "test": binding.test,
+                        "output": binding.output,
+                        "metric": binding.metric,
+                        "raw_value": str(raw_value),
+                        "scale": binding.scale,
+                        "unit": binding.unit,
+                        "normalized_value": normalized,
+                        "raw_evidence_source": "eda_result",
+                        "normalization_evidence_source": "software_inference",
+                    }
+                )
+
+            simulation = AdapterResult(
+                data={
+                    "parameters": parameters,
+                    "metrics": metrics,
+                    "metric_sources": {
+                        name: EvidenceSource.SOFTWARE_INFERENCE.value for name in metrics
+                    },
+                    "analysis_complete": True,
+                },
+                evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+            )
+            evaluation = cls._evaluate_candidate(
+                task, point_number, parameters, simulation
+            )
+            evaluations.append(evaluation)
+            mapped_points.append(
+                {
+                    "point": point_number,
+                    "parameters": parameter_rows,
+                    "metrics": metric_rows,
+                    "constraints": [
+                        item.model_dump(mode="json") for item in evaluation.constraints
+                    ],
+                    "feasible": evaluation.feasible,
+                    "total_violation": evaluation.total_violation,
+                    "objective_value": evaluation.objective_value,
+                }
+            )
+
+        if seen_points != set(expected_points):
+            raise RuntimeError("ADE result mapping omitted a strict sweep point")
+        evaluations.sort(key=lambda item: item.index)
+        mapped_points.sort(key=lambda item: int(item["point"]))
+        return evaluations, {
+            "history": data.get("history"),
+            "tests": list(sweep.expected_tests),
+            "result_mapping_setup_fingerprint_sha256": setup_readbacks[0][
+                "fingerprint_sha256"
+            ],
+            "result_mapping_setup_evidence_source": "bridge_readback",
+            "raw_result_evidence_source": "eda_result",
+            "mapping_and_constraint_evidence_source": "software_inference",
+            "parameter_bindings": [
+                item.model_dump(mode="json") for item in mapping.parameters
+            ],
+            "metric_bindings": [
+                item.model_dump(mode="json") for item in mapping.metrics
+            ],
+            "points": mapped_points,
+        }
+
+    @classmethod
     def _validate_checkpoint(
         cls,
         checkpoint: ExecutionCheckpoint,
@@ -1692,6 +1932,38 @@ class TaskExecutor:
                             "input.scs, OA parameter references, non-empty results, "
                             "and structured point parameters"
                         )
+                if task.ade_run is not None and task.ade_run.result_mapping is not None:
+                    mapped_evaluations: list[CandidateEvaluation] = []
+
+                    def evaluate_ade_results() -> AdapterResult:
+                        nonlocal mapped_evaluations
+                        mapped_evaluations, details = self._evaluate_ade_result_mapping(
+                            task, ran.data
+                        )
+                        return AdapterResult(
+                            data=details,
+                            evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+                        )
+
+                    self._action("ade.results.evaluate", evaluate_ade_results)
+                    candidates.extend(mapped_evaluations)
+                    feasible = [item for item in mapped_evaluations if item.feasible]
+                    if feasible:
+                        selected = min(feasible, key=lambda item: self._rank(task, item))
+                        selected_parameters = selected.parameters
+                        selected_metrics = selected.metrics
+                        notes.append(
+                            "mapped exact-history Maestro scalar outputs into VDA "
+                            "metrics and constraints for every declared sweep point; "
+                            "raw values remain EDA evidence and normalization/selection "
+                            "are software inference"
+                        )
+                    else:
+                        status = RunStatus.PARTIAL
+                        notes.append(
+                            "all declared Maestro sweep points were evaluated, but none "
+                            "satisfied every VDA constraint; no point was selected"
+                        )
                 if ran.data.get("history_recovery_performed") is True:
                     notes.append(
                         "recovered the explicitly named Maestro history without "
@@ -1703,11 +1975,12 @@ class TaskExecutor:
                         "executed the saved Maestro setup in a background session; no "
                         "GUI focus, setup save, or OA write was performed"
                     )
-                notes.append(
-                    "ADE output/spec values, runtime input hashes, and exact-history "
-                    "result/log hashes are EDA evidence but are not yet mapped to "
-                    "VDA constraints by ade.run"
-                )
+                if task.ade_run is not None and task.ade_run.result_mapping is None:
+                    notes.append(
+                        "ADE output/spec values, runtime input hashes, and exact-history "
+                        "result/log hashes are EDA evidence but are not mapped to VDA "
+                        "constraints because this task declared no result_mapping"
+                    )
                 notes.append(
                     "history naming and overwrite behavior came from the saved "
                     "Maestro setup; VDA did not change it or prove history uniqueness"
@@ -1982,7 +2255,9 @@ class TaskExecutor:
                         or request["output_type"]
                         not in {state.get("type"), state.get("eval_type")}
                         or state.get("signal_name") != request.get("signal_name")
-                        or state.get("expression") != request.get("expression")
+                        or not calculator_expressions_equal(
+                            state.get("expression"), request.get("expression")
+                        )
                         or state.get("spec") != request.get("spec")
                     ):
                         raise RuntimeError(

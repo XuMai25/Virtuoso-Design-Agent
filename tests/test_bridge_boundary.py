@@ -2364,6 +2364,87 @@ def test_maestro_setup_readback_parser_preserves_skill_values_and_escapes(
     }
 
 
+def test_ade_result_mapping_setup_pins_exact_scalar_expression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expression = (
+        'cross(clip(VT("/OUT") 80p 130p) 0.45 1 "falling" nil nil nil) '
+        '- cross(clip(VT("/IN") 80p 130p) 0.45 1 "rising" nil nil nil)'
+    )
+    canonical = (
+        '(cross(clip(VT("/OUT") 8e-11 1.3e-10) 0.45 1 "falling" nil '
+        'nil nil) - cross(clip(VT("/IN") 8e-11 1.3e-10) 0.45 1 '
+        '"rising" nil nil nil))'
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_maestro_output_state",
+        lambda *_args, **_kwargs: {
+            "name": "Delay",
+            "type": None,
+            "signal_name": None,
+            "expression": canonical,
+            "eval_type": "point",
+            "plot": True,
+            "save": True,
+            "spec": None,
+        },
+    )
+
+    result = bridge_worker._read_ade_result_mapping_setup(  # noqa: SLF001
+        object(),
+        {
+            "metrics": [
+                {
+                    "test": "VDA",
+                    "output": "Delay",
+                    "metric": "delay_ps",
+                    "expected_expression": expression,
+                }
+            ]
+        },
+        session="fnxResultMapping",
+    )
+
+    assert result["outputs"][0]["state"]["expression"] == canonical
+    assert len(result["fingerprint_sha256"]) == 64
+
+
+def test_ade_result_mapping_setup_rejects_changed_expression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        bridge_worker,
+        "_maestro_output_state",
+        lambda *_args, **_kwargs: {
+            "name": "Delay",
+            "type": None,
+            "signal_name": None,
+            "expression": 'ymax(VT("/OUT"))',
+            "eval_type": "point",
+            "plot": True,
+            "save": True,
+            "spec": None,
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="did not match"):
+        bridge_worker._read_ade_result_mapping_setup(  # noqa: SLF001
+            object(),
+            {
+                "metrics": [
+                    {
+                        "test": "VDA",
+                        "output": "Delay",
+                        "metric": "delay_ps",
+                        "expected_expression": 'average(VT("/OUT"))',
+                    }
+                ]
+            },
+            session="fnxResultMapping",
+        )
+
+
 def test_maestro_setup_patch_saves_once_and_reopens_for_readback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

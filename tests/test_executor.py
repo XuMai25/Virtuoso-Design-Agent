@@ -770,6 +770,137 @@ def _native_sweep_run_task() -> TaskSpec:
     )
 
 
+def _mapped_native_sweep_run_task(*, delay_limit_ps: float = 5.0) -> TaskSpec:
+    data = _native_sweep_run_task().model_dump(mode="json")
+    data["id"] = "evaluate-native-cl-sweep"
+    data["ade_run"]["result_mapping"] = {
+        "parameters": [
+            {
+                "source": "CL",
+                "parameter": "load_ff",
+                "scale": 1e15,
+                "unit": "fF",
+            }
+        ],
+        "metrics": [
+            {
+                "test": "VDA",
+                "output": "Delay",
+                "expected_expression": "average(VT(\"/OUT\"))",
+                "metric": "delay_ps",
+                "scale": 1e12,
+                "unit": "ps",
+            },
+            {
+                "test": "VDA",
+                "output": "Energy",
+                "expected_expression": "integ(IT(\"/VDD0/PLUS\"))",
+                "metric": "supply_energy_per_cycle_fj",
+                "scale": 1e15,
+                "unit": "fJ",
+            },
+        ],
+    }
+    data["constraints"] = [
+        {"metric": "delay_ps", "relation": "<=", "value": delay_limit_ps}
+    ]
+    data["objective"] = {
+        "metric": "supply_energy_per_cycle_fj",
+        "goal": "minimize",
+    }
+    return TaskSpec.model_validate(data)
+
+
+def _mapped_native_sweep_run_evidence(task: TaskSpec) -> dict:
+    data = _native_sweep_run_evidence(task)
+    raw_points = [
+        (1, "1f", "3p", "4f"),
+        (2, "2f", "6p", "2f"),
+    ]
+    data["structured_results"] = {
+        "history": data["history"],
+        "tests": ["VDA"],
+        "points": [
+            {
+                "point": point,
+                "parameters": {"CL": load},
+                "outputs": {
+                    "Delay": {"value": delay},
+                    "Energy": {"value": energy},
+                },
+            }
+            for point, load, delay, energy in raw_points
+        ],
+    }
+    trusted_by_point = {
+        item["point"]: item for item in data["sweep_point_consistency"]
+    }
+    for point, _load, delay, energy in raw_points:
+        trusted = trusted_by_point[point]
+        trusted["scalar_outputs"] = {
+            "VoutAvg": trusted["scalar_outputs"]["VoutAvg"],
+            "Delay": delay,
+            "Energy": energy,
+        }
+        payload = {
+            "point": trusted["point"],
+            "expected_parameters": trusted["expected_parameters"],
+            "result_parameters": trusted["result_parameters"],
+            "scalar_outputs": trusted["scalar_outputs"],
+            "tests": trusted["tests"],
+        }
+        trusted["point_binding_sha256"] = hashlib.sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+    assert task.ade_run is not None
+    assert task.ade_run.result_mapping is not None
+    setup_outputs = [
+        {
+            "test": binding.test,
+            "output": binding.output,
+            "metric": binding.metric,
+            "state": {
+                "name": binding.output,
+                "type": None,
+                "signal_name": None,
+                "expression": binding.expected_expression,
+                "eval_type": "point",
+                "plot": True,
+                "save": True,
+                "spec": None,
+            },
+        }
+        for binding in task.ade_run.result_mapping.metrics
+    ]
+    setup_fingerprint = hashlib.sha256(
+        json.dumps(
+            setup_outputs,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    setup_readback = {
+        "outputs": setup_outputs,
+        "fingerprint_sha256": setup_fingerprint,
+    }
+    data.update(
+        {
+            "result_mapping_setup_readback_before": setup_readback,
+            "result_mapping_setup_readback_after": setup_readback,
+            "result_mapping_setup_readback_evidence_source": "bridge_readback",
+            "expected_result_mapping_evidence_source": "user_input",
+            "result_mapping_setup_unchanged": True,
+        }
+    )
+    return data
+
+
 def _native_sweep_database_run_evidence(task: TaskSpec) -> dict:
     data = _native_sweep_run_evidence(task)
     history = data["history"]
@@ -964,6 +1095,186 @@ def test_ade_run_accepts_complete_native_sweep_point_evidence() -> None:
 
     assert record.status is RunStatus.SUCCEEDED
     assert any("every declared native Maestro sweep point" in note for note in record.notes)
+
+
+def test_ade_run_maps_verified_scalar_outputs_to_constraints_and_selection() -> None:
+    class RunningAdapter(DeterministicDemoAdapter):
+        def run_ade(self, task):
+            return AdapterResult(
+                data=_mapped_native_sweep_run_evidence(task),
+                evidence_source=EvidenceSource.EDA_RESULT,
+            )
+
+    task = _mapped_native_sweep_run_task()
+    plan = build_plan(task)
+    record = TaskExecutor(RunningAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert [action.action for action in record.actions][-2:] == [
+        "ade.run",
+        "ade.results.evaluate",
+    ]
+    evaluation = record.actions[-1]
+    assert evaluation.evidence_source is EvidenceSource.SOFTWARE_INFERENCE
+    assert evaluation.details["raw_result_evidence_source"] == "eda_result"
+    assert (
+        evaluation.details["mapping_and_constraint_evidence_source"]
+        == "software_inference"
+    )
+    assert len(record.candidates) == 2
+    assert record.candidates[0].parameters == {"load_ff": pytest.approx(1.0)}
+    assert record.candidates[0].metrics == {
+        "delay_ps": pytest.approx(3.0),
+        "supply_energy_per_cycle_fj": pytest.approx(4.0),
+    }
+    assert record.candidates[0].feasible is True
+    assert record.candidates[1].feasible is False
+    assert set(record.candidates[0].metric_sources.values()) == {
+        EvidenceSource.SOFTWARE_INFERENCE
+    }
+    assert record.selected_parameters == {"load_ff": pytest.approx(1.0)}
+    assert record.selected_metrics == record.candidates[0].metrics
+    assert any("mapped exact-history Maestro scalar outputs" in note for note in record.notes)
+
+
+def test_ade_run_marks_all_mapped_constraint_failures_partial() -> None:
+    class RunningAdapter(DeterministicDemoAdapter):
+        def run_ade(self, task):
+            return AdapterResult(
+                data=_mapped_native_sweep_run_evidence(task),
+                evidence_source=EvidenceSource.EDA_RESULT,
+            )
+
+    task = _mapped_native_sweep_run_task(delay_limit_ps=2.0)
+    plan = build_plan(task)
+    record = TaskExecutor(RunningAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.PARTIAL
+    assert all(not candidate.feasible for candidate in record.candidates)
+    assert record.selected_parameters is None
+    assert record.selected_metrics is None
+    assert any("none satisfied every VDA constraint" in note for note in record.notes)
+
+
+def test_ade_run_rejects_result_mapping_expression_drift() -> None:
+    class RunningAdapter(DeterministicDemoAdapter):
+        def run_ade(self, task):
+            data = _mapped_native_sweep_run_evidence(task)
+            before = json.loads(
+                json.dumps(data["result_mapping_setup_readback_before"])
+            )
+            before["outputs"][0]["state"]["expression"] = 'ymax(VT("/OUT"))'
+            before["fingerprint_sha256"] = hashlib.sha256(
+                json.dumps(
+                    before["outputs"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            data["result_mapping_setup_readback_before"] = before
+            return AdapterResult(
+                data=data,
+                evidence_source=EvidenceSource.EDA_RESULT,
+            )
+
+    task = _mapped_native_sweep_run_task()
+    plan = build_plan(task)
+    record = TaskExecutor(RunningAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.FAILED
+    assert record.actions[-1].action == "ade.results.evaluate"
+    assert record.actions[-1].status == "failed"
+    assert any("output expression did not match" in note for note in record.notes)
+
+
+def test_ade_run_rejects_empty_mapped_output_as_evidence_failure() -> None:
+    class RunningAdapter(DeterministicDemoAdapter):
+        def run_ade(self, task):
+            data = _mapped_native_sweep_run_evidence(task)
+            data["structured_results"]["points"][0]["outputs"]["Delay"]["value"] = ""
+            trusted = data["sweep_point_consistency"][0]
+            trusted["scalar_outputs"]["Delay"] = ""
+            payload = {
+                "point": trusted["point"],
+                "expected_parameters": trusted["expected_parameters"],
+                "result_parameters": trusted["result_parameters"],
+                "scalar_outputs": trusted["scalar_outputs"],
+                "tests": trusted["tests"],
+            }
+            trusted["point_binding_sha256"] = hashlib.sha256(
+                json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            return AdapterResult(
+                data=data,
+                evidence_source=EvidenceSource.EDA_RESULT,
+            )
+
+    task = _mapped_native_sweep_run_task()
+    plan = build_plan(task)
+    record = TaskExecutor(RunningAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.FAILED
+    assert record.actions[-1].action == "ade.run"
+    assert record.actions[-1].status == "succeeded"
+    assert record.candidates == []
+    assert any("non-empty scalar outputs" in note for note in record.notes)
+
+
+@pytest.mark.parametrize("raw_value", ["nan", "inf"])
+def test_ade_run_rejects_nonfinite_mapped_output(raw_value: str) -> None:
+    class RunningAdapter(DeterministicDemoAdapter):
+        def run_ade(self, task):
+            data = _mapped_native_sweep_run_evidence(task)
+            data["structured_results"]["points"][0]["outputs"]["Delay"][
+                "value"
+            ] = raw_value
+            trusted = data["sweep_point_consistency"][0]
+            trusted["scalar_outputs"]["Delay"] = raw_value
+            payload = {
+                "point": trusted["point"],
+                "expected_parameters": trusted["expected_parameters"],
+                "result_parameters": trusted["result_parameters"],
+                "scalar_outputs": trusted["scalar_outputs"],
+                "tests": trusted["tests"],
+            }
+            trusted["point_binding_sha256"] = hashlib.sha256(
+                json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            return AdapterResult(
+                data=data,
+                evidence_source=EvidenceSource.EDA_RESULT,
+            )
+
+    task = _mapped_native_sweep_run_task()
+    plan = build_plan(task)
+    record = TaskExecutor(RunningAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.FAILED
+    assert record.actions[-1].action == "ade.results.evaluate"
+    assert record.actions[-1].status == "failed"
+    assert record.candidates == []
+    assert any("empty or non-finite" in note for note in record.notes)
 
 
 def test_ade_run_accepts_native_sweep_history_database_evidence() -> None:
@@ -1494,6 +1805,37 @@ def test_ade_setup_patch_records_atomic_persistent_readback() -> None:
     assert record.candidates == []
     assert any("absent named outputs" in note for note in record.notes)
     assert any("no simulation was run" in note for note in record.notes)
+
+
+def test_ade_setup_patch_accepts_cadence_expression_canonicalization() -> None:
+    task_data = _ade_setup_task().model_dump(mode="json")
+    task_data["ade_setup"]["outputs"][0]["expression"] = (
+        'cross(clip(VT("/OUT") 80p 130p) 0.45 1 "falling" nil nil nil) '
+        '- cross(clip(VT("/IN") 80p 130p) 0.45 1 "rising" nil nil nil)'
+    )
+    task = TaskSpec.model_validate(task_data)
+
+    class SetupAdapter(DeterministicDemoAdapter):
+        def apply_ade_setup(self, task):
+            data = _ade_setup_evidence(task)
+            canonical = (
+                '(cross(clip(VT("/OUT") 8e-11 1.3e-10) 0.45 1 "falling" '
+                'nil nil nil) - cross(clip(VT("/IN") 8e-11 1.3e-10) 0.45 1 '
+                '"rising" nil nil nil))'
+            )
+            data["immediate_outputs"][0]["state"]["expression"] = canonical
+            data["persisted_outputs"][0]["state"]["expression"] = canonical
+            return AdapterResult(
+                data=data,
+                evidence_source=EvidenceSource.BRIDGE_READBACK,
+            )
+
+    plan = build_plan(task)
+    record = TaskExecutor(SetupAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
 
 
 @pytest.mark.parametrize("corruption", ["persisted", "fingerprint", "scope"])

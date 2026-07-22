@@ -30,6 +30,7 @@ from virtuoso_design_agent.metrics import (
     extract_supply_metrics,
 )
 from virtuoso_design_agent.spectre_values import spectre_values_equal
+from virtuoso_design_agent.calculator_expressions import calculator_expressions_equal
 
 _MARKER = "VDA_RESULT="
 
@@ -1870,9 +1871,71 @@ def _requested_output_matches(
         return False
     if actual.get("signal_name") != output.get("signal_name"):
         return False
-    if actual.get("expression") != output.get("expression"):
+    if not calculator_expressions_equal(
+        actual.get("expression"), output.get("expression")
+    ):
         return False
     return actual.get("spec") == output.get("spec")
+
+
+def _read_ade_result_mapping_setup(
+    client, mapping: dict[str, Any], *, session: str
+) -> dict[str, Any]:
+    """Read and pin the exact saved scalar outputs consumed by result mapping."""
+
+    metrics = mapping.get("metrics")
+    if not isinstance(metrics, list) or not metrics:
+        raise RuntimeError("ADE result_mapping requires metric bindings")
+    rows: list[dict[str, Any]] = []
+    identities: set[tuple[str, str]] = set()
+    for binding in metrics:
+        if not isinstance(binding, dict):
+            raise RuntimeError("ADE result metric binding must be an object")
+        test = binding.get("test")
+        output = binding.get("output")
+        metric = binding.get("metric")
+        expected_expression = binding.get("expected_expression")
+        if not all(
+            isinstance(value, str) and value
+            for value in (test, output, metric, expected_expression)
+        ):
+            raise RuntimeError(
+                "ADE result metric binding requires test/output/metric/"
+                "expected_expression"
+            )
+        identity = (test, output)
+        if identity in identities:
+            raise RuntimeError("ADE result metric bindings contain duplicate outputs")
+        identities.add(identity)
+        state = _maestro_output_state(client, test, output, session=session)
+        if (
+            not isinstance(state, dict)
+            or output != state.get("name")
+            or "point" not in {state.get("type"), state.get("eval_type")}
+            or state.get("signal_name") is not None
+            or not calculator_expressions_equal(
+                expected_expression, state.get("expression")
+            )
+        ):
+            raise RuntimeError(
+                f"ADE result mapping output {test}/{output} did not match its "
+                "declared scalar calculator expression"
+            )
+        rows.append(
+            {
+                "test": test,
+                "output": output,
+                "metric": metric,
+                "state": state,
+            }
+        )
+    payload = json.dumps(
+        rows,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return {"outputs": rows, "fingerprint_sha256": hashlib.sha256(payload).hexdigest()}
 
 
 def _maestro_setup_patch_fingerprint(
@@ -3321,9 +3384,13 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
         "sweep_point_evidence_mode": None,
         "sweep_history_log_evidence": None,
         "sweep_result_database_artifacts": [],
+        "result_mapping_setup_readback_before": None,
+        "result_mapping_setup_readback_after": None,
     }
     sweep_verification = settings.get("sweep_verification")
+    result_mapping = settings.get("result_mapping")
     sweep_setup_before: dict[str, Any] | None = None
+    result_mapping_setup_before: dict[str, Any] | None = None
     try:
         tests = _maestro_tests_readback(client, session)
         if not tests:
@@ -3335,6 +3402,12 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
 
             sweep_setup_before = _read_maestro_sweep_setup(
                 client, get_var, sweep_verification, session=session
+            )
+        if result_mapping is not None:
+            if not isinstance(result_mapping, dict):
+                raise RuntimeError("ADE result_mapping must be an object")
+            result_mapping_setup_before = _read_ade_result_mapping_setup(
+                client, result_mapping, session=session
             )
         resume_history = settings.get("resume_history")
         resume_scratch_root = settings.get("resume_runtime_scratch_root")
@@ -3448,6 +3521,29 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
                     "expected_sweep_evidence_source": "user_input",
                 }
             )
+        if result_mapping is not None:
+            result_mapping_setup_after = _read_ade_result_mapping_setup(
+                client, result_mapping, session=session
+            )
+            if result_mapping_setup_before != result_mapping_setup_after:
+                raise RuntimeError(
+                    "Maestro result-mapping outputs changed while ade.run was executing"
+                )
+            artifact_evidence.update(
+                {
+                    "result_mapping_setup_readback_before": (
+                        result_mapping_setup_before
+                    ),
+                    "result_mapping_setup_readback_after": (
+                        result_mapping_setup_after
+                    ),
+                    "result_mapping_setup_readback_evidence_source": (
+                        "bridge_readback"
+                    ),
+                    "expected_result_mapping_evidence_source": "user_input",
+                    "result_mapping_setup_unchanged": True,
+                }
+            )
         if settings.get("require_structured_outputs", True) and not structured_outputs:
             retained = artifact_evidence.get("remote_manifest_directory")
             raise RuntimeError(
@@ -3544,7 +3640,13 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
                 if sweep_verification is not None
                 else ""
             )
-            + "; history name uniqueness and VDA constraint mapping were not proved"
+            + (
+                "; declared result-mapping scalar output expressions were pinned "
+                "before and after the run"
+                if result_mapping is not None
+                else "; VDA constraint mapping was not requested"
+            )
+            + "; history name uniqueness was not proved"
         ),
     }
 
