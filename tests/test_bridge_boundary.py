@@ -36,8 +36,11 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     _complex_signal,
     _complete_si_env,
     _discard_failed_existing_schematic_edit,
+    _differential_pair_ac_metrics_from_result,
+    _differential_pair_common_mode_ac_metrics_from_result,
     _differential_pair_device_geometry_from_schematic,
     _differential_pair_instance_parameter_updates,
+    _differential_pair_linearity_metrics_from_result,
     _differential_pair_metrics_from_result,
     _differential_pair_semantic_parameters_from_schematic,
     _differential_pair_testbench_deck,
@@ -6618,6 +6621,216 @@ def test_differential_pair_dc_deck_keeps_tail_source_outside_oa() -> None:
     assert "MN0 (" not in deck and "RD0 (" not in deck
 
 
+def test_differential_pair_ac_deck_and_parser_use_balanced_complex_nodes() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump(mode="json")
+    parameters = {
+        "input_width_um": 2.0,
+        "length_um": 0.03,
+        "load_resistance_ohm": 8_000.0,
+        "tail_current_ua": 50.0,
+        "common_mode_v": 0.45,
+        "vdd_v": 0.9,
+    }
+    sweep = {
+        "start_hz": 1e3,
+        "stop_hz": 1e10,
+        "points_per_decade": 10,
+        "reference_points": 5,
+        "max_reference_variation_db": 0.5,
+    }
+    deck = _differential_pair_testbench_deck(
+        profile,
+        parameters,
+        "/data/xum/virtuoso_bridge_smoke/vda_diffpair/netlist",
+        analysis="ac",
+        ac_sweep=sweep,
+    )
+
+    assert "VINP_SRC (INP 0) vsource dc=vcm mag=0.5 phase=0 type=dc" in deck
+    assert "VINN_SRC (INN 0) vsource dc=vcm mag=0.5 phase=180 type=dc" in deck
+    assert "ac ac start=1000 stop=10000000000 dec=10" in deck
+
+    frequency_hz = [10.0 ** (2.0 + index / 10.0) for index in range(61)]
+    transfer = [
+        -8.0 / (1.0 + 1j * frequency / 1e6) for frequency in frequency_hz
+    ]
+    data = {
+        "ac_freq": frequency_hz,
+        "ac_INP": [0.5 + 0.0j] * len(frequency_hz),
+        "ac_INN": [-0.5 + 0.0j] * len(frequency_hz),
+        "ac_OUTP": [0.5 * value for value in transfer],
+        "ac_OUTN": [-0.5 * value for value in transfer],
+    }
+
+    metrics, diagnostics = _differential_pair_ac_metrics_from_result(data, sweep)
+
+    assert metrics["differential_low_frequency_gain_v_per_v"] == pytest.approx(
+        8.0, rel=1e-5
+    )
+    assert metrics["differential_bandwidth_3db_hz"] == pytest.approx(
+        1e6, rel=0.01
+    )
+    assert diagnostics["analysis_complete"] is True
+
+
+def test_differential_pair_common_mode_deck_uses_explicit_finite_tail_resistance() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump(mode="json")
+    parameters = {
+        "input_width_um": 2.0,
+        "length_um": 0.03,
+        "load_resistance_ohm": 8_000.0,
+        "tail_current_ua": 50.0,
+        "tail_output_resistance_ohm": 1_000_000.0,
+        "common_mode_v": 0.45,
+        "vdd_v": 0.9,
+    }
+    sweep = {"start_hz": 1e3, "stop_hz": 1e9}
+    deck = _differential_pair_testbench_deck(
+        profile,
+        parameters,
+        "/data/xum/virtuoso_bridge_smoke/vda_diffpair/netlist",
+        analysis="ac",
+        ac_sweep=sweep,
+        ac_mode="common_mode",
+    )
+
+    assert "rtail=1000000" in deck
+    assert "RTAIL (TAIL 0) resistor r=rtail" in deck
+    assert "VINP_SRC (INP 0) vsource dc=vcm mag=1 phase=0 type=dc" in deck
+    assert "VINN_SRC (INN 0) vsource dc=vcm mag=1 phase=0 type=dc" in deck
+
+    frequency_hz = [10.0 ** (3.0 + index / 10.0) for index in range(61)]
+    transfer = [
+        -0.01 / (1.0 + 1j * frequency / 1e6)
+        for frequency in frequency_hz
+    ]
+    metrics, diagnostics = _differential_pair_common_mode_ac_metrics_from_result(
+        {
+            "ac_freq": frequency_hz,
+            "ac_INP": [1.0 + 0.0j] * len(frequency_hz),
+            "ac_INN": [1.0 + 0.0j] * len(frequency_hz),
+            "ac_OUTP": transfer,
+            "ac_OUTN": transfer,
+        },
+        sweep,
+    )
+    assert metrics["common_mode_low_frequency_gain_v_per_v"] == pytest.approx(
+        0.01, rel=1e-5
+    )
+    assert diagnostics["analysis_complete"] is True
+
+
+def test_differential_pair_transient_deck_and_linearity_parser_use_differences() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump(mode="json")
+    sweep = {
+        "frequency_hz": 1e6,
+        "amplitudes_v": [0.005, 0.02, 0.05],
+        "settling_cycles": 1,
+        "measurement_cycles": 2,
+        "points_per_cycle": 64,
+        "max_harmonic": 5,
+        "compression_db": 1.0,
+    }
+    deck = _differential_pair_testbench_deck(
+        profile,
+        {
+            "input_width_um": 2.0,
+            "length_um": 0.03,
+            "load_resistance_ohm": 8_000.0,
+            "tail_current_ua": 50.0,
+            "common_mode_v": 0.45,
+            "vdd_v": 0.9,
+            "load_ff": 1.0,
+        },
+        "/data/xum/virtuoso_bridge_smoke/vda_diffpair/netlist",
+        analysis="transient",
+        linearity_sweep=sweep,
+    )
+    assert "vinhalf=vindiff/2 vinnhalf=-vindiff/2" in deck
+    assert "VINP_SRC (INP 0) vsource dc=vcm type=sine" in deck
+    assert "VINN_SRC (INN 0) vsource dc=vcm type=sine" in deck
+    assert "sw1 sweep param=vindiff values=[0.005 0.02 0.05]" in deck
+    assert "CLP (OUTP 0) capacitor c=1f" in deck
+    assert "CLN (OUTN 0) capacitor c=1f" in deck
+
+    frequency_hz = sweep["frequency_hz"]
+    time_s = [
+        index / (frequency_hz * sweep["points_per_cycle"])
+        for index in range(3 * sweep["points_per_cycle"] + 1)
+    ]
+    raw_points = {}
+    for index, (amplitude, gain) in enumerate(
+        zip(sweep["amplitudes_v"], [3.0, 2.9, 2.4], strict=True), start=1
+    ):
+        sine = [
+            math.sin(2.0 * math.pi * frequency_hz * time) for time in time_s
+        ]
+        raw_points[index] = {
+            "time": time_s,
+            "INP": [0.45 + 0.5 * amplitude * value for value in sine],
+            "INN": [0.45 - 0.5 * amplitude * value for value in sine],
+            "OUTP": [0.70 - 0.5 * amplitude * gain * value for value in sine],
+            "OUTN": [0.70 + 0.5 * amplitude * gain * value for value in sine],
+            "VDD_SRC:p": [-50e-6] * len(time_s),
+        }
+
+    metrics, diagnostics = _differential_pair_linearity_metrics_from_result(
+        {"sweep_points": raw_points}, sweep, vdd_v=0.9
+    )
+
+    assert metrics["differential_small_signal_gain_v_per_v"] == pytest.approx(
+        3.0, rel=1e-3
+    )
+    assert 0.02 < metrics["differential_input_1db_compression_v_peak"] < 0.05
+    assert metrics["transient_small_signal_supply_power_uw"] == pytest.approx(45.0)
+    assert diagnostics["sweep_point_count"] == 3
+    assert diagnostics["point_details"][0]["input_expression"] == "INP-INN"
+
+
+def test_differential_pair_dc_accounts_for_tail_output_resistor_current() -> None:
+    parameters = {
+        "input_width_um": 1.0,
+        "length_um": 0.03,
+        "load_resistance_ohm": 10_000.0,
+        "tail_current_ua": 50.0,
+        "tail_output_resistance_ohm": 1_000_000.0,
+        "common_mode_v": 0.45,
+        "vdd_v": 0.9,
+    }
+    data = {
+        "dc_INP": 0.45,
+        "dc_INN": 0.45,
+        "dc_OUTP": 0.6495,
+        "dc_OUTN": 0.6495,
+        "dc_TAIL": 0.10,
+        "dc_VDD": 0.9,
+        "dc_VSS": 0.0,
+        "dc_VDD_SRC:p": -50.1e-6,
+        "dcOpInfo_MN0:ids": 25.05e-6,
+        "dcOpInfo_MN0:vgs": 0.35,
+        "dcOpInfo_MN0:vds": 0.5495,
+        "dcOpInfo_MN0:vdsat": 0.10,
+        "dcOpInfo_MN0:gm": 200e-6,
+        "dcOpInfo_MN0:gds": 5e-6,
+        "dcOpInfo_MN1:ids": 25.05e-6,
+        "dcOpInfo_MN1:vgs": 0.35,
+        "dcOpInfo_MN1:vds": 0.5495,
+        "dcOpInfo_MN1:vdsat": 0.10,
+        "dcOpInfo_MN1:gm": 200e-6,
+        "dcOpInfo_MN1:gds": 5e-6,
+    }
+
+    metrics, evidence = _differential_pair_metrics_from_result(data, parameters)
+
+    assert metrics["ideal_tail_source_current_ua"] == pytest.approx(50.0)
+    assert metrics["tail_output_resistor_current_ua"] == pytest.approx(0.1)
+    assert metrics["tail_current_ua"] == pytest.approx(50.1)
+    assert metrics["tail_current_mismatch_percent"] == pytest.approx(0.0)
+    assert evidence["tail_source_binding"] == (
+        "ideal_isource_plus_explicit_output_resistor"
+    )
+
+
 def test_differential_pair_result_requires_independent_kcl_and_node_evidence() -> None:
     data = {
         "dc_INP": 0.45,
@@ -6661,6 +6874,14 @@ def test_differential_pair_result_requires_independent_kcl_and_node_evidence() -
     assert metrics["output_offset_abs_mv"] == pytest.approx(0.0)
     assert evidence["node_device_consistency"] == "matched"
     assert evidence["kcl_consistency"] == "matched"
+
+    no_saved_tail = dict(data)
+    no_saved_tail.pop("dc_ITAIL_SRC:p")
+    setpoint_metrics, setpoint_evidence = _differential_pair_metrics_from_result(
+        no_saved_tail, parameters
+    )
+    assert setpoint_metrics["tail_current_mismatch_percent"] == pytest.approx(0.0)
+    assert setpoint_evidence["tail_source_binding"] == "ideal_isource_dc_setpoint"
 
     broken_supply = dict(data, **{"dc_VDD_SRC:p": -40e-6})
     with pytest.raises(RuntimeError, match="supply_current_mismatch_percent"):
@@ -6719,33 +6940,56 @@ def test_differential_pair_subprocess_adapter_routes_real_operations(
     assert result.evidence_source is EvidenceSource.EDA_RESULT
 
 
-def test_differential_pair_live_worker_returns_bound_oa_netlist_and_dc_evidence(
+def test_differential_pair_live_worker_returns_bound_oa_netlist_and_ac_evidence(
     monkeypatch,
 ) -> None:
     runner_module = ModuleType("virtuoso_bridge.spectre.runner")
-    dc_data = {
+    frequency_hz = [10.0 ** (2.0 + index / 10.0) for index in range(71)]
+    transfer = [
+        -8.0 / (1.0 + 1j * frequency / 1e6) for frequency in frequency_hz
+    ]
+    common_mode_transfer = [
+        -0.01 / (1.0 + 1j * frequency / 1e7) for frequency in frequency_hz
+    ]
+    base_dc_data = {
         "dc_INP": 0.45,
         "dc_INN": 0.45,
-        "dc_OUTP": 0.65,
-        "dc_OUTN": 0.65,
+        "dc_OUTP": 0.6495,
+        "dc_OUTN": 0.6495,
         "dc_TAIL": 0.10,
         "dc_VDD": 0.9,
         "dc_VSS": 0.0,
-        "dc_VDD_SRC:p": -50e-6,
-        "dc_ITAIL_SRC:p": 50e-6,
-        "dcOpInfo_MN0:ids": 25e-6,
+        "dc_VDD_SRC:p": -50.1e-6,
+        "dcOpInfo_MN0:ids": 25.05e-6,
         "dcOpInfo_MN0:vgs": 0.35,
-        "dcOpInfo_MN0:vds": 0.55,
+        "dcOpInfo_MN0:vds": 0.5495,
         "dcOpInfo_MN0:vdsat": 0.10,
         "dcOpInfo_MN0:gm": 200e-6,
         "dcOpInfo_MN0:gds": 5e-6,
-        "dcOpInfo_MN1:ids": 25e-6,
+        "dcOpInfo_MN1:ids": 25.05e-6,
         "dcOpInfo_MN1:vgs": 0.35,
-        "dcOpInfo_MN1:vds": 0.55,
+        "dcOpInfo_MN1:vds": 0.5495,
         "dcOpInfo_MN1:vdsat": 0.10,
         "dcOpInfo_MN1:gm": 200e-6,
         "dcOpInfo_MN1:gds": 5e-6,
     }
+    differential_data = {
+        **base_dc_data,
+        "ac_freq": frequency_hz,
+        "ac_INP": [0.5 + 0.0j] * len(frequency_hz),
+        "ac_INN": [-0.5 + 0.0j] * len(frequency_hz),
+        "ac_OUTP": [0.5 * value for value in transfer],
+        "ac_OUTN": [-0.5 * value for value in transfer],
+    }
+    common_mode_data = {
+        **base_dc_data,
+        "ac_freq": frequency_hz,
+        "ac_INP": [1.0 + 0.0j] * len(frequency_hz),
+        "ac_INN": [1.0 + 0.0j] * len(frequency_hz),
+        "ac_OUTP": common_mode_transfer,
+        "ac_OUTN": common_mode_transfer,
+    }
+    run_modes: list[str] = []
 
     class Simulator:
         _ssh_runner = None
@@ -6755,10 +6999,14 @@ def test_differential_pair_live_worker_returns_bound_oa_netlist_and_dc_evidence(
             return cls()
 
         def run_simulation(self, netlist, parameters):
-            assert "ITAIL_SRC (TAIL 0)" in netlist.read_text(encoding="utf-8")
+            text = netlist.read_text(encoding="utf-8")
+            assert "ITAIL_SRC (TAIL 0)" in text
+            assert "RTAIL (TAIL 0) resistor r=rtail" in text
+            common_mode = "mag=1 phase=0" in text
+            run_modes.append("common_mode" if common_mode else "differential")
             return SimpleNamespace(
                 ok=True,
-                data=dc_data,
+                data=common_mode_data if common_mode else differential_data,
                 metadata={},
                 tool_version="test-spectre-diffpair",
                 warnings=[],
@@ -6801,13 +7049,22 @@ RD1 (VDD OUTN) resistor r=10k
             "target": {"library": "vda_test", "cell": "vda_diffpair", "view": "schematic"},
             "circuit": "differential_pair",
             "profile": load_pdk_profile("nics4304_tsmc28").model_dump(mode="json"),
-            "analysis": "dc",
+            "analysis": "ac",
             "analysis_source": "user_input",
+            "ac_sweep": {
+                "start_hz": 1e2,
+                "stop_hz": 1e9,
+                "points_per_decade": 10,
+                "reference_points": 5,
+                "max_reference_variation_db": 0.5,
+            },
+            "ac_sweep_user_fields": ["start_hz", "stop_hz"],
             "parameters": {
                 "input_width_um": 1.0,
                 "length_um": 0.03,
                 "load_resistance_ohm": 10_000.0,
                 "tail_current_ua": 50.0,
+                "tail_output_resistance_ohm": 1_000_000.0,
                 "common_mode_v": 0.45,
                 "vdd_v": 0.9,
             },
@@ -6817,9 +7074,48 @@ RD1 (VDD OUTN) resistor r=10k
 
     assert result["analysis_complete"] is True
     assert result["metrics"]["both_saturation_region"] == 1.0
+    assert result["metrics"]["differential_bandwidth_3db_hz"] == pytest.approx(
+        1e6, rel=0.01
+    )
+    assert result["metrics"]["common_mode_bandwidth_3db_hz"] == pytest.approx(
+        1e7, rel=0.01
+    )
+    assert result["metrics"]["cmrr_bandwidth_3db_hz"] == pytest.approx(
+        1.01e6, rel=0.03
+    )
+    assert result["metrics"]["low_frequency_cmrr_db"] == pytest.approx(
+        20.0 * math.log10(800.0), rel=1e-5
+    )
+    assert run_modes == ["differential", "common_mode"]
     assert result["metric_sources"]["both_saturation_region"] == "software_inference"
+    assert result["metric_sources"]["tail_current_ua"] == "software_inference"
+    assert result["metric_sources"]["ideal_tail_source_current_ua"] == "user_input"
+    assert result["metric_sources"]["low_frequency_cmrr_db"] == (
+        "software_inference"
+    )
+    assert result["metric_sources"]["cmrr_bandwidth_3db_hz"] == (
+        "software_inference"
+    )
+    assert result["metric_sources"]["tail_current_mismatch_percent"] == (
+        "software_inference"
+    )
     assert result["evidence"]["schematic_readback"]["source"] == "bridge_readback"
     assert result["evidence"]["netlist"]["source"] == "eda_result"
     assert result["evidence"]["netlist"]["parameter_consistency"] == "matched"
     assert result["evidence"]["testbench"]["tail_source_location"] == "external_wrapper_only"
     assert result["evidence"]["operating_point"]["kcl_consistency"] == "matched"
+    assert result["evidence"]["ac_response"]["analysis_complete"] is True
+    assert result["evidence"]["operating_point"]["tail_source_binding"] == (
+        "ideal_isource_plus_explicit_output_resistor"
+    )
+    assert result["evidence"]["testbench"]["common_mode_pair"][
+        "netlist_binding"
+    ] == "same_si_netlist_sha256"
+    assert result["evidence"]["common_mode_ac_response"][
+        "analysis_complete"
+    ] is True
+    assert result["evidence"]["common_mode_operating_point"][
+        "consistency_with_differential_run"
+    ] == "matched"
+    assert result["evidence"]["cmrr"]["source"] == "software_inference"
+    assert result["evidence"]["cmrr"]["frequency_grid_consistency"] == "matched"

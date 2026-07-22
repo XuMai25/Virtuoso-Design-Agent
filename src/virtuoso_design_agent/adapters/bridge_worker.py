@@ -22,11 +22,15 @@ from typing import Any
 from virtuoso_design_agent.adapters.base import merge_analysis_bundle
 from virtuoso_design_agent.metrics import (
     aggregate_common_source_linearity_metrics,
+    aggregate_differential_pair_linearity_metrics,
     extract_common_source_ac_metrics,
     extract_common_source_dc_metrics,
     extract_common_source_linearity_point_metrics,
     extract_common_source_noise_metrics,
     extract_dc_supply_metrics,
+    extract_differential_pair_ac_metrics,
+    extract_differential_pair_cmrr_response_metrics,
+    extract_differential_pair_common_mode_ac_metrics,
     extract_differential_pair_dc_metrics,
     extract_inverter_metrics,
     extract_supply_metrics,
@@ -974,7 +978,7 @@ def _resolved_differential_pair_parameters(
     profile = payload["profile"]
     supplied = payload.get("parameters", {})
     oa_parameters = oa_parameters or {}
-    return {
+    parameters = {
         "input_width_um": float(
             supplied.get(
                 "input_width_um",
@@ -1004,6 +1008,13 @@ def _resolved_differential_pair_parameters(
         ),
         "vdd_v": float(supplied.get("vdd_v", profile["default_vdd_v"])),
     }
+    if "tail_output_resistance_ohm" in supplied:
+        parameters["tail_output_resistance_ohm"] = float(
+            supplied["tail_output_resistance_ohm"]
+        )
+    if "load_ff" in supplied:
+        parameters["load_ff"] = float(supplied["load_ff"])
+    return parameters
 
 
 def _apply_parameters(
@@ -8246,9 +8257,19 @@ def _differential_pair_metrics_from_result(
             "gm_s": _operating_point_scalar(data, instance, "gm"),
             "gds_s": _operating_point_scalar(data, instance, "gds"),
         }
+    ideal_tail_current_a = parameters["tail_current_ua"] * 1e-6
+    tail_output_resistance = parameters.get("tail_output_resistance_ohm")
+    tail_resistor_current_a = (
+        node_values["TAIL"] / tail_output_resistance
+        if tail_output_resistance is not None
+        else 0.0
+    )
+    expected_tail_current_a = ideal_tail_current_a + tail_resistor_current_a
     source_values = {
         "supply_source_current_a": _scalar(data, "dc_VDD_SRC:p"),
-        "tail_source_current_a": _scalar(data, "dc_ITAIL_SRC:p"),
+        "ideal_tail_source_setpoint_a": ideal_tail_current_a,
+        "tail_output_resistor_current_a": tail_resistor_current_a,
+        "total_tail_sink_current_a": expected_tail_current_a,
     }
     source_tolerance_v = 1e-5
     expected_nodes = {
@@ -8264,19 +8285,6 @@ def _differential_pair_metrics_from_result(
                 f"source value: expected {expected:.12g}, got "
                 f"{node_values[name]:.12g}"
             )
-
-    expected_tail_current_a = parameters["tail_current_ua"] * 1e-6
-    measured_tail_current_a = abs(source_values["tail_source_current_a"])
-    tail_source_error_percent = (
-        abs(measured_tail_current_a - expected_tail_current_a)
-        / max(abs(expected_tail_current_a), measured_tail_current_a, 1e-18)
-        * 100.0
-    )
-    if tail_source_error_percent > 1.0:
-        raise RuntimeError(
-            "DC tail source current does not match the requested value: "
-            f"{tail_source_error_percent:.6g}%"
-        )
 
     branch_nodes = {
         "MN0": (node_values["INP"], node_values["OUTP"]),
@@ -8302,7 +8310,7 @@ def _differential_pair_metrics_from_result(
         tail_v=node_values["TAIL"],
         branch_p_current_a=branch_values["MN0"]["ids_a"],
         branch_n_current_a=branch_values["MN1"]["ids_a"],
-        tail_source_current_a=source_values["tail_source_current_a"],
+        tail_source_current_a=expected_tail_current_a,
         supply_source_current_a=source_values["supply_source_current_a"],
         branch_p_vdsat_v=branch_values["MN0"]["vdsat_v"],
         branch_n_vdsat_v=branch_values["MN1"]["vdsat_v"],
@@ -8312,7 +8320,16 @@ def _differential_pair_metrics_from_result(
         branch_n_gds_s=branch_values["MN1"]["gds_s"],
         load_resistance_ohm=parameters["load_resistance_ohm"],
     )
-    metrics["tail_source_setpoint_error_percent"] = tail_source_error_percent
+    metrics["ideal_tail_source_current_ua"] = ideal_tail_current_a * 1e6
+    if tail_output_resistance is not None:
+        metrics.update(
+            {
+                "tail_output_resistance_ohm": tail_output_resistance,
+                "tail_output_resistor_current_ua": (
+                    abs(tail_resistor_current_a) * 1e6
+                ),
+            }
+        )
     kcl_metrics = (
         "tail_current_mismatch_percent",
         "supply_current_mismatch_percent",
@@ -8328,6 +8345,11 @@ def _differential_pair_metrics_from_result(
         "node_values_v": node_values,
         "device_values": branch_values,
         "source_values_a": source_values,
+        "tail_source_binding": (
+            "ideal_isource_plus_explicit_output_resistor"
+            if tail_output_resistance is not None
+            else "ideal_isource_dc_setpoint"
+        ),
         "operating_regions": {
             "MN0": (
                 "saturation"
@@ -8344,7 +8366,11 @@ def _differential_pair_metrics_from_result(
         },
         "region_rule": "saturation when |VDS| >= |VDSAT| and |IDS| > 0",
         "node_device_consistency": "matched",
-        "tail_source_consistency": "matched",
+        "tail_source_consistency": (
+            "branch_sum_matches_ideal_source_plus_output_resistor"
+            if tail_output_resistance is not None
+            else "branch_sum_matches_declared_ideal_source"
+        ),
         "kcl_consistency": "matched",
     }
 
@@ -8367,6 +8393,61 @@ def _common_source_ac_metrics_from_result(
     diagnostics["signals"] = ["ac_freq", "ac_IN", "ac_OUT"]
     diagnostics["transfer"] = "VOUT/VIN complex ratio"
     return metrics, diagnostics
+
+
+def _differential_pair_ac_metrics_from_result(
+    data: dict[str, Any], ac_sweep: dict[str, Any]
+) -> tuple[dict[str, float], dict[str, Any]]:
+    return extract_differential_pair_ac_metrics(
+        _signal(data, "ac_freq"),
+        _complex_signal(data, "ac_INP"),
+        _complex_signal(data, "ac_INN"),
+        _complex_signal(data, "ac_OUTP"),
+        _complex_signal(data, "ac_OUTN"),
+        reference_points=int(ac_sweep.get("reference_points", 5)),
+        max_reference_variation_db=float(
+            ac_sweep.get("max_reference_variation_db", 0.5)
+        ),
+    )
+
+
+def _differential_pair_common_mode_ac_metrics_from_result(
+    data: dict[str, Any], ac_sweep: dict[str, Any]
+) -> tuple[dict[str, float], dict[str, Any]]:
+    return extract_differential_pair_common_mode_ac_metrics(
+        _signal(data, "ac_freq"),
+        _complex_signal(data, "ac_INP"),
+        _complex_signal(data, "ac_INN"),
+        _complex_signal(data, "ac_OUTP"),
+        _complex_signal(data, "ac_OUTN"),
+        reference_points=int(ac_sweep.get("reference_points", 5)),
+        max_reference_variation_db=float(
+            ac_sweep.get("max_reference_variation_db", 0.5)
+        ),
+    )
+
+
+def _differential_pair_cmrr_metrics_from_results(
+    differential_data: dict[str, Any],
+    common_mode_data: dict[str, Any],
+    ac_sweep: dict[str, Any],
+) -> tuple[dict[str, float], dict[str, Any]]:
+    return extract_differential_pair_cmrr_response_metrics(
+        _signal(differential_data, "ac_freq"),
+        _complex_signal(differential_data, "ac_INP"),
+        _complex_signal(differential_data, "ac_INN"),
+        _complex_signal(differential_data, "ac_OUTP"),
+        _complex_signal(differential_data, "ac_OUTN"),
+        _signal(common_mode_data, "ac_freq"),
+        _complex_signal(common_mode_data, "ac_INP"),
+        _complex_signal(common_mode_data, "ac_INN"),
+        _complex_signal(common_mode_data, "ac_OUTP"),
+        _complex_signal(common_mode_data, "ac_OUTN"),
+        reference_points=int(ac_sweep.get("reference_points", 5)),
+        max_reference_variation_db=float(
+            ac_sweep.get("max_reference_variation_db", 0.5)
+        ),
+    )
 
 
 def _common_source_linearity_metrics_from_result(
@@ -8417,6 +8498,90 @@ def _common_source_linearity_metrics_from_result(
             }
         )
     metrics, diagnostics = aggregate_common_source_linearity_metrics(
+        amplitudes,
+        point_metrics,
+        compression_db=float(linearity_sweep.get("compression_db", 1.0)),
+    )
+    diagnostics["point_details"] = point_diagnostics
+    diagnostics["sweep_point_count"] = len(point_metrics)
+    diagnostics["sweep_engine"] = "Spectre nested parameter sweep"
+    return metrics, diagnostics
+
+
+def _differential_pair_linearity_metrics_from_result(
+    metadata: dict[str, Any],
+    linearity_sweep: dict[str, Any],
+    *,
+    vdd_v: float,
+) -> tuple[dict[str, float], dict[str, Any]]:
+    raw_points = metadata.get("sweep_points")
+    if not isinstance(raw_points, dict) or not raw_points:
+        raise RuntimeError(
+            "Spectre differential linearity sweep returned no transient points"
+        )
+    amplitudes = [float(value) for value in linearity_sweep["amplitudes_v"]]
+    if len(raw_points) != len(amplitudes):
+        raise RuntimeError(
+            "Spectre differential linearity point count does not match declared "
+            "amplitudes"
+        )
+    point_metrics: list[dict[str, float]] = []
+    point_diagnostics: list[dict[str, Any]] = []
+    for index, amplitude in enumerate(amplitudes, start=1):
+        raw_point = raw_points.get(index, raw_points.get(str(index)))
+        if not isinstance(raw_point, dict):
+            raise RuntimeError(
+                f"Spectre differential linearity sweep is missing point {index}"
+            )
+        inp = _signal(raw_point, "INP")
+        inn = _signal(raw_point, "INN")
+        outp = _signal(raw_point, "OUTP")
+        outn = _signal(raw_point, "OUTN")
+        differential_input = [
+            positive - negative
+            for positive, negative in zip(inp, inn, strict=True)
+        ]
+        differential_output = [
+            positive - negative
+            for positive, negative in zip(outp, outn, strict=True)
+        ]
+        metrics, diagnostics = extract_common_source_linearity_point_metrics(
+            _signal(raw_point, "time"),
+            differential_input,
+            differential_output,
+            _signal(raw_point, "VDD_SRC:p"),
+            vdd_v=vdd_v,
+            frequency_hz=float(linearity_sweep["frequency_hz"]),
+            settling_cycles=int(linearity_sweep.get("settling_cycles", 4)),
+            measurement_cycles=int(linearity_sweep.get("measurement_cycles", 8)),
+            max_harmonic=int(linearity_sweep.get("max_harmonic", 5)),
+        )
+        tolerance = max(amplitude * 5e-3, 1e-8)
+        if abs(metrics["input_fundamental_v_peak"] - amplitude) > tolerance:
+            raise RuntimeError(
+                "Spectre differential input fundamental does not match declared "
+                f"sweep amplitude at point {index}"
+            )
+        point_metrics.append(metrics)
+        point_diagnostics.append(
+            {
+                "index": index,
+                "declared_differential_input_amplitude_v_peak": amplitude,
+                "signals": [
+                    "time",
+                    "INP",
+                    "INN",
+                    "OUTP",
+                    "OUTN",
+                    "VDD_SRC:p",
+                ],
+                "input_expression": "INP-INN",
+                "output_expression": "OUTP-OUTN",
+                "metrics": metrics,
+                **diagnostics,
+            }
+        )
+    metrics, diagnostics = aggregate_differential_pair_linearity_metrics(
         amplitudes,
         point_metrics,
         compression_db=float(linearity_sweep.get("compression_db", 1.0)),
@@ -8674,26 +8839,101 @@ def _differential_pair_testbench_deck(
     profile: dict[str, Any],
     parameters: dict[str, float],
     remote_netlist_path: str,
+    *,
+    analysis: str = "dc",
+    ac_sweep: dict[str, Any] | None = None,
+    linearity_sweep: dict[str, Any] | None = None,
+    ac_mode: str = "differential",
 ) -> str:
     if '"' in remote_netlist_path:
         raise ValueError("netlist path contains an unsupported quote")
+    if analysis not in {"dc", "ac", "transient"}:
+        raise ValueError(f"unsupported differential-pair analysis: {analysis}")
+    if ac_mode not in {"differential", "common_mode"}:
+        raise ValueError(f"unsupported differential-pair AC mode: {ac_mode}")
+    inp_ac = ""
+    inn_ac = ""
+    extra_parameters = ""
+    load = ""
+    analysis_statement = ""
+    if analysis == "ac":
+        if ac_sweep is None:
+            raise ValueError("differential-pair AC deck requires ac_sweep")
+        if ac_mode == "differential":
+            inp_ac = " mag=0.5 phase=0 type=dc"
+            inn_ac = " mag=0.5 phase=180 type=dc"
+        else:
+            inp_ac = " mag=1 phase=0 type=dc"
+            inn_ac = " mag=1 phase=0 type=dc"
+        analysis_statement = (
+            f'ac ac start={float(ac_sweep["start_hz"]):.12g} '
+            f'stop={float(ac_sweep["stop_hz"]):.12g} '
+            f'dec={int(ac_sweep.get("points_per_decade", 20))} annotate=status\n'
+        )
+    elif analysis == "transient":
+        if linearity_sweep is None:
+            raise ValueError(
+                "differential-pair transient deck requires linearity_sweep"
+            )
+        amplitudes = [
+            float(value) for value in linearity_sweep["amplitudes_v"]
+        ]
+        frequency_hz = float(linearity_sweep["frequency_hz"])
+        total_cycles = int(linearity_sweep.get("settling_cycles", 4)) + int(
+            linearity_sweep.get("measurement_cycles", 8)
+        )
+        points_per_cycle = int(linearity_sweep.get("points_per_cycle", 128))
+        sample_step_s = 1.0 / (frequency_hz * points_per_cycle)
+        stop_s = total_cycles / frequency_hz + sample_step_s
+        extra_parameters = (
+            f" vindiff={amplitudes[0]:.12g} "
+            f"flinearity={frequency_hz:.12g} vinhalf=vindiff/2 "
+            "vinnhalf=-vindiff/2"
+        )
+        inp_ac = " type=sine sinedc=vcm ampl=vinhalf freq=flinearity"
+        inn_ac = " type=sine sinedc=vcm ampl=vinnhalf freq=flinearity"
+        values = " ".join(f"{value:.12g}" for value in amplitudes)
+        analysis_statement = (
+            f"sw1 sweep param=vindiff values=[{values}] {{\n"
+            f"  tran tran stop={stop_s:.12g} maxstep={sample_step_s:.12g} "
+            f"strobeperiod={sample_step_s:.12g} strobeoutput=all annotate=status\n"
+            "}\n"
+        )
+    if "load_ff" in parameters:
+        load = (
+            f'CLP (OUTP 0) capacitor c={parameters["load_ff"]:.12g}f\n'
+            f'CLN (OUTN 0) capacitor c={parameters["load_ff"]:.12g}f\n'
+        )
+    tail_output_resistance = parameters.get("tail_output_resistance_ohm")
+    tail_resistance_parameter = (
+        f' rtail={tail_output_resistance:.12g}'
+        if tail_output_resistance is not None
+        else ""
+    )
+    tail_resistance_element = (
+        "RTAIL (TAIL 0) resistor r=rtail\n"
+        if tail_output_resistance is not None
+        else ""
+    )
     model_configuration, _ = _common_source_model_configuration(profile, None)
     return f'''simulator lang=spectre
 {model_configuration}
 include "{remote_netlist_path}"
 
-parameters vdd={parameters["vdd_v"]:.12g} vcm={parameters["common_mode_v"]:.12g} itail={parameters["tail_current_ua"]:.12g}u
+parameters vdd={parameters["vdd_v"]:.12g} vcm={parameters["common_mode_v"]:.12g} itail={parameters["tail_current_ua"]:.12g}u{tail_resistance_parameter}{extra_parameters}
 
 VDD_SRC (VDD 0) vsource dc=vdd
 VSS_SRC (VSS 0) vsource dc=0
-VINP_SRC (INP 0) vsource dc=vcm
-VINN_SRC (INN 0) vsource dc=vcm
+VINP_SRC (INP 0) vsource dc=vcm{inp_ac}
+VINN_SRC (INN 0) vsource dc=vcm{inn_ac}
 ITAIL_SRC (TAIL 0) isource dc=itail
+{tail_resistance_element}
+{load}
 
 simulatorOptions options psfversion="1.4.0" reltol=1e-4 vabstol=1e-6 iabstol=1e-12
 dcOp dc write="spectre.dc" maxiters=150 maxsteps=10000 annotate=status
 dcOpInfo info what=oppoint where=rawfile
-save INP INN OUTP OUTN TAIL VDD VSS VDD_SRC:p ITAIL_SRC:p
+{analysis_statement}save INP INN OUTP OUTN TAIL VDD VSS VDD_SRC:p
 save MN0:ids MN0:vgs MN0:vds MN0:vdsat MN0:gm MN0:gds
 save MN1:ids MN1:vgs MN1:vds MN1:vdsat MN1:gm MN1:gds
 saveOptions options save=allpub
@@ -9447,8 +9687,16 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
     from virtuoso_bridge.spectre.runner import SpectreSimulator
 
     analysis = str(payload.get("analysis", "dc"))
-    if analysis != "dc":
-        raise RuntimeError("differential-pair live adapter currently supports only dc")
+    if analysis not in {"dc", "ac", "transient"}:
+        raise RuntimeError(f"unsupported differential-pair analysis: {analysis}")
+    ac_sweep = payload.get("ac_sweep")
+    linearity_sweep = payload.get("linearity_sweep")
+    if analysis == "ac" and not isinstance(ac_sweep, dict):
+        raise RuntimeError("differential-pair AC simulation requires ac_sweep")
+    if analysis == "transient" and not isinstance(linearity_sweep, dict):
+        raise RuntimeError(
+            "differential-pair transient simulation requires linearity_sweep"
+        )
     profile = payload["profile"]
     timeout = int(payload.get("timeout_seconds", 600))
     client = _client()
@@ -9503,7 +9751,12 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
 
         wrapper = work_dir / "differential_pair_from_oa.scs"
         deck = _differential_pair_testbench_deck(
-            profile, parameters, netlist_evidence["remote_netlist_path"]
+            profile,
+            parameters,
+            netlist_evidence["remote_netlist_path"],
+            analysis=analysis,
+            ac_sweep=ac_sweep,
+            linearity_sweep=linearity_sweep,
         )
         wrapper.write_text(deck, encoding="utf-8")
         remote_wrapper = (
@@ -9529,10 +9782,201 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
             dc_data, parameters
         )
         operating_point["raw_files"] = dc_psf_evidence
+        analysis_complete = True
+        analysis_issues: list[str] = []
+        analysis_warnings: list[str] = []
+        ac_diagnostics: dict[str, Any] | None = None
+        common_mode_ac_diagnostics: dict[str, Any] | None = None
+        cmrr_diagnostics: dict[str, Any] | None = None
+        linearity_diagnostics: dict[str, Any] | None = None
+        common_mode_operating_point: dict[str, Any] | None = None
+        common_mode_deck: str | None = None
+        common_mode_remote_wrapper: str | None = None
+        common_mode_result = None
+        if analysis == "ac":
+            assert isinstance(ac_sweep, dict)
+            ac_metrics, ac_diagnostics = _differential_pair_ac_metrics_from_result(
+                result.data, ac_sweep
+            )
+            metrics.update(ac_metrics)
+            analysis_issues.extend(
+                str(value) for value in ac_diagnostics.get("issues", [])
+            )
+            analysis_warnings.extend(
+                str(value) for value in ac_diagnostics.get("warnings", [])
+            )
+            if metrics["both_saturation_region"] != 1.0:
+                analysis_issues.append(
+                    "differential AC metrics require both branches in saturation"
+                )
+            differential_ac_complete = (
+                bool(ac_diagnostics.get("analysis_complete", False))
+                and not analysis_issues
+            )
+            analysis_complete = differential_ac_complete
+            if "tail_output_resistance_ohm" in parameters:
+                common_mode_dir = work_dir / "common_mode"
+                common_mode_dir.mkdir()
+                common_mode_wrapper = (
+                    common_mode_dir / "differential_pair_common_mode_from_oa.scs"
+                )
+                common_mode_deck = _differential_pair_testbench_deck(
+                    profile,
+                    parameters,
+                    netlist_evidence["remote_netlist_path"],
+                    analysis="ac",
+                    ac_sweep=ac_sweep,
+                    ac_mode="common_mode",
+                )
+                common_mode_wrapper.write_text(
+                    common_mode_deck, encoding="utf-8"
+                )
+                common_mode_remote_wrapper = (
+                    f"{netlist_evidence['remote_run_dir']}/"
+                    "input_from_oa_ac_common_mode.scs"
+                )
+                _upload_file(
+                    client,
+                    common_mode_wrapper,
+                    common_mode_remote_wrapper,
+                    timeout=min(timeout, 60),
+                )
+                common_mode_simulator = SpectreSimulator.from_env(
+                    timeout=timeout,
+                    work_dir=common_mode_dir,
+                    output_format="psfascii",
+                    keep_remote_files=False,
+                    ssh_runner=getattr(client, "ssh_runner", None),
+                )
+                common_mode_ssh_runner = getattr(
+                    common_mode_simulator, "_ssh_runner", None
+                )
+                if common_mode_ssh_runner is not None:
+                    common_mode_ssh_runner._persistent_shell_enabled = False
+                common_mode_result = common_mode_simulator.run_simulation(
+                    common_mode_wrapper, {}
+                )
+                if not common_mode_result.ok:
+                    detail = (
+                        common_mode_result.errors[0]
+                        if common_mode_result.errors
+                        else common_mode_result.status.value
+                    )
+                    raise RuntimeError(
+                        f"Spectre common-mode simulation failed: {detail}"
+                    )
+                common_mode_dc_data, common_mode_dc_psf_evidence = (
+                    _common_source_dc_data_from_result(common_mode_result)
+                )
+                common_mode_dc_metrics, common_mode_operating_point = (
+                    _differential_pair_metrics_from_result(
+                        common_mode_dc_data, parameters
+                    )
+                )
+                common_mode_operating_point["raw_files"] = (
+                    common_mode_dc_psf_evidence
+                )
+                dc_consistency_names = (
+                    "branch_p_current_ua",
+                    "branch_n_current_ua",
+                    "tail_current_ua",
+                    "supply_current_ua",
+                    "tail_voltage_v",
+                    "output_common_mode_v",
+                    "minimum_saturation_margin_v",
+                )
+                _assert_parameter_consistency(
+                    {name: metrics[name] for name in dc_consistency_names},
+                    {
+                        name: common_mode_dc_metrics[name]
+                        for name in dc_consistency_names
+                    },
+                    expected_label="differential-run DC operating point",
+                    actual_label="common-mode-run DC operating point",
+                )
+                (
+                    common_mode_metrics,
+                    common_mode_ac_diagnostics,
+                ) = _differential_pair_common_mode_ac_metrics_from_result(
+                    common_mode_result.data, ac_sweep
+                )
+                cmrr_metrics, cmrr_diagnostics = (
+                    _differential_pair_cmrr_metrics_from_results(
+                        result.data, common_mode_result.data, ac_sweep
+                    )
+                )
+                metrics.update(common_mode_metrics)
+                metrics.update(cmrr_metrics)
+                common_mode_issues = [
+                    str(value)
+                    for value in common_mode_ac_diagnostics.get("issues", [])
+                ]
+                common_mode_warnings = [
+                    str(value)
+                    for value in common_mode_ac_diagnostics.get("warnings", [])
+                ]
+                common_mode_reference = common_mode_ac_diagnostics.get(
+                    "reference", {}
+                )
+                common_mode_reference_complete = (
+                    isinstance(common_mode_reference, dict)
+                    and common_mode_reference.get("status") == "flat"
+                )
+                if not common_mode_reference_complete:
+                    analysis_issues.append(
+                        "common-mode AC low-frequency reference is not flat"
+                    )
+                analysis_warnings.extend(
+                    "common-mode standalone bandwidth not used for CMRR acceptance: "
+                    f"{value}"
+                    for value in common_mode_issues
+                )
+                analysis_warnings.extend(
+                    f"common-mode AC: {value}" for value in common_mode_warnings
+                )
+                analysis_issues.extend(
+                    f"CMRR response: {value}"
+                    for value in cmrr_diagnostics.get("issues", [])
+                )
+                analysis_warnings.extend(
+                    f"CMRR response: {value}"
+                    for value in cmrr_diagnostics.get("warnings", [])
+                )
+                analysis_complete = (
+                    differential_ac_complete
+                    and common_mode_reference_complete
+                    and bool(cmrr_diagnostics.get("analysis_complete", False))
+                    and not analysis_issues
+                )
+        elif analysis == "transient":
+            assert isinstance(linearity_sweep, dict)
+            linearity_metrics, linearity_diagnostics = (
+                _differential_pair_linearity_metrics_from_result(
+                    getattr(result, "metadata", {}),
+                    linearity_sweep,
+                    vdd_v=parameters["vdd_v"],
+                )
+            )
+            metrics.update(linearity_metrics)
+            analysis_issues.extend(
+                str(value) for value in linearity_diagnostics.get("issues", [])
+            )
+            analysis_warnings.extend(
+                str(value) for value in linearity_diagnostics.get("warnings", [])
+            )
+            if metrics["both_saturation_region"] != 1.0:
+                analysis_issues.append(
+                    "differential linearity metrics require both branches in "
+                    "saturation at the DC operating point"
+                )
+            analysis_complete = (
+                bool(linearity_diagnostics.get("analysis_complete", False))
+                and not analysis_issues
+            )
         metric_sources = {name: "eda_result" for name in metrics}
         metric_sources["both_saturation_region"] = "software_inference"
         testbench_values = {
-            "analysis": "dc",
+            "analysis": analysis,
             "tail_current_ua": parameters["tail_current_ua"],
             "common_mode_v": parameters["common_mode_v"],
             "vdd_v": parameters["vdd_v"],
@@ -9548,14 +9992,119 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                 for name in ("tail_current_ua", "common_mode_v", "vdd_v")
             },
         }
+        if "tail_output_resistance_ohm" in parameters:
+            testbench_values["tail_output_resistance_ohm"] = parameters[
+                "tail_output_resistance_ohm"
+            ]
+            testbench_value_sources["tail_output_resistance_ohm"] = (
+                "user_input"
+                if "tail_output_resistance_ohm" in payload.get("parameters", {})
+                else "software_inference"
+            )
+        if "load_ff" in parameters:
+            testbench_values["load_ff"] = parameters["load_ff"]
+            testbench_value_sources["load_ff"] = (
+                "user_input"
+                if "load_ff" in payload.get("parameters", {})
+                else "software_inference"
+            )
+        if analysis == "ac":
+            assert isinstance(ac_sweep, dict)
+            testbench_values["ac_sweep"] = dict(ac_sweep)
+            testbench_values["differential_ac_stimulus"] = {
+                "inp_magnitude_v": 0.5,
+                "inp_phase_deg": 0.0,
+                "inn_magnitude_v": 0.5,
+                "inn_phase_deg": 180.0,
+                "differential_input_magnitude_v": 1.0,
+            }
+            user_sweep_fields = set(payload.get("ac_sweep_user_fields", []))
+            testbench_value_sources["ac_sweep"] = {
+                name: (
+                    "user_input"
+                    if name in user_sweep_fields
+                    else "software_inference"
+                )
+                for name in ac_sweep
+            }
+            testbench_value_sources["differential_ac_stimulus"] = (
+                "software_inference"
+            )
+            if common_mode_ac_diagnostics is not None:
+                testbench_values["common_mode_ac_stimulus"] = {
+                    "inp_magnitude_v": 1.0,
+                    "inp_phase_deg": 0.0,
+                    "inn_magnitude_v": 1.0,
+                    "inn_phase_deg": 0.0,
+                    "common_mode_input_magnitude_v": 1.0,
+                }
+                testbench_value_sources["common_mode_ac_stimulus"] = (
+                    "software_inference"
+                )
+        elif analysis == "transient":
+            assert isinstance(linearity_sweep, dict)
+            testbench_values["linearity_sweep"] = dict(linearity_sweep)
+            testbench_values["differential_transient_stimulus"] = {
+                "inp_peak_fraction_of_declared_differential_input": 0.5,
+                "inn_peak_fraction_of_declared_differential_input": -0.5,
+                "common_mode_v": parameters["common_mode_v"],
+            }
+            user_sweep_fields = set(
+                payload.get("linearity_sweep_user_fields", [])
+            )
+            testbench_value_sources["linearity_sweep"] = {
+                name: (
+                    "user_input"
+                    if name in user_sweep_fields
+                    else "software_inference"
+                )
+                for name in linearity_sweep
+            }
+            testbench_value_sources["differential_transient_stimulus"] = (
+                "software_inference"
+            )
+        metric_sources["tail_current_ua"] = testbench_value_sources[
+            "tail_current_ua"
+        ]
+        metric_sources["tail_current_mismatch_percent"] = "software_inference"
+        metric_sources["ideal_tail_source_current_ua"] = (
+            testbench_value_sources["tail_current_ua"]
+        )
+        if "tail_output_resistance_ohm" in parameters:
+            metric_sources["tail_current_ua"] = "software_inference"
+            metric_sources["tail_output_resistance_ohm"] = (
+                testbench_value_sources["tail_output_resistance_ohm"]
+            )
+            metric_sources["tail_output_resistor_current_ua"] = (
+                "software_inference"
+            )
+        for name in metrics:
+            if "cmrr" in name:
+                metric_sources[name] = "software_inference"
+        operating_point["source_value_sources"] = {
+            "supply_source_current_a": "eda_result",
+            "ideal_tail_source_setpoint_a": testbench_value_sources[
+                "tail_current_ua"
+            ],
+            "tail_output_resistor_current_a": "software_inference",
+            "total_tail_sink_current_a": "software_inference",
+        }
+        if common_mode_operating_point is not None:
+            common_mode_operating_point["source_value_sources"] = dict(
+                operating_point["source_value_sources"]
+            )
         return {
             "parameters": parameters,
             "metrics": metrics,
             "metric_sources": metric_sources,
-            "analysis_complete": True,
-            "analysis_issues": [],
-            "analysis_warnings": [],
-            "scalar_count": len(dc_data),
+            "analysis_complete": analysis_complete,
+            "analysis_issues": analysis_issues,
+            "analysis_warnings": analysis_warnings,
+            "scalar_count": len(result.data) + (
+                len(common_mode_result.data)
+                if common_mode_result is not None
+                else 0
+            ),
             "tool_version": result.tool_version,
             "warnings": result.warnings[:20],
             "evidence": {
@@ -9591,12 +10140,89 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                     "model_configuration": _common_source_model_manifest(
                         profile, None
                     ),
+                    "common_mode_pair": (
+                        {
+                            "remote_path": common_mode_remote_wrapper,
+                            "sha256": hashlib.sha256(
+                                common_mode_deck.encode("utf-8")
+                            ).hexdigest(),
+                            "netlist_binding": "same_si_netlist_sha256",
+                        }
+                        if common_mode_deck is not None
+                        and common_mode_remote_wrapper is not None
+                        else {"status": "not_requested"}
+                    ),
                 },
                 "operating_point": {
                     "source": "eda_result",
                     **operating_point,
                     "operating_region_source": "software_inference",
                 },
+                "ac_response": (
+                    {
+                        "source": "eda_result",
+                        "extraction_source": "software_inference",
+                        **ac_diagnostics,
+                    }
+                    if ac_diagnostics is not None
+                    else {"status": "not_requested"}
+                ),
+                "common_mode_operating_point": (
+                    {
+                        "source": "eda_result",
+                        **common_mode_operating_point,
+                        "operating_region_source": "software_inference",
+                        "consistency_with_differential_run": "matched",
+                    }
+                    if common_mode_operating_point is not None
+                    else {"status": "not_requested"}
+                ),
+                "common_mode_ac_response": (
+                    {
+                        "source": "eda_result",
+                        "extraction_source": "software_inference",
+                        **common_mode_ac_diagnostics,
+                        "acceptance_role": "low_frequency_reference_and_shape",
+                        "standalone_bandwidth_required": False,
+                        "reference_complete": (
+                            isinstance(
+                                common_mode_ac_diagnostics.get("reference"), dict
+                            )
+                            and common_mode_ac_diagnostics["reference"].get(
+                                "status"
+                            )
+                            == "flat"
+                        ),
+                    }
+                    if common_mode_ac_diagnostics is not None
+                    else {"status": "not_requested"}
+                ),
+                "cmrr": (
+                    {
+                        "source": "software_inference",
+                        "definition": (
+                            "differential low-frequency gain divided by common-mode "
+                            "low-frequency gain"
+                        ),
+                        "tail_model": (
+                            "external ideal DC sink in parallel with explicit finite "
+                            "small-signal output resistance"
+                        ),
+                        "netlist_binding": "same_si_netlist_sha256",
+                        **cmrr_diagnostics,
+                    }
+                    if cmrr_diagnostics is not None
+                    else {"status": "not_requested"}
+                ),
+                "linearity_response": (
+                    {
+                        "source": "eda_result",
+                        "extraction_source": "software_inference",
+                        **linearity_diagnostics,
+                    }
+                    if linearity_diagnostics is not None
+                    else {"status": "not_requested"}
+                ),
             },
         }
 

@@ -34,6 +34,14 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
     differential_pair = task.circuit is CircuitKind.DIFFERENTIAL_PAIR
     analysis = task.resolved_analysis()
     common_source_ac = common_source and analysis is AnalysisKind.AC
+    differential_pair_ac = differential_pair and analysis is AnalysisKind.AC
+    differential_pair_cmrr = differential_pair_ac and (
+        "tail_output_resistance_ohm"
+        in (task.parameters.keys() | task.parameter_space.keys())
+    )
+    differential_pair_linearity = (
+        differential_pair and analysis is AnalysisKind.TRANSIENT
+    )
     common_source_linearity = (
         common_source and analysis is AnalysisKind.TRANSIENT
     )
@@ -54,6 +62,21 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         if common_source_quality
         else "用 OA 导出网表，先核对 DC operating point，再运行 Spectre 复数 AC sweep"
         if common_source_ac
+        else (
+            "用 OA 导出网表和外部共模/尾电流 testbench，先核对双支路 DC "
+            "operating point，再运行平衡差模 Spectre 复数 AC sweep"
+        )
+        if differential_pair_ac and not differential_pair_cmrr
+        else (
+            "用同一次 OA/si 网表分别运行平衡差模与同相共模 Spectre 复数 AC；"
+            "显式有限尾源输出电阻只存在于外部 testbench，并核对两次 DC 工作点一致"
+        )
+        if differential_pair_cmrr
+        else (
+            "用 OA 导出网表和外部共模/尾电流 testbench，先核对双支路 DC，"
+            "再运行平衡差分正弦 Spectre transient 幅度 sweep"
+        )
+        if differential_pair_linearity
         else (
             "用 OA 导出网表，先核对 DC operating point，再用 Spectre transient "
             "参数 sweep 运行相干正弦幅度扫描"
@@ -79,6 +102,17 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         if common_source_quality
         else "在 max_iterations 内运行 OA 同源 DC + 复数 AC 候选"
         if common_source_ac
+        else "在 max_iterations 内运行 OA 同源双支路 DC + 差模复数 AC 候选"
+        if differential_pair_ac and not differential_pair_cmrr
+        else (
+            "在 max_iterations 内运行 OA 同源双支路 DC + 差模/共模复数 AC 候选"
+        )
+        if differential_pair_cmrr
+        else (
+            "在 max_iterations 内运行 OA 同源双支路 DC + 平衡差分 transient "
+            "线性度候选"
+        )
+        if differential_pair_linearity
         else "在 max_iterations 内运行 OA 同源 DC + transient 线性度候选"
         if common_source_linearity
         else "在 max_iterations 内运行 OA 同源 DC + noise 候选"
@@ -96,6 +130,21 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         else "从复数 VOUT/VIN 提取低频增益、首个 -3 dB 带宽、GBW、"
         "unity-gain frequency，并结合 DC 工作区逐条判断规格"
         if common_source_ac
+        else (
+            "从复数 (OUTP-OUTN)/(INP-INN) 提取差模低频增益、首个 -3 dB "
+            "带宽、GBW、unity-gain frequency，并结合双支路 DC/KCL 逐条判断规格"
+        )
+        if differential_pair_ac and not differential_pair_cmrr
+        else (
+            "提取差模低频增益/首个 -3 dB 带宽、共模低频增益/响应形状，以及"
+            "CMRR 首次下降 3 dB 的带宽；两次 AC 必须共享 si 网表且 DC 工作点一致"
+        )
+        if differential_pair_cmrr
+        else (
+            "从 VINP-INN 与 VOUTP-OUTN 的相干稳态窗口提取差分增益、"
+            "HD2/HD3、THD、P1dB 和真实 VDD 功耗，并结合双支路 DC/KCL 判定规格"
+        )
+        if differential_pair_linearity
         else (
             "从相干稳态窗口提取增益、HD2/HD3、THD、P1dB 和真实 VDD "
             "功耗，并结合 DC 工作区逐条判断规格"

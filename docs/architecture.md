@@ -211,15 +211,21 @@ AC 核心结果只有在 DC 工作点为饱和、低频参考足够平坦且扫�
 
 同日的 raw CDF Gate 在全新 `vda_cs_topology_patch_001` nominal cell 上固定 Wfg=1 µm、L=0.03 µm、RD=10 kΩ、bias=0.35 V、VDD=0.9 V、CL=2 fF，只搜索 `MN0.fingers=["1","2"]`。两个点的 OA 定向回读、`si` 网表 `nf` 与总宽度分别为 1/1 µm 和 2/2 µm，网表 SHA 不同，均得到完整 DC+复数 AC。GBW 从 39.582 GHz 增至 58.375 GHz，两个点都通过本任务的饱和/KCL/gain/BW 约束，最终写回 fingers=2 并独立回读。首个点第一次在 `si -batch` 遇到 `WinError 10054`，未产生候选；VDA 恢复 RD=20 kΩ/fingers=1，随后从 checkpoint index 1 重试并保留失败 action。这个 Gate 证明明确点名的实际 CDF 字段可以进入同源有限搜索，不证明 PDK 的 233 个 MOS 字段都可持久化、物理独立或适合联合优化。
 
-## 差分对 Gate 3 nominal DC 路径
+## 差分对 Gate 3 nominal same-source 路径
 
 Gate 3 沿用现有 task、adapter、`si`、Spectre 和 checkpoint 机制。首个固定 DUT 是电阻负载 NMOS 差分对：`MN0(OUTP,INP,TAIL,VSS)`、`MN1(OUTN,INN,TAIL,VSS)`、`RD0(VDD,OUTP)`、`RD1(VDD,OUTN)`。OA 中显式保留 `TAIL` pin，不放测试用尾电流源；两个匹配共模输入源、VDD/VSS 和理想尾电流源都由本次 simulation wrapper 提供。这样同一 DUT 可以后续由人工 ADE 或另一个明确 testbench 驱动，不把自动化激励固化为设计拓扑。
 
-canonical OA 参数只有 `input_width_um`、`length_um` 和 `load_resistance_ohm`，且 semantic 写入必须同时更新两只 NMOS 或两只负载；`tail_current_ua`、`common_mode_v` 和 `vdd_v` 是 testbench 参数，`schematic.create`/`parameters.apply` 拒绝把它们伪装成 OA 属性。显式 `instance_parameter_updates`/`instance_parameter_space` 仍可点名单个实例的实际 CDF 字段，但固定差分对 adapter 会在随后 topology/semantic/geometry 回读中拒绝破坏当前匹配模板的结果。该限制不收窄 `existing_schematic` 的 Bridge 参数透传能力。
+canonical OA 参数只有 `input_width_um`、`length_um` 和 `load_resistance_ohm`，且 semantic 写入必须同时更新两只 NMOS 或两只负载；`tail_current_ua`、`common_mode_v`、`vdd_v`、可选 `tail_output_resistance_ohm` 和每端对称 `load_ff` 是 testbench 参数，`schematic.create`/`parameters.apply` 拒绝把它们伪装成 OA 属性。显式 `instance_parameter_updates`/`instance_parameter_space` 仍可点名单个实例的实际 CDF 字段，但固定差分对 adapter 会在随后 topology/semantic/geometry 回读中拒绝破坏当前匹配模板的结果。该限制不收窄 `existing_schematic` 的 Bridge 参数透传能力。
 
 同源链要求 OA 与 `si` 同时精确匹配四个 instance、端口和 master，并分别比较 MN0/MN1 的单指宽、`fingers/nf`、`m/multi`、总宽和 L，以及 RD0/RD1 的 R。wrapper 保存七个节点、VDD/TAIL source current 和两只 NMOS 的 `ids/vgs/vds/vdsat/gm/gds`。结果解析先核对输入/电源设定值和每只器件的节点 VGS/VDS，再独立检查支路和、尾源、电源源以及两只负载电流；任一 KCL 残差超过 1% 都停止，不把它当作不满足规格的普通候选。连续 OP/KCL/功耗值来自 `eda_result`，OA 回读来自 `bridge_readback`，双管饱和分类和一致性判断是 `software_inference`。
 
-2026-07-23 已完成该路径的本地 worker、parser、adapter、planner、demo、可行/不可行/预算测试和 3 点离线闭环；离线选择 `input_width_um=2 µm` 只属于 `software_inference`。尚未连接 nics4304 创建 cell 或运行真实 Spectre，因此当前状态只能称为 **differential-pair nominal DC contract implemented locally**。live create/readback、只读 DC、testbench-only bias 搜索、设计参数写回、失败恢复，以及后续 differential AC/CMRR/输入共模范围均是独立 Gate。
+2026-07-23 在新 `vb_pdk_smoke/vda_diffpair_gate3_001/schematic` 上完成 non-overwrite live Gate。nominal create/inspect、单点 DC、9 点尾电流×共模只读搜索、2/9 预算、全不可行恢复，以及 18 点 W/RD/尾电流设计搜索均复用现有 executor。设计搜索在候选 3 和 9 的 transport reset 后独立回读 OA 并续跑，最终 18/18 完成并写回 `W=2 µm/L=30 nm/RD=8 kΩ`；checkpoint 和最终 OA 回读一致。该状态证明 bounded writeback/recovery，不证明任意差分拓扑或参数空间。
+
+动态 analysis 继续复用同一 OA→`si` 网表。平衡差模 AC 使用 `+0.5/-0.5` V 小信号源，从 `(OUTP-OUTN)/(INP-INN)` 提取低频增益、首个 -3 dB 带宽、GBW 和 unity；最终 OA 的无额外负载结果为 `2.992 V/V`、`29.18/87.25/86.80 GHz`。四点 `tail_current_ua × load_ff` 只读搜索以 GBW 选出 `50 µA/0.5 fF`，OA 前后不变。`load_ff` 在 OUTP/OUTN 各放一个对称 wrapper 电容，不进入 DUT。
+
+CMRR 不能在理想尾源上直接宣称。任务只有显式提供 `tail_output_resistance_ohm` 时，才在外部 ideal DC sink 并联该电阻，分别运行平衡差模与同相共模 AC；两次运行只生成一份 `si` 网表，并要求 DC OP 和频率网格一致。CMRR 定义为两条复数传输函数之比；带宽定义为 CMRR 相对低频参考首次下降 3 dB，而不是共模传输自身的低通带宽。真实 `1 MΩ` Gate 得到 `58.59 dB` 低频 CMRR 和 `306.38 MHz` CMRR 带宽；第一次错误要求共模自身 -3 dB 带宽的 run 保持 `partial`，修正后另建成功记录。
+
+受控 transient 使用 Spectre nested `vindiff` sweep，VINP/VINN 分别为声明差分峰值的 `+0.5/-0.5`，并逐点检查实际 `VINP-INN` 基波。指标从 `VOUTP-OUTN` 相干窗口提取差分增益、HD2/HD3、THD、P1dB；VDD 源积分给出全电路功耗。100 MHz/每端 1 fF 的 7 点 live sweep 解析到输入 P1dB `110.9 mV peak`、输出 P1dB `293.5 mV peak`。输入共模 12 点只读 DC 则得到采样通过区间 `0.30–0.875 V`，并在 `WinError 10054` 后从 9/10 checkpoint 恢复；这只是理想尾源和当前 50 mV 余量门下的采样结论。
 
 ## 证据链
 
@@ -227,6 +233,6 @@ canonical OA 参数只有 `input_width_um`、`length_um` 和 `load_resistance_oh
 
 有限 PVT 还保存每个原始 condition 的完整 `CandidateEvaluation`、同一 OA/netlist identity、每个 analysis 的 testbench/model manifest、独立 noise PSF，以及跨条件 `all_conditions_required`/worst-case 聚合。缺一个条件、条件顺序或值与任务不一致、任一 analysis 不完整、netlist 漂移或 model corner 未映射都直接失败，不会降级为 nominal 结果。
 
-timing、过冲/欠冲、`supply_energy_per_cycle_fj`、`average_supply_power_uw`、共源与差分对的 DC/供电/KCL 连续指标，以及从 AC、相干 transient 或 noise PSF 提取的连续量标为 `eda_result`；OA 结构和参数标为 `bridge_readback`；任务显式给出的 VDD、负载、偏置、尾电流、analysis 或 sweep 字段标为 `user_input`；默认 analysis/sweep 字段、`gate_area_proxy_um2=(Wn+Wp)L`、饱和区分类、交点/压缩点规则和指标完整性判断是 `software_inference`。供电能量或功耗保留积分窗口和源电流方向，不能称为纯动态开关能量；AC、linearity 和 noise 指标也必须保存提取公式、范围和 unresolved 诊断，不能只保存一个无来源标量。后续 Maestro、Calibre 和 PEX 沿用同一证据模型。
+timing、过冲/欠冲、`supply_energy_per_cycle_fj`、`average_supply_power_uw`、共源与差分对的 DC/供电/KCL 连续指标，以及从 AC、相干 transient 或 noise PSF 提取的连续量标为 `eda_result`；OA 结构和参数标为 `bridge_readback`；任务显式给出的 VDD、负载、偏置、尾电流、有限尾源输出电阻、analysis 或 sweep 字段标为 `user_input`；默认 analysis/sweep 字段、`gate_area_proxy_um2=(Wn+Wp)L`、饱和区分类、CMRR/交点/压缩点规则和指标完整性判断是 `software_inference`。供电能量或功耗保留积分窗口和源电流方向，不能称为纯动态开关能量；AC、linearity 和 noise 指标也必须保存提取公式、范围和 unresolved 诊断，不能只保存一个无来源标量。后续 Maestro、Calibre 和 PEX 沿用同一证据模型。
 
 PVT 中的角名、温度和逐角 VDD 是 `user_input`；profile include 映射来自 `pdk_profile`，映射选择及 manifest 组合标为 `software_inference`；每角 Spectre 标量/波形指标仍是 `eda_result`；跨角保守 constraint/objective 值全部标为 `software_inference`。因此聚合最坏值不能被误读为某个单独 Spectre analysis 直接输出的标量。

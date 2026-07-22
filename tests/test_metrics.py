@@ -7,13 +7,18 @@ import pytest
 from virtuoso_design_agent.metrics import (
     MetricExtractionError,
     aggregate_common_source_linearity_metrics,
+    aggregate_differential_pair_linearity_metrics,
     extract_common_source_ac_metrics,
     extract_common_source_dc_metrics,
     extract_common_source_linearity_point_metrics,
     extract_common_source_noise_metrics,
     extract_dc_supply_metrics,
+    extract_differential_pair_ac_metrics,
+    extract_differential_pair_cmrr_response_metrics,
+    extract_differential_pair_common_mode_ac_metrics,
     extract_differential_pair_dc_metrics,
     extract_inverter_metrics,
+    extract_low_frequency_cmrr_metrics,
     extract_supply_metrics,
 )
 
@@ -356,6 +361,147 @@ def test_extract_common_source_ac_gain_bandwidth_gbw_and_unity_gain() -> None:
     assert diagnostics["bandwidth"]["status"] == "resolved"
     assert diagnostics["gbw"]["status"] == "resolved"
     assert diagnostics["unity_gain"]["status"] == "resolved"
+
+
+def test_extract_differential_pair_ac_uses_differential_nodes() -> None:
+    frequency_hz, _, transfer = _first_order_ac_response(
+        start_exponent=2, stop_exponent=8
+    )
+
+    metrics, diagnostics = extract_differential_pair_ac_metrics(
+        frequency_hz,
+        [0.5 + 0.0j] * len(frequency_hz),
+        [-0.5 + 0.0j] * len(frequency_hz),
+        [0.5 * value for value in transfer],
+        [-0.5 * value for value in transfer],
+    )
+
+    assert metrics["differential_low_frequency_gain_v_per_v"] == pytest.approx(
+        10.0, rel=1e-5
+    )
+    assert metrics["differential_bandwidth_3db_hz"] == pytest.approx(
+        1e6, rel=0.01
+    )
+    assert metrics["differential_gain_bandwidth_product_hz"] == pytest.approx(
+        1e7, rel=0.01
+    )
+    assert metrics["differential_unity_gain_frequency_hz"] == pytest.approx(
+        (10.0**2 - 1.0) ** 0.5 * 1e6,
+        rel=0.02,
+    )
+    assert diagnostics["analysis_complete"] is True
+    assert diagnostics["transfer"] == "(OUTP-OUTN)/(INP-INN) complex ratio"
+
+
+def test_extract_differential_pair_common_mode_ac_and_cmrr() -> None:
+    frequency_hz = [10.0 ** (2.0 + index / 10.0) for index in range(71)]
+    differential_transfer = [
+        -10.0 / (1.0 + 1j * frequency / 1e6)
+        for frequency in frequency_hz
+    ]
+    common_mode_transfer = [
+        -0.01 / (1.0 + 1j * frequency / 2e5)
+        for frequency in frequency_hz
+    ]
+    differential_metrics, _ = extract_differential_pair_ac_metrics(
+        frequency_hz,
+        [0.5 + 0.0j] * len(frequency_hz),
+        [-0.5 + 0.0j] * len(frequency_hz),
+        [0.5 * value for value in differential_transfer],
+        [-0.5 * value for value in differential_transfer],
+    )
+    common_mode_metrics, diagnostics = (
+        extract_differential_pair_common_mode_ac_metrics(
+            frequency_hz,
+            [1.0 + 0.0j] * len(frequency_hz),
+            [1.0 + 0.0j] * len(frequency_hz),
+            common_mode_transfer,
+            common_mode_transfer,
+        )
+    )
+    cmrr = extract_low_frequency_cmrr_metrics(
+        differential_metrics, common_mode_metrics
+    )
+
+    assert common_mode_metrics[
+        "common_mode_low_frequency_gain_v_per_v"
+    ] == pytest.approx(0.01, rel=1e-5)
+    assert common_mode_metrics["common_mode_bandwidth_3db_hz"] == pytest.approx(
+        2e5, rel=0.01
+    )
+    assert cmrr["low_frequency_cmrr_v_per_v"] == pytest.approx(1000.0)
+    assert cmrr["low_frequency_cmrr_db"] == pytest.approx(60.0)
+    assert diagnostics["analysis_complete"] is True
+    assert diagnostics["transfer"] == (
+        "((OUTP+OUTN)/2)/((INP+INN)/2) complex ratio"
+    )
+
+
+def test_extract_frequency_dependent_cmrr_bandwidth_from_paired_runs() -> None:
+    frequency_hz = [10.0 ** (2.0 + index / 10.0) for index in range(71)]
+    differential_transfer = [
+        -10.0 / (1.0 + 1j * frequency / 1e6)
+        for frequency in frequency_hz
+    ]
+    common_mode_transfer = [
+        -0.01 / (1.0 + 1j * frequency / 1e7)
+        for frequency in frequency_hz
+    ]
+
+    metrics, diagnostics = extract_differential_pair_cmrr_response_metrics(
+        frequency_hz,
+        [0.5 + 0.0j] * len(frequency_hz),
+        [-0.5 + 0.0j] * len(frequency_hz),
+        [0.5 * value for value in differential_transfer],
+        [-0.5 * value for value in differential_transfer],
+        frequency_hz,
+        [1.0 + 0.0j] * len(frequency_hz),
+        [1.0 + 0.0j] * len(frequency_hz),
+        common_mode_transfer,
+        common_mode_transfer,
+    )
+
+    assert metrics["low_frequency_cmrr_db"] == pytest.approx(60.0, abs=1e-4)
+    assert metrics["cmrr_bandwidth_3db_hz"] == pytest.approx(1.01e6, rel=0.03)
+    assert metrics["cmrr_at_sweep_stop_db"] < metrics["low_frequency_cmrr_db"]
+    assert diagnostics["analysis_complete"] is True
+    assert diagnostics["frequency_grid_consistency"] == "matched"
+
+
+def test_namespace_differential_pair_linearity_metrics() -> None:
+    metrics, diagnostics = aggregate_differential_pair_linearity_metrics(
+        [0.01, 0.1],
+        [
+            {
+                "large_signal_gain_v_per_v": 3.0,
+                "output_fundamental_v_peak": 0.03,
+                "thd_percent": 0.1,
+                "average_supply_power_uw": 45.0,
+                "output_peak_to_peak_v": 0.06,
+                "hd2_dbc": -80.0,
+                "hd3_dbc": -60.0,
+            },
+            {
+                "large_signal_gain_v_per_v": 2.5,
+                "output_fundamental_v_peak": 0.25,
+                "thd_percent": 2.0,
+                "average_supply_power_uw": 46.0,
+                "output_peak_to_peak_v": 0.5,
+                "hd2_dbc": -60.0,
+                "hd3_dbc": -35.0,
+            },
+        ],
+    )
+
+    assert metrics["differential_small_signal_gain_v_per_v"] == pytest.approx(3.0)
+    assert metrics["differential_input_1db_compression_v_peak"] > 0.01
+    assert metrics["differential_thd_at_max_amplitude_percent"] == pytest.approx(
+        2.0
+    )
+    assert metrics["transient_max_average_supply_power_uw"] == pytest.approx(46.0)
+    assert diagnostics["input_definition"] == (
+        "VINP-VINN differential peak amplitude"
+    )
 
 
 def test_common_source_ac_does_not_invent_bandwidth_beyond_sweep() -> None:

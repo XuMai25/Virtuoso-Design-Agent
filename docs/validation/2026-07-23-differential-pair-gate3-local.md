@@ -1,6 +1,8 @@
 # 2026-07-23 差分对 Gate 3 nominal DC 本地实现
 
-状态：**differential-pair nominal DC contract implemented locally; live TSMC N28 validation pending**。
+状态：**differential-pair nominal DC contract implemented locally; superseded by same-day live Gate**。
+
+> 后续 TSMC N28 create/DC/AC/CMRR/输入共模范围/transient、设计参数写回和 transport recovery 已完成，见[真实验证记录](2026-07-23-differential-pair-gate3-live.md)。本文件保留本地实现阶段的边界和测试证据，不再代表当前项目状态。
 
 本轮没有连接 nics4304、没有写远端 OA、没有运行远端 Spectre，也没有修改 `virtuoso-bridge-lite`。新增能力位于 VDA 的既有 task、planner、demo、subprocess adapter 和 Bridge worker 边界内；离线 demo 结果全部是 `software_inference`，不能作为电路性能证据。
 

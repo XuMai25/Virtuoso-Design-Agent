@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "id": "differential-pair-dc-design-tune-bridge",
+  "id": "differential-pair-common-mode-range-bridge",
   "operation": "design.tune",
   "circuit": "differential_pair",
   "target": {
@@ -10,11 +10,12 @@
   },
   "pdk_profile": "nics4304_tsmc28",
   "analysis": "dc",
-  "parameters": {"length_um": 0.03, "common_mode_v": 0.45, "vdd_v": 0.9},
+  "parameters": {
+    "tail_current_ua": 50.0,
+    "vdd_v": 0.9
+  },
   "parameter_space": {
-    "input_width_um": [0.5, 1.0, 2.0],
-    "load_resistance_ohm": [8000.0, 10000.0, 12000.0],
-    "tail_current_ua": [40.0, 50.0]
+    "common_mode_v": [0.2, 0.25, 0.3, 0.35, 0.45, 0.55, 0.65, 0.75, 0.8, 0.85]
   },
   "constraints": [
     {"metric": "branch_current_mismatch_percent", "relation": "<=", "value": 1.0},
@@ -23,18 +24,20 @@
     {"metric": "max_load_current_mismatch_percent", "relation": "<=", "value": 1.0},
     {"metric": "both_saturation_region", "relation": ">=", "value": 1.0},
     {"metric": "tail_voltage_v", "relation": ">=", "value": 0.0},
-    {"metric": "minimum_output_swing_margin_v", "relation": ">=", "value": 0.1},
+    {"metric": "minimum_output_swing_margin_v", "relation": ">=", "value": 0.05},
     {"metric": "output_offset_abs_mv", "relation": "<=", "value": 2.0},
     {"metric": "dc_supply_power_uw", "relation": "<=", "value": 50.0}
   ],
-  "objective": {"metric": "minimum_branch_gm_us", "goal": "maximize"},
+  "objective": {
+    "metric": "minimum_output_swing_margin_v",
+    "goal": "maximize"
+  },
   "create_if_missing": false,
   "safety": {
     "allow_remote_compute": true,
-    "allow_remote_write": true,
-    "allowed_library": "vb_pdk_smoke",
+    "allow_remote_write": false,
     "required_cell_prefix": "vda_",
     "replace_existing": false
   },
-  "limits": {"max_iterations": 18, "timeout_seconds": 600}
+  "limits": {"max_iterations": 10, "timeout_seconds": 600}
 }

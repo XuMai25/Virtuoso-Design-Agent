@@ -7,9 +7,13 @@ from typing import Any
 
 from ..metrics import (
     aggregate_common_source_linearity_metrics,
+    aggregate_differential_pair_linearity_metrics,
     extract_common_source_ac_metrics,
     extract_common_source_dc_metrics,
     extract_common_source_noise_metrics,
+    extract_differential_pair_ac_metrics,
+    extract_differential_pair_cmrr_response_metrics,
+    extract_differential_pair_common_mode_ac_metrics,
     extract_differential_pair_dc_metrics,
 )
 from ..models import (
@@ -763,11 +767,26 @@ class DeterministicDemoAdapter:
             width_um = effective_parameters["input_width_um"]
             length_um = effective_parameters["length_um"]
             resistance = effective_parameters["load_resistance_ohm"]
-            tail_current_a = effective_parameters.get("tail_current_ua", 50.0) * 1e-6
+            ideal_tail_current_a = (
+                effective_parameters.get("tail_current_ua", 50.0) * 1e-6
+            )
             common_mode_v = effective_parameters.get("common_mode_v", 0.45)
             vdd_v = effective_parameters.get("vdd_v", 0.9)
-            branch_current_a = 0.5 * tail_current_a
             beta_a_per_v2 = 200e-6 * width_um / length_um
+            tail_output_resistance = effective_parameters.get(
+                "tail_output_resistance_ohm"
+            )
+            total_tail_current_a = ideal_tail_current_a
+            if tail_output_resistance is not None:
+                for _ in range(20):
+                    trial_overdrive_v = math.sqrt(
+                        max(total_tail_current_a / beta_a_per_v2, 1e-12)
+                    )
+                    trial_tail_v = common_mode_v - 0.25 - trial_overdrive_v
+                    total_tail_current_a = ideal_tail_current_a + (
+                        trial_tail_v / tail_output_resistance
+                    )
+            branch_current_a = 0.5 * total_tail_current_a
             overdrive_v = math.sqrt(
                 max(2.0 * branch_current_a / beta_a_per_v2, 1e-12)
             )
@@ -783,8 +802,8 @@ class DeterministicDemoAdapter:
                 tail_v=tail_v,
                 branch_p_current_a=branch_current_a,
                 branch_n_current_a=branch_current_a,
-                tail_source_current_a=tail_current_a,
-                supply_source_current_a=-tail_current_a,
+                tail_source_current_a=total_tail_current_a,
+                supply_source_current_a=-total_tail_current_a,
                 branch_p_vdsat_v=overdrive_v,
                 branch_n_vdsat_v=overdrive_v,
                 branch_p_gm_s=gm_s,
@@ -793,6 +812,204 @@ class DeterministicDemoAdapter:
                 branch_n_gds_s=gds_s,
                 load_resistance_ohm=resistance,
             )
+            metrics["ideal_tail_source_current_ua"] = (
+                ideal_tail_current_a * 1e6
+            )
+            if tail_output_resistance is not None:
+                metrics.update(
+                    {
+                        "tail_output_resistance_ohm": tail_output_resistance,
+                        "tail_output_resistor_current_ua": abs(
+                            total_tail_current_a - ideal_tail_current_a
+                        )
+                        * 1e6,
+                    }
+                )
+            analysis_complete = True
+            analysis_issues: list[str] = []
+            analysis_warnings = [
+                "analytical differential-pair demo; not an EDA result"
+            ]
+            output_resistance = 1.0 / (1.0 / resistance + gds_s)
+            low_frequency_gain = gm_s * output_resistance
+            if task.resolved_analysis() is AnalysisKind.AC:
+                if task.ac_sweep is None:
+                    raise RuntimeError("demo differential AC analysis requires ac_sweep")
+                sweep = task.ac_sweep
+                decades = math.log10(sweep.stop_hz / sweep.start_hz)
+                steps = math.ceil(decades * sweep.points_per_decade)
+                frequency_hz = [
+                    sweep.start_hz * 10.0 ** (index / sweep.points_per_decade)
+                    for index in range(steps + 1)
+                    if sweep.start_hz
+                    * 10.0 ** (index / sweep.points_per_decade)
+                    <= sweep.stop_hz
+                ]
+                if not math.isclose(frequency_hz[-1], sweep.stop_hz, rel_tol=1e-12):
+                    frequency_hz.append(sweep.stop_hz)
+                capacitance_f = (2.0 + 0.2 * width_um) * 1e-15
+                pole_hz = 1.0 / (
+                    2.0 * math.pi * output_resistance * capacitance_f
+                )
+                transfer = [
+                    -low_frequency_gain / (1.0 + 1j * frequency / pole_hz)
+                    for frequency in frequency_hz
+                ]
+                ac_metrics, diagnostics = extract_differential_pair_ac_metrics(
+                    frequency_hz,
+                    [0.5 + 0.0j] * len(frequency_hz),
+                    [-0.5 + 0.0j] * len(frequency_hz),
+                    [0.5 * value for value in transfer],
+                    [-0.5 * value for value in transfer],
+                    reference_points=sweep.reference_points,
+                    max_reference_variation_db=sweep.max_reference_variation_db,
+                )
+                metrics.update(ac_metrics)
+                analysis_issues.extend(
+                    str(value) for value in diagnostics.get("issues", [])
+                )
+                analysis_warnings.extend(
+                    str(value) for value in diagnostics.get("warnings", [])
+                )
+                if metrics["both_saturation_region"] != 1.0:
+                    analysis_issues.append(
+                        "differential AC metrics require both branches in saturation"
+                    )
+                analysis_complete = (
+                    bool(diagnostics.get("analysis_complete", False))
+                    and not analysis_issues
+                )
+                if tail_output_resistance is not None:
+                    common_mode_gain = (
+                        gm_s
+                        * output_resistance
+                        / (1.0 + 2.0 * gm_s * tail_output_resistance)
+                    )
+                    common_mode_transfer = [
+                        -common_mode_gain
+                        / (1.0 + 1j * frequency / (10.0 * pole_hz))
+                        for frequency in frequency_hz
+                    ]
+                    (
+                        common_mode_metrics,
+                        common_mode_diagnostics,
+                    ) = extract_differential_pair_common_mode_ac_metrics(
+                        frequency_hz,
+                        [1.0 + 0.0j] * len(frequency_hz),
+                        [1.0 + 0.0j] * len(frequency_hz),
+                        common_mode_transfer,
+                        common_mode_transfer,
+                        reference_points=sweep.reference_points,
+                        max_reference_variation_db=(
+                            sweep.max_reference_variation_db
+                        ),
+                    )
+                    metrics.update(common_mode_metrics)
+                    cmrr_metrics, cmrr_diagnostics = (
+                        extract_differential_pair_cmrr_response_metrics(
+                            frequency_hz,
+                            [0.5 + 0.0j] * len(frequency_hz),
+                            [-0.5 + 0.0j] * len(frequency_hz),
+                            [0.5 * value for value in transfer],
+                            [-0.5 * value for value in transfer],
+                            frequency_hz,
+                            [1.0 + 0.0j] * len(frequency_hz),
+                            [1.0 + 0.0j] * len(frequency_hz),
+                            common_mode_transfer,
+                            common_mode_transfer,
+                            reference_points=sweep.reference_points,
+                            max_reference_variation_db=(
+                                sweep.max_reference_variation_db
+                            ),
+                        )
+                    )
+                    metrics.update(cmrr_metrics)
+                    common_mode_issues = [
+                        str(value)
+                        for value in common_mode_diagnostics.get("issues", [])
+                    ]
+                    common_mode_reference = common_mode_diagnostics.get(
+                        "reference", {}
+                    )
+                    common_mode_reference_complete = (
+                        isinstance(common_mode_reference, dict)
+                        and common_mode_reference.get("status") == "flat"
+                    )
+                    if not common_mode_reference_complete:
+                        analysis_issues.append(
+                            "common-mode AC low-frequency reference is not flat"
+                        )
+                    analysis_warnings.extend(
+                        "common-mode standalone bandwidth not used for CMRR "
+                        f"acceptance: {value}"
+                        for value in common_mode_issues
+                    )
+                    analysis_warnings.extend(
+                        f"common-mode AC: {value}"
+                        for value in common_mode_diagnostics.get("warnings", [])
+                    )
+                    analysis_issues.extend(
+                        f"CMRR response: {value}"
+                        for value in cmrr_diagnostics.get("issues", [])
+                    )
+                    analysis_warnings.extend(
+                        f"CMRR response: {value}"
+                        for value in cmrr_diagnostics.get("warnings", [])
+                    )
+                    analysis_complete = (
+                        analysis_complete
+                        and common_mode_reference_complete
+                        and bool(cmrr_diagnostics.get("analysis_complete", False))
+                        and not analysis_issues
+                    )
+            elif task.resolved_analysis() is AnalysisKind.TRANSIENT:
+                if task.linearity_sweep is None:
+                    raise RuntimeError(
+                        "demo differential transient analysis requires linearity_sweep"
+                    )
+                amplitudes = task.linearity_sweep.amplitudes_v
+                compression_scale_v = max(0.12, amplitudes[0] * 2.0)
+                point_metrics: list[dict[str, float]] = []
+                for amplitude in amplitudes:
+                    normalized = amplitude / compression_scale_v
+                    gain = low_frequency_gain / math.sqrt(
+                        1.0 + normalized**4
+                    )
+                    thd_percent = 1.5 * normalized**2
+                    power_uw = metrics["dc_supply_power_uw"] * (
+                        1.0 + 0.04 * normalized**2
+                    )
+                    point_metrics.append(
+                        {
+                            "large_signal_gain_v_per_v": gain,
+                            "output_fundamental_v_peak": amplitude * gain,
+                            "thd_percent": thd_percent,
+                            "average_supply_power_uw": power_uw,
+                            "output_peak_to_peak_v": 2.0 * amplitude * gain,
+                            "hd2_dbc": 20.0
+                            * math.log10(max(thd_percent / 500.0, 1e-15)),
+                            "hd3_dbc": 20.0
+                            * math.log10(max(thd_percent / 100.0, 1e-15)),
+                        }
+                    )
+                linearity_metrics, linearity_diagnostics = (
+                    aggregate_differential_pair_linearity_metrics(
+                        amplitudes,
+                        point_metrics,
+                        compression_db=task.linearity_sweep.compression_db,
+                    )
+                )
+                metrics.update(linearity_metrics)
+                analysis_warnings.extend(
+                    str(value)
+                    for value in linearity_diagnostics.get("warnings", [])
+                )
+                if metrics["both_saturation_region"] != 1.0:
+                    analysis_issues.append(
+                        "differential linearity metrics require both branches in "
+                        "saturation at the DC operating point"
+                    )
+                analysis_complete = not analysis_issues
             return AdapterResult(
                 data={
                     "parameters": effective_parameters,
@@ -800,11 +1017,9 @@ class DeterministicDemoAdapter:
                     "metric_sources": {
                         name: "software_inference" for name in metrics
                     },
-                    "analysis_complete": True,
-                    "analysis_issues": [],
-                    "analysis_warnings": [
-                        "analytical differential-pair demo; not an EDA result"
-                    ],
+                    "analysis_complete": analysis_complete,
+                    "analysis_issues": analysis_issues,
+                    "analysis_warnings": analysis_warnings,
                     "warning": "analytical demo only; not an EDA result",
                 },
                 evidence_source=EvidenceSource.SOFTWARE_INFERENCE,

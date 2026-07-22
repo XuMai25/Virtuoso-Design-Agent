@@ -540,6 +540,39 @@ def aggregate_common_source_linearity_metrics(
     }
 
 
+def aggregate_differential_pair_linearity_metrics(
+    amplitudes_v: Sequence[float],
+    point_metrics: Sequence[dict[str, float]],
+    *,
+    compression_db: float = 1.0,
+) -> tuple[dict[str, float], dict[str, object]]:
+    """Namespace a differential-input/differential-output linearity sweep."""
+    raw_metrics, diagnostics = aggregate_common_source_linearity_metrics(
+        amplitudes_v,
+        point_metrics,
+        compression_db=compression_db,
+    )
+    metrics = {
+        (
+            f"transient_{name}"
+            if "supply_power" in name
+            else f"differential_{name}"
+        ): value
+        for name, value in raw_metrics.items()
+    }
+    diagnostics.update(
+        {
+            "input_definition": "VINP-VINN differential peak amplitude",
+            "output_definition": "VOUTP-VOUTN differential waveform",
+            "metric_namespace": (
+                "differential_* for transfer/linearity and transient_* for "
+                "whole-circuit supply power"
+            ),
+        }
+    )
+    return metrics, diagnostics
+
+
 def extract_common_source_noise_metrics(
     frequency_hz: Sequence[float],
     output_noise_v_per_sqrt_hz: Sequence[float],
@@ -1074,6 +1107,291 @@ def extract_common_source_ac_metrics(
             }
         )
 
+    return metrics, diagnostics
+
+
+def extract_differential_pair_ac_metrics(
+    frequency_hz: Sequence[float],
+    inp_v: Sequence[complex | float],
+    inn_v: Sequence[complex | float],
+    outp_v: Sequence[complex | float],
+    outn_v: Sequence[complex | float],
+    *,
+    reference_points: int = 5,
+    max_reference_variation_db: float = 0.5,
+) -> tuple[dict[str, float], dict[str, object]]:
+    """Extract differential gain and bandwidth from balanced complex AC data."""
+    lengths = {
+        len(frequency_hz),
+        len(inp_v),
+        len(inn_v),
+        len(outp_v),
+        len(outn_v),
+    }
+    if len(lengths) != 1:
+        raise MetricExtractionError(
+            "differential AC frequency and four node vectors must have equal length"
+        )
+    differential_input = [
+        complex(inp) - complex(inn) for inp, inn in zip(inp_v, inn_v, strict=True)
+    ]
+    differential_output = [
+        complex(outp) - complex(outn)
+        for outp, outn in zip(outp_v, outn_v, strict=True)
+    ]
+    metrics, diagnostics = extract_common_source_ac_metrics(
+        frequency_hz,
+        differential_input,
+        differential_output,
+        reference_points=reference_points,
+        max_reference_variation_db=max_reference_variation_db,
+    )
+    return (
+        {f"differential_{name}": value for name, value in metrics.items()},
+        {
+            **diagnostics,
+            "signals": ["ac_freq", "ac_INP", "ac_INN", "ac_OUTP", "ac_OUTN"],
+            "transfer": "(OUTP-OUTN)/(INP-INN) complex ratio",
+            "stimulus": "balanced +0.5/-0.5 AC sources; differential input is 1 V",
+        },
+    )
+
+
+def extract_differential_pair_common_mode_ac_metrics(
+    frequency_hz: Sequence[float],
+    inp_v: Sequence[complex | float],
+    inn_v: Sequence[complex | float],
+    outp_v: Sequence[complex | float],
+    outn_v: Sequence[complex | float],
+    *,
+    reference_points: int = 5,
+    max_reference_variation_db: float = 0.5,
+) -> tuple[dict[str, float], dict[str, object]]:
+    """Extract common-mode gain from a matched in-phase AC stimulus."""
+    lengths = {
+        len(frequency_hz),
+        len(inp_v),
+        len(inn_v),
+        len(outp_v),
+        len(outn_v),
+    }
+    if len(lengths) != 1:
+        raise MetricExtractionError(
+            "common-mode AC frequency and four node vectors must have equal length"
+        )
+    common_input = [
+        0.5 * (complex(inp) + complex(inn))
+        for inp, inn in zip(inp_v, inn_v, strict=True)
+    ]
+    common_output = [
+        0.5 * (complex(outp) + complex(outn))
+        for outp, outn in zip(outp_v, outn_v, strict=True)
+    ]
+    metrics, diagnostics = extract_common_source_ac_metrics(
+        frequency_hz,
+        common_input,
+        common_output,
+        reference_points=reference_points,
+        max_reference_variation_db=max_reference_variation_db,
+    )
+    return (
+        {f"common_mode_{name}": value for name, value in metrics.items()},
+        {
+            **diagnostics,
+            "signals": ["ac_freq", "ac_INP", "ac_INN", "ac_OUTP", "ac_OUTN"],
+            "transfer": "((OUTP+OUTN)/2)/((INP+INN)/2) complex ratio",
+            "stimulus": "matched 1 V in-phase AC sources",
+        },
+    )
+
+
+def extract_low_frequency_cmrr_metrics(
+    differential_metrics: dict[str, float],
+    common_mode_metrics: dict[str, float],
+) -> dict[str, float]:
+    differential_gain = float(
+        differential_metrics["differential_low_frequency_gain_v_per_v"]
+    )
+    common_mode_gain = float(
+        common_mode_metrics["common_mode_low_frequency_gain_v_per_v"]
+    )
+    if (
+        not math.isfinite(differential_gain)
+        or not math.isfinite(common_mode_gain)
+        or differential_gain <= 0.0
+        or common_mode_gain <= 0.0
+    ):
+        raise MetricExtractionError(
+            "CMRR requires finite positive differential and common-mode gains"
+        )
+    ratio = differential_gain / common_mode_gain
+    return {
+        "low_frequency_cmrr_v_per_v": ratio,
+        "low_frequency_cmrr_db": 20.0 * math.log10(ratio),
+    }
+
+
+def extract_differential_pair_cmrr_response_metrics(
+    differential_frequency_hz: Sequence[float],
+    differential_inp_v: Sequence[complex | float],
+    differential_inn_v: Sequence[complex | float],
+    differential_outp_v: Sequence[complex | float],
+    differential_outn_v: Sequence[complex | float],
+    common_mode_frequency_hz: Sequence[float],
+    common_mode_inp_v: Sequence[complex | float],
+    common_mode_inn_v: Sequence[complex | float],
+    common_mode_outp_v: Sequence[complex | float],
+    common_mode_outn_v: Sequence[complex | float],
+    *,
+    reference_points: int = 5,
+    max_reference_variation_db: float = 0.5,
+) -> tuple[dict[str, float], dict[str, object]]:
+    """Extract frequency-dependent CMRR from paired differential/common AC runs."""
+    differential_lengths = {
+        len(differential_frequency_hz),
+        len(differential_inp_v),
+        len(differential_inn_v),
+        len(differential_outp_v),
+        len(differential_outn_v),
+    }
+    common_mode_lengths = {
+        len(common_mode_frequency_hz),
+        len(common_mode_inp_v),
+        len(common_mode_inn_v),
+        len(common_mode_outp_v),
+        len(common_mode_outn_v),
+    }
+    if len(differential_lengths) != 1 or len(common_mode_lengths) != 1:
+        raise MetricExtractionError(
+            "paired CMRR frequency and node vectors must have equal lengths per run"
+        )
+    if len(differential_frequency_hz) != len(common_mode_frequency_hz):
+        raise MetricExtractionError(
+            "paired CMRR differential and common-mode sweeps have different lengths"
+        )
+    differential_frequencies = [float(value) for value in differential_frequency_hz]
+    common_mode_frequencies = [float(value) for value in common_mode_frequency_hz]
+    for differential_frequency, common_mode_frequency in zip(
+        differential_frequencies, common_mode_frequencies, strict=True
+    ):
+        tolerance = max(abs(differential_frequency) * 1e-12, 1e-9)
+        if abs(differential_frequency - common_mode_frequency) > tolerance:
+            raise MetricExtractionError(
+                "paired CMRR differential and common-mode frequency grids differ"
+            )
+
+    differential_transfer: list[complex] = []
+    common_mode_transfer: list[complex] = []
+    for inp, inn, outp, outn in zip(
+        differential_inp_v,
+        differential_inn_v,
+        differential_outp_v,
+        differential_outn_v,
+        strict=True,
+    ):
+        differential_input = complex(inp) - complex(inn)
+        if abs(differential_input) <= 1e-30:
+            raise MetricExtractionError(
+                "paired CMRR differential run contains zero differential input"
+            )
+        differential_transfer.append(
+            (complex(outp) - complex(outn)) / differential_input
+        )
+    for inp, inn, outp, outn in zip(
+        common_mode_inp_v,
+        common_mode_inn_v,
+        common_mode_outp_v,
+        common_mode_outn_v,
+        strict=True,
+    ):
+        common_mode_input = 0.5 * (complex(inp) + complex(inn))
+        if abs(common_mode_input) <= 1e-30:
+            raise MetricExtractionError(
+                "paired CMRR common-mode run contains zero common-mode input"
+            )
+        common_mode_transfer.append(
+            0.5 * (complex(outp) + complex(outn)) / common_mode_input
+        )
+    if any(abs(value) <= 1e-30 for value in common_mode_transfer):
+        raise MetricExtractionError(
+            "paired CMRR requires non-zero common-mode transfer; use an explicit "
+            "finite tail-output model"
+        )
+    cmrr_transfer = [
+        differential / common_mode
+        for differential, common_mode in zip(
+            differential_transfer, common_mode_transfer, strict=True
+        )
+    ]
+    raw_metrics, raw_diagnostics = extract_common_source_ac_metrics(
+        differential_frequencies,
+        [1.0 + 0.0j] * len(differential_frequencies),
+        cmrr_transfer,
+        reference_points=reference_points,
+        max_reference_variation_db=max_reference_variation_db,
+    )
+    metric_mapping = {
+        "low_frequency_gain_v_per_v": "low_frequency_cmrr_v_per_v",
+        "low_frequency_gain_db": "low_frequency_cmrr_db",
+        "low_frequency_phase_deg": "low_frequency_cmrr_phase_deg",
+        "peak_gain_db": "peak_cmrr_db",
+        "peak_gain_frequency_hz": "peak_cmrr_frequency_hz",
+        "gain_peaking_db": "cmrr_peaking_db",
+        "bandwidth_3db_hz": "cmrr_bandwidth_3db_hz",
+        "phase_at_bandwidth_deg": "cmrr_phase_at_bandwidth_deg",
+    }
+    metrics = {
+        renamed: raw_metrics[name]
+        for name, renamed in metric_mapping.items()
+        if name in raw_metrics
+    }
+    cmrr_db = [20.0 * math.log10(max(abs(value), 1e-300)) for value in cmrr_transfer]
+    metrics.update(
+        {
+            "minimum_cmrr_db_over_sweep": min(cmrr_db),
+            "cmrr_at_sweep_stop_db": cmrr_db[-1],
+        }
+    )
+    diagnostics = dict(raw_diagnostics)
+    diagnostics["cmrr_bandwidth"] = diagnostics.pop("bandwidth")
+    diagnostics.pop("gbw", None)
+    diagnostics.pop("unity_gain", None)
+    diagnostics["issues"] = [
+        str(value).replace("bandwidth_3db_hz", "cmrr_bandwidth_3db_hz")
+        for value in diagnostics.get("issues", [])
+    ]
+    diagnostics["warnings"] = [
+        value
+        for value in diagnostics.get("warnings", [])
+        if not str(value).startswith("unity_gain_frequency_hz unresolved")
+    ]
+    diagnostics.update(
+        {
+            "differential_signals": [
+                "ac_freq",
+                "ac_INP",
+                "ac_INN",
+                "ac_OUTP",
+                "ac_OUTN",
+            ],
+            "common_mode_signals": [
+                "ac_freq",
+                "ac_INP",
+                "ac_INN",
+                "ac_OUTP",
+                "ac_OUTN",
+            ],
+            "transfer": (
+                "((OUTP-OUTN)/(INP-INN)) divided by "
+                "(((OUTP+OUTN)/2)/((INP+INN)/2))"
+            ),
+            "frequency_grid_consistency": "matched",
+            "definition": (
+                "CMRR bandwidth is the first 3 dB decline from the low-frequency "
+                "CMRR reference, not a standalone common-mode low-pass bandwidth"
+            ),
+        }
+    )
     return metrics, diagnostics
 
 

@@ -3082,6 +3082,143 @@ def test_differential_pair_demo_closes_balanced_dc_and_writes_best_width() -> No
     }
 
 
+def test_differential_pair_demo_ac_reuses_dc_and_exposes_bandwidth_metrics() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "differential-pair-ac-loop",
+            "operation": "design.close_loop",
+            "circuit": "differential_pair",
+            "target": {"library": "vda_test", "cell": "vda_diffpair_ac"},
+            "analysis": "ac",
+            "ac_sweep": {
+                "start_hz": 1e3,
+                "stop_hz": 1e12,
+                "points_per_decade": 20,
+            },
+            "parameters": {
+                "length_um": 0.03,
+                "load_resistance_ohm": 8_000.0,
+                "tail_current_ua": 50.0,
+                "tail_output_resistance_ohm": 1_000_000.0,
+                "common_mode_v": 0.45,
+                "vdd_v": 0.9,
+            },
+            "parameter_space": {"input_width_um": [2.0]},
+            "constraints": [
+                {
+                    "metric": "both_saturation_region",
+                    "relation": ">=",
+                    "value": 1.0,
+                },
+                {
+                    "metric": "differential_bandwidth_3db_hz",
+                    "relation": ">=",
+                    "value": 1.0,
+                },
+            ],
+            "objective": {
+                "metric": "differential_gain_bandwidth_product_hz",
+                "goal": "maximize",
+            },
+            "create_if_missing": True,
+            "safety": {
+                "allow_remote_compute": True,
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+            "limits": {"max_iterations": 1, "timeout_seconds": 600},
+        }
+    )
+    adapter = DeterministicDemoAdapter()
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert record.selected_metrics is not None
+    assert record.selected_metrics["differential_low_frequency_gain_v_per_v"] > 1.0
+    assert record.selected_metrics["differential_bandwidth_3db_hz"] > 0.0
+    assert record.selected_metrics["differential_gain_bandwidth_product_hz"] > 0.0
+    assert record.selected_metrics["common_mode_low_frequency_gain_v_per_v"] > 0.0
+    assert record.selected_metrics["common_mode_bandwidth_3db_hz"] > 0.0
+    assert record.selected_metrics["low_frequency_cmrr_db"] > 0.0
+    assert record.selected_metrics["cmrr_bandwidth_3db_hz"] > 0.0
+    assert record.candidates[0].evidence_source.value == "software_inference"
+
+
+def test_differential_pair_demo_transient_exposes_linearity_metrics() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "differential-pair-linearity-loop",
+            "operation": "design.close_loop",
+            "circuit": "differential_pair",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_diffpair_linearity",
+            },
+            "analysis": "transient",
+            "linearity_sweep": {
+                "frequency_hz": 100e6,
+                "amplitudes_v": [0.005, 0.05, 0.15, 0.25],
+            },
+            "parameters": {
+                "length_um": 0.03,
+                "load_resistance_ohm": 8_000.0,
+                "tail_current_ua": 50.0,
+                "common_mode_v": 0.45,
+                "vdd_v": 0.9,
+                "load_ff": 1.0,
+            },
+            "parameter_space": {"input_width_um": [2.0]},
+            "constraints": [
+                {
+                    "metric": "both_saturation_region",
+                    "relation": ">=",
+                    "value": 1.0,
+                },
+                {
+                    "metric": "differential_small_signal_gain_v_per_v",
+                    "relation": ">=",
+                    "value": 1.0,
+                },
+            ],
+            "objective": {
+                "metric": "differential_input_1db_compression_v_peak",
+                "goal": "maximize",
+            },
+            "create_if_missing": True,
+            "safety": {
+                "allow_remote_compute": True,
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+            "limits": {"max_iterations": 1, "timeout_seconds": 600},
+        }
+    )
+    adapter = DeterministicDemoAdapter()
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert record.selected_metrics is not None
+    assert record.selected_metrics[
+        "differential_small_signal_gain_v_per_v"
+    ] > 1.0
+    assert record.selected_metrics[
+        "differential_input_1db_compression_v_peak"
+    ] > 0.0
+    assert record.selected_metrics[
+        "differential_thd_at_max_amplitude_percent"
+    ] > 0.0
+    assert record.selected_metrics["transient_max_average_supply_power_uw"] > 0.0
+    assert record.candidates[0].evidence_source.value == "software_inference"
+
+
 def test_differential_pair_infeasible_search_restores_initial_oa() -> None:
     task = TaskSpec.model_validate(
         {

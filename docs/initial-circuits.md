@@ -43,19 +43,20 @@ Gate 2 已分别覆盖 bias/load、W/RD/RS 和 L/VDD 网格，能对固定 OA �
 
 ## Gate 3：差分对
 
-状态：2026-07-23 已完成固定电阻负载 NMOS 差分对的 **nominal DC 本地实现**，尚未执行新的远端 OA 写入或真实 Spectre smoke。不能把离线 demo 数值称为 EDA 结果，也不能把本状态升级为 Gate 3 live 通过。
+状态：2026-07-23 已在新建且不覆盖的 `vb_pdk_smoke/vda_diffpair_gate3_001/schematic` 上完成固定电阻负载 NMOS 差分对的 **nominal same-source DC/AC/CMRR/linearity live Gate**。OA 创建/回读、设计参数有限搜索与最佳写回、不可行恢复、预算截断、transport checkpoint、只读 testbench 搜索和动态指标均有真实 TSMC N28 证据；这仍不是带真实尾管、noise、PVT、mismatch 或 ADE 人工交接的完整差分放大器。
 
 - OA DUT 固定为 `MN0/MN1/RD0/RD1`；连接为 `MN0(OUTP,INP,TAIL,VSS)`、`MN1(OUTN,INN,TAIL,VSS)`、`RD0(VDD,OUTP)`、`RD1(VDD,OUTN)`，顶层 pins 为 `INP/INN/OUTP/OUTN/TAIL/VDD/VSS`。
 - 尾电流源和匹配共模输入源属于外部 testbench，不写进 DUT OA。这样 VDA 自动 wrapper 与后续人工 ADE 都能使用同一 cellview。
-- OA semantic 参数为两管共同 `input_width_um/length_um` 和两负载共同 `load_resistance_ohm`；testbench 参数为 `tail_current_ua/common_mode_v/vdd_v`。创建或参数应用会拒绝把 testbench 参数持久化。
+- OA semantic 参数为两管共同 `input_width_um/length_um` 和两负载共同 `load_resistance_ohm`；testbench 参数为 `tail_current_ua/common_mode_v/vdd_v`、可选有限 `tail_output_resistance_ohm` 和每端对称 `load_ff`。创建或参数应用会拒绝把 testbench 参数持久化。
 - `si` parser 要求两管、两负载的 topology/master 完全匹配，并核对两管单指宽、指数量、multiplicity、总宽、L 和两只 R 的对称性；OA 与网表任一差异停止。
 - nominal DC 指标包括两支路 Id、支路失配、尾源/电源/两负载 KCL、VGS/VDS/VDSAT、双管饱和余量、输出偏移/共模、上下摆幅余量、gm/gds、最小 intrinsic gain 和真实 VDD 功耗。三类 KCL 任一超过 1% 是证据错误，不是普通不可行候选。
-- `schematic.create`、`schematic.inspect`、`parameters.apply`、`simulation.run`、`design.tune` 和 `design.close_loop` 已接入；原始 CDF 参数仍可显式 apply/有限 search，但若最终破坏固定匹配模板，对称回读会拒绝继续。
-- 本地 3 点 demo 在明确标记 `software_inference` 的分析模型下选择 `input_width_um=2 µm`；可行、全不可行恢复和预算截断均有单元测试。它只证明编排与保护语义。
+- `schematic.create`、`schematic.inspect`、`parameters.apply`、`simulation.run`、`design.tune` 和 `design.close_loop` 共用原有 executor/checkpoint，不复制 Bridge。18 点 W/RD/尾电流搜索经历两次 transport 恢复后写回 `W=2 µm/L=30 nm/RD=8 kΩ`；预算任务只提交已评估前缀的最佳点，全不可行任务恢复精确初值。
+- 该最终 OA 在无额外负载的平衡差模 AC 下得到低频增益 `2.992 V/V`、`29.18 GHz` 带宽、`87.25 GHz` GBW 和 `86.80 GHz` unity。加入每端 0.5/2 fF 后的四点尾电流×负载只读搜索均完整；网格内最佳为 `50 µA/0.5 fF`，GBW `55.71 GHz`。所有这些点的 OA `si` 网表 SHA 都是 `45282f...cd588`。
+- CMRR Gate 在外部理想 DC 尾源并联显式 `1 MΩ` 小信号输出电阻；差模与同相共模分别运行、共享同一 `si` 网表，并要求两次 DC OP 一致。低频 CMRR 为 `58.59 dB`，首次下降 3 dB 的 CMRR 带宽为 `306.38 MHz`。共模增益随频率上升，故不再错误要求“共模自身的低通 -3 dB 带宽”；第一次使用该错误判据的 `partial` 记录被保留。
+- 输入共模 0.20–0.90 V 的 12 个采样点表明：0.25 V 因尾节点低于 0 V 失败，0.30 V 通过；0.875 V 的最小余量为 62.29 mV 并通过，0.90 V 虽仍在饱和区但余量 40.44 mV，低于 50 mV 门限。故当前只称采样通过区间 `0.30–0.875 V`，低/高边界分别夹在 `0.25–0.30 V` 与 `0.875–0.90 V`，不外推为连续解析 ICMR。
+- 100 MHz、每端 1 fF 的 7 点平衡差分 transient sweep 得到小信号增益 `2.991 V/V`、输入 P1dB `110.9 mV peak`、输出 P1dB `293.5 mV peak`；最大 250 mV 输入时 THD `16.54%`、HD3 `-15.75 dBc`，HD2 接近数值底噪，平均 VDD 功耗约 `45.0 µW`。每点都验证实际 `VINP-INN` 基波与声明幅度一致。
 
-下一 live Gate 使用新 cell `vb_pdk_smoke/vda_diffpair_gate3_001/schematic`，顺序为非覆盖创建与独立回读、单点只读 DC、只改尾电流/共模且不写 OA 的有限搜索，再做 W/RD 的逐候选写回、全不可行、预算和 transport checkpoint。完成这些证据前不进入 differential AC。
-
-后续才扩展输入共模范围、差模增益、带宽、CMRR 和受控 transient；nominal 稳定后再把有限 PVT 作为可选加严项，不在第一步盲目扩展组合。
+下一 Gate 聚焦真实尾电流器件/偏置网络与 differential noise；可选 PVT 只在任务显式启用时加严，不默认附加。差分对 ADE/Maestro setup、人工打开/调整/重跑、mismatch/Monte Carlo 和多 test/multi-analysis 仍未闭合。
 
 ## 升级原则
 

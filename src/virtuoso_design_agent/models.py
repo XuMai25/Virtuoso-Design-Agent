@@ -1519,22 +1519,59 @@ class TaskSpec(StrictModel):
                         "analysis"
                     )
             elif self.circuit is CircuitKind.DIFFERENTIAL_PAIR:
-                if resolved_analysis is not AnalysisKind.DC:
+                if resolved_analysis not in {
+                    AnalysisKind.DC,
+                    AnalysisKind.AC,
+                    AnalysisKind.TRANSIENT,
+                }:
                     raise ValueError(
-                        "differential_pair currently supports only dc analysis"
+                        "differential_pair currently supports dc, ac, or transient "
+                        "analysis"
                     )
-                if any(
-                    setting is not None
-                    for setting in (
-                        self.ac_sweep,
-                        self.linearity_sweep,
-                        self.noise_sweep,
+                if self.noise_sweep is not None:
+                    raise ValueError(
+                        "differential_pair does not yet accept noise sweep settings"
                     )
+                if resolved_analysis is AnalysisKind.AC and self.ac_sweep is None:
+                    raise ValueError("differential-pair AC analysis requires ac_sweep")
+                if (
+                    resolved_analysis is AnalysisKind.TRANSIENT
+                    and self.linearity_sweep is None
                 ):
                     raise ValueError(
-                        "differential_pair DC does not accept AC, linearity, or "
-                        "noise sweep settings"
+                        "differential-pair transient analysis requires linearity_sweep"
                     )
+                if resolved_analysis is AnalysisKind.DC and (
+                    self.ac_sweep is not None or self.linearity_sweep is not None
+                ):
+                    raise ValueError(
+                        "differential-pair DC does not accept dynamic sweep settings"
+                    )
+                if (
+                    resolved_analysis is AnalysisKind.AC
+                    and self.linearity_sweep is not None
+                ):
+                    raise ValueError(
+                        "differential-pair AC does not accept linearity_sweep"
+                    )
+                if (
+                    resolved_analysis is AnalysisKind.TRANSIENT
+                    and self.ac_sweep is not None
+                ):
+                    raise ValueError(
+                        "differential-pair transient does not accept ac_sweep"
+                    )
+                if self.operation in _TUNING_OPERATIONS:
+                    declared_parameters = self.parameters.keys() | self.parameter_space.keys()
+                    missing = sorted(
+                        {"tail_current_ua", "common_mode_v", "vdd_v"}
+                        - declared_parameters
+                    )
+                    if missing:
+                        raise ValueError(
+                            "differential_pair tuning requires explicit testbench "
+                            "parameters for resumable evidence: " + ", ".join(missing)
+                        )
             elif analysis_settings:
                 raise ValueError(
                     "analysis settings are not implemented for this circuit"

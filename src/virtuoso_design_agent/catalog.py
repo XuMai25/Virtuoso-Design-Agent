@@ -154,7 +154,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     ),
     CircuitKind.DIFFERENTIAL_PAIR: CircuitCapability(
         circuit=CircuitKind.DIFFERENTIAL_PAIR,
-        stage="Gate 3 nominal DC implemented; live validation pending",
+        stage="Gate 3 nominal same-source DC/AC/CMRR/linearity verified",
         executable=True,
         operations=(
             Operation.SCHEMATIC_CREATE,
@@ -169,15 +169,19 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "length_um",
             "load_resistance_ohm",
             "tail_current_ua",
+            "tail_output_resistance_ohm",
             "common_mode_v",
             "vdd_v",
+            "load_ff",
         ),
         explicit_instance_parameters=True,
         evidence_gate=(
             "exact MN0/MN1/RD0/RD1 OA topology + symmetric W/L/R readback + "
             "si netlist consistency + Spectre DC branch balance/tail-current/KCL/"
-            "dual-saturation metrics; local implementation only, live TSMC N28 "
-            "create/DC/search and differential AC/CMRR remain pending"
+            "dual-saturation metrics + bounded OA writeback/recovery + differential "
+            "AC gain/bandwidth/GBW + finite-tail paired CMRR response/bandwidth + "
+            "sampled input-common-mode range + coherent differential transient "
+            "THD/P1dB and read-only tail/load AC tuning live on TSMC N28"
         ),
     ),
 }
@@ -253,7 +257,14 @@ def validate_task_capability(task: TaskSpec) -> None:
         and task.operation in {Operation.SCHEMATIC_CREATE, Operation.PARAMETERS_APPLY}
     ):
         testbench_only = sorted(
-            supplied & {"tail_current_ua", "common_mode_v", "vdd_v"}
+            supplied
+            & {
+                "tail_current_ua",
+                "tail_output_resistance_ohm",
+                "common_mode_v",
+                "vdd_v",
+                "load_ff",
+            }
         )
         if testbench_only:
             raise UnsupportedCapability(
@@ -268,6 +279,15 @@ def validate_task_capability(task: TaskSpec) -> None:
         raise UnsupportedCapability(
             "load_ff is a common-source dynamic-analysis testbench parameter and "
             "cannot be used with analysis='dc'"
+        )
+    if (
+        task.circuit is CircuitKind.DIFFERENTIAL_PAIR
+        and "load_ff" in supplied
+        and task.resolved_analysis() is AnalysisKind.DC
+    ):
+        raise UnsupportedCapability(
+            "load_ff is a differential-pair dynamic-analysis testbench parameter "
+            "and cannot be used with analysis='dc'"
         )
     if (
         task.circuit is CircuitKind.COMMON_SOURCE

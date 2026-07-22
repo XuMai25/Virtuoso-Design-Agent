@@ -265,7 +265,22 @@ def test_differential_pair_dc_gate_accepts_only_declared_parameters() -> None:
         build_plan(invalid)
 
 
-def test_differential_pair_rejects_unimplemented_ac_analysis() -> None:
+def test_differential_pair_tuning_requires_explicit_testbench_defaults() -> None:
+    data = _base_task()
+    data["circuit"] = "differential_pair"
+    data["analysis"] = "dc"
+    data["parameters"] = {
+        "length_um": 0.03,
+        "tail_current_ua": 50.0,
+        "vdd_v": 0.9,
+    }
+    data["parameter_space"] = {"input_width_um": [0.5, 1.0]}
+
+    with pytest.raises(ValidationError, match="common_mode_v"):
+        TaskSpec.model_validate(data)
+
+
+def test_differential_pair_accepts_ac_with_an_explicit_sweep() -> None:
     data = _base_task()
     data.update(
         {
@@ -274,6 +289,7 @@ def test_differential_pair_rejects_unimplemented_ac_analysis() -> None:
             "ac_sweep": {"start_hz": 1e3, "stop_hz": 1e9},
             "parameters": {
                 "tail_current_ua": 50.0,
+                "tail_output_resistance_ohm": 1_000_000.0,
                 "common_mode_v": 0.45,
                 "vdd_v": 0.9,
             },
@@ -281,7 +297,46 @@ def test_differential_pair_rejects_unimplemented_ac_analysis() -> None:
         }
     )
 
-    with pytest.raises(ValidationError, match="currently supports only dc"):
+    task = TaskSpec.model_validate(data)
+
+    assert task.resolved_analysis().value == "ac"
+    plan = build_plan(task)
+    assert plan.circuit.value == "differential_pair"
+    assert any("差模/共模" in step.description for step in plan.steps)
+
+    data.pop("ac_sweep")
+    with pytest.raises(ValidationError, match="requires ac_sweep"):
+        TaskSpec.model_validate(data)
+
+
+def test_differential_pair_accepts_balanced_transient_linearity_sweep() -> None:
+    data = {
+        "id": "diffpair-linearity",
+        "operation": "simulation.run",
+        "circuit": "differential_pair",
+        "target": {"library": "vda_test", "cell": "vda_diffpair"},
+        "analysis": "transient",
+        "linearity_sweep": {
+            "frequency_hz": 100e6,
+            "amplitudes_v": [0.005, 0.05, 0.15],
+        },
+        "parameters": {
+            "tail_current_ua": 50.0,
+            "common_mode_v": 0.45,
+            "vdd_v": 0.9,
+            "load_ff": 1.0,
+        },
+        "safety": {"allow_remote_compute": True},
+    }
+
+    task = TaskSpec.model_validate(data)
+    plan = build_plan(task)
+
+    assert task.resolved_analysis().value == "transient"
+    assert any("差分正弦" in step.description for step in plan.steps)
+
+    data.pop("linearity_sweep")
+    with pytest.raises(ValidationError, match="requires linearity_sweep"):
         TaskSpec.model_validate(data)
 
 
@@ -307,6 +362,21 @@ def test_differential_pair_create_rejects_testbench_only_parameters() -> None:
 
     with pytest.raises(UnsupportedCapability, match="tail_current_ua"):
         build_plan(task)
+
+    finite_tail = task.model_copy(
+        update={
+            "parameters": {
+                "input_width_um": 1.0,
+                "length_um": 0.03,
+                "load_resistance_ohm": 10_000.0,
+                "tail_output_resistance_ohm": 1_000_000.0,
+            }
+        }
+    )
+    with pytest.raises(
+        UnsupportedCapability, match="tail_output_resistance_ohm"
+    ):
+        build_plan(finite_tail)
 
 
 def test_common_source_gate_accepts_only_implemented_dc_parameters() -> None:
