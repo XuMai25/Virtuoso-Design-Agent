@@ -526,6 +526,11 @@ class TaskExecutor:
                     )
 
     @staticmethod
+    def _is_ade_output_evaluation_error(value: Any) -> bool:
+        normalized = " ".join(str(value or "").strip().lower().split())
+        return normalized in {"eval err", "evaluation error", "error"}
+
+    @staticmethod
     def _assert_ade_sweep_evidence(task: TaskSpec, data: dict[str, Any]) -> None:
         assert task.ade_run is not None
         sweep = task.ade_run.sweep_verification
@@ -623,6 +628,92 @@ class TaskExecutor:
             for test in sweep.expected_tests
         }
         expected_points = {point.point: point for point in sweep.points}
+        expected_error_cells: dict[tuple[int, str], dict[str, Any]] = {}
+        for expectation in sweep.expected_output_evaluation_errors:
+            for point in sweep.points:
+                if all(
+                    point.values[name] == value
+                    for name, value in expectation.point_values.items()
+                ):
+                    expected_error_cells[(point.point, expectation.output)] = {
+                        "point": point.point,
+                        "test": expectation.test,
+                        "output": expectation.output,
+                        "point_values": dict(expectation.point_values),
+                    }
+        raw_error_rows = data.get("output_evaluation_errors")
+        expected_sources = {
+            "expected": "user_input" if expected_error_cells else None,
+            "actual": "eda_result",
+            "comparison": "software_inference",
+        }
+        if (
+            data.get("expected_output_evaluation_errors_verified") is not True
+            or data.get("output_evaluation_error_count")
+            != len(expected_error_cells)
+            or data.get("output_evaluation_error_evidence_sources")
+            != expected_sources
+            or not isinstance(raw_error_rows, list)
+            or len(raw_error_rows) != len(expected_error_cells)
+        ):
+            raise RuntimeError(
+                "ADE sweep output evaluation-error evidence was incomplete"
+            )
+        error_rows: dict[tuple[int, str], dict[str, Any]] = {}
+        for row in raw_error_rows:
+            if not isinstance(row, dict):
+                raise RuntimeError(
+                    "ADE sweep output evaluation-error evidence was malformed"
+                )
+            try:
+                identity = (int(row.get("point")), str(row.get("output") or ""))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "ADE sweep output evaluation-error point was invalid"
+                ) from exc
+            expected_row = expected_error_cells.get(identity)
+            if (
+                expected_row is None
+                or identity in error_rows
+                or row.get("test") != expected_row["test"]
+                or row.get("point_values") != expected_row["point_values"]
+                or row.get("expectation_evidence_source") != "user_input"
+                or row.get("raw_evidence_source") != "eda_result"
+                or not TaskExecutor._is_ade_output_evaluation_error(
+                    row.get("raw_value")
+                )
+            ):
+                raise RuntimeError(
+                    "ADE sweep output evaluation-error evidence did not match the "
+                    "declared point/output cells"
+                )
+            error_rows[identity] = row
+        if set(error_rows) != set(expected_error_cells):
+            raise RuntimeError(
+                "ADE sweep output evaluation-error evidence omitted a declared cell"
+            )
+        actual_error_cells: dict[tuple[int, str], str] = {}
+        for point_evidence in raw_points:
+            if not isinstance(point_evidence, dict):
+                continue
+            try:
+                point_number = int(point_evidence.get("point"))
+            except (TypeError, ValueError):
+                continue
+            scalar_outputs = point_evidence.get("scalar_outputs")
+            if not isinstance(scalar_outputs, dict):
+                continue
+            for output, value in scalar_outputs.items():
+                if TaskExecutor._is_ade_output_evaluation_error(value):
+                    actual_error_cells[(point_number, str(output))] = str(value)
+        if set(actual_error_cells) != set(expected_error_cells) or any(
+            actual_error_cells[identity] != str(error_rows[identity]["raw_value"])
+            for identity in expected_error_cells
+        ):
+            raise RuntimeError(
+                "ADE sweep trusted scalar outputs did not exactly preserve the "
+                "declared output evaluation errors"
+            )
         input_consistency_by_key: dict[tuple[int, str, str], dict[str, Any]] = {}
         for item in raw_input_consistency:
             if not isinstance(item, dict):
@@ -730,12 +821,18 @@ class TaskExecutor:
                 or manifest_log.get("size_bytes") != history_log.get("size_bytes")
                 or int(history_log.get("size_bytes") or 0) <= 0
                 or history_log.get("points_completed") != len(sweep.points)
-                or history_log.get("simulation_errors") != 0
+                or history_log.get("simulation_errors")
+                != len(expected_error_cells)
+                or history_log.get(
+                    "simulation_errors_accounted_by_output_evaluation_errors"
+                )
+                != len(expected_error_cells)
+                or history_log.get("unaccounted_simulation_errors") != 0
                 or history_log.get("history_completed") is not True
             ):
                 raise RuntimeError(
                     "ADE sweep history log did not prove the declared completed "
-                    "point count without simulation errors"
+                    "point count without unaccounted simulation errors"
                 )
         elif (
             data.get("sweep_history_log_evidence") is not None

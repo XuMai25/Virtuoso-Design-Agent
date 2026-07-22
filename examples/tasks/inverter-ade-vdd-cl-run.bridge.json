@@ -1,0 +1,168 @@
+{
+  "schema_version": 1,
+  "id": "inverter-ade-vdd-cl-run",
+  "operation": "ade.run",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_ade_sweep_inv_001",
+    "view": "maestro"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "ade_run": {
+    "backend": "maestro",
+    "require_structured_outputs": true,
+    "require_artifact_manifest": true,
+    "require_simulator_input_consistency": true,
+    "sweep_verification": {
+      "expected_tests": ["VDA"],
+      "variables": [
+        {
+          "name": "CL",
+          "scope": "global",
+          "expected_value": "1f,2f,4f"
+        },
+        {
+          "name": "VDD",
+          "scope": "global",
+          "expected_value": "0.8,0.9"
+        }
+      ],
+      "points": [
+        {"point": 1, "values": {"CL": "1f", "VDD": "0.8"}},
+        {"point": 2, "values": {"CL": "1f", "VDD": "0.9"}},
+        {"point": 3, "values": {"CL": "2f", "VDD": "0.8"}},
+        {"point": 4, "values": {"CL": "2f", "VDD": "0.9"}},
+        {"point": 5, "values": {"CL": "4f", "VDD": "0.8"}},
+        {"point": 6, "values": {"CL": "4f", "VDD": "0.9"}}
+      ],
+      "input_bindings": [
+        {
+          "test": "VDA",
+          "variable": "CL",
+          "instance": "CL0",
+          "oa_parameter": "c"
+        },
+        {
+          "test": "VDA",
+          "variable": "VDD",
+          "instance": "VDD0",
+          "oa_parameter": "vdc"
+        },
+        {
+          "test": "VDA",
+          "variable": "VDD",
+          "instance": "VIN0",
+          "oa_parameter": "v2"
+        }
+      ],
+      "expected_output_evaluation_errors": [
+        {
+          "test": "VDA",
+          "output": "Rise",
+          "point_values": {"VDD": "0.8"}
+        },
+        {
+          "test": "VDA",
+          "output": "RiseFallSkew",
+          "point_values": {"VDD": "0.8"}
+        }
+      ]
+    },
+    "result_mapping": {
+      "parameters": [
+        {
+          "source": "CL",
+          "parameter": "load_ff",
+          "scale": 1000000000000000.0,
+          "unit": "fF"
+        },
+        {
+          "source": "VDD",
+          "parameter": "vdd_v",
+          "scale": 1.0,
+          "unit": "V"
+        }
+      ],
+      "metrics": [
+        {
+          "test": "VDA",
+          "output": "TphlVdd",
+          "expected_expression": "cross(clip(VT(\"/OUT\") 80p 130p) (0.5 * VAR(\"VDD\")) 1 \"falling\" nil nil nil) - cross(clip(VT(\"/IN\") 80p 130p) (0.5 * VAR(\"VDD\")) 1 \"rising\" nil nil nil)",
+          "metric": "t_phl_ps",
+          "scale": 1000000000000.0,
+          "unit": "ps"
+        },
+        {
+          "test": "VDA",
+          "output": "TplhVdd",
+          "expected_expression": "cross(clip(VT(\"/OUT\") 130p 180p) (0.5 * VAR(\"VDD\")) 1 \"rising\" nil nil nil) - cross(clip(VT(\"/IN\") 130p 180p) (0.5 * VAR(\"VDD\")) 1 \"falling\" nil nil nil)",
+          "metric": "t_plh_ps",
+          "scale": 1000000000000.0,
+          "unit": "ps"
+        },
+        {
+          "test": "VDA",
+          "output": "DelayVdd",
+          "expected_expression": "((cross(clip(VT(\"/OUT\") 80p 130p) (0.5 * VAR(\"VDD\")) 1 \"falling\" nil nil nil) - cross(clip(VT(\"/IN\") 80p 130p) (0.5 * VAR(\"VDD\")) 1 \"rising\" nil nil nil)) + (cross(clip(VT(\"/OUT\") 130p 180p) (0.5 * VAR(\"VDD\")) 1 \"rising\" nil nil nil) - cross(clip(VT(\"/IN\") 130p 180p) (0.5 * VAR(\"VDD\")) 1 \"falling\" nil nil nil))) / 2",
+          "metric": "delay_ps",
+          "scale": 1000000000000.0,
+          "unit": "ps"
+        },
+        {
+          "test": "VDA",
+          "output": "RiseVdd",
+          "expected_expression": "cross(clip(VT(\"/OUT\") 130p 180p) (0.9 * VAR(\"VDD\")) 1 \"rising\" nil nil nil) - cross(clip(VT(\"/OUT\") 130p 180p) (0.1 * VAR(\"VDD\")) 1 \"rising\" nil nil nil)",
+          "metric": "rise_time_ps",
+          "scale": 1000000000000.0,
+          "unit": "ps"
+        },
+        {
+          "test": "VDA",
+          "output": "FallVdd",
+          "expected_expression": "cross(clip(VT(\"/OUT\") 80p 130p) (0.1 * VAR(\"VDD\")) 1 \"falling\" nil nil nil) - cross(clip(VT(\"/OUT\") 80p 130p) (0.9 * VAR(\"VDD\")) 1 \"falling\" nil nil nil)",
+          "metric": "fall_time_ps",
+          "scale": 1000000000000.0,
+          "unit": "ps"
+        },
+        {
+          "test": "VDA",
+          "output": "RiseFallSkewVdd",
+          "expected_expression": "abs((cross(clip(VT(\"/OUT\") 130p 180p) (0.9 * VAR(\"VDD\")) 1 \"rising\" nil nil nil) - cross(clip(VT(\"/OUT\") 130p 180p) (0.1 * VAR(\"VDD\")) 1 \"rising\" nil nil nil)) - (cross(clip(VT(\"/OUT\") 80p 130p) (0.1 * VAR(\"VDD\")) 1 \"falling\" nil nil nil) - cross(clip(VT(\"/OUT\") 80p 130p) (0.9 * VAR(\"VDD\")) 1 \"falling\" nil nil nil)))",
+          "metric": "rise_fall_skew_ps",
+          "scale": 1000000000000.0,
+          "unit": "ps"
+        },
+        {
+          "test": "VDA",
+          "output": "SupplyEnergyCycleVdd",
+          "expected_expression": "-VAR(\"VDD\") * integ(IT(\"/VDD0/PLUS\") cross(VT(\"/IN\") (0.5 * VAR(\"VDD\")) 2 \"rising\" nil nil nil) cross(VT(\"/IN\") (0.5 * VAR(\"VDD\")) 3 \"rising\" nil nil nil))",
+          "metric": "supply_energy_per_cycle_fj",
+          "scale": 1000000000000000.0,
+          "unit": "fJ"
+        }
+      ]
+    }
+  },
+  "constraints": [
+    {"metric": "delay_ps", "relation": "<=", "value": 6.0},
+    {"metric": "rise_fall_skew_ps", "relation": "<=", "value": 5.0},
+    {
+      "metric": "supply_energy_per_cycle_fj",
+      "relation": "<=",
+      "value": 5.0
+    }
+  ],
+  "objective": {
+    "metric": "supply_energy_per_cycle_fj",
+    "goal": "minimize"
+  },
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 6, "timeout_seconds": 600}
+}

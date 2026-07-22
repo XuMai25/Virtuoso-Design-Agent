@@ -70,9 +70,9 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "unfiltered Bridge schematic readback + targeted CDF value verification + "
             "live non-overwrite ADE prepare/setup patch/background run-resume + exact-"
             "history/result/log and OA-to-runtime-input consistency; native Maestro "
-            "sweep setup/input-bundle/RDB point binding and pinned scalar-to-constraint "
-            "mapping live on TSMC N28; human capture, test/corner-scope variable "
-            "patch, multidimensional sweep, and corner sweep live pending"
+            "CL and VDDxCL sweep setup/input-bundle/RDB point binding and pinned "
+            "scalar-to-constraint mapping live on TSMC N28; human capture, "
+            "test/corner-scope variable patch, and corner sweep live pending"
         ),
     ),
     CircuitKind.INVERTER: CircuitCapability(
@@ -91,10 +91,10 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
         evidence_gate=(
             "OA readback + si netlist consistency + transient timing/supply energy + "
             "bounded search + live non-overwrite ADE prepare/setup patch/background "
-            "run-resume and OA-to-runtime-input consistency; native Maestro CL sweep "
-            "setup/input-bundle/exact-history RDB binding plus delay/skew/supply-energy "
-            "constraint mapping live; capture, additional variable scopes, "
-            "multidimensional sweep, and corner ADE gates pending"
+            "run-resume and OA-to-runtime-input consistency; native Maestro CL and "
+            "VDDxCL sweep setup/input-bundle/exact-history RDB binding plus "
+            "delay/skew/supply-energy constraint mapping live; capture, additional "
+            "variable scopes, and corner ADE gates pending"
         ),
     ),
     CircuitKind.COMMON_SOURCE: CircuitCapability(

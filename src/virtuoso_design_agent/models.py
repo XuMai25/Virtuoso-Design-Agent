@@ -370,6 +370,49 @@ class AdeSweepInputBinding(StrictModel):
         return self.test, self.variable, self.instance, self.oa_parameter
 
 
+class AdeSweepOutputEvaluationErrorExpectation(StrictModel):
+    """Pin one known non-metric calculator failure to exact sweep points."""
+
+    test: StrictStr = Field(min_length=1, max_length=128)
+    output: StrictStr = Field(min_length=1, max_length=128)
+    point_values: dict[StrictStr, StrictStr] = Field(min_length=1, max_length=32)
+
+    @field_validator("test", "output")
+    @classmethod
+    def validate_label(cls, value: str) -> str:
+        if any(
+            character in ('"', "\\")
+            or ord(character) < 32
+            or ord(character) == 127
+            for character in value
+        ):
+            raise ValueError(
+                "ADE expected output evaluation-error labels cannot contain "
+                "quotes, backslashes, or control characters"
+            )
+        return value
+
+    @field_validator("point_values")
+    @classmethod
+    def validate_point_values(cls, value: dict[str, str]) -> dict[str, str]:
+        for name, point_value in value.items():
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", name):
+                raise ValueError(
+                    f"invalid ADE expected evaluation-error variable: {name!r}"
+                )
+            if not point_value or any(
+                character in ('"', "\\")
+                or ord(character) < 32
+                or ord(character) == 127
+                for character in point_value
+            ):
+                raise ValueError(
+                    "ADE expected output evaluation-error point values cannot "
+                    "contain quotes, backslashes, or control characters"
+                )
+        return value
+
+
 class AdeSweepVerificationSpec(StrictModel):
     """Exact expected point set and OA bindings for a native Maestro sweep."""
 
@@ -384,6 +427,9 @@ class AdeSweepVerificationSpec(StrictModel):
     input_bindings: list[AdeSweepInputBinding] = Field(
         min_length=1, max_length=128
     )
+    expected_output_evaluation_errors: list[
+        AdeSweepOutputEvaluationErrorExpectation
+    ] = Field(default_factory=list, max_length=128)
 
     @model_validator(mode="after")
     def validate_sweep_contract(self) -> "AdeSweepVerificationSpec":
@@ -483,6 +529,43 @@ class AdeSweepVerificationSpec(StrictModel):
                 "each Maestro sweep test/variable pair needs an OA input binding; "
                 f"missing={missing}"
             )
+
+        error_expectations = self.expected_output_evaluation_errors
+        if error_expectations and len(self.expected_tests) != 1:
+            raise ValueError(
+                "expected output evaluation errors require exactly one Maestro test"
+            )
+        expected_error_cells: set[tuple[str, str, int]] = set()
+        for expectation in error_expectations:
+            if expectation.test not in self.expected_tests:
+                raise ValueError(
+                    "expected output evaluation errors must target expected_tests"
+                )
+            if not set(expectation.point_values).issubset(expected_names):
+                raise ValueError(
+                    "expected output evaluation-error point values must use declared "
+                    "sweep variables"
+                )
+            matching_points = [
+                point
+                for point in self.points
+                if all(
+                    point.values[name] == value
+                    for name, value in expectation.point_values.items()
+                )
+            ]
+            if not matching_points:
+                raise ValueError(
+                    "expected output evaluation error did not match any declared "
+                    "sweep point"
+                )
+            for point in matching_points:
+                identity = (expectation.test, expectation.output, point.point)
+                if identity in expected_error_cells:
+                    raise ValueError(
+                        "expected output evaluation-error rules overlap at one point"
+                    )
+                expected_error_cells.add(identity)
         return self
 
 
@@ -651,6 +734,22 @@ class AdeRunSpec(StrictModel):
             ):
                 raise ValueError(
                     "ADE result metric bindings must target the sole expected test"
+                )
+            mapped_outputs = {
+                (binding.test, binding.output)
+                for binding in self.result_mapping.metrics
+            }
+            expected_error_outputs = {
+                (expectation.test, expectation.output)
+                for expectation in (
+                    self.sweep_verification.expected_output_evaluation_errors
+                )
+            }
+            overlap = sorted(mapped_outputs & expected_error_outputs)
+            if overlap:
+                raise ValueError(
+                    "ADE mapped metric outputs cannot be declared as expected "
+                    f"evaluation errors: {overlap}"
                 )
             expected_variables = {
                 variable.name for variable in self.sweep_verification.variables

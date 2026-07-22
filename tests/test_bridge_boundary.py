@@ -991,6 +991,7 @@ def _native_sweep_verification() -> dict:
                 "oa_parameter": "c",
             }
         ],
+        "expected_output_evaluation_errors": [],
     }
 
 
@@ -1083,6 +1084,77 @@ def test_ade_spectre_input_verifies_a_symbolic_native_sweep_binding() -> None:
     assert comparison["symbolic_sweep_bindings_verified"] is True
     assert comparison["effective_sweep_bindings_verified"] is False
     assert comparison["verified_sweep_binding_pairs"] == 1
+
+
+def test_ade_spectre_input_verifies_one_symbolic_variable_at_two_sources() -> None:
+    text = """// Design library name: vda_test
+// Design cell name: vda_vdd_cl_tb
+// Design view name: schematic
+simulator lang=spectre
+parameters CL=1f VDD=0.8
+VDD0 (VDD 0) vsource dc=VDD type=dc
+VIN0 (IN 0) vsource type=pulse val0=0 val1=VDD period=100p delay=0 rise=5p fall=5p width=50p
+CL0 (OUT 0) capacitor c=CL
+tran tran stop=300p
+save IN OUT
+"""
+    schematic = {
+        "instances": [
+            {
+                "name": "VDD0",
+                "lib": "analogLib",
+                "cell": "vdc",
+                "params": {"vdc": "VDD", "srcType": "dc"},
+                "terms": {"PLUS": "VDD", "MINUS": "gnd!"},
+            },
+            {
+                "name": "VIN0",
+                "lib": "analogLib",
+                "cell": "vpulse",
+                "params": {
+                    "v1": "0",
+                    "v2": "VDD",
+                    "per": "100p",
+                    "td": "0",
+                    "tr": "5p",
+                    "tf": "5p",
+                    "pw": "50p",
+                    "srcType": "pulse",
+                },
+                "terms": {"PLUS": "IN", "MINUS": "gnd!"},
+            },
+            {
+                "name": "CL0",
+                "lib": "analogLib",
+                "cell": "cap",
+                "params": {"c": "CL"},
+                "terms": {"PLUS": "OUT", "MINUS": "gnd!"},
+            },
+        ]
+    }
+
+    comparison = bridge_worker._compare_ade_input_to_schematic(
+        bridge_worker._parse_ade_spectre_input(text),
+        schematic,
+        design={
+            "library": "vda_test",
+            "cell": "vda_vdd_cl_tb",
+            "view": "schematic",
+        },
+        symbolic_sweep_bindings={
+            ("CL0", "c"): "CL",
+            ("VDD0", "vdc"): "VDD",
+            ("VIN0", "v2"): "VDD",
+        },
+    )
+
+    assert comparison["symbolic_sweep_bindings_verified"] is True
+    assert comparison["verified_sweep_binding_pairs"] == 3
+    assert comparison["verified_sweep_bindings"] == [
+        {"instance": "CL0", "oa_parameter": "c"},
+        {"instance": "VDD0", "oa_parameter": "vdc"},
+        {"instance": "VIN0", "oa_parameter": "v2"},
+    ]
 
 
 def test_native_ade_sweep_does_not_reuse_unlabeled_artifacts_across_tests() -> None:
@@ -1361,6 +1433,60 @@ def test_native_ade_sweep_accepts_ic618_shared_input_and_history_rdb(
         point["result_parameters"]["CL"]
         for point in evidence["sweep_point_consistency"]
     } == {"1f", "2f"}
+
+
+def test_native_ade_sweep_accounts_for_exact_declared_output_evaluation_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results, manifest, texts = _native_sweep_database_case(simulation_errors=1)
+    results["points"][0]["outputs"]["LegacyRise"] = {"value": "eval err"}
+    verification = _native_sweep_verification()
+    verification["expected_output_evaluation_errors"] = [
+        {
+            "test": "VDA",
+            "output": "LegacyRise",
+            "point_values": {"CL": "1f"},
+        }
+    ]
+    _patch_native_sweep_database_readbacks(monkeypatch, texts)
+
+    evidence = bridge_worker._verify_ade_sweep_consistency(
+        object(),
+        session="fnxSweep12",
+        tests=["VDA"],
+        history="Interactive.12",
+        results=results,
+        artifact_evidence={"artifact_manifest": manifest},
+        verification=verification,
+    )
+
+    assert evidence["expected_output_evaluation_errors_verified"] is True
+    assert evidence["output_evaluation_error_count"] == 1
+    assert evidence["output_evaluation_errors"][0]["output"] == "LegacyRise"
+    assert evidence["sweep_history_log_evidence"]["simulation_errors"] == 1
+    assert (
+        evidence["sweep_history_log_evidence"]["unaccounted_simulation_errors"]
+        == 0
+    )
+
+
+def test_native_ade_sweep_rejects_an_undeclared_output_evaluation_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results, manifest, texts = _native_sweep_database_case(simulation_errors=1)
+    results["points"][0]["outputs"]["LegacyRise"] = {"value": "eval err"}
+    _patch_native_sweep_database_readbacks(monkeypatch, texts)
+
+    with pytest.raises(RuntimeError, match="did not exactly match"):
+        bridge_worker._verify_ade_sweep_consistency(
+            object(),
+            session="fnxSweep12",
+            tests=["VDA"],
+            history="Interactive.12",
+            results=results,
+            artifact_evidence={"artifact_manifest": manifest},
+            verification=_native_sweep_verification(),
+        )
 
 
 def test_native_ade_sweep_database_mode_rejects_a_missing_history_rdb(

@@ -219,11 +219,27 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             else ""
         )
         sweep_requirement = ""
+        sweep_log_requirement = "完成点数和零仿真错误日志"
         if task.ade_run.sweep_verification is not None:
             sweep = task.ade_run.sweep_verification
             variables = ", ".join(
                 variable.evidence_key() for variable in sweep.variables
             )
+            expected_error_cells = {
+                (expectation.output, point.point)
+                for expectation in sweep.expected_output_evaluation_errors
+                for point in sweep.points
+                if all(
+                    point.values[name] == value
+                    for name, value in expectation.point_values.items()
+                )
+            }
+            if expected_error_cells:
+                sweep_log_requirement = (
+                    "完成点数、"
+                    f"{len(expected_error_cells)} 个显式声明且逐点匹配的 legacy "
+                    "output evaluation error，以及零未解释错误日志"
+                )
             sweep_requirement = (
                 f"；必须精确回读 tests={sweep.expected_tests!r} 与 sweep "
                 f"variables={variables}，并把 {len(sweep.points)} 个声明 point "
@@ -302,8 +318,7 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                             "；若存在逐 point 输入目录则要求每点完整；否则从唯一 "
                             "runtime 根读取 input.scs 及其显式 include 的 netlist，"
                             "并将符号 OA 绑定与 exact-history RDB/Detail 的逐点参数/"
-                            "输出、"
-                            "完成点数和零仿真错误日志共同核对"
+                            f"输出、{sweep_log_requirement}共同核对"
                             if task.ade_run.sweep_verification is not None
                             else "；从唯一 runtime 根读取 input.scs 并核对 test "
                             "design、OA 连接与显式 raw 参数映射"

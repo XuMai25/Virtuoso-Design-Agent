@@ -712,6 +712,14 @@ def _native_sweep_run_evidence(task: TaskSpec) -> dict:
             "spectre_input": "eda_result",
             "comparison": "software_inference",
         },
+        "expected_output_evaluation_errors_verified": True,
+        "output_evaluation_errors": [],
+        "output_evaluation_error_count": 0,
+        "output_evaluation_error_evidence_sources": {
+            "expected": None,
+            "actual": "eda_result",
+            "comparison": "software_inference",
+        },
         "sweep_setup_readback_before": setup_readback,
         "sweep_setup_readback_after": setup_readback,
         "sweep_setup_readback_evidence_source": "bridge_readback",
@@ -1068,6 +1076,8 @@ def _native_sweep_database_run_evidence(task: TaskSpec) -> dict:
                 "size_bytes": 320,
                 "points_completed": 2,
                 "simulation_errors": 0,
+                "simulation_errors_accounted_by_output_evaluation_errors": 0,
+                "unaccounted_simulation_errors": 0,
                 "history_completed": True,
             },
             "sweep_result_database_artifacts": [
@@ -1294,6 +1304,79 @@ def test_ade_run_accepts_native_sweep_history_database_evidence() -> None:
 
     assert record.status is RunStatus.SUCCEEDED
     assert any("exact-history RDB/completion log" in note for note in record.notes)
+
+
+def test_ade_run_accepts_only_accounted_legacy_output_evaluation_errors() -> None:
+    class RunningAdapter(DeterministicDemoAdapter):
+        def run_ade(self, task):
+            data = _native_sweep_database_run_evidence(task)
+            point = data["sweep_point_consistency"][0]
+            point["scalar_outputs"]["LegacyRise"] = "eval err"
+            payload = {
+                "point": point["point"],
+                "expected_parameters": point["expected_parameters"],
+                "result_parameters": point["result_parameters"],
+                "scalar_outputs": point["scalar_outputs"],
+                "tests": point["tests"],
+            }
+            point["point_binding_sha256"] = hashlib.sha256(
+                json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            data.update(
+                {
+                    "output_evaluation_errors": [
+                        {
+                            "point": 1,
+                            "test": "VDA",
+                            "output": "LegacyRise",
+                            "point_values": {"CL": "1f"},
+                            "expectation_evidence_source": "user_input",
+                            "raw_value": "eval err",
+                            "raw_evidence_source": "eda_result",
+                        }
+                    ],
+                    "output_evaluation_error_count": 1,
+                    "output_evaluation_error_evidence_sources": {
+                        "expected": "user_input",
+                        "actual": "eda_result",
+                        "comparison": "software_inference",
+                    },
+                }
+            )
+            data["sweep_history_log_evidence"].update(
+                {
+                    "simulation_errors": 1,
+                    "simulation_errors_accounted_by_output_evaluation_errors": 1,
+                }
+            )
+            return AdapterResult(
+                data=data,
+                evidence_source=EvidenceSource.EDA_RESULT,
+            )
+
+    task_data = _native_sweep_run_task().model_dump(mode="json")
+    task_data["ade_run"]["sweep_verification"][
+        "expected_output_evaluation_errors"
+    ] = [
+        {
+            "test": "VDA",
+            "output": "LegacyRise",
+            "point_values": {"CL": "1f"},
+        }
+    ]
+    task = TaskSpec.model_validate(task_data)
+    plan = build_plan(task)
+
+    record = TaskExecutor(RunningAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
 
 
 def test_ade_run_rejects_native_sweep_database_log_errors() -> None:

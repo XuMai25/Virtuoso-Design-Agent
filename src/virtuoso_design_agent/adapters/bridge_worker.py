@@ -5090,6 +5090,113 @@ def _remote_manifest_item_path(item: dict[str, Any]) -> str:
     )
 
 
+def _is_ade_output_evaluation_error(value: Any) -> bool:
+    normalized = " ".join(str(value or "").strip().lower().split())
+    return normalized in {"eval err", "evaluation error", "error"}
+
+
+def _ade_sweep_output_evaluation_error_evidence(
+    *,
+    tests: list[str],
+    expected_points: list[dict[str, Any]],
+    actual_points: dict[int, dict[str, Any]],
+    verification: dict[str, Any],
+) -> dict[str, Any]:
+    """Require every Detail calculator error to match an explicit point rule."""
+
+    expectations = list(
+        verification.get("expected_output_evaluation_errors") or []
+    )
+    if expectations and len(tests) != 1:
+        raise RuntimeError(
+            "ADE expected output evaluation errors require exactly one test"
+        )
+    expected_cells: dict[tuple[int, str], dict[str, Any]] = {}
+    for expectation in expectations:
+        if not isinstance(expectation, dict):
+            raise RuntimeError(
+                "ADE expected output evaluation-error rule is not an object"
+            )
+        test = str(expectation.get("test") or "")
+        output = str(expectation.get("output") or "")
+        point_values = expectation.get("point_values") or {}
+        if not isinstance(point_values, dict) or test not in tests or not output:
+            raise RuntimeError(
+                "ADE expected output evaluation-error rule is invalid"
+            )
+        matched = False
+        for point in expected_points:
+            values = point.get("values") or {}
+            if all(
+                name in values
+                and spectre_values_equal(values[name], expected_value)
+                for name, expected_value in point_values.items()
+            ):
+                matched = True
+                point_number = int(point["point"])
+                identity = (point_number, output)
+                if identity in expected_cells:
+                    raise RuntimeError(
+                        "ADE expected output evaluation-error rules overlap at "
+                        f"point {point_number} output {output!r}"
+                    )
+                expected_cells[identity] = {
+                    "point": point_number,
+                    "test": test,
+                    "output": output,
+                    "point_values": {
+                        str(name): str(value)
+                        for name, value in point_values.items()
+                    },
+                    "expectation_evidence_source": "user_input",
+                }
+        if not matched:
+            raise RuntimeError(
+                "ADE expected output evaluation-error rule did not match a point"
+            )
+
+    actual_cells: dict[tuple[int, str], dict[str, Any]] = {}
+    for point_number, point in actual_points.items():
+        outputs = point.get("outputs") or {}
+        if not isinstance(outputs, dict):
+            continue
+        for output, details in outputs.items():
+            if not isinstance(details, dict) or not _is_ade_output_evaluation_error(
+                details.get("value")
+            ):
+                continue
+            identity = (point_number, str(output))
+            actual_cells[identity] = {
+                "point": point_number,
+                "test": tests[0] if len(tests) == 1 else None,
+                "output": str(output),
+                "raw_value": str(details.get("value") or ""),
+                "raw_evidence_source": "eda_result",
+            }
+
+    missing = sorted(set(expected_cells) - set(actual_cells))
+    unexpected = sorted(set(actual_cells) - set(expected_cells))
+    if missing or unexpected:
+        raise RuntimeError(
+            "ADE native sweep output evaluation errors did not exactly match the "
+            f"declared point/output cells: missing={missing}, unexpected={unexpected}"
+        )
+    verified = [
+        {**expected_cells[identity], **actual_cells[identity]}
+        for identity in sorted(expected_cells)
+    ]
+    return {
+        "expected_output_evaluation_errors_verified": True,
+        "output_evaluation_errors": verified,
+        "output_evaluation_error_count": len(verified),
+        "output_evaluation_error_evidence_sources": {
+            "expected": "user_input" if expectations else None,
+            "actual": "eda_result",
+            "comparison": "software_inference",
+        },
+    }
+
+
 def _verify_ade_sweep_consistency(
     client,
     *,
@@ -5139,6 +5246,12 @@ def _verify_ade_sweep_consistency(
             "ADE sweep result point set mismatch: "
             f"expected {expected_numbers!r}, got {sorted(actual_points)!r}"
         )
+    evaluation_error_evidence = _ade_sweep_output_evaluation_error_evidence(
+        tests=tests,
+        expected_points=expected_points,
+        actual_points=actual_points,
+        verification=verification,
+    )
 
     manifest = artifact_evidence.get("artifact_manifest") or []
     if not isinstance(manifest, list) or not manifest:
@@ -5235,14 +5348,22 @@ def _verify_ade_sweep_consistency(
         simulation_errors = (
             int(error_match.group(1)) if error_match is not None else -1
         )
+        expected_simulation_errors = int(
+            evaluation_error_evidence["output_evaluation_error_count"]
+        )
         if (
             points_completed != len(expected_points)
-            or simulation_errors != 0
+            or simulation_errors != expected_simulation_errors
             or not history_completed
         ):
+            error_requirement = (
+                "zero simulation errors"
+                if expected_simulation_errors == 0
+                else "only the explicitly declared output evaluation errors"
+            )
             raise RuntimeError(
                 "ADE native sweep history log did not prove the exact point count, "
-                "zero simulation errors, and completed history"
+                f"{error_requirement}, and completed history"
             )
         history_log_evidence = {
             "path": log_item["path"],
@@ -5250,6 +5371,10 @@ def _verify_ade_sweep_consistency(
             "size_bytes": log_item["size_bytes"],
             "points_completed": points_completed,
             "simulation_errors": simulation_errors,
+            "simulation_errors_accounted_by_output_evaluation_errors": (
+                expected_simulation_errors
+            ),
+            "unaccounted_simulation_errors": 0,
             "history_completed": True,
         }
 
@@ -5572,6 +5697,7 @@ def _verify_ade_sweep_consistency(
         )
 
     return {
+        **evaluation_error_evidence,
         "simulator_input_consistency_verified": bool(input_evidence),
         "simulator_input_consistency": input_evidence,
         "simulator_input_consistency_evidence_sources": {

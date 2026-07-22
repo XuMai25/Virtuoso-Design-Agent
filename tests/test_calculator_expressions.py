@@ -23,6 +23,10 @@ from virtuoso_design_agent.calculator_expressions import calculator_expressions_
         ),
         ('average(VT("/OUT"))', 'average(VT("/OUT"))'),
         ('bandwidth(mag(VF("/OUT")) 3 "low")', 'bandwidth(mag(VF("/OUT")) 3 "low")'),
+        (
+            'cross(VT("/OUT") (0.5 * VAR("VDD")) 1 "rising")',
+            'cross(VT("/OUT") (500m * VAR("VDD")) 1 "rising")',
+        ),
     ],
 )
 def test_calculator_expression_comparison_accepts_cadence_canonicalization(
@@ -38,6 +42,10 @@ def test_calculator_expression_comparison_accepts_cadence_canonicalization(
         ('cross(VT("/OUT") 0.45 1 "rising")', 'cross(VT("/OUT") 0.45 1 "falling")'),
         ('VT("/A") - VT("/B")', 'VT("/B") - VT("/A")'),
         ('average(VT("/OUT"))', 'ymax(VT("/OUT"))'),
+        (
+            'cross(VT("/OUT") (0.5 * VAR("VDD")) 1 "rising")',
+            'cross(VT("/OUT") (0.5 * VAR("VBIAS")) 1 "rising")',
+        ),
         ('unsupported[0]', 'unsupported [ 0 ]'),
     ],
 )

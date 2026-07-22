@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "inverter-ade-vdd-aware-quality-outputs",
+  "operation": "ade.setup.apply",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_ade_sweep_inv_001",
+    "view": "maestro"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "ade_setup": {
+    "backend": "maestro",
+    "expected_tests": ["VDA"],
+    "outputs": [
+      {
+        "test": "VDA",
+        "name": "TphlVdd",
+        "output_type": "point",
+        "expression": "cross(clip(VT(\"/OUT\") 80p 130p) (0.5 * VAR(\"VDD\")) 1 \"falling\" nil nil nil) - cross(clip(VT(\"/IN\") 80p 130p) (0.5 * VAR(\"VDD\")) 1 \"rising\" nil nil nil)"
+      },
+      {
+        "test": "VDA",
+        "name": "TplhVdd",
+        "output_type": "point",
+        "expression": "cross(clip(VT(\"/OUT\") 130p 180p) (0.5 * VAR(\"VDD\")) 1 \"rising\" nil nil nil) - cross(clip(VT(\"/IN\") 130p 180p) (0.5 * VAR(\"VDD\")) 1 \"falling\" nil nil nil)"
+      },
+      {
+        "test": "VDA",
+        "name": "DelayVdd",
+        "output_type": "point",
+        "expression": "((cross(clip(VT(\"/OUT\") 80p 130p) (0.5 * VAR(\"VDD\")) 1 \"falling\" nil nil nil) - cross(clip(VT(\"/IN\") 80p 130p) (0.5 * VAR(\"VDD\")) 1 \"rising\" nil nil nil)) + (cross(clip(VT(\"/OUT\") 130p 180p) (0.5 * VAR(\"VDD\")) 1 \"rising\" nil nil nil) - cross(clip(VT(\"/IN\") 130p 180p) (0.5 * VAR(\"VDD\")) 1 \"falling\" nil nil nil))) / 2"
+      },
+      {
+        "test": "VDA",
+        "name": "RiseVdd",
+        "output_type": "point",
+        "expression": "cross(clip(VT(\"/OUT\") 130p 180p) (0.9 * VAR(\"VDD\")) 1 \"rising\" nil nil nil) - cross(clip(VT(\"/OUT\") 130p 180p) (0.1 * VAR(\"VDD\")) 1 \"rising\" nil nil nil)"
+      },
+      {
+        "test": "VDA",
+        "name": "FallVdd",
+        "output_type": "point",
+        "expression": "cross(clip(VT(\"/OUT\") 80p 130p) (0.1 * VAR(\"VDD\")) 1 \"falling\" nil nil nil) - cross(clip(VT(\"/OUT\") 80p 130p) (0.9 * VAR(\"VDD\")) 1 \"falling\" nil nil nil)"
+      },
+      {
+        "test": "VDA",
+        "name": "RiseFallSkewVdd",
+        "output_type": "point",
+        "expression": "abs((cross(clip(VT(\"/OUT\") 130p 180p) (0.9 * VAR(\"VDD\")) 1 \"rising\" nil nil nil) - cross(clip(VT(\"/OUT\") 130p 180p) (0.1 * VAR(\"VDD\")) 1 \"rising\" nil nil nil)) - (cross(clip(VT(\"/OUT\") 80p 130p) (0.1 * VAR(\"VDD\")) 1 \"falling\" nil nil nil) - cross(clip(VT(\"/OUT\") 80p 130p) (0.9 * VAR(\"VDD\")) 1 \"falling\" nil nil nil)))"
+      },
+      {
+        "test": "VDA",
+        "name": "SupplyEnergyCycleVdd",
+        "output_type": "point",
+        "expression": "-VAR(\"VDD\") * integ(IT(\"/VDD0/PLUS\") cross(VT(\"/IN\") (0.5 * VAR(\"VDD\")) 2 \"rising\" nil nil nil) cross(VT(\"/IN\") (0.5 * VAR(\"VDD\")) 3 \"rising\" nil nil nil))"
+      }
+    ]
+  },
+  "safety": {
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}

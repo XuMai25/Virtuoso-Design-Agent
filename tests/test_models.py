@@ -708,6 +708,67 @@ def test_ade_run_accepts_an_exact_native_sweep_verification_contract() -> None:
     assert [point.point for point in sweep.points] == [1, 2, 3]
 
 
+def test_ade_sweep_allows_one_variable_to_bind_multiple_oa_parameters() -> None:
+    verification = _sweep_verification()
+    verification["variables"].append(
+        {
+            "name": "VDD",
+            "scope": "global",
+            "expected_value": "0.8,0.9",
+        }
+    )
+    verification["points"] = [
+        {"point": 1, "values": {"CL": "1f", "VDD": "0.8"}},
+        {"point": 2, "values": {"CL": "2f", "VDD": "0.8"}},
+        {"point": 3, "values": {"CL": "4f", "VDD": "0.8"}},
+        {"point": 4, "values": {"CL": "1f", "VDD": "0.9"}},
+        {"point": 5, "values": {"CL": "2f", "VDD": "0.9"}},
+        {"point": 6, "values": {"CL": "4f", "VDD": "0.9"}},
+    ]
+    verification["input_bindings"].extend(
+        [
+            {
+                "test": "VDA",
+                "variable": "VDD",
+                "instance": "VDD0",
+                "oa_parameter": "vdc",
+            },
+            {
+                "test": "VDA",
+                "variable": "VDD",
+                "instance": "VIN0",
+                "oa_parameter": "v2",
+            },
+        ]
+    )
+    task = TaskSpec.model_validate(
+        {
+            "id": "run-native-vdd-cl-sweep",
+            "operation": "ade.run",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_sweep_tb",
+                "view": "maestro",
+            },
+            "ade_run": {
+                "require_simulator_input_consistency": True,
+                "sweep_verification": verification,
+            },
+        }
+    )
+
+    assert task.ade_run is not None
+    sweep = task.ade_run.sweep_verification
+    assert sweep is not None
+    assert len(sweep.points) == 6
+    assert [
+        binding.instance
+        for binding in sweep.input_bindings
+        if binding.variable == "VDD"
+    ] == ["VDD0", "VIN0"]
+
+
 def test_ade_run_accepts_strict_result_mapping_constraints_and_objective() -> None:
     task = TaskSpec.model_validate(
         {
@@ -744,6 +805,77 @@ def test_ade_run_accepts_strict_result_mapping_constraints_and_objective() -> No
     assert "显式 scale 映射" in descriptions
     assert "constraint 判定" in descriptions
     assert "software_inference" in descriptions
+
+
+def test_ade_run_allows_only_exact_unmapped_output_evaluation_errors() -> None:
+    sweep = _sweep_verification()
+    sweep["expected_output_evaluation_errors"] = [
+        {
+            "test": "VDA",
+            "output": "LegacyRise",
+            "point_values": {"CL": "1f"},
+        }
+    ]
+    task = TaskSpec.model_validate(
+        {
+            "id": "evaluate-native-cl-sweep-with-legacy-output-error",
+            "operation": "ade.run",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_sweep_tb",
+                "view": "maestro",
+            },
+            "ade_run": {
+                "require_simulator_input_consistency": True,
+                "sweep_verification": sweep,
+                "result_mapping": _result_mapping(),
+            },
+            "constraints": [
+                {"metric": "delay_ps", "relation": "<=", "value": 5.0}
+            ],
+        }
+    )
+
+    assert task.ade_run is not None
+    verification = task.ade_run.sweep_verification
+    assert verification is not None
+    assert verification.expected_output_evaluation_errors[0].output == "LegacyRise"
+    descriptions = "\n".join(step.description for step in build_plan(task).steps)
+    assert "1 个显式声明" in descriptions
+    assert "零未解释错误" in descriptions
+
+
+def test_ade_run_rejects_a_mapped_output_as_an_expected_evaluation_error() -> None:
+    sweep = _sweep_verification()
+    sweep["expected_output_evaluation_errors"] = [
+        {
+            "test": "VDA",
+            "output": "Delay",
+            "point_values": {"CL": "1f"},
+        }
+    ]
+    with pytest.raises(ValidationError, match="mapped metric outputs"):
+        TaskSpec.model_validate(
+            {
+                "id": "invalid-mapped-output-error",
+                "operation": "ade.run",
+                "circuit": "existing_schematic",
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_sweep_tb",
+                    "view": "maestro",
+                },
+                "ade_run": {
+                    "require_simulator_input_consistency": True,
+                    "sweep_verification": sweep,
+                    "result_mapping": _result_mapping(),
+                },
+                "constraints": [
+                    {"metric": "delay_ps", "relation": "<=", "value": 5.0}
+                ],
+            }
+        )
 
 
 @pytest.mark.parametrize(
