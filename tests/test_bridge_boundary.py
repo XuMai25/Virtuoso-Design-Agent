@@ -971,17 +971,29 @@ def _native_sweep_verification() -> dict:
     return {
         "expected_tests": ["VDA"],
         "expected_corners": None,
+        "expected_global_variable_selections": {},
         "variables": [
             {
                 "name": "CL",
                 "expected_value": "1f,2f",
                 "scope": "global",
                 "scope_name": None,
+                "sweep": True,
             }
         ],
         "points": [
-            {"point": 1, "values": {"CL": "1f"}},
-            {"point": 2, "values": {"CL": "2f"}},
+            {
+                "point": 1,
+                "maestro_point": None,
+                "corner": None,
+                "values": {"CL": "1f"},
+            },
+            {
+                "point": 2,
+                "maestro_point": None,
+                "corner": None,
+                "values": {"CL": "2f"},
+            },
         ],
         "input_bindings": [
             {
@@ -990,6 +1002,80 @@ def _native_sweep_verification() -> dict:
                 "instance": "CL0",
                 "oa_parameter": "c",
             }
+        ],
+        "expected_output_evaluation_errors": [],
+    }
+
+
+def _native_corner_sweep_verification() -> dict:
+    corners = ["Nominal", "VDA_LOW_VDD", "VDA_NOMINAL_VDD"]
+    points: list[dict] = []
+    point = 1
+    for maestro_point, load in ((1, "1f"), (2, "4f")):
+        for corner, vdd in zip(corners, ("0.9", "0.8", "0.9"), strict=True):
+            points.append(
+                {
+                    "point": point,
+                    "maestro_point": maestro_point,
+                    "corner": corner,
+                    "values": {"CL": load, "VDD": vdd},
+                }
+            )
+            point += 1
+    return {
+        "expected_tests": ["VDA"],
+        "expected_corners": corners,
+        "expected_global_variable_selections": {"CL": False, "VDD": True},
+        "variables": [
+            {
+                "name": "CL",
+                "expected_value": "1f,4f",
+                "scope": "test",
+                "scope_name": "VDA",
+                "sweep": True,
+            },
+            {
+                "name": "VDD",
+                "expected_value": "0.9",
+                "scope": "global",
+                "scope_name": None,
+                "sweep": False,
+            },
+            {
+                "name": "VDD",
+                "expected_value": "0.8",
+                "scope": "corner",
+                "scope_name": "VDA_LOW_VDD",
+                "sweep": False,
+            },
+            {
+                "name": "VDD",
+                "expected_value": "0.9",
+                "scope": "corner",
+                "scope_name": "VDA_NOMINAL_VDD",
+                "sweep": False,
+            },
+        ],
+        "points": points,
+        "input_bindings": [
+            {
+                "test": "VDA",
+                "variable": "CL",
+                "instance": "CL0",
+                "oa_parameter": "c",
+            },
+            {
+                "test": "VDA",
+                "variable": "VDD",
+                "instance": "VDD0",
+                "oa_parameter": "vdc",
+            },
+            {
+                "test": "VDA",
+                "variable": "VDD",
+                "instance": "VIN0",
+                "oa_parameter": "v2",
+            },
         ],
         "expected_output_evaluation_errors": [],
     }
@@ -1016,6 +1102,43 @@ def _native_sweep_schematic() -> dict:
     }
 
 
+def _native_corner_sweep_schematic() -> dict:
+    return {
+        "instances": [
+            {
+                "name": "VDD0",
+                "lib": "analogLib",
+                "cell": "vdc",
+                "params": {"vdc": "VDD", "srcType": "dc"},
+                "terms": {"PLUS": "VDD", "MINUS": "gnd!"},
+            },
+            {
+                "name": "VIN0",
+                "lib": "analogLib",
+                "cell": "vpulse",
+                "params": {
+                    "v1": "0",
+                    "v2": "VDD",
+                    "per": "100p",
+                    "td": "0",
+                    "tr": "5p",
+                    "tf": "5p",
+                    "pw": "50p",
+                    "srcType": "pulse",
+                },
+                "terms": {"PLUS": "IN", "MINUS": "gnd!"},
+            },
+            {
+                "name": "CL0",
+                "lib": "analogLib",
+                "cell": "cap",
+                "params": {"c": "CL"},
+                "terms": {"PLUS": "OUT", "MINUS": "gnd!"},
+            },
+        ]
+    }
+
+
 def _native_sweep_input(value: str) -> str:
     return f"""// Design library name: vda_test
 // Design cell name: vda_sweep_tb
@@ -1026,6 +1149,56 @@ CL0 (OUT 0) capacitor c=CL
 tran tran stop=1n
 save OUT
 """
+
+
+def _native_corner_detail_csv() -> str:
+    return (
+        ",,Parameter,Nominal,,,,,,VDA_LOW_VDD,VDA_NOMINAL_VDD\n"
+        ",,VDD,900e-3,,,,,,800e-3,900e-3\n"
+        "Point,Test,Output,Nominal,Spec,Weight,Pass/Fail,Min,Max,"
+        "VDA_LOW_VDD,VDA_NOMINAL_VDD\n"
+        "Parameters: CL=1f,,,,,,,,,,\n"
+        "1,VDA,DelayVdd,2.8e-12,,,,,,3.2e-12,2.8e-12\n"
+        "1,VDA,EnergyVdd,1.6e-15,,,,,,1.4e-15,1.6e-15\n"
+        "Parameters: CL=4f,,,,,,,,,,\n"
+        "2,VDA,DelayVdd,4.1e-12,,,,,,4.8e-12,4.1e-12\n"
+        "2,VDA,EnergyVdd,2.7e-15,,,,,,2.4e-15,2.7e-15\n"
+    )
+
+
+def test_parse_ade_corner_detail_csv_preserves_point_corner_grid() -> None:
+    text = _native_corner_detail_csv()
+
+    parsed = bridge_worker._parse_ade_corner_detail_csv(
+        text,
+        history="Interactive.14",
+        expected_corners=["Nominal", "VDA_LOW_VDD", "VDA_NOMINAL_VDD"],
+    )
+
+    assert parsed["history"] == "Interactive.14"
+    assert parsed["tests"] == ["VDA"]
+    assert len(parsed["points"]) == 6
+    assert [
+        (point["maestro_point"], point["corner"])
+        for point in parsed["points"]
+    ] == [
+        (1, "Nominal"),
+        (1, "VDA_LOW_VDD"),
+        (1, "VDA_NOMINAL_VDD"),
+        (2, "Nominal"),
+        (2, "VDA_LOW_VDD"),
+        (2, "VDA_NOMINAL_VDD"),
+    ]
+    assert parsed["points"][1]["parameters"] == {
+        "CL": "1f",
+        "VDD": "800e-3",
+    }
+    assert parsed["points"][5]["outputs"]["EnergyVdd"]["value"] == (
+        "2.7e-15"
+    )
+    assert parsed["detail_csv_sha256"] == hashlib.sha256(
+        text.encode("utf-8")
+    ).hexdigest()
 
 
 def test_ade_spectre_input_resolves_a_declared_oa_sweep_binding() -> None:
@@ -1435,6 +1608,145 @@ def test_native_ade_sweep_accepts_ic618_shared_input_and_history_rdb(
     } == {"1f", "2f"}
 
 
+def test_native_ade_corner_sweep_binds_two_points_to_three_corner_columns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    history = "Interactive.14"
+    input_remote = "/data/xum/runtime/VDA/input.scs"
+    input_text = """// Design library name: vda_test
+// Design cell name: vda_corner_tb
+// Design view name: schematic
+simulator lang=spectre
+parameters CL=1f VDD=900m
+include "netlist"
+tran tran stop=300p
+save IN OUT
+"""
+    netlist_remote = "/data/xum/runtime/VDA/netlist"
+    netlist_text = """VDD0 (VDD 0) vsource dc=VDD type=dc
+VIN0 (IN 0) vsource type=pulse val0=0 val1=VDD period=100p delay=0 rise=5p fall=5p width=50p
+CL0 (OUT 0) capacitor c=CL
+"""
+    log_remote = f"/data/xum/results/{history}.log"
+    log_text = (
+        "Starting Single Run, Sweeps and Corners...\n"
+        "Number of points completed: 2\n"
+        "Number of simulation errors: 0\n"
+        f"{history} completed.\n"
+    )
+    manifest = [
+        {
+            "path": f"{history}/runtime/VDA/input.scs",
+            "remote_path": input_remote,
+            "binding": "unique_runtime_session",
+            "category": "simulator_input",
+            "size_bytes": len(input_text.encode()),
+            "sha256": hashlib.sha256(input_text.encode()).hexdigest(),
+            "evidence_source": "eda_result",
+        },
+        {
+            "path": f"{history}/runtime/VDA/netlist",
+            "remote_path": netlist_remote,
+            "binding": "unique_runtime_session",
+            "category": "simulator_input",
+            "size_bytes": len(netlist_text.encode()),
+            "sha256": hashlib.sha256(netlist_text.encode()).hexdigest(),
+            "evidence_source": "eda_result",
+        },
+        {
+            "path": f"{history}/{history}.log",
+            "remote_path": log_remote,
+            "binding": "exact_history_companion",
+            "category": "run_log",
+            "size_bytes": len(log_text.encode()),
+            "sha256": hashlib.sha256(log_text.encode()).hexdigest(),
+            "evidence_source": "eda_result",
+        },
+        {
+            "path": f"{history}/{history}.rdb",
+            "remote_path": f"/data/xum/results/{history}.rdb",
+            "binding": "exact_history_companion",
+            "category": "eda_result",
+            "size_bytes": 4096,
+            "sha256": "a" * 64,
+            "evidence_source": "eda_result",
+        },
+    ]
+    detail_csv = _native_corner_detail_csv()
+    parsed = bridge_worker._parse_ade_corner_detail_csv(
+        detail_csv,
+        history=history,
+        expected_corners=["Nominal", "VDA_LOW_VDD", "VDA_NOMINAL_VDD"],
+    )
+    results = {
+        "history": history,
+        "corner_points": parsed["points"],
+        "corner_order": parsed["corners"],
+        "corner_tests": parsed["tests"],
+        "corner_detail_csv_sha256": parsed["detail_csv_sha256"],
+        "corner_detail_csv_size_bytes": parsed["detail_csv_size_bytes"],
+        "corner_detail_csv_evidence_sources": {
+            "raw": "eda_result",
+            "parser": "software_inference",
+        },
+    }
+    texts = {
+        input_remote: input_text,
+        netlist_remote: netlist_text,
+        log_remote: log_text,
+    }
+    monkeypatch.setattr(
+        bridge_worker,
+        "_maestro_test_design_readback",
+        lambda *_args, **_kwargs: {
+            "library": "vda_test",
+            "cell": "vda_corner_tb",
+            "view": "schematic",
+        },
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_read_schematic",
+        lambda *_args, **_kwargs: _native_corner_sweep_schematic(),
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_read_remote_text_via_skill",
+        lambda _client, path, **_kwargs: texts[path],
+    )
+
+    evidence = bridge_worker._verify_ade_sweep_consistency(
+        object(),
+        session="fnxSweep14",
+        tests=["VDA"],
+        history=history,
+        results=results,
+        artifact_evidence={"artifact_manifest": manifest},
+        verification=_native_corner_sweep_verification(),
+    )
+
+    assert evidence["native_sweep_database_binding_verified"] is True
+    assert evidence["exact_point_input_result_binding_verified"] is False
+    assert evidence["sweep_history_log_evidence"]["points_completed"] == 2
+    assert evidence["simulator_input_consistency"][0][
+        "retained_maestro_point"
+    ] == 1
+    assert [
+        (point["maestro_point"], point["corner"])
+        for point in evidence["sweep_point_consistency"]
+    ] == [
+        (1, "Nominal"),
+        (1, "VDA_LOW_VDD"),
+        (1, "VDA_NOMINAL_VDD"),
+        (2, "Nominal"),
+        (2, "VDA_LOW_VDD"),
+        (2, "VDA_NOMINAL_VDD"),
+    ]
+    assert evidence["corner_detail_csv_sha256"] == hashlib.sha256(
+        detail_csv.encode("utf-8")
+    ).hexdigest()
+
+
 def test_native_ade_sweep_accounts_for_exact_declared_output_evaluation_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1693,6 +2005,45 @@ def test_native_ade_sweep_setup_readback_requires_the_exact_saved_declaration() 
         )
 
 
+def test_native_ade_sweep_setup_readback_pins_global_variable_selections() -> None:
+    class Client:
+        def execute_skill(self, expression, **_kwargs):
+            if '?typeName "variables"' in expression:
+                return SimpleNamespace(output='(("CL" "VDD") nil)', errors=[])
+            if expression.startswith("maeGetSetup(?session"):
+                return SimpleNamespace(output='("VDA")', errors=[])
+            raise AssertionError(expression)
+
+    verification = _native_sweep_verification()
+    verification["expected_global_variable_selections"] = {"CL": True}
+    readback = bridge_worker._read_maestro_sweep_setup(
+        Client(),
+        lambda _client, name, **_kwargs: (
+            '"1f,2f"' if name == "CL" else "nil"
+        ),
+        verification,
+        session="fnxSweep12",
+    )
+
+    assert readback["global_variable_selections"] == {"CL": True}
+    assert readback["global_variable_selection_state"] == {
+        "enabled": ["CL", "VDD"],
+        "disabled": [],
+    }
+    assert readback["global_variable_selection_readback_method"] == (
+        "cadence_maeGetSetup_enabled_variables_via_bridge_skill_channel"
+    )
+
+    verification["expected_global_variable_selections"] = {"CL": False}
+    with pytest.raises(RuntimeError, match="selections changed"):
+        bridge_worker._read_maestro_sweep_setup(
+            Client(),
+            lambda *_args, **_kwargs: '"1f,2f"',
+            verification,
+            session="fnxSweep12",
+        )
+
+
 def test_background_maestro_run_wires_native_sweep_preflight_and_point_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1866,6 +2217,80 @@ def test_background_ade_artifact_gate_rejects_empty_core_input() -> None:
         )
 
 
+def test_maestro_history_log_listing_and_single_completed_timeout_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locations = [
+        {"source_location": "project", "maestro_root": "/data/xum/project"},
+        {"source_location": "scratch", "maestro_root": "/data/xum/scratch"},
+    ]
+
+    class Client:
+        def execute_skill(self, expression, **_kwargs):
+            if "/data/xum/project" in expression:
+                return SimpleNamespace(
+                    output='("." "Interactive.3.log" "Interactive.4.log" '
+                    '"Interactive.4.rdb")',
+                    errors=[],
+                )
+            if "/data/xum/scratch" in expression:
+                return SimpleNamespace(output="nil", errors=[])
+            raise AssertionError(expression)
+
+    histories = bridge_worker._maestro_history_log_paths(Client(), locations)
+    assert histories == {
+        "Interactive.3": ["/data/xum/project/Interactive.3.log"],
+        "Interactive.4": ["/data/xum/project/Interactive.4.log"],
+    }
+    monkeypatch.setattr(
+        bridge_worker,
+        "_read_remote_text_via_skill",
+        lambda *_args, **_kwargs: (
+            "Number of points completed: 2\nInteractive.4 completed.\n"
+        ),
+    )
+
+    history, evidence = (
+        bridge_worker._recover_single_new_completed_maestro_history(
+            Client(),
+            locations=locations,
+            histories_before={
+                "Interactive.3": ["/data/xum/project/Interactive.3.log"]
+            },
+            timeout_error=TimeoutError("Simulation did not finish within 90s"),
+        )
+    )
+
+    assert history == "Interactive.4"
+    assert evidence["new_histories"] == ["Interactive.4"]
+    assert evidence["completed_history_logs"][0]["size_bytes"] > 0
+    assert evidence["evidence_sources"] == {
+        "history_log": "eda_result",
+        "selection": "software_inference",
+    }
+
+
+def test_maestro_timeout_recovery_rejects_ambiguous_new_histories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        bridge_worker,
+        "_maestro_history_log_paths",
+        lambda *_args, **_kwargs: {
+            "Interactive.4": ["/data/xum/results/Interactive.4.log"],
+            "Interactive.5": ["/data/xum/results/Interactive.5.log"],
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="exactly one newly named"):
+        bridge_worker._recover_single_new_completed_maestro_history(
+            object(),
+            locations=[],
+            histories_before={},
+            timeout_error=TimeoutError("Simulation did not finish within 90s"),
+        )
+
+
 def test_background_maestro_run_rejects_artifact_transport_failure_and_closes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2003,6 +2428,7 @@ def test_maestro_variable_patch_saves_once_and_reopens_for_readback(
             "corner:TT:vdd": "0.9",
         },
         "working": {},
+        "session": "",
     }
 
     class Client:
@@ -2014,6 +2440,7 @@ def test_maestro_variable_patch_saves_once_and_reopens_for_readback(
             if "maeGetSetup" in expression:
                 return SimpleNamespace(output='("VDA")', errors=[])
             if expression.startswith("maeGetVar"):
+                calls.append(("get_expr", expression))
                 parts = expression.split('"')
                 name, scope, scope_name, session = (
                     parts[1],
@@ -2027,6 +2454,34 @@ def test_maestro_variable_patch_saves_once_and_reopens_for_readback(
                 return SimpleNamespace(
                     output="nil" if value is None else f'"{value}"', errors=[]
                 )
+            if "axlPutVar" in expression:
+                calls.append(("set_expr", expression))
+                parts = expression.split('"')
+                session = state["session"]
+                scope_name, name, value = "TT", parts[1], parts[3]
+                identity = f"corner:{scope_name}:{name}"
+                calls.append(
+                    ("set", session, identity, value, "corner", "axlPutVar")
+                )
+                state["working"][identity] = value
+                return SimpleNamespace(output=f'(2001 "{value}")', errors=[])
+            if "axlGetCorner" in expression:
+                calls.append(("get_expr", expression))
+                parts = expression.split('"')
+                session, scope_name = parts[1], parts[3]
+                calls.append(("corner_handle", session, scope_name))
+                return SimpleNamespace(output="(1001 1002)", errors=[])
+            if expression.startswith("axlGetVar("):
+                name = expression.split('"')[1]
+                identity = f"corner:TT:{name}"
+                calls.append(("get", state["session"], identity))
+                value = state["working"].get(identity)
+                return SimpleNamespace(
+                    output="0" if value is None else "2001", errors=[]
+                )
+            if expression.startswith("axlGetVarValue("):
+                value = state["working"].get("corner:TT:vdd")
+                return SimpleNamespace(output=f'"{value}"', errors=[])
             raise AssertionError(expression)
 
     sessions = iter(["fnxPatch1", "fnxPatch2"])
@@ -2034,6 +2489,7 @@ def test_maestro_variable_patch_saves_once_and_reopens_for_readback(
     def fake_open_session(_client, library, cell):
         session = next(sessions)
         state["working"] = dict(state["persisted"])
+        state["session"] = session
         calls.append(("open", session, library, cell))
         return session
 
@@ -2139,8 +2595,15 @@ def test_maestro_variable_patch_saves_once_and_reopens_for_readback(
     assert result["declared_scoped_values_verified"] is True
     assert result["variable_readback_methods"] == {
         "global": "bridge_public_get_var",
-        "test": "cadence_maeGetVar_via_bridge_skill_channel",
-        "corner": "cadence_maeGetVar_via_bridge_skill_channel",
+        "test": "cadence_maeGetVar_string_typeValue_via_bridge_skill_channel",
+        "corner": (
+            "cadence_axlGetCorner_axlGetVarValue_via_bridge_skill_channel"
+        ),
+    }
+    assert result["variable_write_methods"] == {
+        "global": "bridge_public_set_var_global",
+        "test": "bridge_public_set_var_list_typeValue",
+        "corner": "cadence_axlPutVar_via_bridge_skill_channel",
     }
     assert result["test_or_corner_overrides_checked"] is False
     assert result["unlisted_scope_overrides_checked"] is False
@@ -2153,6 +2616,17 @@ def test_maestro_variable_patch_saves_once_and_reopens_for_readback(
     assert result["before_target_fingerprint_sha256"] != result[
         "after_target_fingerprint_sha256"
     ]
+    scoped_get_expressions = [
+        call[1] for call in calls if call[0] == "get_expr"
+    ]
+    assert any(
+        '?typeName "test" ?typeValue "VDA"' in value
+        for value in scoped_get_expressions
+    )
+    assert any(
+        'axlGetCorner(sdb "TT")' in value and "list(sdb corner)" in value
+        for value in scoped_get_expressions
+    )
     assert [call[0] for call in calls].count("save") == 1
     assert [call[0] for call in calls].count("open") == 2
     assert [call[0] for call in calls].count("close") == 2
@@ -2178,7 +2652,7 @@ def test_maestro_variable_patch_saves_once_and_reopens_for_readback(
             "corner:TT:vdd",
             "0.95",
             "corner",
-            '("TT")',
+            "axlPutVar",
         ),
     ]
 
@@ -2237,6 +2711,165 @@ def test_maestro_variable_patch_stops_before_write_on_corner_mismatch(
         )
 
     assert calls == [("close", "fnxCornerMismatch")]
+
+
+def test_corner_variable_readback_rejects_unaddressable_corner_handle() -> None:
+    update = {
+        "name": "VDD",
+        "scope": "corner",
+        "scope_name": "Nominal",
+    }
+
+    class MissingClient:
+        def execute_skill(self, expression, **kwargs):
+            return SimpleNamespace(
+                output="0",
+                errors=[
+                    "*Error* error: Cannot find a setup database entry for handle 0."
+                ],
+            )
+
+    with pytest.raises(RuntimeError, match="named-corner handle readback failed"):
+        bridge_worker._read_maestro_variable(
+            MissingClient(), lambda *_args, **_kwargs: None, update, session="fnx1"
+        )
+
+    class BrokenClient:
+        def execute_skill(self, expression, **kwargs):
+            return SimpleNamespace(output="nil", errors=["unexpected SKILL failure"])
+
+    with pytest.raises(RuntimeError, match="unexpected SKILL failure"):
+        bridge_worker._read_maestro_variable(
+            BrokenClient(), lambda *_args, **_kwargs: None, update, session="fnx1"
+        )
+
+
+def test_corner_variable_readback_treats_only_zero_variable_handle_as_absent() -> None:
+    update = {
+        "name": "VDD",
+        "scope": "corner",
+        "scope_name": "VDA_LOW_VDD",
+    }
+
+    class Client:
+        def execute_skill(self, expression, **kwargs):
+            if "axlGetCorner" in expression:
+                return SimpleNamespace(output="(1001 1002)", errors=[])
+            if expression.startswith("axlGetVar("):
+                return SimpleNamespace(output="0", errors=[])
+            raise AssertionError(expression)
+
+    assert (
+        bridge_worker._read_maestro_variable(
+            Client(), lambda *_args, **_kwargs: None, update, session="fnx1"
+        )
+        is None
+    )
+
+
+def test_maestro_global_variable_selection_patch_preserves_other_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+    state = {
+        "persisted": {"enabled": ["CL", "VDD"], "disabled": []},
+        "working": {"enabled": [], "disabled": []},
+    }
+
+    class Client:
+        def execute_skill(self, expression, **kwargs):
+            if "ddGetObj" in expression:
+                return SimpleNamespace(output="t", errors=[])
+            if '?typeName "corners"' in expression:
+                return SimpleNamespace(output='("Nominal")', errors=[])
+            if '?typeName "variables"' in expression:
+                enabled = " ".join(
+                    f'"{name}"' for name in state["working"]["enabled"]
+                )
+                disabled = " ".join(
+                    f'"{name}"' for name in state["working"]["disabled"]
+                )
+                return SimpleNamespace(
+                    output=(
+                        f"(({enabled}) "
+                        + (f"({disabled}))" if disabled else "nil)")
+                    ),
+                    errors=[],
+                )
+            if expression.startswith("maeSetSetup"):
+                calls.append(("selection", expression))
+                state["working"]["enabled"].remove("CL")
+                state["working"]["disabled"].append("CL")
+                state["working"]["disabled"].sort()
+                return SimpleNamespace(output="t", errors=[])
+            if "maeGetSetup" in expression:
+                return SimpleNamespace(output='("VDA")', errors=[])
+            raise AssertionError(expression)
+
+    sessions = iter(["fnxSelect1", "fnxSelect2"])
+
+    def fake_open_session(_client, library, cell):
+        session = next(sessions)
+        state["working"] = {
+            key: list(values) for key, values in state["persisted"].items()
+        }
+        calls.append(("open", session, library, cell))
+        return session
+
+    def fake_save_setup(_client, library, cell, *, session):
+        calls.append(("save", session, library, cell))
+        state["persisted"] = {
+            key: list(values) for key, values in state["working"].items()
+        }
+
+    _install_fake_maestro_module(
+        monkeypatch,
+        find_open_session=lambda _client: None,
+        open_session=fake_open_session,
+        close_session=lambda _client, session: calls.append(("close", session)),
+        get_var=lambda *_args, **_kwargs: "nil",
+        set_var=lambda *_args, **_kwargs: None,
+        save_setup=fake_save_setup,
+    )
+    monkeypatch.setattr(bridge_worker, "_client", Client)
+
+    result = bridge_worker.apply_maestro_variables(
+        {
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_variables": {
+                "expected_tests": ["VDA"],
+                "expected_corners": ["Nominal"],
+                "updates": [],
+                "global_selection_updates": [
+                    {
+                        "name": "CL",
+                        "expected_enabled": True,
+                        "enabled": False,
+                    }
+                ],
+            },
+        }
+    )
+
+    assert result["variable_scope"] == "none"
+    assert result["global_variable_selection_before"] == {"CL": True}
+    assert result["global_variable_selection_immediate"] == {"CL": False}
+    assert result["global_variable_selection_persisted"] == {"CL": False}
+    assert result["global_variable_selection_state_before"] == {
+        "enabled": ["CL", "VDD"],
+        "disabled": [],
+    }
+    assert result["global_variable_selection_state_persisted"] == {
+        "enabled": ["VDD"],
+        "disabled": ["CL"],
+    }
+    assert result["global_variable_selection_preserved_undeclared"] is True
+    assert len([call for call in calls if call[0] == "save"]) == 1
+    assert len([call for call in calls if call[0] == "open"]) == 2
 
 
 def test_maestro_variable_patch_worker_requires_explicit_old_value() -> None:
@@ -3217,6 +3850,191 @@ def test_subprocess_ade_variable_payload_preserves_exact_strings(
     assert set(payload["ade_variables_user_fields"]) == {
         "expected_tests",
         "updates",
+    }
+
+
+def test_apply_maestro_corners_is_add_only_and_independently_reopened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    corners: list[str] = []
+    calls: list[tuple] = []
+
+    class FakeClient:
+        def execute_skill(self, expression, **kwargs):
+            calls.append(("skill", expression, kwargs))
+            if '?typeName "corners"' in expression:
+                output = "(" + " ".join(f'\"{name}\"' for name in corners) + ")"
+                return SimpleNamespace(output=output, errors=[])
+            if "maeGetSetup" in expression:
+                return SimpleNamespace(output='("VDA")', errors=[])
+            raise AssertionError(expression)
+
+    def fake_open_session(_client, library, cell):
+        session = f"fnxSession{len([c for c in calls if c[0] == 'open']) + 1}"
+        calls.append(("open", library, cell, session))
+        return session
+
+    def fake_close_session(_client, session):
+        calls.append(("close", session))
+
+    def fake_set_corner(_client, name, **kwargs):
+        calls.append(("set_corner", name, kwargs))
+        corners.append(name)
+
+    def fake_save_setup(_client, library, cell, **kwargs):
+        calls.append(("save", library, cell, kwargs))
+
+    _install_fake_maestro_module(
+        monkeypatch,
+        open_session=fake_open_session,
+        close_session=fake_close_session,
+        find_open_session=lambda _client: None,
+        save_setup=fake_save_setup,
+        set_corner=fake_set_corner,
+    )
+    monkeypatch.setattr(bridge_worker, "_client", lambda: FakeClient())
+    monkeypatch.setattr(bridge_worker, "_cellview_exists", lambda *_args: True)
+
+    result = bridge_worker.apply_maestro_corners(
+        {
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_corners": {
+                "backend": "maestro",
+                "expected_tests": ["VDA"],
+                "expected_corners": [],
+                "additions": [{"name": "VDA_LOW"}, {"name": "VDA_NOMINAL"}],
+            },
+        }
+    )
+
+    assert result["all_corners_readback_before"] == []
+    assert result["enabled_corners_readback_before"] == []
+    assert result["all_corners_readback_after"] == ["VDA_LOW", "VDA_NOMINAL"]
+    assert result["enabled_corners_readback_after"] == [
+        "VDA_LOW",
+        "VDA_NOMINAL",
+    ]
+    assert result["model_files_modified"] is False
+    assert result["maestro_setup_write_performed"] is True
+    assert [call[1] for call in calls if call[0] == "set_corner"] == [
+        "VDA_LOW",
+        "VDA_NOMINAL",
+    ]
+    assert len([call for call in calls if call[0] == "save"]) == 1
+    assert len([call for call in calls if call[0] == "open"]) == 2
+
+
+def test_apply_maestro_corners_rejects_reordered_existing_membership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    corners = ["Nominal", "VDA_LOW"]
+    calls: list[tuple] = []
+
+    class FakeClient:
+        def execute_skill(self, expression, **kwargs):
+            calls.append(("skill", expression, kwargs))
+            if '?typeName "corners"' in expression:
+                output = "(" + " ".join(f'\"{name}\"' for name in corners) + ")"
+                return SimpleNamespace(output=output, errors=[])
+            if "maeGetSetup" in expression:
+                return SimpleNamespace(output='("VDA")', errors=[])
+            raise AssertionError(expression)
+
+    def fake_open_session(_client, library, cell):
+        calls.append(("open", library, cell))
+        return "fnxSession1"
+
+    def fake_close_session(_client, session):
+        calls.append(("close", session))
+
+    def unexpected_writer(*_args, **_kwargs):
+        raise AssertionError("corner writer must not run after an order mismatch")
+
+    _install_fake_maestro_module(
+        monkeypatch,
+        open_session=fake_open_session,
+        close_session=fake_close_session,
+        find_open_session=lambda _client: None,
+        save_setup=unexpected_writer,
+        set_corner=unexpected_writer,
+    )
+    monkeypatch.setattr(bridge_worker, "_client", lambda: FakeClient())
+    monkeypatch.setattr(bridge_worker, "_cellview_exists", lambda *_args: True)
+
+    with pytest.raises(RuntimeError, match="corner membership precondition mismatch"):
+        bridge_worker.apply_maestro_corners(
+            {
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "ade_corners": {
+                    "backend": "maestro",
+                    "expected_tests": ["VDA"],
+                    "expected_corners": ["VDA_LOW", "Nominal"],
+                    "additions": [{"name": "VDA_HIGH"}],
+                },
+            }
+        )
+
+    assert not [call for call in calls if call[0] == "set_corner"]
+    assert [call for call in calls if call[0] == "close"] == [
+        ("close", "fnxSession1")
+    ]
+
+
+def test_subprocess_ade_corner_payload_preserves_exact_membership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "add-maestro-corners",
+            "operation": "ade.corners.apply",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_corners": {
+                "expected_tests": ["VDA"],
+                "expected_corners": [],
+                "additions": [{"name": "VDA_LOW"}, {"name": "VDA_NOMINAL"}],
+            },
+        }
+    )
+    adapter = SubprocessBridgeAdapter(tmp_path / "bridge-python.exe")
+    request: dict[str, object] = {}
+
+    def fake_request(action, payload, *, timeout):
+        request.update(action=action, payload=payload, timeout=timeout)
+        return {"all_corners_readback_after": ["VDA_LOW", "VDA_NOMINAL"]}
+
+    monkeypatch.setattr(adapter, "_request", fake_request)
+
+    result = adapter.apply_ade_corners(task)
+
+    assert result.evidence_source is EvidenceSource.BRIDGE_READBACK
+    assert request["action"] == "apply_maestro_corners"
+    payload = request["payload"]
+    assert isinstance(payload, dict)
+    assert "analysis" not in payload
+    assert "analysis_source" not in payload
+    assert payload["ade_corners"] == {
+        "backend": "maestro",
+        "expected_tests": ["VDA"],
+        "expected_corners": [],
+        "additions": [{"name": "VDA_LOW"}, {"name": "VDA_NOMINAL"}],
+    }
+    assert set(payload["ade_corners_user_fields"]) == {
+        "expected_tests",
+        "expected_corners",
+        "additions",
     }
 
 

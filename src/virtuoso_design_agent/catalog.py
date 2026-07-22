@@ -30,6 +30,7 @@ _STANDARD_OPERATIONS = (
     Operation.ADE_CAPTURE,
     Operation.ADE_RUN,
     Operation.ADE_VARIABLES_APPLY,
+    Operation.ADE_CORNERS_APPLY,
     Operation.ADE_SETUP_APPLY,
     Operation.SIMULATION_RUN,
     Operation.DESIGN_TUNE,
@@ -62,6 +63,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             Operation.ADE_CAPTURE,
             Operation.ADE_RUN,
             Operation.ADE_VARIABLES_APPLY,
+            Operation.ADE_CORNERS_APPLY,
             Operation.ADE_SETUP_APPLY,
         ),
         parameters=(),
@@ -71,8 +73,9 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "live non-overwrite ADE prepare/setup patch/background run-resume + exact-"
             "history/result/log and OA-to-runtime-input consistency; native Maestro "
             "CL and VDDxCL sweep setup/input-bundle/RDB point binding and pinned "
-            "scalar-to-constraint mapping live on TSMC N28; human capture, "
-            "test/corner-scope variable patch, and corner sweep live pending"
+            "scalar-to-constraint mapping plus test-scope CL x environmental-corner "
+            "raw-result binding live on TSMC N28; human capture, real PVT corners, "
+            "and multi-test/multi-analysis mapping pending"
         ),
     ),
     CircuitKind.INVERTER: CircuitCapability(
@@ -93,8 +96,9 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "bounded search + live non-overwrite ADE prepare/setup patch/background "
             "run-resume and OA-to-runtime-input consistency; native Maestro CL and "
             "VDDxCL sweep setup/input-bundle/exact-history RDB binding plus "
-            "delay/skew/supply-energy constraint mapping live; capture, additional "
-            "variable scopes, and corner ADE gates pending"
+            "delay/skew/supply-energy constraint mapping, test/corner-scoped values, "
+            "global selection CAS, and environmental-corner quality selection live; "
+            "capture, real PVT corners, and multi-test/multi-analysis mapping pending"
         ),
     ),
     CircuitKind.COMMON_SOURCE: CircuitCapability(
@@ -118,8 +122,9 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "infeasible restore, checkpoint recovery, and non-overwrite ADE "
             "prepare/setup/background exact-history run-resume path live on the TSMC "
             "inverter handoff; native Maestro CL sweep is live on the inverter "
-            "testbench; common-source capture/variable/sweep/corner ADE gates and "
-            "L/VDD/corner pending"
+            "testbench, including test-scope CL x environmental-corner result "
+            "binding; common-source capture/variable/sweep/PVT-corner ADE gates and "
+            "L/VDD design search pending"
         ),
     ),
     CircuitKind.SOURCE_DEGENERATED_COMMON_SOURCE: CircuitCapability(

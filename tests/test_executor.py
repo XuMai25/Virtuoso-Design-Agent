@@ -778,6 +778,95 @@ def _native_sweep_run_task() -> TaskSpec:
     )
 
 
+def _native_corner_sweep_run_task() -> TaskSpec:
+    corners = ["Nominal", "VDA_LOW_VDD", "VDA_NOMINAL_VDD"]
+    points = []
+    point = 1
+    for maestro_point, load in ((1, "1f"), (2, "4f")):
+        for corner, vdd in zip(corners, ("0.9", "0.8", "0.9"), strict=True):
+            points.append(
+                {
+                    "point": point,
+                    "maestro_point": maestro_point,
+                    "corner": corner,
+                    "values": {"CL": load, "VDD": vdd},
+                }
+            )
+            point += 1
+    return TaskSpec.model_validate(
+        {
+            "id": "run-native-corner-grid",
+            "operation": "ade.run",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_sweep_tb",
+                "view": "maestro",
+            },
+            "ade_run": {
+                "require_simulator_input_consistency": True,
+                "sweep_verification": {
+                    "expected_tests": ["VDA"],
+                    "expected_corners": corners,
+                    "expected_global_variable_selections": {
+                        "CL": False,
+                        "VDD": True,
+                    },
+                    "variables": [
+                        {
+                            "name": "CL",
+                            "scope": "test",
+                            "scope_name": "VDA",
+                            "expected_value": "1f,4f",
+                        },
+                        {
+                            "name": "VDD",
+                            "expected_value": "0.9",
+                            "sweep": False,
+                        },
+                        {
+                            "name": "VDD",
+                            "scope": "corner",
+                            "scope_name": "VDA_LOW_VDD",
+                            "expected_value": "0.8",
+                            "sweep": False,
+                        },
+                        {
+                            "name": "VDD",
+                            "scope": "corner",
+                            "scope_name": "VDA_NOMINAL_VDD",
+                            "expected_value": "0.9",
+                            "sweep": False,
+                        },
+                    ],
+                    "points": points,
+                    "input_bindings": [
+                        {
+                            "test": "VDA",
+                            "variable": "CL",
+                            "instance": "CL0",
+                            "oa_parameter": "c",
+                        },
+                        {
+                            "test": "VDA",
+                            "variable": "VDD",
+                            "instance": "VDD0",
+                            "oa_parameter": "vdc",
+                        },
+                        {
+                            "test": "VDA",
+                            "variable": "VDD",
+                            "instance": "VIN0",
+                            "oa_parameter": "v2",
+                        },
+                    ],
+                },
+            },
+            "safety": {"allow_remote_compute": True},
+        }
+    )
+
+
 def _mapped_native_sweep_run_task(*, delay_limit_ps: float = 5.0) -> TaskSpec:
     data = _native_sweep_run_task().model_dump(mode="json")
     data["id"] = "evaluate-native-cl-sweep"
@@ -1088,6 +1177,85 @@ def _native_sweep_database_run_evidence(task: TaskSpec) -> dict:
     return data
 
 
+def _native_corner_sweep_database_run_evidence(task: TaskSpec) -> dict:
+    data = _native_sweep_database_run_evidence(_native_sweep_run_task())
+    assert task.ade_run is not None
+    sweep = task.ade_run.sweep_verification
+    assert sweep is not None
+    data["target"] = task.target.model_dump(mode="json")
+    setup_readback = {
+        "tests": ["VDA"],
+        "corners": list(sweep.expected_corners or []),
+        "variables": {
+            variable.evidence_key(): variable.expected_value
+            for variable in sweep.variables
+        },
+        "variable_readback_methods": {
+            "test:VDA:CL": (
+                "cadence_maeGetVar_string_typeValue_via_bridge_skill_channel"
+            ),
+            "VDD": "bridge_public_get_var",
+            "corner:VDA_LOW_VDD:VDD": (
+                "cadence_axlGetCorner_axlGetVarValue_via_bridge_skill_channel"
+            ),
+            "corner:VDA_NOMINAL_VDD:VDD": (
+                "cadence_axlGetCorner_axlGetVarValue_via_bridge_skill_channel"
+            ),
+        },
+        "global_variable_selections": {"CL": False, "VDD": True},
+        "global_variable_selection_state": {
+            "enabled": ["VDD"],
+            "disabled": ["CL"],
+        },
+        "global_variable_selection_readback_method": (
+            "cadence_maeGetSetup_enabled_variables_via_bridge_skill_channel"
+        ),
+        "fingerprint_sha256": "f" * 64,
+    }
+    data["sweep_setup_readback_before"] = setup_readback
+    data["sweep_setup_readback_after"] = setup_readback
+
+    input_consistency = data["simulator_input_consistency"][0]
+    input_consistency["verified_sweep_binding_pairs"] = 3
+    input_consistency.pop("retained_point")
+    input_consistency["retained_maestro_point"] = 1
+    input_consistency["retained_sweep_values"] = {"CL": "1f", "VDD": "0.9"}
+
+    shared_tests = data["sweep_point_consistency"][0]["tests"]
+    point_consistency = []
+    for expected in sweep.points:
+        point_payload = {
+            "point": expected.point,
+            "maestro_point": expected.maestro_point,
+            "corner": expected.corner,
+            "expected_parameters": dict(expected.values),
+            "result_parameters": dict(expected.values),
+            "scalar_outputs": {"VoutAvg": str(0.4 + expected.point / 100)},
+            "tests": json.loads(json.dumps(shared_tests)),
+        }
+        point_consistency.append(
+            {
+                **point_payload,
+                "point_binding_sha256": hashlib.sha256(
+                    json.dumps(
+                        point_payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+    data["sweep_point_consistency"] = point_consistency
+    data["corner_detail_csv_sha256"] = "8" * 64
+    data["corner_detail_csv_size_bytes"] = 2048
+    data["corner_detail_csv_evidence_sources"] = {
+        "raw": "eda_result",
+        "parser": "software_inference",
+    }
+    return data
+
+
 def test_ade_run_accepts_complete_native_sweep_point_evidence() -> None:
     class RunningAdapter(DeterministicDemoAdapter):
         def run_ade(self, task):
@@ -1304,6 +1472,158 @@ def test_ade_run_accepts_native_sweep_history_database_evidence() -> None:
 
     assert record.status is RunStatus.SUCCEEDED
     assert any("exact-history RDB/completion log" in note for note in record.notes)
+
+
+def test_ade_run_accepts_exact_corner_grid_and_global_selection_evidence() -> None:
+    class RunningAdapter(DeterministicDemoAdapter):
+        def run_ade(self, task):
+            return AdapterResult(
+                data=_native_corner_sweep_database_run_evidence(task),
+                evidence_source=EvidenceSource.EDA_RESULT,
+            )
+
+    task = _native_corner_sweep_run_task()
+    plan = build_plan(task)
+    record = TaskExecutor(RunningAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    run = next(action for action in record.actions if action.action == "ade.run")
+    assert len(run.details["sweep_point_consistency"]) == 6
+    assert run.details["sweep_history_log_evidence"]["points_completed"] == 2
+    assert run.details["sweep_setup_readback_before"][
+        "global_variable_selections"
+    ] == {"CL": False, "VDD": True}
+
+
+def test_ade_run_rejects_global_selection_map_that_conflicts_with_full_state() -> None:
+    class RunningAdapter(DeterministicDemoAdapter):
+        def run_ade(self, task):
+            data = _native_corner_sweep_database_run_evidence(task)
+            for field in (
+                "sweep_setup_readback_before",
+                "sweep_setup_readback_after",
+            ):
+                data[field]["global_variable_selection_state"] = {
+                    "enabled": ["CL", "VDD"],
+                    "disabled": [],
+                }
+            return AdapterResult(
+                data=data,
+                evidence_source=EvidenceSource.EDA_RESULT,
+            )
+
+    task = _native_corner_sweep_run_task()
+    plan = build_plan(task)
+    record = TaskExecutor(RunningAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.FAILED
+    assert any(
+        "global-variable selections" in note for note in record.notes
+    )
+
+
+def test_ade_run_accepts_unambiguous_completed_history_after_callback_timeout() -> None:
+    class RunningAdapter(DeterministicDemoAdapter):
+        def run_ade(self, task):
+            data = _native_corner_sweep_database_run_evidence(task)
+            history = data["history"]
+            data.update(
+                {
+                    "run_status": "recovered_after_bridge_timeout",
+                    "simulation_performed_by_this_invocation": True,
+                    "history_recovery_performed": False,
+                    "callback_timeout_history_recovery_performed": True,
+                    "callback_timeout_history_recovery_evidence": {
+                        "method": (
+                            "single_new_completed_history_log_after_bridge_timeout"
+                        ),
+                        "bridge_timeout": "Simulation did not finish within 90s",
+                        "histories_before": ["Interactive.11"],
+                        "new_histories": [history],
+                        "completed_history_logs": [
+                            {
+                                "path": f"/data/xum/results/{history}.log",
+                                "size_bytes": 320,
+                                "sha256": "e" * 64,
+                            }
+                        ],
+                        "evidence_sources": {
+                            "history_log": "eda_result",
+                            "selection": "software_inference",
+                        },
+                    },
+                }
+            )
+            return AdapterResult(
+                data=data,
+                evidence_source=EvidenceSource.EDA_RESULT,
+            )
+
+    task = _native_corner_sweep_run_task()
+    plan = build_plan(task)
+    record = TaskExecutor(RunningAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert any(
+        "exactly one newly named completed Maestro history" in note
+        for note in record.notes
+    )
+
+
+def test_ade_run_rejects_callback_recovery_when_history_already_existed() -> None:
+    class RunningAdapter(DeterministicDemoAdapter):
+        def run_ade(self, task):
+            data = _native_corner_sweep_database_run_evidence(task)
+            history = data["history"]
+            data.update(
+                {
+                    "run_status": "recovered_after_bridge_timeout",
+                    "simulation_performed_by_this_invocation": True,
+                    "history_recovery_performed": False,
+                    "callback_timeout_history_recovery_performed": True,
+                    "callback_timeout_history_recovery_evidence": {
+                        "method": (
+                            "single_new_completed_history_log_after_bridge_timeout"
+                        ),
+                        "bridge_timeout": "Simulation did not finish within 90s",
+                        "histories_before": [history],
+                        "new_histories": [history],
+                        "completed_history_logs": [
+                            {
+                                "path": f"/data/xum/results/{history}.log",
+                                "size_bytes": 320,
+                                "sha256": "e" * 64,
+                            }
+                        ],
+                        "evidence_sources": {
+                            "history_log": "eda_result",
+                            "selection": "software_inference",
+                        },
+                    },
+                }
+            )
+            return AdapterResult(
+                data=data,
+                evidence_source=EvidenceSource.EDA_RESULT,
+            )
+
+    task = _native_corner_sweep_run_task()
+    plan = build_plan(task)
+    record = TaskExecutor(RunningAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.FAILED
+    assert any(
+        "callback-timeout recovery evidence was incomplete or ambiguous" in note
+        for note in record.notes
+    )
 
 
 def test_ade_run_accepts_only_accounted_legacy_output_evaluation_errors() -> None:
@@ -1657,7 +1977,7 @@ def test_ade_variable_patch_records_exact_persistent_compare_and_swap() -> None:
                     "expected_corners": ["nominal", "TT"],
                     "corners_readback_before": ["nominal", "TT"],
                     "corners_readback_after": ["nominal", "TT"],
-                    "requested_variable_updates": {
+                        "requested_variable_updates": {
                         "bias_v": {
                             "name": "bias_v",
                             "scope": "global",
@@ -1678,9 +1998,15 @@ def test_ade_variable_patch_records_exact_persistent_compare_and_swap() -> None:
                             "scope_name": "TT",
                             "expected_value": "0.9",
                             "value": "0.95",
+                            },
                         },
-                    },
-                    "requested_evidence_source": "user_input",
+                        "requested_global_selection_updates": {
+                            "CL": {
+                                "expected_enabled": True,
+                                "enabled": False,
+                            }
+                        },
+                        "requested_evidence_source": "user_input",
                     "before_variables": {
                         "bias_v": "0.35",
                         "test:VDA:bias_v": None,
@@ -1691,17 +2017,52 @@ def test_ade_variable_patch_records_exact_persistent_compare_and_swap() -> None:
                         "test:VDA:bias_v": "0.30,0.35,0.40",
                         "corner:TT:vdd": "0.95",
                     },
-                    "persisted_variables": {
+                        "persisted_variables": {
                         "bias_v": "0.40",
                         "test:VDA:bias_v": "0.30,0.35,0.40",
-                        "corner:TT:vdd": "0.95",
-                    },
-                    "confirmed_evidence_source": "bridge_readback",
-                    "declared_scoped_values_verified": True,
+                            "corner:TT:vdd": "0.95",
+                        },
+                        "global_variable_selection_before": {"CL": True},
+                        "global_variable_selection_immediate": {"CL": False},
+                        "global_variable_selection_persisted": {"CL": False},
+                        "global_variable_selection_state_before": {
+                            "enabled": ["CL", "VDD"],
+                            "disabled": [],
+                        },
+                        "global_variable_selection_state_immediate": {
+                            "enabled": ["VDD"],
+                            "disabled": ["CL"],
+                        },
+                        "global_variable_selection_state_persisted": {
+                            "enabled": ["VDD"],
+                            "disabled": ["CL"],
+                        },
+                        "global_variable_selection_readback_method": (
+                            "cadence_maeGetSetup_enabled_variables_"
+                            "via_bridge_skill_channel"
+                        ),
+                        "global_variable_selection_write_method": (
+                            "cadence_maeSetSetup_variables_via_bridge_skill_channel"
+                        ),
+                        "global_variable_selection_preserved_undeclared": True,
+                        "confirmed_evidence_source": "bridge_readback",
+                        "declared_scoped_values_verified": True,
+                        "declared_global_selections_verified": True,
                     "variable_readback_methods": {
                         "global": "bridge_public_get_var",
-                        "test": "cadence_maeGetVar_via_bridge_skill_channel",
-                        "corner": "cadence_maeGetVar_via_bridge_skill_channel",
+                        "test": (
+                            "cadence_maeGetVar_string_typeValue_"
+                            "via_bridge_skill_channel"
+                        ),
+                        "corner": (
+                            "cadence_axlGetCorner_axlGetVarValue_"
+                            "via_bridge_skill_channel"
+                        ),
+                    },
+                    "variable_write_methods": {
+                        "global": "bridge_public_set_var_global",
+                        "test": "bridge_public_set_var_list_typeValue",
+                        "corner": "cadence_axlPutVar_via_bridge_skill_channel",
                     },
                     "test_or_corner_overrides_checked": False,
                     "unlisted_scope_overrides_checked": False,
@@ -1748,6 +2109,13 @@ def test_ade_variable_patch_records_exact_persistent_compare_and_swap() -> None:
                         "value": "0.95",
                     },
                 ],
+                "global_selection_updates": [
+                    {
+                        "name": "CL",
+                        "expected_enabled": True,
+                        "enabled": False,
+                    }
+                ],
             },
             "safety": {
                 "allow_remote_write": True,
@@ -1780,7 +2148,11 @@ def test_ade_variable_patch_records_exact_persistent_compare_and_swap() -> None:
         (
             "0.40",
             "0.40",
-            {"global": "cadence_maeGetVar_via_bridge_skill_channel"},
+            {
+                "global": (
+                    "cadence_maeGetVar_string_typeValue_via_bridge_skill_channel"
+                )
+            },
         ),
     ],
 )
@@ -1817,6 +2189,9 @@ def test_ade_variable_patch_rejects_untrusted_readback(
                     "confirmed_evidence_source": "bridge_readback",
                     "declared_scoped_values_verified": True,
                     "variable_readback_methods": readback_methods,
+                    "variable_write_methods": {
+                        "global": "bridge_public_set_var_global"
+                    },
                     "test_or_corner_overrides_checked": False,
                     "unlisted_scope_overrides_checked": False,
                     "effective_simulation_value_verified": False,
@@ -1862,6 +2237,127 @@ def test_ade_variable_patch_rejects_untrusted_readback(
 
     assert record.status is RunStatus.FAILED
     assert any("compare-and-swap" in note for note in record.notes)
+
+
+def _ade_corner_task() -> TaskSpec:
+    return TaskSpec.model_validate(
+        {
+            "id": "add-maestro-corners",
+            "operation": "ade.corners.apply",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_corners": {
+                "expected_tests": ["VDA"],
+                "expected_corners": [],
+                "additions": [{"name": "VDA_LOW"}, {"name": "VDA_NOMINAL"}],
+            },
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+
+
+def _ade_corner_evidence(task: TaskSpec) -> dict:
+    assert task.ade_corners is not None
+    additions = [addition.name for addition in task.ade_corners.additions]
+    return {
+        "target": task.target.model_dump(mode="json"),
+        "expected_tests": ["VDA"],
+        "tests_readback_before": ["VDA"],
+        "tests_readback_after": ["VDA"],
+        "expected_corners_before": [],
+        "requested_corner_additions": additions,
+        "all_corners_readback_before": [],
+        "enabled_corners_readback_before": [],
+        "immediate_corner_states": [
+            {
+                "name": "VDA_LOW",
+                "all_corners": ["VDA_LOW"],
+                "enabled_corners": ["VDA_LOW"],
+            },
+            {
+                "name": "VDA_NOMINAL",
+                "all_corners": ["VDA_LOW", "VDA_NOMINAL"],
+                "enabled_corners": ["VDA_LOW", "VDA_NOMINAL"],
+            },
+        ],
+        "all_corners_readback_after": ["VDA_LOW", "VDA_NOMINAL"],
+        "enabled_corners_readback_after": ["VDA_LOW", "VDA_NOMINAL"],
+        "requested_evidence_source": "user_input",
+        "confirmed_evidence_source": "bridge_readback",
+        "before_target_fingerprint_sha256": "a" * 64,
+        "after_target_fingerprint_sha256": "b" * 64,
+        "corner_write_method": "bridge_public_set_corner",
+        "corner_readback_method": (
+            "cadence_maeGetSetup_all_and_enabled_via_bridge_skill_channel"
+        ),
+        "existing_corners_modified": False,
+        "existing_maestro_replaced": False,
+        "model_files_modified": False,
+        "variables_modified": False,
+        "analyses_or_outputs_modified": False,
+        "schematic_oa_write_performed": False,
+        "maestro_setup_write_performed": True,
+        "automated_simulation_performed": False,
+    }
+
+
+def test_ade_corner_patch_records_add_only_persistent_membership() -> None:
+    task = _ade_corner_task()
+
+    class CornerAdapter(DeterministicDemoAdapter):
+        def apply_ade_corners(self, task):
+            return AdapterResult(
+                data=_ade_corner_evidence(task),
+                evidence_source=EvidenceSource.BRIDGE_READBACK,
+            )
+
+    plan = build_plan(task)
+    record = TaskExecutor(CornerAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert [action.action for action in record.actions] == [
+        "bridge.probe",
+        "ade.corners.apply",
+    ]
+    assert record.candidates == []
+    assert any("all/enabled membership" in note for note in record.notes)
+    assert any("did not attach process models" in note for note in record.notes)
+
+
+@pytest.mark.parametrize("corruption", ["disabled", "modified", "fingerprint"])
+def test_ade_corner_patch_rejects_untrusted_membership(corruption: str) -> None:
+    task = _ade_corner_task()
+
+    class UntrustedCornerAdapter(DeterministicDemoAdapter):
+        def apply_ade_corners(self, task):
+            data = _ade_corner_evidence(task)
+            if corruption == "disabled":
+                data["enabled_corners_readback_after"] = ["VDA_NOMINAL"]
+            elif corruption == "modified":
+                data["existing_corners_modified"] = True
+            else:
+                data["after_target_fingerprint_sha256"] = "a" * 64
+            return AdapterResult(
+                data=data,
+                evidence_source=EvidenceSource.BRIDGE_READBACK,
+            )
+
+    plan = build_plan(task)
+    record = TaskExecutor(UntrustedCornerAdapter()).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.FAILED
+    assert any("corner patch did not prove" in note for note in record.notes)
 
 
 def test_ade_setup_patch_records_atomic_persistent_readback() -> None:

@@ -124,6 +124,7 @@ class SubprocessBridgeAdapter:
             Operation.ADE_CAPTURE,
             Operation.ADE_RUN,
             Operation.ADE_VARIABLES_APPLY,
+            Operation.ADE_CORNERS_APPLY,
             Operation.ADE_SETUP_APPLY,
         }:
             payload["analysis"] = task.resolved_analysis().value
@@ -162,6 +163,11 @@ class SubprocessBridgeAdapter:
             payload["ade_variables"] = task.ade_variables.model_dump(mode="json")
             payload["ade_variables_user_fields"] = sorted(
                 task.ade_variables.model_fields_set
+            )
+        if task.ade_corners is not None:
+            payload["ade_corners"] = task.ade_corners.model_dump(mode="json")
+            payload["ade_corners_user_fields"] = sorted(
+                task.ade_corners.model_fields_set
             )
         if task.ade_setup is not None:
             payload["ade_setup"] = task.ade_setup.model_dump(mode="json")
@@ -257,6 +263,14 @@ class SubprocessBridgeAdapter:
     def apply_ade_variables(self, task: TaskSpec) -> AdapterResult:
         data = self._request(
             "apply_maestro_variables",
+            self._task_payload(task),
+            timeout=min(task.limits.timeout_seconds, 180),
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
+
+    def apply_ade_corners(self, task: TaskSpec) -> AdapterResult:
+        data = self._request(
+            "apply_maestro_corners",
             self._task_payload(task),
             timeout=min(task.limits.timeout_seconds, 180),
         )

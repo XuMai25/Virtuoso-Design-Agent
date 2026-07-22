@@ -508,6 +508,12 @@ class DeterministicDemoAdapter:
             "write or verify a persistent Maestro setup"
         )
 
+    def apply_ade_corners(self, task: TaskSpec) -> AdapterResult:
+        raise RuntimeError(
+            "ade.corners.apply requires the real Bridge; the demo adapter cannot "
+            "write or verify persistent Maestro corners"
+        )
+
     def apply_ade_setup(self, task: TaskSpec) -> AdapterResult:
         raise RuntimeError(
             "ade.setup.apply requires the real Bridge; the demo adapter cannot "

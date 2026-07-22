@@ -261,6 +261,36 @@ def test_ade_variable_patch_plan_discloses_cas_and_single_setup_save() -> None:
     assert "bias_v" in plan.steps[2].description
     assert "只保存一次 setup" in plan.steps[2].description
     assert "不证明未声明 scope" in plan.steps[2].description
+
+
+def test_ade_variable_selection_plan_discloses_exact_transition() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "select-test-local-cl",
+            "operation": "ade.variables.apply",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_variables": {
+                "expected_tests": ["VDA"],
+                "global_selection_updates": [
+                    {
+                        "name": "CL",
+                        "expected_enabled": True,
+                        "enabled": False,
+                    }
+                ],
+            },
+        }
+    )
+
+    plan = build_plan(task)
+
+    assert "CL:True->False" in plan.steps[2].description
+    assert "保持其余集合" in plan.steps[2].description
     assert "不自动覆盖式重试" in plan.steps[3].description
     assert plan.requires_remote_write
     assert not plan.requires_remote_compute
@@ -314,6 +344,43 @@ def test_ade_setup_patch_plan_discloses_atomic_add_only_boundary() -> None:
     assert "AC/Vout" in plan.steps[2].description
     assert "不替换已有 output" in plan.steps[2].description
     assert "重新打开" in plan.steps[3].description
+    assert plan.steps[2].side_effect is SideEffect.REMOTE_WRITE
+    assert plan.requires_remote_write
+    assert not plan.requires_remote_compute
+
+
+def test_ade_corner_patch_plan_discloses_add_only_membership_boundary() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "add-maestro-corners",
+            "operation": "ade.corners.apply",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_corners": {
+                "expected_tests": ["VDA"],
+                "expected_corners": [],
+                "additions": [{"name": "VDA_LOW"}, {"name": "VDA_NOMINAL"}],
+            },
+        }
+    )
+
+    plan = build_plan(task)
+
+    assert [step.capability for step in plan.steps] == [
+        "bridge.probe",
+        "ade.corners.preflight",
+        "ade.corners.apply",
+        "ade.corners.readback",
+        "evidence.persist",
+    ]
+    assert "enabled/all corner" in plan.steps[1].description
+    assert "VDA_LOW, VDA_NOMINAL" in plan.steps[2].description
+    assert "public set_corner" in plan.steps[2].description
+    assert "不配置 disabled tests" in plan.steps[2].description
     assert plan.steps[2].side_effect is SideEffect.REMOTE_WRITE
     assert plan.requires_remote_write
     assert not plan.requires_remote_compute

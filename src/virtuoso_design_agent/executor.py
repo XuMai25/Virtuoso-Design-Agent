@@ -540,14 +540,26 @@ class TaskExecutor:
             variable.evidence_key(): variable.expected_value
             for variable in sweep.variables
         }
+        point_sweep_names = {
+            variable.name for variable in sweep.variables if variable.sweep
+        }
+        effective_variable_names = set(sweep.effective_variable_names())
         expected_methods = {
             variable.evidence_key(): (
                 "bridge_public_get_var"
                 if variable.scope.value == "global"
-                else "cadence_maeGetVar_via_bridge_skill_channel"
+                else (
+                    "cadence_maeGetVar_string_typeValue_via_bridge_skill_channel"
+                    if variable.scope.value == "test"
+                    else (
+                        "cadence_axlGetCorner_axlGetVarValue_"
+                        "via_bridge_skill_channel"
+                    )
+                )
             )
             for variable in sweep.variables
         }
+        expected_selections = dict(sweep.expected_global_variable_selections)
         setup_readbacks: list[dict[str, Any]] = []
         for field in (
             "sweep_setup_readback_before",
@@ -574,6 +586,64 @@ class TaskExecutor:
                 raise RuntimeError(
                     "ADE sweep setup readback did not match the declared exact "
                     "tests, corners, and variable scopes"
+                )
+            if expected_selections:
+                selection_state = readback.get(
+                    "global_variable_selection_state"
+                )
+                enabled_names = (
+                    selection_state.get("enabled")
+                    if isinstance(selection_state, dict)
+                    else None
+                )
+                disabled_names = (
+                    selection_state.get("disabled")
+                    if isinstance(selection_state, dict)
+                    else None
+                )
+                valid_selection_lists = (
+                    isinstance(enabled_names, list)
+                    and isinstance(disabled_names, list)
+                    and all(
+                        isinstance(name, str) and name
+                        for name in [*enabled_names, *disabled_names]
+                    )
+                    and len(enabled_names) == len(set(enabled_names))
+                    and len(disabled_names) == len(set(disabled_names))
+                    and not set(enabled_names) & set(disabled_names)
+                )
+                selection_values_match = valid_selection_lists and all(
+                    (name in enabled_names) is expected_enabled
+                    and ((name in enabled_names) + (name in disabled_names) == 1)
+                    for name, expected_enabled in expected_selections.items()
+                )
+                if (
+                    readback.get("global_variable_selections")
+                    != expected_selections
+                    or not selection_values_match
+                    or readback.get(
+                        "global_variable_selection_readback_method"
+                    )
+                    != (
+                        "cadence_maeGetSetup_enabled_variables_"
+                        "via_bridge_skill_channel"
+                    )
+                ):
+                    raise RuntimeError(
+                        "ADE sweep setup readback did not match the declared "
+                        "global-variable selections"
+                    )
+            elif any(
+                field in readback
+                for field in (
+                    "global_variable_selections",
+                    "global_variable_selection_state",
+                    "global_variable_selection_readback_method",
+                )
+            ):
+                raise RuntimeError(
+                    "ADE sweep setup readback exposed undeclared global-variable "
+                    "selection evidence"
                 )
             setup_readbacks.append(readback)
         if setup_readbacks[0] != setup_readbacks[1]:
@@ -605,6 +675,29 @@ class TaskExecutor:
             raise RuntimeError(
                 "ADE sweep evidence did not preserve its setup/input/result sources"
             )
+        if sweep.corner_mode():
+            if (
+                not database_mode
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(data.get("corner_detail_csv_sha256") or ""),
+                )
+                or int(data.get("corner_detail_csv_size_bytes") or 0) <= 0
+                or data.get("corner_detail_csv_evidence_sources")
+                != {"raw": "eda_result", "parser": "software_inference"}
+            ):
+                raise RuntimeError(
+                    "ADE corner sweep lacked hashed raw-Detail CSV evidence"
+                )
+        elif any(
+            data.get(field) is not None
+            for field in (
+                "corner_detail_csv_sha256",
+                "corner_detail_csv_size_bytes",
+                "corner_detail_csv_evidence_sources",
+            )
+        ):
+            raise RuntimeError("ordinary ADE sweep mixed corner-CSV evidence")
 
         raw_points = data.get("sweep_point_consistency")
         if not isinstance(raw_points, list) or len(raw_points) != len(sweep.points):
@@ -750,25 +843,71 @@ class TaskExecutor:
                     "declared binding"
                 )
             if database_mode:
-                try:
-                    retained_point = int(item.get("retained_point"))
-                except (TypeError, ValueError) as exc:
-                    raise RuntimeError(
-                        "ADE sweep symbolic input has an invalid retained point"
-                    ) from exc
-                expected_retained = expected_points.get(retained_point)
                 retained_values = item.get("retained_sweep_values")
-                if (
-                    expected_retained is None
-                    or not isinstance(retained_values, dict)
-                    or set(retained_values) != set(expected_retained.values)
-                    or any(
-                        not spectre_values_equal(
+                if not isinstance(retained_values, dict) or set(
+                    retained_values
+                ) != effective_variable_names:
+                    raise RuntimeError(
+                        "ADE sweep symbolic input retained values did not match one "
+                        "declared point"
+                    )
+                if sweep.corner_mode():
+                    try:
+                        retained_maestro_point = int(
+                            item.get("retained_maestro_point")
+                        )
+                    except (TypeError, ValueError) as exc:
+                        raise RuntimeError(
+                            "ADE corner sweep symbolic input has an invalid retained "
+                            "Maestro point"
+                        ) from exc
+                    retained_group = [
+                        point
+                        for point in sweep.points
+                        if point.maestro_point == retained_maestro_point
+                    ]
+                    if not retained_group:
+                        raise RuntimeError(
+                            "ADE corner sweep symbolic input retained an undeclared "
+                            "Maestro point"
+                        )
+                    retained_matches = all(
+                        (
+                            all(
+                                spectre_values_equal(
+                                    retained_values[name], point.values[name]
+                                )
+                                for point in retained_group
+                            )
+                            if name in point_sweep_names
+                            else any(
+                                spectre_values_equal(
+                                    retained_values[name], point.values[name]
+                                )
+                                for point in retained_group
+                            )
+                        )
+                        for name in effective_variable_names
+                    )
+                else:
+                    try:
+                        retained_point = int(item.get("retained_point"))
+                    except (TypeError, ValueError) as exc:
+                        raise RuntimeError(
+                            "ADE sweep symbolic input has an invalid retained point"
+                        ) from exc
+                    expected_retained = expected_points.get(retained_point)
+                    retained_matches = expected_retained is not None and all(
+                        spectre_values_equal(
                             retained_values[name], expected_value
                         )
-                        for name, expected_value in expected_retained.values.items()
+                        for name, expected_value in (
+                            expected_retained.values.items()
+                            if expected_retained is not None
+                            else []
+                        )
                     )
-                ):
+                if not retained_matches:
                     raise RuntimeError(
                         "ADE sweep symbolic input retained values did not match one "
                         "declared point"
@@ -820,7 +959,7 @@ class TaskExecutor:
                 or manifest_log.get("sha256") != history_log.get("sha256")
                 or manifest_log.get("size_bytes") != history_log.get("size_bytes")
                 or int(history_log.get("size_bytes") or 0) <= 0
-                or history_log.get("points_completed") != len(sweep.points)
+                or history_log.get("points_completed") != sweep.maestro_point_count()
                 or history_log.get("simulation_errors")
                 != len(expected_error_cells)
                 or history_log.get(
@@ -860,6 +999,9 @@ class TaskExecutor:
             result_parameters = point_evidence.get("result_parameters")
             if (
                 point_evidence.get("expected_parameters") != expected_point.values
+                or point_evidence.get("maestro_point")
+                != expected_point.maestro_point
+                or point_evidence.get("corner") != expected_point.corner
                 or not isinstance(result_parameters, dict)
                 or not isinstance(scalar_outputs, dict)
                 or not scalar_outputs
@@ -888,6 +1030,11 @@ class TaskExecutor:
                 "scalar_outputs": scalar_outputs,
                 "tests": tests,
             }
+            if sweep.corner_mode():
+                payload.update(
+                    maestro_point=point_evidence.get("maestro_point"),
+                    corner=point_evidence.get("corner"),
+                )
             expected_hash = hashlib.sha256(
                 json.dumps(
                     payload,
@@ -1159,7 +1306,9 @@ class TaskExecutor:
             raise RuntimeError("ADE result mapping history did not match the exact run")
         if results.get("tests") != list(sweep.expected_tests):
             raise RuntimeError("ADE result mapping tests did not match the strict sweep")
-        raw_points = results.get("points")
+        raw_points = results.get(
+            "corner_points" if sweep.corner_mode() else "points"
+        )
         if not isinstance(raw_points, list) or len(raw_points) != len(sweep.points):
             raise RuntimeError("ADE result mapping did not cover every strict sweep point")
         trusted_points = data.get("sweep_point_consistency")
@@ -1188,6 +1337,13 @@ class TaskExecutor:
             if expected_point is None or point_number in seen_points:
                 raise RuntimeError("ADE result mapping repeated an unknown point")
             seen_points.add(point_number)
+            if (
+                raw_point.get("maestro_point") != expected_point.maestro_point
+                or raw_point.get("corner") != expected_point.corner
+            ):
+                raise RuntimeError(
+                    f"ADE result mapping point {point_number} corner selector changed"
+                )
 
             raw_parameters = raw_point.get("parameters")
             raw_outputs = raw_point.get("outputs")
@@ -1295,6 +1451,8 @@ class TaskExecutor:
             mapped_points.append(
                 {
                     "point": point_number,
+                    "maestro_point": expected_point.maestro_point,
+                    "corner": expected_point.corner,
                     "parameters": parameter_rows,
                     "metrics": metric_rows,
                     "constraints": [
@@ -1791,6 +1949,93 @@ class TaskExecutor:
                         "ADE run did not prove an exact background history without "
                         "OA or Maestro setup writes"
                     )
+                callback_recovered = (
+                    ran.data.get(
+                        "callback_timeout_history_recovery_performed"
+                    )
+                    is True
+                )
+                callback_evidence = ran.data.get(
+                    "callback_timeout_history_recovery_evidence"
+                )
+                if callback_recovered:
+                    completed_logs = (
+                        callback_evidence.get("completed_history_logs")
+                        if isinstance(callback_evidence, dict)
+                        else None
+                    )
+                    histories_before = (
+                        callback_evidence.get("histories_before")
+                        if isinstance(callback_evidence, dict)
+                        else None
+                    )
+                    history = str(ran.data.get("history") or "")
+                    histories_before_valid = (
+                        isinstance(histories_before, list)
+                        and all(
+                            isinstance(item, str)
+                            and re.fullmatch(r"[A-Za-z0-9_.-]+", item)
+                            for item in histories_before
+                        )
+                        and histories_before
+                        == sorted(set(histories_before))
+                        and history not in histories_before
+                    )
+                    completed_log_paths = (
+                        [str(item.get("path") or "") for item in completed_logs]
+                        if isinstance(completed_logs, list)
+                        and all(isinstance(item, dict) for item in completed_logs)
+                        else []
+                    )
+                    if (
+                        task.ade_run is None
+                        or task.ade_run.resume_history is not None
+                        or not task.ade_run.sweep_verification
+                        or not task.ade_run.sweep_verification.corner_mode()
+                        or ran.data.get("simulation_performed_by_this_invocation")
+                        is not True
+                        or ran.data.get("history_recovery_performed") is not False
+                        or ran.data.get("run_status")
+                        != "recovered_after_bridge_timeout"
+                        or not isinstance(callback_evidence, dict)
+                        or not histories_before_valid
+                        or callback_evidence.get("method")
+                        != (
+                            "single_new_completed_history_log_after_bridge_timeout"
+                        )
+                        or not str(callback_evidence.get("bridge_timeout") or "")
+                        or callback_evidence.get("new_histories") != [history]
+                        or callback_evidence.get("evidence_sources")
+                        != {
+                            "history_log": "eda_result",
+                            "selection": "software_inference",
+                        }
+                        or not isinstance(completed_logs, list)
+                        or not completed_logs
+                        or len(completed_log_paths)
+                        != len(set(completed_log_paths))
+                        or any(
+                            not isinstance(item, dict)
+                            or not str(item.get("path") or "").endswith(
+                                f"/{history}.log"
+                            )
+                            or int(item.get("size_bytes") or 0) <= 0
+                            or not re.fullmatch(
+                                r"[0-9a-f]{64}",
+                                str(item.get("sha256") or ""),
+                            )
+                            for item in completed_logs
+                        )
+                    ):
+                        raise RuntimeError(
+                            "ADE run callback-timeout recovery evidence was "
+                            "incomplete or ambiguous"
+                        )
+                elif callback_evidence is not None:
+                    raise RuntimeError(
+                        "ADE run exposed callback-timeout recovery evidence without "
+                        "declaring recovery"
+                    )
                 structured = bool(
                     ran.data.get("structured_results_available", False)
                 )
@@ -2067,6 +2312,12 @@ class TaskExecutor:
                         "rerunning simulation; no GUI focus, setup save, or OA write "
                         "was performed"
                     )
+                elif callback_recovered:
+                    notes.append(
+                        "the Bridge completion wait timed out after simulation, but "
+                        "VDA identified exactly one newly named completed Maestro "
+                        "history and validated it without rerunning or writing OA"
+                    )
                 else:
                     notes.append(
                         "executed the saved Maestro setup in a background session; no "
@@ -2115,6 +2366,22 @@ class TaskExecutor:
                     update.evidence_key(): update.value
                     for update in task.ade_variables.updates
                 }
+                requested_selections = {
+                    update.name: {
+                        "expected_enabled": update.expected_enabled,
+                        "enabled": update.enabled,
+                    }
+                    for update in task.ade_variables.global_selection_updates
+                }
+                expected_selection_before = {
+                    update.name: update.expected_enabled
+                    for update in task.ade_variables.global_selection_updates
+                }
+                expected_selection_after = {
+                    update.name: update.enabled
+                    for update in task.ade_variables.global_selection_updates
+                }
+                selection_names = set(expected_selection_after)
                 expected_scopes = list(
                     dict.fromkeys(
                         update.scope.value for update in task.ade_variables.updates
@@ -2129,10 +2396,95 @@ class TaskExecutor:
                     scope: (
                         "bridge_public_get_var"
                         if scope == "global"
-                        else "cadence_maeGetVar_via_bridge_skill_channel"
+                        else (
+                            "cadence_maeGetVar_string_typeValue_"
+                            "via_bridge_skill_channel"
+                            if scope == "test"
+                            else (
+                                "cadence_axlGetCorner_axlGetVarValue_"
+                                "via_bridge_skill_channel"
+                            )
+                        )
                     )
                     for scope in expected_scopes
                 }
+                expected_write_methods = {
+                    scope: (
+                        "bridge_public_set_var_global"
+                        if scope == "global"
+                        else (
+                            "bridge_public_set_var_list_typeValue"
+                            if scope == "test"
+                            else "cadence_axlPutVar_via_bridge_skill_channel"
+                        )
+                    )
+                    for scope in expected_scopes
+                }
+                selection_states = [
+                    patched.data.get("global_variable_selection_state_before"),
+                    patched.data.get("global_variable_selection_state_immediate"),
+                    patched.data.get("global_variable_selection_state_persisted"),
+                ]
+                selection_state_valid = not selection_names and selection_states == [
+                    None,
+                    None,
+                    None,
+                ]
+                if selection_names:
+                    selection_state_valid = all(
+                        isinstance(state, dict)
+                        and isinstance(state.get("enabled"), list)
+                        and isinstance(state.get("disabled"), list)
+                        and all(
+                            isinstance(name, str) and name
+                            for name in [
+                                *state["enabled"],
+                                *state["disabled"],
+                            ]
+                        )
+                        and len(state["enabled"])
+                        == len(set(state["enabled"]))
+                        and len(state["disabled"])
+                        == len(set(state["disabled"]))
+                        and not (
+                            set(state["enabled"]) & set(state["disabled"])
+                        )
+                        for state in selection_states
+                    )
+                    if selection_state_valid:
+                        before_state, immediate_state, persisted_state = selection_states
+                        assert isinstance(before_state, dict)
+                        assert isinstance(immediate_state, dict)
+                        assert isinstance(persisted_state, dict)
+
+                        def undeclared(state: dict[str, Any]) -> dict[str, bool]:
+                            enabled = set(state["enabled"])
+                            disabled = set(state["disabled"])
+                            return {
+                                name: name in enabled
+                                for name in enabled | disabled
+                                if name not in selection_names
+                            }
+
+                        def declared(state: dict[str, Any]) -> dict[str, bool] | None:
+                            enabled = set(state["enabled"])
+                            disabled = set(state["disabled"])
+                            if any(
+                                (name in enabled) + (name in disabled) != 1
+                                for name in selection_names
+                            ):
+                                return None
+                            return {
+                                name: name in enabled for name in selection_names
+                            }
+
+                        selection_state_valid = (
+                            immediate_state == persisted_state
+                            and undeclared(before_state) == undeclared(immediate_state)
+                            and declared(before_state) == expected_selection_before
+                            and declared(immediate_state) == expected_selection_after
+                            and declared(persisted_state) == expected_selection_after
+                        )
                 if (
                     patched.evidence_source is not EvidenceSource.BRIDGE_READBACK
                     or patched.data.get("requested_evidence_source") != "user_input"
@@ -2144,9 +2496,13 @@ class TaskExecutor:
                     or patched.data.get("automated_simulation_performed") is not False
                     or patched.data.get("variable_scope")
                     != (
-                        "global"
-                        if expected_scopes == ["global"]
-                        else "declared_scopes"
+                        "none"
+                        if not expected_scopes
+                        else (
+                            "global"
+                            if expected_scopes == ["global"]
+                            else "declared_scopes"
+                        )
                     )
                     or patched.data.get("variable_scopes") != expected_scopes
                     or patched.data.get("expected_tests") != expected_tests
@@ -2158,12 +2514,44 @@ class TaskExecutor:
                     or patched.data.get("corners_readback_after")
                     != expected_corners
                     or patched.data.get("requested_variable_updates") != requested
+                    or patched.data.get("requested_global_selection_updates")
+                    != requested_selections
                     or patched.data.get("before_variables") != expected_before
                     or patched.data.get("immediate_variables") != expected_after
                     or patched.data.get("persisted_variables") != expected_after
+                    or patched.data.get("global_variable_selection_before")
+                    != expected_selection_before
+                    or patched.data.get("global_variable_selection_immediate")
+                    != expected_selection_after
+                    or patched.data.get("global_variable_selection_persisted")
+                    != expected_selection_after
+                    or not selection_state_valid
+                    or patched.data.get(
+                        "global_variable_selection_readback_method"
+                    )
+                    != (
+                        "cadence_maeGetSetup_enabled_variables_"
+                        "via_bridge_skill_channel"
+                        if selection_names
+                        else None
+                    )
+                    or patched.data.get("global_variable_selection_write_method")
+                    != (
+                        "cadence_maeSetSetup_variables_via_bridge_skill_channel"
+                        if selection_names
+                        else None
+                    )
+                    or patched.data.get(
+                        "global_variable_selection_preserved_undeclared"
+                    )
+                    is not bool(selection_names)
                     or patched.data.get("declared_scoped_values_verified") is not True
+                    or patched.data.get("declared_global_selections_verified")
+                    is not True
                     or patched.data.get("variable_readback_methods")
                     != expected_readback_methods
+                    or patched.data.get("variable_write_methods")
+                    != expected_write_methods
                     or (
                         patched.data.get("test_or_corner_overrides_checked")
                         is not False
@@ -2182,8 +2570,10 @@ class TaskExecutor:
                         "compare-and-swap with persistent readback"
                     )
                 notes.append(
-                    "patched only the declared Maestro variable scopes after exact "
-                    "old-value preconditions and an independent persisted readback"
+                    "patched only the declared Maestro variable scopes/selections "
+                    "after exact old-value preconditions plus selection-state "
+                    "preconditions and an independent "
+                    "persisted readback"
                 )
                 notes.append(
                     "no simulation, schematic write, test, analysis, output, or "
@@ -2193,6 +2583,90 @@ class TaskExecutor:
                     "comma-separated values can request a native sweep at their "
                     "declared scope, but unlisted scope overrides and effective "
                     "simulator values were not verified by this operation"
+                )
+            elif operation is Operation.ADE_CORNERS_APPLY:
+                patched = self._action(
+                    "ade.corners.apply",
+                    lambda: self.adapter.apply_ade_corners(task),
+                )
+                if task.ade_corners is None:
+                    raise RuntimeError("ADE corner settings disappeared at execution")
+                expected_tests = list(task.ade_corners.expected_tests)
+                expected_before = list(task.ade_corners.expected_corners)
+                additions = [addition.name for addition in task.ade_corners.additions]
+                expected_after = [*expected_before, *additions]
+                before_fingerprint = patched.data.get(
+                    "before_target_fingerprint_sha256"
+                )
+                after_fingerprint = patched.data.get(
+                    "after_target_fingerprint_sha256"
+                )
+                valid_fingerprints = all(
+                    isinstance(value, str)
+                    and len(value) == 64
+                    and all(character in "0123456789abcdef" for character in value)
+                    for value in (before_fingerprint, after_fingerprint)
+                ) and before_fingerprint != after_fingerprint
+                immediate = patched.data.get("immediate_corner_states")
+                expected_immediate = []
+                for index, name in enumerate(additions, start=1):
+                    membership = [*expected_before, *additions[:index]]
+                    expected_immediate.append(
+                        {
+                            "name": name,
+                            "all_corners": membership,
+                            "enabled_corners": membership,
+                        }
+                    )
+                if (
+                    patched.evidence_source is not EvidenceSource.BRIDGE_READBACK
+                    or patched.data.get("target")
+                    != task.target.model_dump(mode="json")
+                    or patched.data.get("requested_evidence_source") != "user_input"
+                    or patched.data.get("confirmed_evidence_source")
+                    != "bridge_readback"
+                    or patched.data.get("expected_tests") != expected_tests
+                    or patched.data.get("tests_readback_before") != expected_tests
+                    or patched.data.get("tests_readback_after") != expected_tests
+                    or patched.data.get("expected_corners_before")
+                    != expected_before
+                    or patched.data.get("requested_corner_additions") != additions
+                    or patched.data.get("all_corners_readback_before")
+                    != expected_before
+                    or patched.data.get("enabled_corners_readback_before")
+                    != expected_before
+                    or patched.data.get("all_corners_readback_after")
+                    != expected_after
+                    or patched.data.get("enabled_corners_readback_after")
+                    != expected_after
+                    or immediate != expected_immediate
+                    or not valid_fingerprints
+                    or patched.data.get("corner_write_method")
+                    != "bridge_public_set_corner"
+                    or patched.data.get("corner_readback_method")
+                    != (
+                        "cadence_maeGetSetup_all_and_enabled_via_bridge_skill_channel"
+                    )
+                    or patched.data.get("existing_corners_modified") is not False
+                    or patched.data.get("existing_maestro_replaced") is not False
+                    or patched.data.get("model_files_modified") is not False
+                    or patched.data.get("variables_modified") is not False
+                    or patched.data.get("analyses_or_outputs_modified") is not False
+                    or patched.data.get("schematic_oa_write_performed") is not False
+                    or patched.data.get("maestro_setup_write_performed") is not True
+                    or patched.data.get("automated_simulation_performed") is not False
+                ):
+                    raise RuntimeError(
+                        "ADE corner patch did not prove exact add-only membership "
+                        "preconditions and persistent readback"
+                    )
+                notes.append(
+                    "added only the declared enabled Maestro corners after exact "
+                    "all/enabled membership preconditions and an independent reopen"
+                )
+                notes.append(
+                    "this operation did not attach process models, set scoped "
+                    "variables, run simulation, or modify the schematic"
                 )
             elif operation is Operation.ADE_SETUP_APPLY:
                 patched = self._action(

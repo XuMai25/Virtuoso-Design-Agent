@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -708,6 +710,114 @@ def test_ade_run_accepts_an_exact_native_sweep_verification_contract() -> None:
     assert [point.point for point in sweep.points] == [1, 2, 3]
 
 
+def test_ade_run_accepts_orthogonal_test_sweep_and_corner_overrides() -> None:
+    corners = ["Nominal", "VDA_LOW_VDD", "VDA_NOMINAL_VDD"]
+    points = []
+    point = 1
+    for maestro_point, load in ((1, "1f"), (2, "4f")):
+        for corner, vdd in zip(corners, ("0.9", "0.8", "0.9"), strict=True):
+            points.append(
+                {
+                    "point": point,
+                    "maestro_point": maestro_point,
+                    "corner": corner,
+                    "values": {"CL": load, "VDD": vdd},
+                }
+            )
+            point += 1
+    verification = {
+        "expected_tests": ["VDA"],
+        "expected_corners": corners,
+        "expected_global_variable_selections": {"CL": False, "VDD": True},
+        "variables": [
+            {
+                "name": "CL",
+                "scope": "test",
+                "scope_name": "VDA",
+                "expected_value": "1f,4f",
+            },
+            {
+                "name": "VDD",
+                "scope": "global",
+                "expected_value": "0.9",
+                "sweep": False,
+            },
+            {
+                "name": "VDD",
+                "scope": "corner",
+                "scope_name": "VDA_LOW_VDD",
+                "expected_value": "0.8",
+                "sweep": False,
+            },
+            {
+                "name": "VDD",
+                "scope": "corner",
+                "scope_name": "VDA_NOMINAL_VDD",
+                "expected_value": "0.9",
+                "sweep": False,
+            },
+        ],
+        "points": points,
+        "input_bindings": [
+            {
+                "test": "VDA",
+                "variable": "CL",
+                "instance": "CL0",
+                "oa_parameter": "c",
+            },
+            {
+                "test": "VDA",
+                "variable": "VDD",
+                "instance": "VDD0",
+                "oa_parameter": "vdc",
+            },
+            {
+                "test": "VDA",
+                "variable": "VDD",
+                "instance": "VIN0",
+                "oa_parameter": "v2",
+            },
+        ],
+    }
+    task = TaskSpec.model_validate(
+        {
+            "id": "run-native-corner-grid",
+            "operation": "ade.run",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_sweep_tb",
+                "view": "maestro",
+            },
+            "ade_run": {
+                "require_simulator_input_consistency": True,
+                "sweep_verification": verification,
+            },
+        }
+    )
+
+    assert task.ade_run is not None
+    sweep = task.ade_run.sweep_verification
+    assert sweep is not None
+    assert sweep.corner_mode() is True
+    assert sweep.maestro_point_count() == 2
+    assert sweep.effective_variable_names() == ["CL", "VDD"]
+    assert len(sweep.points) == 6
+
+    missing_selection = json.loads(json.dumps(verification))
+    missing_selection["expected_global_variable_selections"].pop("VDD")
+    with pytest.raises(ValidationError, match="cover every effective"):
+        TaskSpec.model_validate(
+            task.model_dump(mode="json")
+            | {
+                "ade_run": {
+                    "require_simulator_input_consistency": True,
+                    "sweep_verification": missing_selection,
+                }
+            }
+        )
+
+
 def test_ade_sweep_allows_one_variable_to_bind_multiple_oa_parameters() -> None:
     verification = _sweep_verification()
     verification["variables"].append(
@@ -1338,6 +1448,114 @@ def test_ade_setup_patch_accepts_analysis_cas_and_named_output_additions() -> No
     assert not plan.requires_remote_compute
 
 
+def test_ade_corner_patch_accepts_add_only_empty_membership() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "add-maestro-corners",
+            "operation": "ade.corners.apply",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_corners": {
+                "expected_tests": ["VDA"],
+                "expected_corners": [],
+                "additions": [{"name": "VDA_LOW"}, {"name": "VDA_NOMINAL"}],
+            },
+        }
+    )
+
+    assert task.ade_corners is not None
+    assert task.ade_corners.expected_corners == []
+    assert [addition.name for addition in task.ade_corners.additions] == [
+        "VDA_LOW",
+        "VDA_NOMINAL",
+    ]
+    plan = build_plan(task)
+    assert plan.requires_remote_write
+    assert not plan.requires_remote_compute
+
+
+@pytest.mark.parametrize(
+    ("ade_corners", "message"),
+    [
+        (
+            {
+                "expected_tests": ["VDA"],
+                "expected_corners": ["VDA_LOW"],
+                "additions": [{"name": "VDA_LOW"}],
+            },
+            "must be absent",
+        ),
+        (
+            {
+                "expected_tests": ["VDA"],
+                "additions": [{"name": "VDA_LOW"}, {"name": "VDA_LOW"}],
+            },
+            "cannot repeat",
+        ),
+        (
+            {
+                "expected_tests": ["VDA"],
+                "additions": [{"name": "bad\ncorner"}],
+            },
+            "control characters",
+        ),
+    ],
+)
+def test_ade_corner_patch_rejects_conflicts_and_unsafe_names(
+    ade_corners: dict, message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        TaskSpec.model_validate(
+            {
+                "id": "invalid-maestro-corners",
+                "operation": "ade.corners.apply",
+                "circuit": "existing_schematic",
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "ade_corners": ade_corners,
+            }
+        )
+
+
+def test_ade_corner_settings_cannot_leak_or_request_overwrite() -> None:
+    settings = {
+        "expected_tests": ["VDA"],
+        "additions": [{"name": "VDA_LOW"}],
+    }
+    with pytest.raises(ValidationError, match="require operation='ade.corners.apply'"):
+        TaskSpec.model_validate(
+            {
+                "id": "wrong-corner-operation",
+                "operation": "schematic.inspect",
+                "circuit": "existing_schematic",
+                "target": {"library": "vda_test", "cell": "vda_manual_tb"},
+                "ade_corners": settings,
+            }
+        )
+    with pytest.raises(ValidationError, match="never replaces"):
+        TaskSpec.model_validate(
+            {
+                "id": "overwrite-corner-setup",
+                "operation": "ade.corners.apply",
+                "circuit": "existing_schematic",
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "ade_corners": settings,
+                "safety": {"replace_existing": True},
+            }
+        )
+
+
 @pytest.mark.parametrize(
     ("ade_setup", "message"),
     [
@@ -1656,6 +1874,57 @@ def test_ade_variable_patch_rejects_control_characters_in_scope_selectors(
                         }
                     ],
                 },
+            }
+        )
+
+
+def test_ade_variable_patch_supports_selection_only_compare_and_swap() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "select-test-local-cl",
+            "operation": "ade.variables.apply",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_variables": {
+                "expected_tests": ["VDA"],
+                "global_selection_updates": [
+                    {
+                        "name": "CL",
+                        "expected_enabled": True,
+                        "enabled": False,
+                    }
+                ],
+            },
+        }
+    )
+
+    assert task.ade_variables is not None
+    assert task.ade_variables.updates == []
+    assert task.ade_variables.global_selection_updates[0].name == "CL"
+
+    bad = task.model_dump(mode="json")
+    bad["ade_variables"]["global_selection_updates"][0]["enabled"] = True
+    with pytest.raises(ValidationError, match="must change state"):
+        TaskSpec.model_validate(bad)
+
+
+def test_ade_variable_patch_rejects_an_empty_change_set() -> None:
+    with pytest.raises(ValidationError, match="requires value or global selection"):
+        TaskSpec.model_validate(
+            {
+                "id": "empty-maestro-variable-patch",
+                "operation": "ade.variables.apply",
+                "circuit": "existing_schematic",
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "ade_variables": {"expected_tests": ["VDA"]},
             }
         )
 

@@ -220,6 +220,7 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         )
         sweep_requirement = ""
         sweep_log_requirement = "完成点数和零仿真错误日志"
+        timeout_recovery_requirement = ""
         if task.ade_run.sweep_verification is not None:
             sweep = task.ade_run.sweep_verification
             variables = ", ".join(
@@ -248,6 +249,12 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 "逐点文件时则强制核对唯一 runtime 符号输入束、exact-history "
                 "RDB 和完成日志"
             )
+            if sweep.corner_mode() and not resume:
+                timeout_recovery_requirement = (
+                    "；若 Bridge completion wait 超时，只允许在运行前后恰好"
+                    "新增一个名称且其 log 明确 completed 时继续；多个、同名"
+                    "覆盖或未完成 history 一律拒绝，不自动重跑"
+                )
         result_requirement = ""
         if task.ade_run.result_mapping is not None:
             mapped_metrics = ", ".join(
@@ -292,7 +299,8 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                     )
                     + f"；{output_requirement}；"
                     f"{artifact_requirement}{consistency_requirement}"
-                    f"{sweep_requirement}{result_requirement}；"
+                    f"{sweep_requirement}{result_requirement}"
+                    f"{timeout_recovery_requirement}；"
                     "history 命名/覆盖策略沿用已保存 setup，VDA 不改写也尚不能"
                     "证明名称唯一"
                 ),
@@ -305,7 +313,10 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                     (
                         "按显式恢复 history"
                         if resume
-                        else "按 run_and_wait 为本次调用返回的 history"
+                        else (
+                            "按 run_and_wait 返回的 history，或严格 corner Gate "
+                            "在唯一新增 completed log 下恢复的 history"
+                        )
                     )
                     + " 回收每个 point 的"
                     "变量、output、spec 和 pass/fail；通过 Bridge shell 在"
@@ -360,6 +371,18 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         variables = ", ".join(
             update.evidence_key() for update in task.ade_variables.updates
         )
+        selections = ", ".join(
+            f"{update.name}:{update.expected_enabled}->{update.enabled}"
+            for update in task.ade_variables.global_selection_updates
+        )
+        declared_changes = "; ".join(
+            value
+            for value in (
+                f"scopes={variables}" if variables else "",
+                f"global selections={selections}" if selections else "",
+            )
+            if value
+        )
         corner_guard = (
             "，并精确核对声明的 enabled corners"
             if task.ade_variables.expected_corners is not None
@@ -372,8 +395,9 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 "ade.variables.preflight",
                 (
                     "确认目标 Maestro view 已存在且当前没有任何已配置的开放 "
-                    f"Maestro session；独立后台回读 tests{corner_guard} 与每个"
-                    "声明 scope 的变量旧值，必须逐项匹配任务前置条件"
+                    f"Maestro session；独立后台回读 tests{corner_guard}、每个"
+                    "声明 scope 的变量旧值及目标 global-variable selection，"
+                    "必须逐项匹配任务前置条件"
                 ),
                 SideEffect.READ_ONLY,
             ),
@@ -381,10 +405,11 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 "03-apply",
                 "ade.variables.apply",
                 (
-                    f"仅更新声明的 Maestro design variable scopes: {variables}；"
-                    "每项 set_var 后立即 get_var，不改 test/analysis/output/corner "
-                    "membership 或 schematic，全部一致后只保存一次 setup；本 "
-                    "Gate 不证明未声明 scope 没有覆盖，也不证明仿真采用新值"
+                    f"仅更新声明的 Maestro design variable 状态: {declared_changes}；"
+                    "每项写后立即回读，不改 test/analysis/output/corner membership "
+                    "或 schematic，全部一致后只保存一次 setup；global selection "
+                    "只移动声明名称并保持其余集合；本 Gate 不证明未声明 scope "
+                    "没有覆盖，也不证明仿真采用新值"
                 ),
                 SideEffect.REMOTE_WRITE,
             ),
@@ -393,8 +418,8 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 "ade.variables.readback",
                 (
                     "关闭写会话后重新打开后台 session，再次核对 tests、可选 "
-                    "enabled corners 与所有目标变量；保存后的不一致或连接失败"
-                    "不自动覆盖式重试"
+                    "enabled corners、所有目标变量与 global selection 全集合；"
+                    "保存后的不一致或连接失败不自动覆盖式重试"
                 ),
                 SideEffect.READ_ONLY,
             ),
@@ -404,6 +429,55 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                     "description": (
                         "记录请求=user_input、旧值/即时值/持久化值="
                         "bridge_readback；成功只证明声明 scope 的 CAS patch"
+                    ),
+                }
+            ),
+        ]
+
+    if task.operation is Operation.ADE_CORNERS_APPLY:
+        assert task.ade_corners is not None
+        additions = ", ".join(
+            addition.name for addition in task.ade_corners.additions
+        )
+        return [
+            probe,
+            _step(
+                "02-preflight",
+                "ade.corners.preflight",
+                (
+                    "确认目标 Maestro view 已存在且没有任何已配置的开放 session；"
+                    "精确核对 tests，以及 enabled/all corner 有序列表都与声明的"
+                    "旧顺序一致；待新增名称在 disabled corner 中也必须不存在"
+                ),
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "03-apply",
+                "ade.corners.apply",
+                (
+                    f"只用 Bridge public set_corner add-only 新增 enabled corners: "
+                    f"{additions}；逐项写后立即回读，全部一致后只保存一次 "
+                    "setup；不配置 disabled tests、model file、变量、"
+                    "analysis、output 或 schematic"
+                ),
+                SideEffect.REMOTE_WRITE,
+            ),
+            _step(
+                "04-readback",
+                "ade.corners.readback",
+                (
+                    "关闭写会话后重新打开 background session，重新核对 tests、"
+                    "全部 corner 和 enabled corner 的完整顺序；不一致不自动重写"
+                ),
+                SideEffect.READ_ONLY,
+            ),
+            persist.model_copy(
+                update={
+                    "id": "05-persist",
+                    "description": (
+                        "记录请求=user_input、corner membership 前后状态="
+                        "bridge_readback；成功只证明 add-only scope 建立，不证明"
+                        "任何 process/environment corner 已进入仿真"
                     ),
                 }
             ),

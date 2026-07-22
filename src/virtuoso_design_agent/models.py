@@ -35,6 +35,7 @@ class Operation(str, Enum):
     ADE_CAPTURE = "ade.capture"
     ADE_RUN = "ade.run"
     ADE_VARIABLES_APPLY = "ade.variables.apply"
+    ADE_CORNERS_APPLY = "ade.corners.apply"
     ADE_SETUP_APPLY = "ade.setup.apply"
     SIMULATION_RUN = "simulation.run"
     DESIGN_TUNE = "design.tune"
@@ -256,7 +257,7 @@ class AdePrepareSpec(StrictModel):
 
 
 class AdeSweepVariableExpectation(StrictModel):
-    """One saved Maestro sweep declaration that must drive simulation."""
+    """One exact saved Maestro variable scope used by a strict sweep."""
 
     name: StrictStr = Field(
         min_length=1,
@@ -266,6 +267,7 @@ class AdeSweepVariableExpectation(StrictModel):
     expected_value: StrictStr = Field(min_length=1, max_length=1024)
     scope: AdeVariableScope = AdeVariableScope.GLOBAL
     scope_name: StrictStr | None = Field(default=None, min_length=1, max_length=128)
+    sweep: bool = True
 
     @field_validator("expected_value")
     @classmethod
@@ -280,14 +282,6 @@ class AdeSweepVariableExpectation(StrictModel):
                 "Maestro sweep values cannot contain quotes, backslashes, or "
                 "control characters"
             )
-        values = [item.strip() for item in value.split(",")]
-        if len(values) < 2 or any(not item for item in values):
-            raise ValueError(
-                "Maestro sweep expected_value must declare at least two "
-                "comma-separated values"
-            )
-        if len(values) != len(set(values)):
-            raise ValueError("Maestro sweep expected_value contains duplicates")
         return value
 
     @field_validator("scope_name")
@@ -313,6 +307,23 @@ class AdeSweepVariableExpectation(StrictModel):
             raise ValueError("global Maestro sweep variables cannot declare scope_name")
         if self.scope is not AdeVariableScope.GLOBAL and self.scope_name is None:
             raise ValueError("test/corner Maestro sweep variables require scope_name")
+        values = [item.strip() for item in self.expected_value.split(",")]
+        if any(not item for item in values):
+            raise ValueError("Maestro sweep expected_value contains an empty value")
+        if self.sweep:
+            if len(values) < 2:
+                raise ValueError(
+                    "Maestro sweep expected_value must declare at least two "
+                    "comma-separated values"
+                )
+            if self.scope is AdeVariableScope.CORNER:
+                raise ValueError("corner-scoped variables cannot be point sweeps")
+        elif len(values) != 1:
+            raise ValueError(
+                "fixed Maestro sweep variables must declare exactly one value"
+            )
+        if len(values) != len(set(values)):
+            raise ValueError("Maestro sweep expected_value contains duplicates")
         return self
 
     def evidence_key(self) -> str:
@@ -325,8 +336,24 @@ class AdeSweepVariableExpectation(StrictModel):
 
 
 class AdeSweepPointExpectation(StrictModel):
+    """One VDA result case, optionally selecting a Maestro point/corner cell."""
+
     point: int = Field(ge=1, le=256)
+    maestro_point: int | None = Field(default=None, ge=1, le=256)
+    corner: StrictStr | None = Field(default=None, min_length=1, max_length=128)
     values: dict[StrictStr, StrictStr] = Field(min_length=1, max_length=32)
+
+    @field_validator("corner")
+    @classmethod
+    def validate_corner(cls, value: str | None) -> str | None:
+        if value is not None and any(
+            character in ('"', "\\")
+            or ord(character) < 32
+            or ord(character) == 127
+            for character in value
+        ):
+            raise ValueError("invalid Maestro sweep point corner")
+        return value
 
     @field_validator("values")
     @classmethod
@@ -420,6 +447,9 @@ class AdeSweepVerificationSpec(StrictModel):
     expected_corners: list[StrictStr] | None = Field(
         default=None, min_length=1, max_length=64
     )
+    expected_global_variable_selections: dict[StrictStr, bool] = Field(
+        default_factory=dict, max_length=32
+    )
     variables: list[AdeSweepVariableExpectation] = Field(
         min_length=1, max_length=32
     )
@@ -433,6 +463,11 @@ class AdeSweepVerificationSpec(StrictModel):
 
     @model_validator(mode="after")
     def validate_sweep_contract(self) -> "AdeSweepVerificationSpec":
+        for name in self.expected_global_variable_selections:
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", name):
+                raise ValueError(
+                    f"invalid Maestro global variable selection name: {name!r}"
+                )
         for label, names in (
             ("test", self.expected_tests),
             ("corner", self.expected_corners or []),
@@ -454,9 +489,27 @@ class AdeSweepVerificationSpec(StrictModel):
                     f"Maestro sweep expected_{label}s cannot contain duplicates"
                 )
 
-        variable_names = [variable.name for variable in self.variables]
-        if len(variable_names) != len(set(variable_names)):
-            raise ValueError("Maestro sweep variables must have unique names")
+        variable_identities = [variable.evidence_key() for variable in self.variables]
+        if len(variable_identities) != len(set(variable_identities)):
+            raise ValueError("Maestro sweep variable scopes must be unique")
+        sweep_variables = [variable for variable in self.variables if variable.sweep]
+        fixed_variables = [variable for variable in self.variables if not variable.sweep]
+        sweep_names = [variable.name for variable in sweep_variables]
+        if len(sweep_names) != len(set(sweep_names)):
+            raise ValueError("Maestro point-sweep variables must have unique names")
+        fixed_names = {variable.name for variable in fixed_variables}
+        if set(sweep_names) & fixed_names:
+            raise ValueError(
+                "a Maestro variable cannot be both a point sweep and fixed scope"
+            )
+        variable_names = list(dict.fromkeys([*sweep_names, *sorted(fixed_names)]))
+        if self.expected_global_variable_selections and set(
+            self.expected_global_variable_selections
+        ) != set(variable_names):
+            raise ValueError(
+                "declared global-variable selections must cover every effective "
+                "Maestro variable exactly"
+            )
         for variable in self.variables:
             if (
                 variable.scope is AdeVariableScope.TEST
@@ -476,6 +529,15 @@ class AdeSweepVerificationSpec(StrictModel):
                         f"corner-scoped sweep variable {variable.name!r} must target "
                         "one of expected_corners"
                     )
+            if (
+                variable.scope is AdeVariableScope.TEST
+                and self.expected_global_variable_selections.get(variable.name)
+                is not False
+            ):
+                raise ValueError(
+                    f"test-scoped sweep variable {variable.name!r} requires an "
+                    "explicit disabled global-variable selection"
+                )
 
         point_numbers = [point.point for point in self.points]
         if point_numbers != list(range(1, len(self.points) + 1)):
@@ -483,6 +545,53 @@ class AdeSweepVerificationSpec(StrictModel):
                 "Maestro sweep points must be ordered and contiguous from point 1"
             )
         expected_names = set(variable_names)
+        corner_mode = any(
+            point.corner is not None or point.maestro_point is not None
+            for point in self.points
+        )
+        if corner_mode and any(
+            point.corner is None or point.maestro_point is None for point in self.points
+        ):
+            raise ValueError(
+                "cornered Maestro sweep cases require corner and maestro_point"
+            )
+        if not corner_mode and any(
+            point.corner is not None or point.maestro_point is not None
+            for point in self.points
+        ):
+            raise ValueError("ordinary Maestro sweep points cannot mix corner selectors")
+        if corner_mode:
+            if self.expected_corners is None:
+                raise ValueError("cornered sweep cases require expected_corners")
+            if len(self.expected_tests) != 1:
+                raise ValueError(
+                    "cornered sweep verification currently requires exactly one "
+                    "Maestro test"
+                )
+            if not fixed_variables:
+                raise ValueError("cornered sweep cases require fixed scoped variables")
+            maestro_points = sorted(
+                {int(point.maestro_point or 0) for point in self.points}
+            )
+            if maestro_points != list(range(1, len(maestro_points) + 1)):
+                raise ValueError(
+                    "cornered Maestro point selectors must be contiguous from 1"
+                )
+            for maestro_point in maestro_points:
+                group = [
+                    point
+                    for point in self.points
+                    if point.maestro_point == maestro_point
+                ]
+                if [point.corner for point in group] != list(self.expected_corners):
+                    raise ValueError(
+                        "each Maestro point must declare every expected corner in order"
+                    )
+                for name in sweep_names:
+                    if len({point.values.get(name) for point in group}) != 1:
+                        raise ValueError(
+                            f"Maestro point sweep value {name!r} changed across corners"
+                        )
         combinations: list[tuple[str, ...]] = []
         for point in self.points:
             if set(point.values) != expected_names:
@@ -490,16 +599,60 @@ class AdeSweepVerificationSpec(StrictModel):
                     f"Maestro sweep point {point.point} must declare exactly "
                     f"{sorted(expected_names)}"
                 )
-            combinations.append(tuple(point.values[name] for name in variable_names))
+            combinations.append(
+                (
+                    str(point.corner or ""),
+                    *(point.values[name] for name in variable_names),
+                )
+            )
         if len(combinations) != len(set(combinations)):
             raise ValueError("Maestro sweep points contain duplicate value combinations")
-        for variable in self.variables:
+        for variable in sweep_variables:
             actual_values = {point.values[variable.name] for point in self.points}
             if actual_values != set(variable.declared_values()):
                 raise ValueError(
                     f"Maestro sweep points do not cover the declared values for "
                     f"{variable.name!r}"
                 )
+
+        if corner_mode:
+            assert self.expected_corners is not None
+            for point in self.points:
+                assert point.corner is not None
+                for name in fixed_names:
+                    scoped = [
+                        variable
+                        for variable in fixed_variables
+                        if variable.name == name
+                    ]
+                    corner_values = [
+                        variable.expected_value
+                        for variable in scoped
+                        if variable.scope is AdeVariableScope.CORNER
+                        and variable.scope_name == point.corner
+                    ]
+                    test_values = [
+                        variable.expected_value
+                        for variable in scoped
+                        if variable.scope is AdeVariableScope.TEST
+                        and variable.scope_name in self.expected_tests
+                    ]
+                    global_values = [
+                        variable.expected_value
+                        for variable in scoped
+                        if variable.scope is AdeVariableScope.GLOBAL
+                    ]
+                    candidates = corner_values or test_values or global_values
+                    if len(candidates) != 1:
+                        raise ValueError(
+                            f"fixed variable {name!r} does not resolve uniquely for "
+                            f"corner {point.corner!r}"
+                        )
+                    if point.values[name] != candidates[0]:
+                        raise ValueError(
+                            f"fixed variable {name!r} at corner {point.corner!r} "
+                            "does not match its declared scope"
+                        )
 
         identities = [binding.identity() for binding in self.input_bindings]
         if len(identities) != len(set(identities)):
@@ -567,6 +720,18 @@ class AdeSweepVerificationSpec(StrictModel):
                     )
                 expected_error_cells.add(identity)
         return self
+
+    def effective_variable_names(self) -> list[str]:
+        return list(dict.fromkeys(variable.name for variable in self.variables))
+
+    def maestro_point_count(self) -> int:
+        selectors = {
+            point.maestro_point for point in self.points if point.maestro_point is not None
+        }
+        return len(selectors) if selectors else len(self.points)
+
+    def corner_mode(self) -> bool:
+        return any(point.corner is not None for point in self.points)
 
 
 class AdeResultParameterBinding(StrictModel):
@@ -839,6 +1004,24 @@ class AdeVariableUpdate(StrictModel):
         return f"{self.scope.value}:{self.scope_name}:{self.name}"
 
 
+class AdeGlobalVariableSelectionUpdate(StrictModel):
+    """CAS one global-variable enable selector without changing its value."""
+
+    name: StrictStr = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$",
+    )
+    expected_enabled: bool
+    enabled: bool
+
+    @model_validator(mode="after")
+    def validate_transition(self) -> "AdeGlobalVariableSelectionUpdate":
+        if self.expected_enabled == self.enabled:
+            raise ValueError("global variable selection updates must change state")
+        return self
+
+
 class AdeVariablesApplySpec(StrictModel):
     """Patch declared Maestro variable scopes with exact old-value preconditions."""
 
@@ -847,10 +1030,17 @@ class AdeVariablesApplySpec(StrictModel):
     expected_corners: list[StrictStr] | None = Field(
         default=None, min_length=1, max_length=64
     )
-    updates: list[AdeVariableUpdate] = Field(min_length=1, max_length=64)
+    updates: list[AdeVariableUpdate] = Field(default_factory=list, max_length=64)
+    global_selection_updates: list[AdeGlobalVariableSelectionUpdate] = Field(
+        default_factory=list, max_length=64
+    )
 
     @model_validator(mode="after")
     def validate_unique_names(self) -> "AdeVariablesApplySpec":
+        if not self.updates and not self.global_selection_updates:
+            raise ValueError(
+                "Maestro variable patch requires value or global selection updates"
+            )
         for test in self.expected_tests:
             if (
                 not test
@@ -903,6 +1093,72 @@ class AdeVariablesApplySpec(StrictModel):
         if len(identities) != len(set(identities)):
             raise ValueError(
                 "Maestro variable updates cannot repeat the same scoped variable"
+            )
+        selection_names = [update.name for update in self.global_selection_updates]
+        if len(selection_names) != len(set(selection_names)):
+            raise ValueError(
+                "Maestro global variable selection updates cannot repeat names"
+            )
+        return self
+
+
+class AdeCornerAddition(StrictModel):
+    """Add one new enabled Maestro corner without replacing existing state."""
+
+    name: StrictStr = Field(min_length=1, max_length=128)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if any(
+            character in ('"', "\\")
+            or ord(character) < 32
+            or ord(character) == 127
+            for character in value
+        ):
+            raise ValueError(
+                "Maestro corner names cannot contain quotes, backslashes, or "
+                "control characters"
+            )
+        return value
+
+
+class AdeCornersApplySpec(StrictModel):
+    """Add named corners after exact tests/corner-membership preconditions."""
+
+    backend: AdeBackend = AdeBackend.MAESTRO
+    expected_tests: list[StrictStr] = Field(min_length=1, max_length=32)
+    expected_corners: list[StrictStr] = Field(default_factory=list, max_length=64)
+    additions: list[AdeCornerAddition] = Field(min_length=1, max_length=32)
+
+    @model_validator(mode="after")
+    def validate_corner_patch(self) -> "AdeCornersApplySpec":
+        for label, names in (
+            ("test", self.expected_tests),
+            ("corner", self.expected_corners),
+        ):
+            for name in names:
+                if (
+                    not name
+                    or len(name) > 128
+                    or any(
+                        character in ('"', "\\")
+                        or ord(character) < 32
+                        or ord(character) == 127
+                        for character in name
+                    )
+                ):
+                    raise ValueError(f"invalid Maestro {label} name: {name!r}")
+            if len(names) != len(set(names)):
+                raise ValueError(f"expected_{label}s cannot contain duplicates")
+        addition_names = [addition.name for addition in self.additions]
+        if len(addition_names) != len(set(addition_names)):
+            raise ValueError("Maestro corner additions cannot repeat a name")
+        overlap = sorted(set(addition_names) & set(self.expected_corners))
+        if overlap:
+            raise ValueError(
+                "Maestro corner additions must be absent from expected_corners: "
+                f"{overlap}"
             )
         return self
 
@@ -1093,6 +1349,7 @@ class TaskSpec(StrictModel):
     ade_prepare: AdePrepareSpec | None = None
     ade_run: AdeRunSpec | None = None
     ade_variables: AdeVariablesApplySpec | None = None
+    ade_corners: AdeCornersApplySpec | None = None
     ade_setup: AdeSetupApplySpec | None = None
     parameters: dict[str, float] = Field(default_factory=dict)
     instance_parameter_updates: list[InstanceParameterUpdate] = Field(
@@ -1329,6 +1586,34 @@ class TaskSpec(StrictModel):
         elif self.ade_variables is not None:
             raise ValueError(
                 "ade_variables settings require operation='ade.variables.apply'"
+            )
+        if self.operation is Operation.ADE_CORNERS_APPLY:
+            if self.ade_corners is None:
+                raise ValueError("ade.corners.apply requires ade_corners settings")
+            if self.target.view != "maestro":
+                raise ValueError(
+                    "ade.corners.apply currently requires target.view='maestro'"
+                )
+            if (
+                self.parameters
+                or self.instance_parameter_updates
+                or self.parameter_space
+                or self.constraints
+                or self.objective is not None
+                or self.create_if_missing
+            ):
+                raise ValueError(
+                    "ade.corners.apply only adds declared Maestro corners and does "
+                    "not accept parameters, search, constraints, objective, or "
+                    "creation requests"
+                )
+            if self.safety.replace_existing:
+                raise ValueError(
+                    "ade.corners.apply never replaces an existing Maestro view"
+                )
+        elif self.ade_corners is not None:
+            raise ValueError(
+                "ade_corners settings require operation='ade.corners.apply'"
             )
         if self.operation is Operation.ADE_SETUP_APPLY:
             if self.ade_setup is None:

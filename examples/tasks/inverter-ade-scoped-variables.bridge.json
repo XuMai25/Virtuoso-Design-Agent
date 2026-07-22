@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "id": "inverter-ade-scoped-variables",
+  "operation": "ade.variables.apply",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_ade_sweep_inv_001",
+    "view": "maestro"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "ade_variables": {
+    "expected_tests": [
+      "VDA"
+    ],
+    "expected_corners": [
+      "Nominal",
+      "VDA_LOW_VDD",
+      "VDA_NOMINAL_VDD"
+    ],
+    "updates": [
+      {
+        "name": "CL",
+        "expected_value": null,
+        "value": "1f,4f",
+        "scope": "test",
+        "scope_name": "VDA"
+      },
+      {
+        "name": "VDD",
+        "expected_value": null,
+        "value": "0.8",
+        "scope": "corner",
+        "scope_name": "VDA_LOW_VDD"
+      },
+      {
+        "name": "VDD",
+        "expected_value": null,
+        "value": "0.9",
+        "scope": "corner",
+        "scope_name": "VDA_NOMINAL_VDD"
+      }
+    ]
+  },
+  "safety": {
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 600
+  }
+}

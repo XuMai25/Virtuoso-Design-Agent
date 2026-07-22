@@ -168,6 +168,40 @@ def test_ade_setup_patch_requires_oa_write_but_not_compute_scope() -> None:
     )
 
 
+def test_ade_corner_patch_requires_oa_write_but_not_compute_scope() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "add-maestro-corners",
+            "operation": "ade.corners.apply",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_corners": {
+                "expected_tests": ["VDA"],
+                "additions": [{"name": "VDA_LOW"}],
+            },
+            "safety": {"allowed_library": "vda_test"},
+        }
+    )
+    plan = build_plan(task)
+
+    assert plan.requires_remote_write
+    assert not plan.requires_remote_compute
+    with pytest.raises(SafetyViolation, match="remote OA write"):
+        authorize_execution(task, plan, plan.confirmation_token)
+
+    authorized = task.model_copy(
+        update={"safety": task.safety.model_copy(update={"allow_remote_write": True})}
+    )
+    authorized_plan = build_plan(authorized)
+    authorize_execution(
+        authorized, authorized_plan, authorized_plan.confirmation_token
+    )
+
+
 def test_in_place_transform_still_requires_explicit_remote_write_permission() -> None:
     task = TaskSpec.model_validate(
         {

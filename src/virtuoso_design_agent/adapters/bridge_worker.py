@@ -1052,6 +1052,18 @@ def _maestro_corners_readback(client, session: str) -> list[str]:
     return re.findall(r'"([^"\\]+)"', raw_corners)
 
 
+def _maestro_all_corners_readback(client, session: str) -> list[str]:
+    readback = client.execute_skill(
+        f'maeGetSetup(?typeName "corners" ?session "{session}")',
+        timeout=30,
+    )
+    errors = getattr(readback, "errors", None) or []
+    if errors:
+        raise RuntimeError(f"Maestro all-corner readback failed: {errors[0]}")
+    raw_corners = str(getattr(readback, "output", "") or "")
+    return re.findall(r'"([^"\\]+)"', raw_corners)
+
+
 def _normalized_maestro_variable_value(value: Any) -> str | None:
     normalized = str(value or "").strip()
     if normalized in {"", "nil"}:
@@ -1113,6 +1125,45 @@ def _maestro_variable_identity(update: dict[str, Any]) -> str:
     return f"{scope}:{update['scope_name']}:{name}"
 
 
+def _maestro_named_corner_handle(client, scope_name: str, *, session: str) -> str:
+    """Return one real named-corner handle, rejecting nominal/unknown selectors.
+
+    Maestro's built-in nominal row is included in ``maeGetSetup`` corner
+    membership but is not a regular ``axlGetCorner`` object.  Keep global
+    values for that row and use this helper only for explicitly named corners.
+    Splitting handle lookup from variable lookup also prevents an invalid
+    corner handle from being mistaken for an absent variable.
+    """
+
+    readback = client.execute_skill(
+        "let((sdb corner) "
+        f'sdb=axlGetMainSetupDB({json.dumps(session)}) '
+        f'corner=axlGetCorner(sdb {json.dumps(scope_name)}) '
+        "list(sdb corner))",
+        timeout=30,
+    )
+    errors = getattr(readback, "errors", None) or []
+    if errors:
+        raise RuntimeError(
+            f"Maestro named-corner handle readback failed for {scope_name}: "
+            f"{errors[0]}"
+        )
+    handles = _parse_skill_sexpr(getattr(readback, "output", ""))
+    if (
+        not isinstance(handles, list)
+        or len(handles) != 2
+        or handles[0] in {None, "0"}
+        or handles[1] in {None, "0"}
+        or not all(str(handle).isdigit() for handle in handles)
+    ):
+        raise RuntimeError(
+            f"Maestro corner scope {scope_name!r} is not an addressable named "
+            f"corner: {handles!r}; use the global scope for the built-in "
+            "Nominal row"
+        )
+    return str(handles[1])
+
+
 def _read_maestro_variable(
     client, get_var, update: dict[str, Any], *, session: str
 ) -> str | None:
@@ -1120,11 +1171,11 @@ def _read_maestro_variable(
     name = str(update["name"])
     if scope == "global":
         raw = get_var(client, name, session=session)
-    else:
+    elif scope == "test":
         scope_name = str(update["scope_name"])
         readback = client.execute_skill(
-            f'maeGetVar("{name}" ?typeName "{scope}" '
-            f'?typeValue "{scope_name}" ?session "{session}")',
+            f'maeGetVar("{name}" ?typeName "test" '
+            f'?typeValue {json.dumps(scope_name)} ?session "{session}")',
             timeout=30,
         )
         errors = getattr(readback, "errors", None) or []
@@ -1134,6 +1185,43 @@ def _read_maestro_variable(
                 f"{_maestro_variable_identity(update)}: {errors[0]}"
             )
         raw = getattr(readback, "output", "")
+    else:
+        scope_name = str(update["scope_name"])
+        corner_handle = _maestro_named_corner_handle(
+            client, scope_name, session=session
+        )
+        variable_readback = client.execute_skill(
+            f'axlGetVar({corner_handle} {json.dumps(name)})',
+            timeout=30,
+        )
+        errors = getattr(variable_readback, "errors", None) or []
+        if errors:
+            raise RuntimeError(
+                f"Maestro corner variable handle readback failed for "
+                f"{_maestro_variable_identity(update)}: {errors[0]}"
+            )
+        variable_handle = _parse_skill_sexpr(
+            getattr(variable_readback, "output", "")
+        )
+        if variable_handle in {None, "0"}:
+            raw = "nil"
+        elif not str(variable_handle).isdigit():
+            raise RuntimeError(
+                f"Maestro corner variable handle readback was malformed for "
+                f"{_maestro_variable_identity(update)}: {variable_handle!r}"
+            )
+        else:
+            value_readback = client.execute_skill(
+                f"axlGetVarValue({variable_handle})",
+                timeout=30,
+            )
+            errors = getattr(value_readback, "errors", None) or []
+            if errors:
+                raise RuntimeError(
+                    f"Maestro variable value readback failed for "
+                    f"{_maestro_variable_identity(update)}: {errors[0]}"
+                )
+            raw = getattr(value_readback, "output", "")
     return _normalized_maestro_variable_value(raw)
 
 
@@ -1141,11 +1229,44 @@ def _write_maestro_variable(
     client, set_var, update: dict[str, Any], *, session: str
 ) -> None:
     scope = str(update.get("scope") or "global")
+    if scope == "corner":
+        scope_name = str(update["scope_name"])
+        name = str(update["name"])
+        value = str(update["value"])
+        corner_handle = _maestro_named_corner_handle(
+            client, scope_name, session=session
+        )
+        writeback = client.execute_skill(
+            "let((variable) "
+            f'variable=axlPutVar({corner_handle} {json.dumps(name)} '
+            f'{json.dumps(value)}) '
+            "if(variable list(variable axlGetVarValue(variable)) nil))",
+            timeout=30,
+        )
+        errors = getattr(writeback, "errors", None) or []
+        if errors:
+            raise RuntimeError(
+                f"Maestro corner variable write failed for "
+                f"{_maestro_variable_identity(update)}: {errors[0]}"
+            )
+        parsed = _parse_skill_sexpr(getattr(writeback, "output", ""))
+        if (
+            not isinstance(parsed, list)
+            or len(parsed) != 2
+            or parsed[0] in {None, "0"}
+            or _normalized_maestro_variable_value(parsed[1]) != value
+        ):
+            raise RuntimeError(
+                f"Maestro corner variable write did not return the requested "
+                f"value for {_maestro_variable_identity(update)}: {parsed!r}"
+            )
+        return
     kwargs: dict[str, str] = {"session": session}
     if scope != "global":
+        scope_name = str(update["scope_name"])
         kwargs.update(
             type_name=scope,
-            type_value=f'("{update["scope_name"]}")',
+            type_value=f'("{scope_name}")',
         )
     set_var(client, str(update["name"]), str(update["value"]), **kwargs)
 
@@ -1154,14 +1275,95 @@ def _maestro_variable_fingerprint(
     tests: list[str],
     corners: list[str] | None,
     values: dict[str, str | None],
+    global_selections: dict[str, Any] | None = None,
 ) -> str:
     canonical = json.dumps(
-        {"tests": tests, "corners": corners, "declared_variables": values},
+        {
+            "tests": tests,
+            "corners": corners,
+            "declared_variables": values,
+            "global_variable_selections": global_selections,
+        },
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
+
+
+def _maestro_global_variable_selection_state(
+    client, *, session: str
+) -> dict[str, Any]:
+    """Read the complete enabled/disabled global-variable selector sets."""
+
+    readback = client.execute_skill(
+        "list("
+        f'maeGetSetup(?typeName "variables" ?enabled t ?session "{session}") '
+        f'maeGetSetup(?typeName "variables" ?enabled nil ?session "{session}"))',
+        timeout=30,
+    )
+    errors = getattr(readback, "errors", None) or []
+    if errors:
+        raise RuntimeError(
+            f"Maestro global-variable selection readback failed: {errors[0]}"
+        )
+    parsed = _parse_skill_sexpr(getattr(readback, "output", ""))
+    if not isinstance(parsed, list) or len(parsed) != 2:
+        raise RuntimeError(
+            f"invalid Maestro global-variable selection readback: {parsed!r}"
+        )
+
+    def names(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) and item for item in value
+        ):
+            raise RuntimeError(
+                f"invalid Maestro global-variable selection list: {value!r}"
+            )
+        return sorted(value)
+
+    enabled = names(parsed[0])
+    disabled = names(parsed[1])
+    overlap = sorted(set(enabled) & set(disabled))
+    if overlap:
+        raise RuntimeError(
+            f"Maestro global variables appeared enabled and disabled: {overlap!r}"
+        )
+    return {"enabled": enabled, "disabled": disabled}
+
+
+def _maestro_global_selection_values(
+    state: dict[str, Any], names: list[str]
+) -> dict[str, bool]:
+    enabled = set(state.get("enabled") or [])
+    disabled = set(state.get("disabled") or [])
+    values: dict[str, bool] = {}
+    for name in names:
+        membership = int(name in enabled) + int(name in disabled)
+        if membership != 1:
+            raise RuntimeError(
+                f"Maestro global variable {name!r} did not have one selection state"
+            )
+        values[name] = name in enabled
+    return values
+
+
+def _write_maestro_global_selection(
+    client, name: str, enabled: bool, *, session: str
+) -> None:
+    enabled_skill = "t" if enabled else "nil"
+    readback = client.execute_skill(
+        f'maeSetSetup(?variables \'("{name}") ?enabled {enabled_skill} '
+        f'?session "{session}")',
+        timeout=30,
+    )
+    errors = getattr(readback, "errors", None) or []
+    if errors:
+        raise RuntimeError(
+            f"Maestro global-variable selection write failed for {name}: {errors[0]}"
+        )
 
 
 def _read_maestro_sweep_setup(
@@ -1230,17 +1432,71 @@ def _read_maestro_sweep_setup(
         methods[identity] = (
             "bridge_public_get_var"
             if scope == "global"
-            else "cadence_maeGetVar_via_bridge_skill_channel"
+            else (
+                "cadence_maeGetVar_string_typeValue_via_bridge_skill_channel"
+                if scope == "test"
+                else (
+                    "cadence_axlGetCorner_axlGetVarValue_"
+                    "via_bridge_skill_channel"
+                )
+            )
         )
-    return {
+    expected_selections_raw = verification.get(
+        "expected_global_variable_selections"
+    )
+    if expected_selections_raw is None:
+        expected_selections_raw = {}
+    if not isinstance(expected_selections_raw, dict) or any(
+        not isinstance(name, str)
+        or not name
+        or not isinstance(enabled, bool)
+        for name, enabled in expected_selections_raw.items()
+    ):
+        raise RuntimeError(
+            "ADE sweep expected global-variable selections must be a "
+            "name-to-boolean object"
+        )
+    expected_selections = {
+        str(name): bool(enabled)
+        for name, enabled in expected_selections_raw.items()
+    }
+    selection_state: dict[str, Any] | None = None
+    selection_values: dict[str, bool] = {}
+    if expected_selections:
+        selection_state = _maestro_global_variable_selection_state(
+            client, session=session
+        )
+        selection_values = _maestro_global_selection_values(
+            selection_state, list(expected_selections)
+        )
+        if selection_values != expected_selections:
+            raise RuntimeError(
+                "Maestro global-variable selections changed before sweep "
+                f"execution: expected {expected_selections!r}, got "
+                f"{selection_values!r}"
+            )
+
+    readback = {
         "tests": tests,
         "corners": corners,
         "variables": values,
         "variable_readback_methods": methods,
         "fingerprint_sha256": _maestro_variable_fingerprint(
-            tests, corners, values
+            tests, corners, values, selection_state
         ),
     }
+    if expected_selections:
+        readback.update(
+            {
+                "global_variable_selections": selection_values,
+                "global_variable_selection_state": selection_state,
+                "global_variable_selection_readback_method": (
+                    "cadence_maeGetSetup_enabled_variables_"
+                    "via_bridge_skill_channel"
+                ),
+            }
+        )
+    return readback
 
 
 def prepare_maestro(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1376,9 +1632,10 @@ def apply_maestro_variables(payload: dict[str, Any]) -> dict[str, Any]:
         else [str(value) for value in expected_corners_raw]
     )
     updates = list(settings.get("updates") or [])
-    if not expected_tests or not updates:
+    selection_updates = list(settings.get("global_selection_updates") or [])
+    if not expected_tests or (not updates and not selection_updates):
         raise RuntimeError(
-            "ADE variable patch requires expected_tests and variable updates"
+            "ADE variable patch requires expected_tests and declared changes"
         )
     if len(expected_tests) != len(set(expected_tests)):
         raise RuntimeError("ADE variable patch expected_tests contain duplicates")
@@ -1424,6 +1681,30 @@ def apply_maestro_variables(payload: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(
             "ADE variable patch contains duplicate scoped variable identities"
         )
+    selection_names: list[str] = []
+    for update in selection_updates:
+        if not isinstance(update, dict):
+            raise RuntimeError(
+                "ADE global variable selection update must be an object"
+            )
+        name = str(update.get("name") or "")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", name):
+            raise RuntimeError(f"invalid Maestro global variable name: {name!r}")
+        if not isinstance(update.get("expected_enabled"), bool) or not isinstance(
+            update.get("enabled"), bool
+        ):
+            raise RuntimeError(
+                "Maestro global variable selection states must be booleans"
+            )
+        if update["expected_enabled"] == update["enabled"]:
+            raise RuntimeError(
+                "Maestro global variable selection update must change state"
+            )
+        selection_names.append(name)
+    if len(selection_names) != len(set(selection_names)):
+        raise RuntimeError(
+            "ADE global variable selection updates contain duplicate names"
+        )
 
     client = _client()
     if not _cellview_exists(client, library, cell, view):
@@ -1439,6 +1720,10 @@ def apply_maestro_variables(payload: dict[str, Any]) -> dict[str, Any]:
 
     before: dict[str, str | None] = {}
     immediate: dict[str, str | None] = {}
+    selection_before: dict[str, bool] = {}
+    selection_immediate: dict[str, bool] = {}
+    selection_state_before: dict[str, Any] | None = None
+    selection_state_immediate: dict[str, Any] | None = None
     session = open_session(client, library, cell)
     try:
         tests = _maestro_tests_readback(client, session)
@@ -1476,6 +1761,27 @@ def apply_maestro_variables(payload: dict[str, Any]) -> dict[str, Any]:
                 "Maestro variable precondition mismatch: "
                 + json.dumps(mismatches, sort_keys=True)
             )
+        if selection_names:
+            selection_state_before = _maestro_global_variable_selection_state(
+                client, session=session
+            )
+            selection_before = _maestro_global_selection_values(
+                selection_state_before, selection_names
+            )
+            selection_mismatches = {
+                update["name"]: {
+                    "expected": update["expected_enabled"],
+                    "actual": selection_before[str(update["name"])],
+                }
+                for update in selection_updates
+                if selection_before[str(update["name"])]
+                != update["expected_enabled"]
+            }
+            if selection_mismatches:
+                raise RuntimeError(
+                    "Maestro global variable selection precondition mismatch: "
+                    + json.dumps(selection_mismatches, sort_keys=True)
+                )
         for update in updates:
             identity = _maestro_variable_identity(update)
             requested = str(update["value"])
@@ -1488,11 +1794,48 @@ def apply_maestro_variables(payload: dict[str, Any]) -> dict[str, Any]:
                     f"Maestro variable immediate readback mismatch for {identity}: "
                     f"requested {requested!r}, got {immediate[identity]!r}"
                 )
+        for update in selection_updates:
+            _write_maestro_global_selection(
+                client,
+                str(update["name"]),
+                bool(update["enabled"]),
+                session=session,
+            )
+            selection_state_immediate = _maestro_global_variable_selection_state(
+                client, session=session
+            )
+            selection_immediate = _maestro_global_selection_values(
+                selection_state_immediate, selection_names
+            )
+            if selection_immediate[str(update["name"])] != update["enabled"]:
+                raise RuntimeError(
+                    "Maestro global variable selection immediate readback mismatch "
+                    f"for {update['name']}"
+                )
+        if selection_state_before is not None and selection_state_immediate is not None:
+            before_other = {
+                name: name in set(selection_state_before["enabled"])
+                for name in set(selection_state_before["enabled"])
+                | set(selection_state_before["disabled"])
+                if name not in selection_names
+            }
+            immediate_other = {
+                name: name in set(selection_state_immediate["enabled"])
+                for name in set(selection_state_immediate["enabled"])
+                | set(selection_state_immediate["disabled"])
+                if name not in selection_names
+            }
+            if before_other != immediate_other:
+                raise RuntimeError(
+                    "Maestro global variable selection changed undeclared names"
+                )
         save_setup(client, library, cell, session=session)
     finally:
         close_session(client, session)
 
     persisted: dict[str, str | None] = {}
+    selection_persisted: dict[str, bool] = {}
+    selection_state_persisted: dict[str, Any] | None = None
     verify_session = open_session(client, library, cell)
     try:
         verify_tests = _maestro_tests_readback(client, verify_session)
@@ -1521,6 +1864,25 @@ def apply_maestro_variables(payload: dict[str, Any]) -> dict[str, Any]:
                     f"Maestro variable persistent readback mismatch for {identity}: "
                     f"requested {update['value']!r}, got {persisted[identity]!r}"
                 )
+        if selection_names:
+            selection_state_persisted = _maestro_global_variable_selection_state(
+                client, session=verify_session
+            )
+            selection_persisted = _maestro_global_selection_values(
+                selection_state_persisted, selection_names
+            )
+            expected_selection_after = {
+                str(update["name"]): bool(update["enabled"])
+                for update in selection_updates
+            }
+            if selection_persisted != expected_selection_after:
+                raise RuntimeError(
+                    "Maestro global variable selection persistent readback mismatch"
+                )
+            if selection_state_persisted != selection_state_immediate:
+                raise RuntimeError(
+                    "Maestro global variable selection full set changed after reopen"
+                )
     finally:
         close_session(client, verify_session)
 
@@ -1537,11 +1899,20 @@ def apply_maestro_variables(payload: dict[str, Any]) -> dict[str, Any]:
     variable_scopes = list(
         dict.fromkeys(str(update.get("scope") or "global") for update in updates)
     )
+    requested_selections = {
+        str(update["name"]): {
+            "expected_enabled": bool(update["expected_enabled"]),
+            "enabled": bool(update["enabled"]),
+        }
+        for update in selection_updates
+    }
     return {
         "backend": "maestro",
         "target": {"library": library, "cell": cell, "view": view},
         "variable_scope": (
-            "global" if variable_scopes == ["global"] else "declared_scopes"
+            "none"
+            if not variable_scopes
+            else ("global" if variable_scopes == ["global"] else "declared_scopes")
         ),
         "variable_scopes": variable_scopes,
         "expected_tests": expected_tests,
@@ -1551,16 +1922,34 @@ def apply_maestro_variables(payload: dict[str, Any]) -> dict[str, Any]:
         "corners_readback_before": corners,
         "corners_readback_after": verify_corners,
         "requested_variable_updates": requested,
+        "requested_global_selection_updates": requested_selections,
         "requested_evidence_source": "user_input",
         "before_variables": before,
         "immediate_variables": immediate,
         "persisted_variables": persisted,
+        "global_variable_selection_before": selection_before,
+        "global_variable_selection_immediate": selection_immediate,
+        "global_variable_selection_persisted": selection_persisted,
+        "global_variable_selection_state_before": selection_state_before,
+        "global_variable_selection_state_immediate": selection_state_immediate,
+        "global_variable_selection_state_persisted": selection_state_persisted,
+        "global_variable_selection_readback_method": (
+            "cadence_maeGetSetup_enabled_variables_via_bridge_skill_channel"
+            if selection_names
+            else None
+        ),
+        "global_variable_selection_write_method": (
+            "cadence_maeSetSetup_variables_via_bridge_skill_channel"
+            if selection_names
+            else None
+        ),
+        "global_variable_selection_preserved_undeclared": bool(selection_names),
         "confirmed_evidence_source": "bridge_readback",
         "before_target_fingerprint_sha256": _maestro_variable_fingerprint(
-            tests, corners, before
+            tests, corners, before, selection_state_before
         ),
         "after_target_fingerprint_sha256": _maestro_variable_fingerprint(
-            verify_tests, verify_corners, persisted
+            verify_tests, verify_corners, persisted, selection_state_persisted
         ),
         "declared_global_sweep_variables": [
             _maestro_variable_identity(update)
@@ -1576,11 +1965,31 @@ def apply_maestro_variables(payload: dict[str, Any]) -> dict[str, Any]:
         ],
         "sweep_detection_evidence_source": "software_inference",
         "declared_scoped_values_verified": True,
+        "declared_global_selections_verified": True,
         "variable_readback_methods": {
             scope: (
                 "bridge_public_get_var"
                 if scope == "global"
-                else "cadence_maeGetVar_via_bridge_skill_channel"
+                else (
+                    "cadence_maeGetVar_string_typeValue_via_bridge_skill_channel"
+                    if scope == "test"
+                    else (
+                        "cadence_axlGetCorner_axlGetVarValue_"
+                        "via_bridge_skill_channel"
+                    )
+                )
+            )
+            for scope in variable_scopes
+        },
+        "variable_write_methods": {
+            scope: (
+                "bridge_public_set_var_global"
+                if scope == "global"
+                else (
+                    "bridge_public_set_var_list_typeValue"
+                    if scope == "test"
+                    else "cadence_axlPutVar_via_bridge_skill_channel"
+                )
             )
             for scope in variable_scopes
         },
@@ -1592,11 +2001,222 @@ def apply_maestro_variables(payload: dict[str, Any]) -> dict[str, Any]:
         "maestro_setup_write_performed": True,
         "automated_simulation_performed": False,
         "completion_scope": (
-            "declared Maestro variable scopes matched their expected old values, "
-            "were saved once, and matched after an independent reopen; tests and "
+            "declared Maestro variable scopes and global selections matched their "
+            "expected old states, were saved once, and matched after an independent "
+            "reopen; tests and "
             "declared corner membership were preserved; analysis, outputs, and "
             "schematic were not changed; unlisted scope overrides and effective "
             "simulator values were not verified"
+        ),
+    }
+
+
+def _maestro_corner_membership_fingerprint(
+    tests: list[str], all_corners: list[str], enabled_corners: list[str]
+) -> str:
+    canonical = json.dumps(
+        {
+            "tests": tests,
+            "all_corners": all_corners,
+            "enabled_corners": enabled_corners,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def apply_maestro_corners(payload: dict[str, Any]) -> dict[str, Any]:
+    """Add enabled Maestro corners after exact membership preconditions."""
+
+    from virtuoso_bridge.virtuoso.maestro import (
+        close_session,
+        find_open_session,
+        open_session,
+        save_setup,
+        set_corner,
+    )
+
+    settings = payload.get("ade_corners") or {}
+    if settings.get("backend", "maestro") != "maestro":
+        raise RuntimeError("only the verified Bridge Maestro backend is supported")
+    library, cell = _target(payload)
+    view = str(payload["target"].get("view") or "")
+    if view != "maestro":
+        raise RuntimeError("ADE corner patch target view must be maestro")
+    expected_tests = [str(value) for value in settings.get("expected_tests") or []]
+    expected_corners = [
+        str(value) for value in settings.get("expected_corners") or []
+    ]
+    additions = list(settings.get("additions") or [])
+    if not expected_tests or not additions:
+        raise RuntimeError(
+            "ADE corner patch requires expected_tests and corner additions"
+        )
+    for label, values in (
+        ("test", expected_tests),
+        ("corner", expected_corners),
+    ):
+        if len(values) != len(set(values)):
+            raise RuntimeError(
+                f"ADE corner patch expected_{label}s contain duplicates"
+            )
+        for value in values:
+            if (
+                not value
+                or len(value) > 128
+                or any(
+                    character in ('"', "\\")
+                    or ord(character) < 32
+                    or ord(character) == 127
+                    for character in value
+                )
+            ):
+                raise RuntimeError(f"invalid Maestro {label} name: {value!r}")
+    addition_names: list[str] = []
+    for addition in additions:
+        if not isinstance(addition, dict):
+            raise RuntimeError("ADE corner addition must be an object")
+        name = addition.get("name")
+        if (
+            not isinstance(name, str)
+            or not name
+            or len(name) > 128
+            or any(
+                character in ('"', "\\")
+                or ord(character) < 32
+                or ord(character) == 127
+                for character in name
+            )
+        ):
+            raise RuntimeError(f"invalid Maestro corner addition name: {name!r}")
+        addition_names.append(name)
+    if len(addition_names) != len(set(addition_names)):
+        raise RuntimeError("ADE corner patch contains duplicate additions")
+    overlap = sorted(set(addition_names) & set(expected_corners))
+    if overlap:
+        raise RuntimeError(
+            f"ADE corner additions already exist in expected_corners: {overlap}"
+        )
+
+    client = _client()
+    if not _cellview_exists(client, library, cell, view):
+        raise RuntimeError(
+            f"ADE corner patch requires existing {library}/{cell}/{view}"
+        )
+    existing_session = find_open_session(client)
+    if existing_session is not None:
+        raise RuntimeError(
+            "ADE corner patch refuses to save while any configured Maestro "
+            f"session is already open: {existing_session}"
+        )
+
+    expected_before = list(expected_corners)
+    requested_after = [*expected_corners, *addition_names]
+    immediate_states: list[dict[str, Any]] = []
+    session = open_session(client, library, cell)
+    try:
+        tests = _maestro_tests_readback(client, session)
+        if tests != expected_tests:
+            raise RuntimeError(
+                "Maestro tests changed before corner patch: "
+                f"expected {expected_tests!r}, got {tests!r}"
+            )
+        all_before = _maestro_all_corners_readback(client, session)
+        enabled_before = _maestro_corners_readback(client, session)
+        if all_before != expected_before or enabled_before != expected_before:
+            raise RuntimeError(
+                "Maestro corner membership precondition mismatch: "
+                f"expected all/enabled {expected_before!r}, got "
+                f"all={all_before!r}, enabled={enabled_before!r}"
+            )
+        for name in addition_names:
+            set_corner(client, name, session=session)
+            all_now = _maestro_all_corners_readback(client, session)
+            enabled_now = _maestro_corners_readback(client, session)
+            expected_now = [
+                *expected_corners,
+                *addition_names[: len(immediate_states) + 1],
+            ]
+            if all_now != expected_now or enabled_now != expected_now:
+                raise RuntimeError(
+                    f"Maestro corner immediate readback mismatch after {name!r}: "
+                    f"expected {expected_now!r}, got all={all_now!r}, "
+                    f"enabled={enabled_now!r}"
+                )
+            immediate_states.append(
+                {
+                    "name": name,
+                    "all_corners": all_now,
+                    "enabled_corners": enabled_now,
+                }
+            )
+        save_setup(client, library, cell, session=session)
+    finally:
+        close_session(client, session)
+
+    verify_session = open_session(client, library, cell)
+    try:
+        verify_tests = _maestro_tests_readback(client, verify_session)
+        all_after = _maestro_all_corners_readback(client, verify_session)
+        enabled_after = _maestro_corners_readback(client, verify_session)
+        if verify_tests != expected_tests:
+            raise RuntimeError(
+                "Maestro tests changed after corner patch: "
+                f"expected {expected_tests!r}, got {verify_tests!r}"
+            )
+        if all_after != requested_after or enabled_after != requested_after:
+            raise RuntimeError(
+                "Maestro corner persistent readback mismatch: "
+                f"expected {requested_after!r}, got all={all_after!r}, "
+                f"enabled={enabled_after!r}"
+            )
+    finally:
+        close_session(client, verify_session)
+
+    return {
+        "backend": "maestro",
+        "target": {"library": library, "cell": cell, "view": view},
+        "expected_tests": expected_tests,
+        "tests_readback_before": tests,
+        "tests_readback_after": verify_tests,
+        "expected_corners_before": expected_before,
+        "requested_corner_additions": addition_names,
+        "all_corners_readback_before": all_before,
+        "enabled_corners_readback_before": enabled_before,
+        "immediate_corner_states": immediate_states,
+        "all_corners_readback_after": all_after,
+        "enabled_corners_readback_after": enabled_after,
+        "requested_evidence_source": "user_input",
+        "confirmed_evidence_source": "bridge_readback",
+        "before_target_fingerprint_sha256": (
+            _maestro_corner_membership_fingerprint(
+                tests, all_before, enabled_before
+            )
+        ),
+        "after_target_fingerprint_sha256": (
+            _maestro_corner_membership_fingerprint(
+                verify_tests, all_after, enabled_after
+            )
+        ),
+        "corner_write_method": "bridge_public_set_corner",
+        "corner_readback_method": (
+            "cadence_maeGetSetup_all_and_enabled_via_bridge_skill_channel"
+        ),
+        "existing_corners_modified": False,
+        "existing_maestro_replaced": False,
+        "model_files_modified": False,
+        "variables_modified": False,
+        "analyses_or_outputs_modified": False,
+        "schematic_oa_write_performed": False,
+        "maestro_setup_write_performed": True,
+        "automated_simulation_performed": False,
+        "completion_scope": (
+            "exact tests and all/enabled corner membership matched before the "
+            "first writer; declared absent corners were added with Bridge public "
+            "set_corner, saved once, and matched after an independent reopen; "
+            "models, variables, analyses, outputs, and schematic were not changed"
         ),
     }
 
@@ -2457,6 +3077,128 @@ def _has_structured_ade_outputs(results: dict[str, Any]) -> bool:
     )
 
 
+def _parse_ade_corner_detail_csv(
+    text: str, *, history: str, expected_corners: list[str]
+) -> dict[str, Any]:
+    """Preserve Maestro Detail CSV's orthogonal point and corner dimensions."""
+
+    rows = list(csv.reader(str(text or "").splitlines()))
+    header_index = next(
+        (
+            index
+            for index, row in enumerate(rows)
+            if len(row) >= 3
+            and row[0].strip() == "Point"
+            and row[1].strip() == "Test"
+            and row[2].strip() == "Output"
+        ),
+        None,
+    )
+    if header_index is None:
+        raise RuntimeError("ADE corner Detail CSV lacked its Point/Test/Output header")
+    header = rows[header_index]
+    corner_columns: dict[str, int] = {}
+    for corner in expected_corners:
+        matches = [
+            index for index, value in enumerate(header) if value.strip() == corner
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"ADE corner Detail CSV expected one column for {corner!r}, "
+                f"found {len(matches)}"
+            )
+        corner_columns[corner] = matches[0]
+
+    corner_parameters: dict[str, dict[str, str]] = {
+        corner: {} for corner in expected_corners
+    }
+    for row in rows[:header_index]:
+        if len(row) < 3:
+            continue
+        name = row[2].strip()
+        if name == "Parameter":
+            continue
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", name):
+            continue
+        for corner, column in corner_columns.items():
+            value = row[column].strip() if column < len(row) else ""
+            if value:
+                corner_parameters[corner][name] = value
+
+    cases: dict[tuple[int, str], dict[str, Any]] = {}
+    active_parameters: dict[str, str] | None = None
+    tests_seen: set[str] = set()
+    for row in rows[header_index + 1 :]:
+        if not row or not any(value.strip() for value in row):
+            continue
+        first = row[0].strip()
+        if first.startswith("Parameters:"):
+            active_parameters = {}
+            for pair in first[len("Parameters:") :].strip().split(","):
+                name, separator, value = pair.strip().partition("=")
+                if separator:
+                    active_parameters[name.strip()] = value.strip()
+            continue
+        if not first.isdigit():
+            continue
+        maestro_point = int(first)
+        if active_parameters is None:
+            active_parameters = {}
+        test = row[1].strip() if len(row) > 1 else ""
+        output = row[2].strip() if len(row) > 2 else ""
+        if test:
+            tests_seen.add(test)
+        for corner, column in corner_columns.items():
+            key = (maestro_point, corner)
+            case = cases.setdefault(
+                key,
+                {
+                    "maestro_point": maestro_point,
+                    "corner": corner,
+                    "parameters": {
+                        **active_parameters,
+                        **corner_parameters[corner],
+                    },
+                    "outputs": {},
+                },
+            )
+            if output:
+                value = row[column].strip() if column < len(row) else ""
+                case["outputs"][output] = {
+                    "value": value,
+                    "spec": row[4].strip() if len(row) > 4 else "",
+                    "weight": row[5].strip() if len(row) > 5 else "",
+                    "pass_fail": row[6].strip() if len(row) > 6 else "",
+                    "min": row[7].strip() if len(row) > 7 else "",
+                    "max": row[8].strip() if len(row) > 8 else "",
+                }
+
+    if not cases:
+        raise RuntimeError("ADE corner Detail CSV did not expose any result cells")
+    maestro_points = sorted({key[0] for key in cases})
+    expected_keys = {
+        (point, corner) for point in maestro_points for corner in expected_corners
+    }
+    if set(cases) != expected_keys:
+        raise RuntimeError("ADE corner Detail CSV did not form a complete point grid")
+    return {
+        "history": history,
+        "tests": sorted(tests_seen),
+        "corners": list(expected_corners),
+        "points": [
+            cases[key]
+            for key in sorted(
+                cases,
+                key=lambda key: (key[0], expected_corners.index(key[1])),
+            )
+        ],
+        "detail_csv_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "detail_csv_size_bytes": len(text.encode("utf-8")),
+        "raw_evidence_source": "eda_result",
+        "parser_evidence_source": "software_inference",
+    }
+
+
 def _normalized_maestro_history(value: Any) -> str:
     history = str(value or "").strip()
     if len(history) >= 2 and history.startswith('"') and history.endswith('"'):
@@ -2762,6 +3504,100 @@ def _maestro_history_locations(
         unique.append(candidate)
         seen.add(candidate["maestro_root"])
     return unique
+
+
+def _maestro_history_log_paths(
+    client, locations: list[dict[str, str]]
+) -> dict[str, list[str]]:
+    """List exact Maestro history logs without using a shell or choosing latest."""
+
+    histories: dict[str, list[str]] = {}
+    for location in locations:
+        root = _validated_ade_remote_path(
+            location.get("maestro_root"), "Maestro result root"
+        )
+        readback = client.execute_skill(
+            f"getDirFiles({json.dumps(root)})", timeout=30
+        )
+        errors = getattr(readback, "errors", None) or []
+        if errors:
+            raise RuntimeError(
+                f"Maestro history listing failed for {root}: {errors[0]}"
+            )
+        parsed = _parse_skill_sexpr(getattr(readback, "output", ""))
+        if parsed is None:
+            continue
+        if not isinstance(parsed, list) or not all(
+            isinstance(item, str) for item in parsed
+        ):
+            raise RuntimeError(
+                f"invalid Maestro history listing for {root}: {parsed!r}"
+            )
+        for filename in parsed:
+            if not filename.endswith(".log"):
+                continue
+            history = filename.removesuffix(".log")
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+", history):
+                continue
+            path = _validated_ade_remote_path(
+                f"{root}/{filename}", "Maestro history log"
+            )
+            histories.setdefault(history, []).append(path)
+    return {
+        history: sorted(set(paths))
+        for history, paths in sorted(histories.items())
+    }
+
+
+def _recover_single_new_completed_maestro_history(
+    client,
+    *,
+    locations: list[dict[str, str]],
+    histories_before: dict[str, list[str]],
+    timeout_error: TimeoutError,
+) -> tuple[str, dict[str, Any]]:
+    """Recover only one newly named, already-completed history after timeout."""
+
+    histories_after = _maestro_history_log_paths(client, locations)
+    new_histories = sorted(set(histories_after) - set(histories_before))
+    if len(new_histories) != 1:
+        raise RuntimeError(
+            "Bridge completion wait timed out and VDA could not identify exactly "
+            "one newly named Maestro history: "
+            f"new_histories={new_histories!r}"
+        ) from timeout_error
+    history = new_histories[0]
+    completed_logs: list[dict[str, Any]] = []
+    for path in histories_after[history]:
+        text = _read_remote_text_via_skill(client, path, page_lines=16)
+        if re.search(
+            rf"(?m)^\s*{re.escape(history)} completed\.\s*$", text
+        ) is None:
+            continue
+        encoded = text.encode("utf-8")
+        completed_logs.append(
+            {
+                "path": path,
+                "size_bytes": len(encoded),
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+            }
+        )
+    if not completed_logs:
+        raise RuntimeError(
+            "Bridge completion wait timed out and the single new Maestro history "
+            f"{history!r} did not have a completed log"
+        ) from timeout_error
+    return history, {
+        "method": "single_new_completed_history_log_after_bridge_timeout",
+        "bridge_timeout": str(timeout_error),
+        "histories_before": sorted(histories_before),
+        "new_histories": new_histories,
+        "completed_history_logs": completed_logs,
+        "evidence_sources": {
+            "history_log": "eda_result",
+            "selection": "software_inference",
+        },
+    }
 
 
 def _ade_artifact_hash_commands(
@@ -3389,8 +4225,16 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
     }
     sweep_verification = settings.get("sweep_verification")
     result_mapping = settings.get("result_mapping")
+    corner_case_mode = bool(
+        isinstance(sweep_verification, dict)
+        and any(
+            isinstance(point, dict) and point.get("corner") is not None
+            for point in sweep_verification.get("points") or []
+        )
+    )
     sweep_setup_before: dict[str, Any] | None = None
     result_mapping_setup_before: dict[str, Any] | None = None
+    callback_timeout_recovery: dict[str, Any] | None = None
     try:
         tests = _maestro_tests_readback(client, session)
         if not tests:
@@ -3428,17 +4272,46 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
             run_status = "recovered"
             simulation_performed_by_this_invocation = False
         else:
-            raw_history, run_status = run_and_wait(
-                client,
-                session=session,
-                timeout=int(payload.get("timeout_seconds") or 600),
-            )
-            history = _normalized_maestro_history(raw_history)
-            if str(run_status).strip().lower() != "done":
-                raise RuntimeError(
-                    f"Maestro background run did not reach done status: {run_status!r}"
+            history_locations: list[dict[str, str]] = []
+            histories_before: dict[str, list[str]] = {}
+            if corner_case_mode:
+                history_locations = _maestro_history_locations(
+                    client,
+                    session=session,
+                    test=tests[0],
+                    library=library,
+                    cell=cell,
+                    view=view,
+                )
+                histories_before = _maestro_history_log_paths(
+                    client, history_locations
                 )
             simulation_performed_by_this_invocation = True
+            try:
+                raw_history, run_status = run_and_wait(
+                    client,
+                    session=session,
+                    timeout=int(payload.get("timeout_seconds") or 600),
+                )
+                history = _normalized_maestro_history(raw_history)
+            except TimeoutError as exc:
+                if not corner_case_mode:
+                    raise
+                history, callback_timeout_recovery = (
+                    _recover_single_new_completed_maestro_history(
+                        client,
+                        locations=history_locations,
+                        histories_before=histories_before,
+                        timeout_error=exc,
+                    )
+                )
+                run_status = "recovered_after_bridge_timeout"
+            if str(run_status).strip().lower() != "done":
+                if callback_timeout_recovery is None:
+                    raise RuntimeError(
+                        "Maestro background run did not reach done status: "
+                        f"{run_status!r}"
+                    )
         results_client = _BridgeTextDownloadFallback(client)
         results = read_results(
             results_client,
@@ -3446,7 +4319,35 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
             lib=library,
             cell=cell,
             history=history,
+            include_raw=corner_case_mode,
         )
+        if corner_case_mode:
+            raw_detail_csv = results.pop("raw_csv", None)
+            expected_corners = list(
+                (sweep_verification or {}).get("expected_corners") or []
+            )
+            if not isinstance(raw_detail_csv, str) or not raw_detail_csv:
+                raise RuntimeError(
+                    "ADE corner sweep required the raw exact-history Detail CSV"
+                )
+            corner_results = _parse_ade_corner_detail_csv(
+                raw_detail_csv,
+                history=history,
+                expected_corners=[str(value) for value in expected_corners],
+            )
+            results["corner_points"] = corner_results["points"]
+            results["corner_order"] = corner_results["corners"]
+            results["corner_tests"] = corner_results["tests"]
+            results["corner_detail_csv_sha256"] = corner_results[
+                "detail_csv_sha256"
+            ]
+            results["corner_detail_csv_size_bytes"] = corner_results[
+                "detail_csv_size_bytes"
+            ]
+            results["corner_detail_csv_evidence_sources"] = {
+                "raw": corner_results["raw_evidence_source"],
+                "parser": corner_results["parser_evidence_source"],
+            }
         result_history = str(results.get("history") or "")
         if result_history and result_history != history:
             raise RuntimeError(
@@ -3604,6 +4505,10 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
         "history_recovery_request_evidence_source": (
             "user_input" if resume_history is not None else None
         ),
+        "callback_timeout_history_recovery_performed": (
+            callback_timeout_recovery is not None
+        ),
+        "callback_timeout_history_recovery_evidence": callback_timeout_recovery,
         "oa_write_performed": False,
         "maestro_setup_write_performed": False,
         "runtime_directory_policy": "transient_per_test_session_override",
@@ -3619,7 +4524,13 @@ def run_background_maestro(payload: dict[str, Any]) -> dict[str, Any]:
                 "an explicitly named existing Maestro history was recovered without "
                 "running simulation again"
                 if resume_history is not None
-                else "the saved Maestro setup was executed in a background session"
+                else (
+                    "the saved Maestro setup was executed in a background session; "
+                    "Bridge completion-wait timeout was recovered only after one "
+                    "new completed history log was identified"
+                    if callback_timeout_recovery is not None
+                    else "the saved Maestro setup was executed in a background session"
+                )
             )
             + "; exact-history simulator input, "
             "result, and log artifacts were hashed across project and scratch "
@@ -5216,8 +6127,19 @@ def _verify_ade_sweep_consistency(
             f"expected {expected_tests!r}, got {tests!r}"
         )
     variables = list(verification.get("variables") or [])
-    variable_names = [str(variable.get("name") or "") for variable in variables]
-    if not variable_names or len(variable_names) != len(set(variable_names)):
+    point_variable_names = [
+        str(variable.get("name") or "")
+        for variable in variables
+        if variable.get("sweep", True)
+    ]
+    variable_names = list(
+        dict.fromkeys(str(variable.get("name") or "") for variable in variables)
+    )
+    if (
+        not point_variable_names
+        or len(point_variable_names) != len(set(point_variable_names))
+        or any(not name for name in variable_names)
+    ):
         raise RuntimeError("ADE sweep verification has invalid variable names")
     expected_points = list(verification.get("points") or [])
     if len(expected_points) < 2:
@@ -5226,20 +6148,69 @@ def _verify_ade_sweep_consistency(
     if not bindings:
         raise RuntimeError("ADE sweep verification requires OA input bindings")
 
-    raw_points = results.get("points")
+    corner_mode = any(
+        isinstance(point, dict) and point.get("corner") is not None
+        for point in expected_points
+    )
+    raw_points = results.get("corner_points" if corner_mode else "points")
     if not isinstance(raw_points, list):
         raise RuntimeError("ADE sweep structured results did not contain points")
     actual_points: dict[int, dict[str, Any]] = {}
-    for item in raw_points:
-        if not isinstance(item, dict):
-            raise RuntimeError("ADE sweep structured result point is not an object")
-        try:
-            point_number = int(item.get("point"))
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError("ADE sweep result has an invalid point number") from exc
-        if point_number in actual_points:
-            raise RuntimeError(f"ADE sweep result repeats point {point_number}")
-        actual_points[point_number] = item
+    if corner_mode:
+        expected_corners = [
+            str(value) for value in verification.get("expected_corners") or []
+        ]
+        if results.get("corner_order") != expected_corners:
+            raise RuntimeError("ADE sweep result corner columns changed")
+        if results.get("corner_tests") != tests:
+            raise RuntimeError("ADE sweep result test columns changed")
+        if results.get("corner_detail_csv_evidence_sources") != {
+            "raw": "eda_result",
+            "parser": "software_inference",
+        } or not re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(results.get("corner_detail_csv_sha256") or ""),
+        ):
+            raise RuntimeError("ADE corner sweep lacked hashed Detail CSV evidence")
+        raw_by_selector: dict[tuple[int, str], dict[str, Any]] = {}
+        for item in raw_points:
+            if not isinstance(item, dict):
+                raise RuntimeError("ADE corner result cell is not an object")
+            try:
+                selector = (int(item.get("maestro_point")), str(item.get("corner")))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("ADE corner result has an invalid selector") from exc
+            if selector in raw_by_selector:
+                raise RuntimeError(f"ADE corner result repeats {selector!r}")
+            raw_by_selector[selector] = item
+        for expected in expected_points:
+            selector = (
+                int(expected.get("maestro_point")),
+                str(expected.get("corner")),
+            )
+            item = raw_by_selector.pop(selector, None)
+            if item is None:
+                raise RuntimeError(f"ADE corner result omitted {selector!r}")
+            point_number = int(expected.get("point"))
+            actual_points[point_number] = {**item, "point": point_number}
+        if raw_by_selector:
+            raise RuntimeError(
+                f"ADE corner result exposed undeclared cells: {sorted(raw_by_selector)!r}"
+            )
+        results["corner_points"] = [
+            actual_points[int(expected["point"])] for expected in expected_points
+        ]
+    else:
+        for item in raw_points:
+            if not isinstance(item, dict):
+                raise RuntimeError("ADE sweep structured result point is not an object")
+            try:
+                point_number = int(item.get("point"))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("ADE sweep result has an invalid point number") from exc
+            if point_number in actual_points:
+                raise RuntimeError(f"ADE sweep result repeats point {point_number}")
+            actual_points[point_number] = item
     expected_numbers = [int(item.get("point")) for item in expected_points]
     if sorted(actual_points) != expected_numbers:
         raise RuntimeError(
@@ -5282,6 +6253,10 @@ def _verify_ade_sweep_consistency(
         for item in manifest
     )
     database_mode = not exact_point_tree_present
+    if corner_mode and not database_mode:
+        raise RuntimeError(
+            "ADE corner sweep verification requires exact-history database mode"
+        )
     database_result_artifacts: list[dict[str, Any]] = []
     shared_inputs_by_test: dict[str, dict[str, Any]] = {}
     history_log_evidence: dict[str, Any] | None = None
@@ -5352,7 +6327,13 @@ def _verify_ade_sweep_consistency(
             evaluation_error_evidence["output_evaluation_error_count"]
         )
         if (
-            points_completed != len(expected_points)
+            points_completed
+            != len(
+                {
+                    int(point.get("maestro_point") or point.get("point"))
+                    for point in expected_points
+                }
+            )
             or simulation_errors != expected_simulation_errors
             or not history_completed
         ):
@@ -5477,21 +6458,22 @@ def _verify_ade_sweep_consistency(
                         f"{variable_name!r} for {test}"
                     )
                 retained_values[variable_name] = str(retained_value)
-            retained_points = [
-                int(point["point"])
+            retained_points = {
+                int(point.get("maestro_point") or point["point"])
                 for point in expected_points
                 if all(
                     spectre_values_equal(
                         retained_values[name], str(point["values"][name])
                     )
-                    for name in variable_names
+                    for name in point_variable_names
                 )
-            ]
+            }
             if len(retained_points) != 1:
                 raise RuntimeError(
                     "ADE native sweep runtime input retained values did not match "
                     f"one declared point for {test}: {retained_values!r}"
                 )
+            retained_maestro_point = next(iter(retained_points))
             item_evidence = {
                 "test": test,
                 "input_path": input_item["path"],
@@ -5510,10 +6492,13 @@ def _verify_ade_sweep_consistency(
                         separators=(",", ":"),
                     ).encode("utf-8")
                 ).hexdigest(),
-                "retained_point": retained_points[0],
                 "retained_sweep_values": retained_values,
                 **comparison,
             }
+            if corner_mode:
+                item_evidence["retained_maestro_point"] = retained_maestro_point
+            else:
+                item_evidence["retained_point"] = retained_maestro_point
             input_evidence.append(item_evidence)
             shared_inputs_by_test[test] = {
                 "path": input_item["path"],
@@ -5682,6 +6667,11 @@ def _verify_ade_sweep_consistency(
             "scalar_outputs": scalar_outputs,
             "tests": point_tests,
         }
+        if corner_mode:
+            point_payload.update(
+                maestro_point=expected.get("maestro_point"),
+                corner=expected.get("corner"),
+            )
         point_evidence.append(
             {
                 **point_payload,
@@ -5721,6 +6711,13 @@ def _verify_ade_sweep_consistency(
         ),
         "sweep_history_log_evidence": history_log_evidence,
         "sweep_result_database_artifacts": database_result_artifacts,
+        "corner_detail_csv_sha256": results.get("corner_detail_csv_sha256"),
+        "corner_detail_csv_size_bytes": results.get(
+            "corner_detail_csv_size_bytes"
+        ),
+        "corner_detail_csv_evidence_sources": results.get(
+            "corner_detail_csv_evidence_sources"
+        ),
         "sweep_consistency_evidence_sources": {
             "expected_sweep": "user_input",
             "maestro_setup_and_oa": "bridge_readback",
@@ -7148,6 +8145,7 @@ _ACTIONS = {
     "capture_focused_maestro": capture_focused_maestro,
     "run_background_maestro": run_background_maestro,
     "apply_maestro_variables": apply_maestro_variables,
+    "apply_maestro_corners": apply_maestro_corners,
     "apply_maestro_setup": apply_maestro_setup,
     "inspect_existing_schematic": inspect_existing_schematic,
     "apply_existing_schematic_parameters": apply_existing_schematic_parameters,
