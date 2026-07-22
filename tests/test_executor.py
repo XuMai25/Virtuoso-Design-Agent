@@ -2996,6 +2996,193 @@ def test_common_source_demo_closes_dc_operating_point_with_oa_readback() -> None
     )
 
 
+def test_differential_pair_demo_closes_balanced_dc_and_writes_best_width() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "differential-pair-dc-loop",
+            "operation": "design.close_loop",
+            "circuit": "differential_pair",
+            "target": {"library": "vda_test", "cell": "vda_diffpair"},
+            "parameters": {
+                "length_um": 0.03,
+                "load_resistance_ohm": 20_000.0,
+                "tail_current_ua": 50.0,
+                "common_mode_v": 0.45,
+                "vdd_v": 0.9,
+            },
+            "parameter_space": {"input_width_um": [0.5, 1.0]},
+            "constraints": [
+                {
+                    "metric": "both_saturation_region",
+                    "relation": ">=",
+                    "value": 1.0,
+                },
+                {
+                    "metric": "branch_current_mismatch_percent",
+                    "relation": "<=",
+                    "value": 1.0,
+                },
+                {
+                    "metric": "tail_current_mismatch_percent",
+                    "relation": "<=",
+                    "value": 1.0,
+                },
+            ],
+            "objective": {
+                "metric": "minimum_branch_gm_us",
+                "goal": "maximize",
+            },
+            "create_if_missing": True,
+            "safety": {
+                "allow_remote_compute": True,
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+            "limits": {"max_iterations": 2, "timeout_seconds": 600},
+        }
+    )
+    adapter = DeterministicDemoAdapter()
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert [candidate.feasible for candidate in record.candidates] == [True, True]
+    assert record.selected_parameters is not None
+    assert record.selected_parameters["input_width_um"] == pytest.approx(1.0)
+    assert record.selected_metrics is not None
+    assert record.selected_metrics["branch_current_mismatch_percent"] == pytest.approx(
+        0.0
+    )
+    assert record.selected_metrics["tail_current_mismatch_percent"] == pytest.approx(
+        0.0
+    )
+    after = adapter.inspect_schematic(task).data
+    assert after["semantic_parameters"] == {
+        "input_width_um": 1.0,
+        "length_um": 0.03,
+        "load_resistance_ohm": 20_000.0,
+    }
+    assert {item["name"] for item in after["instances"]} == {
+        "MN0",
+        "MN1",
+        "RD0",
+        "RD1",
+    }
+    assert set(after["nets"]) == {
+        "INP",
+        "INN",
+        "OUTP",
+        "OUTN",
+        "TAIL",
+        "VDD",
+        "VSS",
+    }
+
+
+def test_differential_pair_infeasible_search_restores_initial_oa() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "differential-pair-infeasible",
+            "operation": "design.close_loop",
+            "circuit": "differential_pair",
+            "target": {"library": "vda_test", "cell": "vda_diffpair_bad"},
+            "parameters": {
+                "length_um": 0.03,
+                "load_resistance_ohm": 10_000.0,
+                "tail_current_ua": 50.0,
+                "common_mode_v": 0.45,
+                "vdd_v": 0.9,
+            },
+            "parameter_space": {"input_width_um": [0.5, 2.0]},
+            "constraints": [
+                {
+                    "metric": "minimum_branch_gm_us",
+                    "relation": ">=",
+                    "value": 1e9,
+                }
+            ],
+            "objective": {
+                "metric": "minimum_branch_gm_us",
+                "goal": "maximize",
+            },
+            "create_if_missing": True,
+            "safety": {
+                "allow_remote_compute": True,
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+            "limits": {"max_iterations": 2, "timeout_seconds": 600},
+        }
+    )
+    adapter = DeterministicDemoAdapter()
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.PARTIAL
+    assert record.selected_parameters is None
+    assert any(action.action == "parameters.restore" for action in record.actions)
+    assert adapter.inspect_schematic(task).data["semantic_parameters"] == {
+        "input_width_um": pytest.approx(1.0),
+        "length_um": pytest.approx(0.03),
+        "load_resistance_ohm": pytest.approx(10_000.0),
+    }
+
+
+def test_differential_pair_budget_selection_is_only_best_evaluated_prefix() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "differential-pair-budget",
+            "operation": "design.close_loop",
+            "circuit": "differential_pair",
+            "target": {"library": "vda_test", "cell": "vda_diffpair_budget"},
+            "parameters": {
+                "length_um": 0.03,
+                "load_resistance_ohm": 10_000.0,
+                "tail_current_ua": 50.0,
+                "common_mode_v": 0.45,
+                "vdd_v": 0.9,
+            },
+            "parameter_space": {"input_width_um": [0.5, 1.0, 2.0]},
+            "constraints": [
+                {
+                    "metric": "both_saturation_region",
+                    "relation": ">=",
+                    "value": 1.0,
+                }
+            ],
+            "objective": {
+                "metric": "minimum_branch_gm_us",
+                "goal": "maximize",
+            },
+            "create_if_missing": True,
+            "safety": {
+                "allow_remote_compute": True,
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+            "limits": {"max_iterations": 1, "timeout_seconds": 600},
+        }
+    )
+    adapter = DeterministicDemoAdapter()
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.PARTIAL
+    assert len(record.candidates) == 1
+    assert record.selected_parameters is not None
+    assert record.selected_parameters["input_width_um"] == pytest.approx(0.5)
+    assert any("search budget exhausted" in note for note in record.notes)
+
+
 def _common_source_ac_run(*, stop_hz: float = 1e11) -> TaskSpec:
     return TaskSpec.model_validate(
         {

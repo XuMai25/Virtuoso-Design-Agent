@@ -38,6 +38,12 @@ _WORKER_ACTIONS = {
         "apply": "apply_common_source_parameters",
         "simulate": "simulate_common_source",
     },
+    CircuitKind.DIFFERENTIAL_PAIR: {
+        "create": "create_differential_pair",
+        "inspect": "inspect_differential_pair",
+        "apply": "apply_differential_pair_parameters",
+        "simulate": "simulate_differential_pair",
+    },
 }
 
 

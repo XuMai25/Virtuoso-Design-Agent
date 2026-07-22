@@ -10,6 +10,7 @@ from ..metrics import (
     extract_common_source_ac_metrics,
     extract_common_source_dc_metrics,
     extract_common_source_noise_metrics,
+    extract_differential_pair_dc_metrics,
 )
 from ..models import (
     AnalysisKind,
@@ -52,6 +53,16 @@ class DeterministicDemoAdapter:
                     task.parameters.get("load_resistance_ohm", 20_000.0)
                 ),
             }
+        if task.circuit is CircuitKind.DIFFERENTIAL_PAIR:
+            return {
+                "input_width_um": float(
+                    task.parameters.get("input_width_um", 1.0)
+                ),
+                "length_um": float(task.parameters.get("length_um", 0.03)),
+                "load_resistance_ohm": float(
+                    task.parameters.get("load_resistance_ohm", 20_000.0)
+                ),
+            }
         return {
             "nmos_width_um": float(task.parameters.get("nmos_width_um", 0.5)),
             "pmos_width_um": float(task.parameters.get("pmos_width_um", 1.0)),
@@ -84,6 +95,22 @@ class DeterministicDemoAdapter:
                     "r": f"{semantic_parameters['source_resistance_ohm']:.12g}"
                 }
             return parameters
+        if task.circuit is CircuitKind.DIFFERENTIAL_PAIR:
+            mos = {
+                "Wfg": f"{semantic_parameters['input_width_um']:.12g}u",
+                "l": f"{semantic_parameters['length_um']:.12g}u",
+                "fingers": "1",
+                "m": "1",
+            }
+            resistor = {
+                "r": f"{semantic_parameters['load_resistance_ohm']:.12g}"
+            }
+            return {
+                "MN0": dict(mos),
+                "MN1": dict(mos),
+                "RD0": dict(resistor),
+                "RD1": dict(resistor),
+            }
         return {
             "MN0": {
                 "Wfg": f"{semantic_parameters['nmos_width_um']:.12g}u",
@@ -120,6 +147,7 @@ class DeterministicDemoAdapter:
         if not existing:
             semantic_parameters = self._semantic_parameters(task)
             common_source = task.circuit is CircuitKind.COMMON_SOURCE
+            differential_pair = task.circuit is CircuitKind.DIFFERENTIAL_PAIR
             instance_parameters = self._instance_parameters(
                 task, semantic_parameters
             )
@@ -154,53 +182,122 @@ class DeterministicDemoAdapter:
                             },
                         ]
                         if common_source
-                        else [
-                            {
-                                "name": "MN0",
-                                "library": "demo_pdk",
-                                "cell": "nmos",
-                                "parameters": dict(instance_parameters["MN0"]),
-                                "terminals": {
-                                    "D": "OUT",
-                                    "G": "IN",
-                                    "S": "VSS",
-                                    "B": "VSS",
+                        else (
+                            [
+                                {
+                                    "name": "MN0",
+                                    "library": "demo_pdk",
+                                    "cell": "nmos",
+                                    "parameters": dict(instance_parameters["MN0"]),
+                                    "terminals": {
+                                        "D": "OUTP",
+                                        "G": "INP",
+                                        "S": "TAIL",
+                                        "B": "VSS",
+                                    },
+                                    "xy": [-0.8, 0.0],
+                                    "orient": "R0",
                                 },
-                                "xy": [0.0, 0.0],
-                                "orient": "R0",
-                            },
-                            {
-                                "name": "MP0",
-                                "library": "demo_pdk",
-                                "cell": "pmos",
-                                "parameters": dict(instance_parameters["MP0"]),
-                                "terminals": {
-                                    "D": "OUT",
-                                    "G": "IN",
-                                    "S": "VDD",
-                                    "B": "VDD",
+                                {
+                                    "name": "MN1",
+                                    "library": "demo_pdk",
+                                    "cell": "nmos",
+                                    "parameters": dict(instance_parameters["MN1"]),
+                                    "terminals": {
+                                        "D": "OUTN",
+                                        "G": "INN",
+                                        "S": "TAIL",
+                                        "B": "VSS",
+                                    },
+                                    "xy": [0.8, 0.0],
+                                    "orient": "R0",
                                 },
-                                "xy": [0.0, 1.0],
-                                "orient": "R0",
-                            },
-                        ]
+                                {
+                                    "name": "RD0",
+                                    "library": "analogLib",
+                                    "cell": "res",
+                                    "parameters": dict(instance_parameters["RD0"]),
+                                    "terminals": {
+                                        "PLUS": "VDD",
+                                        "MINUS": "OUTP",
+                                    },
+                                    "xy": [-0.8, 1.3],
+                                    "orient": "R0",
+                                },
+                                {
+                                    "name": "RD1",
+                                    "library": "analogLib",
+                                    "cell": "res",
+                                    "parameters": dict(instance_parameters["RD1"]),
+                                    "terminals": {
+                                        "PLUS": "VDD",
+                                        "MINUS": "OUTN",
+                                    },
+                                    "xy": [0.8, 1.3],
+                                    "orient": "R0",
+                                },
+                            ]
+                            if differential_pair
+                            else [
+                                {
+                                    "name": "MN0",
+                                    "library": "demo_pdk",
+                                    "cell": "nmos",
+                                    "parameters": dict(instance_parameters["MN0"]),
+                                    "terminals": {
+                                        "D": "OUT",
+                                        "G": "IN",
+                                        "S": "VSS",
+                                        "B": "VSS",
+                                    },
+                                    "xy": [0.0, 0.0],
+                                    "orient": "R0",
+                                },
+                                {
+                                    "name": "MP0",
+                                    "library": "demo_pdk",
+                                    "cell": "pmos",
+                                    "parameters": dict(instance_parameters["MP0"]),
+                                    "terminals": {
+                                        "D": "OUT",
+                                        "G": "IN",
+                                        "S": "VDD",
+                                        "B": "VDD",
+                                    },
+                                    "xy": [0.0, 1.0],
+                                    "orient": "R0",
+                                },
+                            ]
+                        )
                     )
                 ),
                 "nets": (
                     []
                     if task.circuit is CircuitKind.EXISTING_SCHEMATIC
-                    else ["IN", "OUT", "VDD", "VSS"]
+                    else (
+                        ["INP", "INN", "OUTP", "OUTN", "TAIL", "VDD", "VSS"]
+                        if differential_pair
+                        else ["IN", "OUT", "VDD", "VSS"]
+                    )
                 ),
                 "pins": (
                     []
                     if task.circuit is CircuitKind.EXISTING_SCHEMATIC
-                    else ["IN", "OUT", "VDD", "VSS"]
+                    else (
+                        ["INP", "INN", "OUTP", "OUTN", "TAIL", "VDD", "VSS"]
+                        if differential_pair
+                        else ["IN", "OUT", "VDD", "VSS"]
+                    )
                 ),
                 "parameters": dict(task.parameters) | semantic_parameters,
                 "semantic_parameters": semantic_parameters,
                 "instance_parameters": instance_parameters,
                 "topology_variant": (
-                    "common_source" if common_source else task.circuit.value
+                    "common_source"
+                    if common_source
+                    else "resistive_load_nmos_differential_pair"
+                    if differential_pair
+                    else task.circuit.value
                 ),
             }
         return AdapterResult(
@@ -452,9 +549,17 @@ class DeterministicDemoAdapter:
                 )
                 if task.circuit is CircuitKind.COMMON_SOURCE
                 else (
-                    ()
-                    if task.circuit is CircuitKind.EXISTING_SCHEMATIC
-                    else ("nmos_width_um", "pmos_width_um", "length_um")
+                    (
+                        "input_width_um",
+                        "length_um",
+                        "load_resistance_ohm",
+                    )
+                    if task.circuit is CircuitKind.DIFFERENTIAL_PAIR
+                    else (
+                        ()
+                        if task.circuit is CircuitKind.EXISTING_SCHEMATIC
+                        else ("nmos_width_um", "pmos_width_um", "length_um")
+                    )
                 )
             )
             for name in semantic_names:
@@ -477,6 +582,20 @@ class DeterministicDemoAdapter:
                     schematic["instance_parameters"]["RS0"]["r"] = (
                         f"{float(parameters['source_resistance_ohm']):.12g}"
                     )
+            elif task.circuit is CircuitKind.DIFFERENTIAL_PAIR:
+                for instance in ("MN0", "MN1"):
+                    if "input_width_um" in parameters:
+                        schematic["instance_parameters"][instance]["Wfg"] = (
+                            f"{float(parameters['input_width_um']):.12g}u"
+                        )
+                    if "length_um" in parameters:
+                        schematic["instance_parameters"][instance]["l"] = (
+                            f"{float(parameters['length_um']):.12g}u"
+                        )
+                if "load_resistance_ohm" in parameters:
+                    resistance = f"{float(parameters['load_resistance_ohm']):.12g}"
+                    for instance in ("RD0", "RD1"):
+                        schematic["instance_parameters"][instance]["r"] = resistance
             result_data.update(
                 {
                     "applied": dict(parameters),
@@ -640,6 +759,56 @@ class DeterministicDemoAdapter:
             raise RuntimeError("demo schematic does not exist")
         effective_parameters = dict(parameters)
         effective_parameters.update(schematic["semantic_parameters"])
+        if task.circuit is CircuitKind.DIFFERENTIAL_PAIR:
+            width_um = effective_parameters["input_width_um"]
+            length_um = effective_parameters["length_um"]
+            resistance = effective_parameters["load_resistance_ohm"]
+            tail_current_a = effective_parameters.get("tail_current_ua", 50.0) * 1e-6
+            common_mode_v = effective_parameters.get("common_mode_v", 0.45)
+            vdd_v = effective_parameters.get("vdd_v", 0.9)
+            branch_current_a = 0.5 * tail_current_a
+            beta_a_per_v2 = 200e-6 * width_um / length_um
+            overdrive_v = math.sqrt(
+                max(2.0 * branch_current_a / beta_a_per_v2, 1e-12)
+            )
+            tail_v = common_mode_v - 0.25 - overdrive_v
+            output_v = vdd_v - branch_current_a * resistance
+            gm_s = 2.0 * branch_current_a / overdrive_v
+            gds_s = max(gm_s / 20.0, 1e-9)
+            metrics = extract_differential_pair_dc_metrics(
+                vdd_v=vdd_v,
+                common_mode_v=common_mode_v,
+                outp_v=output_v,
+                outn_v=output_v,
+                tail_v=tail_v,
+                branch_p_current_a=branch_current_a,
+                branch_n_current_a=branch_current_a,
+                tail_source_current_a=tail_current_a,
+                supply_source_current_a=-tail_current_a,
+                branch_p_vdsat_v=overdrive_v,
+                branch_n_vdsat_v=overdrive_v,
+                branch_p_gm_s=gm_s,
+                branch_n_gm_s=gm_s,
+                branch_p_gds_s=gds_s,
+                branch_n_gds_s=gds_s,
+                load_resistance_ohm=resistance,
+            )
+            return AdapterResult(
+                data={
+                    "parameters": effective_parameters,
+                    "metrics": metrics,
+                    "metric_sources": {
+                        name: "software_inference" for name in metrics
+                    },
+                    "analysis_complete": True,
+                    "analysis_issues": [],
+                    "analysis_warnings": [
+                        "analytical differential-pair demo; not an EDA result"
+                    ],
+                    "warning": "analytical demo only; not an EDA result",
+                },
+                evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+            )
         if task.circuit is CircuitKind.COMMON_SOURCE:
             width = effective_parameters["device_width_um"]
             length = effective_parameters["length_um"]

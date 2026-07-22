@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-dc-verify-bridge",
+  "operation": "simulation.run",
+  "circuit": "differential_pair",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_diffpair_gate3_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis": "dc",
+  "parameters": {
+    "input_width_um": 1.0,
+    "length_um": 0.03,
+    "load_resistance_ohm": 10000.0,
+    "tail_current_ua": 50.0,
+    "common_mode_v": 0.45,
+    "vdd_v": 0.9
+  },
+  "constraints": [
+    {"metric": "branch_current_mismatch_percent", "relation": "<=", "value": 1.0},
+    {"metric": "tail_current_mismatch_percent", "relation": "<=", "value": 1.0},
+    {"metric": "supply_current_mismatch_percent", "relation": "<=", "value": 1.0},
+    {"metric": "max_load_current_mismatch_percent", "relation": "<=", "value": 1.0},
+    {"metric": "both_saturation_region", "relation": ">=", "value": 1.0},
+    {"metric": "tail_voltage_v", "relation": ">=", "value": 0.0},
+    {"metric": "minimum_saturation_margin_v", "relation": ">=", "value": 0.05},
+    {"metric": "minimum_output_swing_margin_v", "relation": ">=", "value": 0.05},
+    {"metric": "output_offset_abs_mv", "relation": "<=", "value": 2.0},
+    {"metric": "dc_supply_power_uw", "relation": "<=", "value": 60.0}
+  ],
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}

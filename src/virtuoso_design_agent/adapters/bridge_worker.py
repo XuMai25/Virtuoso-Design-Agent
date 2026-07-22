@@ -27,6 +27,7 @@ from virtuoso_design_agent.metrics import (
     extract_common_source_linearity_point_metrics,
     extract_common_source_noise_metrics,
     extract_dc_supply_metrics,
+    extract_differential_pair_dc_metrics,
     extract_inverter_metrics,
     extract_supply_metrics,
 )
@@ -379,6 +380,59 @@ def _assert_common_source(
     return variant
 
 
+def _assert_differential_pair(
+    data: dict[str, Any], profile: dict[str, Any] | None = None
+) -> str:
+    by_name = {str(item.get("name")): item for item in data.get("instances", [])}
+    expected_names = {"MN0", "MN1", "RD0", "RD1"}
+    if set(by_name) != expected_names:
+        raise RuntimeError(
+            "existing schematic is not the VDA differential pair: "
+            f"instances={sorted(by_name)}"
+        )
+    required_nets = {"INP", "INN", "OUTP", "OUTN", "TAIL", "VDD", "VSS"}
+    missing_pins = required_nets - set(data.get("pins", {}).keys())
+    if missing_pins:
+        raise RuntimeError(
+            "existing schematic is not the VDA differential pair: "
+            f"missing pins={sorted(missing_pins)}"
+        )
+    missing_nets = required_nets - set(data.get("nets", {}).keys())
+    if missing_nets:
+        raise RuntimeError(
+            "existing schematic is not the VDA differential pair: "
+            f"missing nets={sorted(missing_nets)}"
+        )
+    expected_terminals = {
+        "MN0": {"D": "OUTP", "G": "INP", "S": "TAIL", "B": "VSS"},
+        "MN1": {"D": "OUTN", "G": "INN", "S": "TAIL", "B": "VSS"},
+        "RD0": {"PLUS": "VDD", "MINUS": "OUTP"},
+        "RD1": {"PLUS": "VDD", "MINUS": "OUTN"},
+    }
+    for name, expected in expected_terminals.items():
+        actual = by_name[name].get("terms", {})
+        if actual != expected:
+            raise RuntimeError(
+                "existing schematic is not the VDA differential pair: "
+                f"{name} terminals={actual!r}, expected={expected!r}"
+            )
+    if profile is not None:
+        expected_masters = {
+            "MN0": (profile["tech_library"], profile["nmos_cell"]),
+            "MN1": (profile["tech_library"], profile["nmos_cell"]),
+            "RD0": ("analogLib", "res"),
+            "RD1": ("analogLib", "res"),
+        }
+        for name, expected in expected_masters.items():
+            actual = (by_name[name].get("lib"), by_name[name].get("cell"))
+            if actual != expected:
+                raise RuntimeError(
+                    "existing schematic is not the VDA differential pair: "
+                    f"{name} master is {actual!r}, expected {expected!r}"
+                )
+    return "resistive_load_nmos_differential_pair"
+
+
 def _um(value: float) -> str:
     return f"{float(value):.12g}u"
 
@@ -563,6 +617,138 @@ def _common_source_summary(data: dict[str, Any]) -> dict[str, Any]:
         "semantic_parameters": _common_source_semantic_parameters_from_schematic(data),
         "device_geometry": _common_source_device_geometry_from_schematic(data),
         "topology_variant": _assert_common_source(data),
+        "bridge_schematic": data,
+    }
+
+
+def _differential_pair_semantic_parameters_from_schematic(
+    data: dict[str, Any],
+) -> dict[str, float]:
+    by_name = {str(item.get("name")): item for item in data.get("instances", [])}
+    required = {"MN0", "MN1", "RD0", "RD1"}
+    if not required <= set(by_name):
+        raise RuntimeError("differential-pair readback is missing a core instance")
+    widths: list[float] = []
+    lengths: list[float] = []
+    resistances: list[float] = []
+    for instance in ("MN0", "MN1"):
+        parameters = by_name[instance].get("params", {})
+        width = parameters.get("Wfg", parameters.get("w"))
+        length = parameters.get("l")
+        if width is None or length is None:
+            raise RuntimeError(
+                f"differential-pair readback is missing {instance} width/length"
+            )
+        widths.append(_length_um(width))
+        lengths.append(_length_um(length))
+    for instance in ("RD0", "RD1"):
+        resistance = by_name[instance].get("params", {}).get("r")
+        if resistance is None:
+            raise RuntimeError(
+                f"differential-pair readback is missing {instance} resistance"
+            )
+        resistances.append(_resistance_ohm(resistance))
+    comparisons = {
+        "input widths": widths,
+        "input lengths": lengths,
+        "load resistances": resistances,
+    }
+    for label, values in comparisons.items():
+        tolerance = max(abs(values[0]) * 1e-6, 1e-9)
+        if abs(values[0] - values[1]) > tolerance:
+            raise RuntimeError(
+                f"differential-pair {label} differ: {values[0]:.12g} vs "
+                f"{values[1]:.12g}"
+            )
+    return {
+        "input_width_um": widths[0],
+        "length_um": lengths[0],
+        "load_resistance_ohm": resistances[0],
+    }
+
+
+def _differential_pair_device_geometry_from_schematic(
+    data: dict[str, Any],
+) -> dict[str, float]:
+    by_name = {str(item.get("name")): item for item in data.get("instances", [])}
+    geometries: list[dict[str, float]] = []
+    for instance in ("MN0", "MN1"):
+        if instance not in by_name:
+            raise RuntimeError(f"differential-pair readback is missing {instance}")
+        parameters = by_name[instance].get("params", {})
+        fingers = _positive_device_count(
+            parameters.get("fingers", 1), f"{instance}.fingers"
+        )
+        multiplicity = _positive_device_count(
+            parameters.get("m", 1), f"{instance}.m"
+        )
+        if parameters.get("Wfg") is not None:
+            finger_width_um = _length_um(parameters["Wfg"])
+        elif parameters.get("w") is not None:
+            finger_width_um = _length_um(parameters["w"]) / fingers
+        else:
+            raise RuntimeError(
+                f"differential-pair readback is missing {instance} Wfg/w"
+            )
+        geometries.append(
+            {
+                "finger_width_um": finger_width_um,
+                "fingers": fingers,
+                "multiplicity": multiplicity,
+                "total_width_um": finger_width_um * fingers * multiplicity,
+            }
+        )
+    _assert_parameter_consistency(
+        geometries[0],
+        geometries[1],
+        expected_label="MN0 OA geometry",
+        actual_label="MN1 OA geometry",
+    )
+    return geometries[0]
+
+
+def _differential_pair_summary(data: dict[str, Any]) -> dict[str, Any]:
+    useful_params = {
+        "Wfg",
+        "w",
+        "l",
+        "fingers",
+        "nf",
+        "m",
+        "model",
+        "multi",
+        "r",
+    }
+    instances = []
+    for item in data.get("instances", []):
+        instances.append(
+            {
+                "name": item.get("name"),
+                "library": item.get("lib"),
+                "cell": item.get("cell"),
+                "parameters": {
+                    key: value
+                    for key, value in item.get("params", {}).items()
+                    if key in useful_params
+                },
+                "terminals": item.get("terms", {}),
+                "xy": item.get("xy"),
+                "orient": item.get("orient"),
+                "bBox": item.get("bBox"),
+                "numInst": item.get("numInst"),
+                "view": item.get("view"),
+            }
+        )
+    return {
+        "instances": sorted(instances, key=lambda item: str(item["name"])),
+        "nets": sorted(data.get("nets", {}).keys()),
+        "pins": sorted(data.get("pins", {}).keys()),
+        "instance_parameters": _instance_parameters_from_schematic(data),
+        "semantic_parameters": (
+            _differential_pair_semantic_parameters_from_schematic(data)
+        ),
+        "device_geometry": _differential_pair_device_geometry_from_schematic(data),
+        "topology_variant": _assert_differential_pair(data),
         "bridge_schematic": data,
     }
 
@@ -781,6 +967,45 @@ def _resolved_common_source_parameters(
     return parameters
 
 
+def _resolved_differential_pair_parameters(
+    payload: dict[str, Any],
+    oa_parameters: dict[str, float] | None = None,
+) -> dict[str, float]:
+    profile = payload["profile"]
+    supplied = payload.get("parameters", {})
+    oa_parameters = oa_parameters or {}
+    return {
+        "input_width_um": float(
+            supplied.get(
+                "input_width_um",
+                oa_parameters.get(
+                    "input_width_um", profile["default_common_source_width_um"]
+                ),
+            )
+        ),
+        "length_um": float(
+            supplied.get(
+                "length_um",
+                oa_parameters.get("length_um", profile["default_length_um"]),
+            )
+        ),
+        "load_resistance_ohm": float(
+            supplied.get(
+                "load_resistance_ohm",
+                oa_parameters.get(
+                    "load_resistance_ohm",
+                    profile["default_common_source_load_resistance_ohm"],
+                ),
+            )
+        ),
+        "tail_current_ua": float(supplied.get("tail_current_ua", 50.0)),
+        "common_mode_v": float(
+            supplied.get("common_mode_v", profile["default_common_source_bias_v"])
+        ),
+        "vdd_v": float(supplied.get("vdd_v", profile["default_vdd_v"])),
+    }
+
+
 def _apply_parameters(
     client,
     library: str,
@@ -912,6 +1137,64 @@ def _apply_common_source_parameters(
     return summary
 
 
+def _differential_pair_instance_parameter_updates(
+    parameters: dict[str, float],
+) -> dict[str, dict[str, str]]:
+    updates: dict[str, dict[str, str]] = {}
+    mos_updates: dict[str, str] = {}
+    if "input_width_um" in parameters:
+        mos_updates["wf"] = _um(parameters["input_width_um"])
+    if "length_um" in parameters:
+        mos_updates["l"] = _um(parameters["length_um"])
+    if mos_updates:
+        updates["MN0"] = dict(mos_updates)
+        updates["MN1"] = dict(mos_updates)
+    if "load_resistance_ohm" in parameters:
+        load = {"r": _ohm(parameters["load_resistance_ohm"])}
+        updates["RD0"] = dict(load)
+        updates["RD1"] = dict(load)
+    return updates
+
+
+def _apply_differential_pair_parameters(
+    client,
+    library: str,
+    cell: str,
+    parameters: dict[str, float],
+    profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    persistable = {
+        name: float(parameters[name])
+        for name in ("input_width_um", "length_um", "load_resistance_ohm")
+        if name in parameters
+    }
+    if not persistable:
+        raise RuntimeError("differential-pair OA parameter write is empty")
+    current = _read_schematic(client, library, cell)
+    _assert_differential_pair(current, profile)
+    for instance, update in _differential_pair_instance_parameter_updates(
+        persistable
+    ).items():
+        _set_target_instance_params(
+            client,
+            library,
+            cell,
+            instance,
+            param_filters=None,
+            **update,
+        )
+    data = _read_schematic(client, library, cell)
+    _assert_differential_pair(data, profile)
+    summary = _differential_pair_summary(data)
+    _assert_parameter_consistency(
+        persistable,
+        summary["semantic_parameters"],
+        expected_label="requested write",
+        actual_label="OA readback",
+    )
+    return summary
+
+
 def _apply_explicit_instance_parameters(
     client,
     library: str,
@@ -926,6 +1209,9 @@ def _apply_explicit_instance_parameters(
     elif payload["circuit"] == "common_source":
         _assert_common_source(current, payload["profile"])
         summarize = _common_source_summary
+    elif payload["circuit"] == "differential_pair":
+        _assert_differential_pair(current, payload["profile"])
+        summarize = _differential_pair_summary
     elif payload["circuit"] == "existing_schematic":
         summarize = _existing_schematic_summary
     else:
@@ -971,6 +1257,8 @@ def _apply_explicit_instance_parameters(
         _assert_inverter(updated, payload["profile"])
     elif payload["circuit"] == "common_source":
         _assert_common_source(updated, payload["profile"])
+    elif payload["circuit"] == "differential_pair":
+        _assert_differential_pair(updated, payload["profile"])
     repair_applied_parameters: dict[str, dict[str, str]] = {}
     repair_reason: str | None = None
     try:
@@ -1017,6 +1305,8 @@ def _apply_explicit_instance_parameters(
             _assert_inverter(updated, payload["profile"])
         elif payload["circuit"] == "common_source":
             _assert_common_source(updated, payload["profile"])
+        elif payload["circuit"] == "differential_pair":
+            _assert_differential_pair(updated, payload["profile"])
     return {
         "requested_instance_parameters": requested,
         "requested_evidence_source": "user_input",
@@ -5819,6 +6109,162 @@ def apply_common_source_parameters(payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def create_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
+    from virtuoso_bridge.virtuoso.schematic.ops import (
+        schematic_create_inst_by_master_name as inst,
+        schematic_create_pin as pin,
+        schematic_label_instance_term as label_term,
+    )
+
+    client = _client()
+    library, cell = _target(payload)
+    existing = _try_read_schematic(client, library, cell)
+    if existing is not None and not payload.get("replace_existing", False):
+        _assert_differential_pair(existing, payload["profile"])
+        return {
+            "created": False,
+            "already_exists": True,
+            "readback": _differential_pair_summary(existing),
+        }
+    if existing is not None:
+        result = client.execute_skill(
+            f'let((v) v=ddGetObj("{library}" "{cell}" "schematic") '
+            "when(v ddDeleteObj(v)))",
+            timeout=30,
+        )
+        errors = getattr(result, "errors", None) or []
+        if errors:
+            raise RuntimeError(f"delete existing schematic failed: {errors[0]}")
+
+    profile = payload["profile"]
+    with client.schematic.edit(library, cell, timeout=90) as schematic:
+        schematic.add(
+            inst(
+                profile["tech_library"],
+                profile["nmos_cell"],
+                "symbol",
+                "MN0",
+                -0.8,
+                0.0,
+                "R0",
+            )
+        )
+        schematic.add(
+            inst(
+                profile["tech_library"],
+                profile["nmos_cell"],
+                "symbol",
+                "MN1",
+                0.8,
+                0.0,
+                "R0",
+            )
+        )
+        schematic.add(inst("analogLib", "res", "symbol", "RD0", -0.8, 1.3, "R0"))
+        schematic.add(inst("analogLib", "res", "symbol", "RD1", 0.8, 1.3, "R0"))
+        schematic.add_net_label_to_transistor(
+            "MN0",
+            drain_net="OUTP",
+            gate_net="INP",
+            source_net="TAIL",
+            body_net="VSS",
+        )
+        schematic.add_net_label_to_transistor(
+            "MN1",
+            drain_net="OUTN",
+            gate_net="INN",
+            source_net="TAIL",
+            body_net="VSS",
+        )
+        schematic.add(label_term("RD0", "PLUS", "VDD"))
+        schematic.add(label_term("RD0", "MINUS", "OUTP"))
+        schematic.add(label_term("RD1", "PLUS", "VDD"))
+        schematic.add(label_term("RD1", "MINUS", "OUTN"))
+        schematic.add(pin("INP", -2.0, 0.0, "R0", direction="input"))
+        schematic.add(pin("INN", 2.0, 0.0, "R0", direction="input"))
+        schematic.add(pin("OUTP", -1.8, 0.8, "R0", direction="output"))
+        schematic.add(pin("OUTN", 1.8, 0.8, "R0", direction="output"))
+        schematic.add(pin("TAIL", 0.0, -0.8, "R0", direction="inputOutput"))
+        schematic.add(pin("VDD", 0.0, 1.9, "R0", direction="inputOutput"))
+        schematic.add(pin("VSS", 1.4, -0.8, "R0", direction="inputOutput"))
+
+    parameters = _resolved_differential_pair_parameters(payload)
+    oa_parameters = {
+        name: parameters[name]
+        for name in ("input_width_um", "length_um", "load_resistance_ohm")
+    }
+    readback = _apply_differential_pair_parameters(
+        client, library, cell, oa_parameters, profile
+    )
+    return {
+        "created": True,
+        "already_exists": False,
+        "applied_device_parameters": oa_parameters,
+        "testbench_contract": {
+            "tail_source": "external ideal current source",
+            "input_bias": "external matched common-mode voltage sources",
+            "source": "software_inference",
+        },
+        "readback": readback,
+    }
+
+
+def inspect_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
+    client = _client()
+    library, cell = _target(payload)
+    data = _read_schematic(client, library, cell)
+    _assert_differential_pair(data, payload["profile"])
+    return _attach_targeted_parameter_verification(
+        client, library, cell, payload, _differential_pair_summary(data)
+    )
+
+
+def apply_differential_pair_parameters(payload: dict[str, Any]) -> dict[str, Any]:
+    client = _client()
+    library, cell = _target(payload)
+    current = _read_schematic(client, library, cell)
+    _assert_differential_pair(current, payload["profile"])
+    result: dict[str, Any] = {}
+    if payload.get("parameters"):
+        oa_parameters = {
+            name: float(payload["parameters"][name])
+            for name in ("input_width_um", "length_um", "load_resistance_ohm")
+            if name in payload["parameters"]
+        }
+        if oa_parameters:
+            result = {
+                "requested_parameters": payload["parameters"],
+                "applied_device_parameters": oa_parameters,
+                "readback": _apply_differential_pair_parameters(
+                    client, library, cell, oa_parameters, payload["profile"]
+                ),
+            }
+        else:
+            result = {
+                **_differential_pair_summary(current),
+                "requested_parameters": payload["parameters"],
+                "applied_device_parameters": {},
+            }
+    if payload.get("instance_parameter_updates"):
+        explicit = _apply_explicit_instance_parameters(
+            client, library, cell, payload
+        )
+        requested_semantic = {
+            name: float(payload["parameters"][name])
+            for name in ("input_width_um", "length_um", "load_resistance_ohm")
+            if name in payload.get("parameters", {})
+        }
+        _assert_parameter_consistency(
+            requested_semantic,
+            explicit["readback"]["semantic_parameters"],
+            expected_label="requested semantic write",
+            actual_label="final OA readback after explicit CDF callbacks",
+        )
+        result.update(explicit)
+        result["semantic_readback"] = explicit["readback"]["semantic_parameters"]
+    return result
+
+
 _SI_ENV_OVERRIDES = {
     "simNotIncremental": "simNotIncremental = 't",
     "simReNetlistAll": "simReNetlistAll = nil",
@@ -7273,6 +7719,128 @@ def _parse_common_source_netlist(
     }
 
 
+def _parse_differential_pair_netlist(
+    text: str, profile: dict[str, Any]
+) -> dict[str, Any]:
+    records = _logical_netlist_records(text)
+    expected = {
+        "MN0": {
+            "model": profile["nmos_cell"],
+            "nodes": ["OUTP", "INP", "TAIL", "VSS"],
+        },
+        "MN1": {
+            "model": profile["nmos_cell"],
+            "nodes": ["OUTN", "INN", "TAIL", "VSS"],
+        },
+        "RD0": {"model": "resistor", "nodes": ["VDD", "OUTP"]},
+        "RD1": {"model": "resistor", "nodes": ["VDD", "OUTN"]},
+    }
+    instances: dict[str, dict[str, Any]] = {}
+    for name, expected_item in expected.items():
+        record = next(
+            (
+                item
+                for item in records
+                if re.match(rf"^{re.escape(name)}\s*\(", item)
+            ),
+            None,
+        )
+        if record is None:
+            raise RuntimeError(
+                f"si netlist is missing differential-pair instance {name}"
+            )
+        match = re.match(r"^\S+\s*\(([^)]*)\)\s+(\S+)\s+(.*)$", record)
+        if match is None:
+            raise RuntimeError(f"cannot parse si netlist instance {name}")
+        nodes = match.group(1).split()
+        model = match.group(2)
+        parameter_text = match.group(3)
+        if nodes != expected_item["nodes"]:
+            raise RuntimeError(
+                f"si netlist topology mismatch for {name}: nodes={nodes}, "
+                f"expected={expected_item['nodes']}"
+            )
+        if model != expected_item["model"]:
+            raise RuntimeError(
+                f"si netlist model mismatch for {name}: {model!r} != "
+                f"{expected_item['model']!r}"
+            )
+        instances[name] = {"nodes": nodes, "model": model}
+        if name.startswith("MN"):
+            width_match = re.search(r"(?:^|\s)w=([^\s\\]+)", parameter_text)
+            length_match = re.search(r"(?:^|\s)l=([^\s\\]+)", parameter_text)
+            if width_match is None or length_match is None:
+                raise RuntimeError(f"si netlist is missing w/l for {name}")
+            fingers_match = re.search(r"(?:^|\s)nf=([^\s\\]+)", parameter_text)
+            multiplicity_match = re.search(
+                r"(?:^|\s)multi=([^\s\\]+)", parameter_text
+            )
+            fingers = _positive_device_count(
+                fingers_match.group(1) if fingers_match else 1,
+                f"si {name}.nf",
+            )
+            multiplicity = _positive_device_count(
+                multiplicity_match.group(1) if multiplicity_match else 1,
+                f"si {name}.multi",
+            )
+            netlist_width_um = _length_um(width_match.group(1))
+            instances[name].update(
+                {
+                    "netlist_width_um": netlist_width_um,
+                    "finger_width_um": netlist_width_um / fingers,
+                    "fingers": fingers,
+                    "multiplicity": multiplicity,
+                    "total_width_um": netlist_width_um * multiplicity,
+                    "length_um": _length_um(length_match.group(1)),
+                }
+            )
+        else:
+            resistance_match = re.search(r"(?:^|\s)r=([^\s\\]+)", parameter_text)
+            if resistance_match is None:
+                raise RuntimeError(f"si netlist is missing resistance for {name}")
+            instances[name]["resistance_ohm"] = _resistance_ohm(
+                resistance_match.group(1)
+            )
+
+    mos_geometry_fields = (
+        "finger_width_um",
+        "fingers",
+        "multiplicity",
+        "total_width_um",
+        "length_um",
+    )
+    _assert_parameter_consistency(
+        {name: float(instances["MN0"][name]) for name in mos_geometry_fields},
+        {name: float(instances["MN1"][name]) for name in mos_geometry_fields},
+        expected_label="MN0 si geometry",
+        actual_label="MN1 si geometry",
+    )
+    _assert_parameter_consistency(
+        {"load_resistance_ohm": float(instances["RD0"]["resistance_ohm"])},
+        {"load_resistance_ohm": float(instances["RD1"]["resistance_ohm"])},
+        expected_label="RD0 si resistance",
+        actual_label="RD1 si resistance",
+    )
+    return {
+        "instances": instances,
+        "semantic_parameters": {
+            "input_width_um": instances["MN0"]["finger_width_um"],
+            "length_um": instances["MN0"]["length_um"],
+            "load_resistance_ohm": instances["RD0"]["resistance_ohm"],
+        },
+        "device_geometry": {
+            name: instances["MN0"][name]
+            for name in (
+                "finger_width_um",
+                "fingers",
+                "multiplicity",
+                "total_width_um",
+            )
+        },
+        "topology_variant": "resistive_load_nmos_differential_pair",
+    }
+
+
 def _validate_si_log(text: str) -> None:
     failure = re.search(
         r"(?im)(\*Error\*|ERROR\s*\(|Stopping netlisting|netlisting failed)", text
@@ -7389,6 +7957,8 @@ def _generate_oa_netlist(
         parsed = _parse_inverter_netlist(netlist_text, profile)
     elif circuit == "common_source":
         parsed = _parse_common_source_netlist(netlist_text, profile)
+    elif circuit == "differential_pair":
+        parsed = _parse_differential_pair_netlist(netlist_text, profile)
     else:
         raise RuntimeError(f"unsupported OA netlist circuit: {circuit}")
     return {
@@ -7656,6 +8226,126 @@ def _common_source_metrics_from_result(
         "source_degeneration_consistency": (
             "matched" if source_degenerated else "not_applicable"
         ),
+    }
+
+
+def _differential_pair_metrics_from_result(
+    data: dict[str, Any], parameters: dict[str, float]
+) -> tuple[dict[str, float], dict[str, Any]]:
+    node_values = {
+        name: _scalar(data, f"dc_{name}")
+        for name in ("INP", "INN", "OUTP", "OUTN", "TAIL", "VDD", "VSS")
+    }
+    branch_values: dict[str, dict[str, float]] = {}
+    for instance in ("MN0", "MN1"):
+        branch_values[instance] = {
+            "ids_a": _operating_point_scalar(data, instance, "ids", "id"),
+            "vgs_v": _operating_point_scalar(data, instance, "vgs"),
+            "vds_v": _operating_point_scalar(data, instance, "vds"),
+            "vdsat_v": _operating_point_scalar(data, instance, "vdsat"),
+            "gm_s": _operating_point_scalar(data, instance, "gm"),
+            "gds_s": _operating_point_scalar(data, instance, "gds"),
+        }
+    source_values = {
+        "supply_source_current_a": _scalar(data, "dc_VDD_SRC:p"),
+        "tail_source_current_a": _scalar(data, "dc_ITAIL_SRC:p"),
+    }
+    source_tolerance_v = 1e-5
+    expected_nodes = {
+        "VDD": parameters["vdd_v"],
+        "VSS": 0.0,
+        "INP": parameters["common_mode_v"],
+        "INN": parameters["common_mode_v"],
+    }
+    for name, expected in expected_nodes.items():
+        if abs(node_values[name] - expected) > source_tolerance_v:
+            raise RuntimeError(
+                f"DC {name} does not match the differential-pair testbench "
+                f"source value: expected {expected:.12g}, got "
+                f"{node_values[name]:.12g}"
+            )
+
+    expected_tail_current_a = parameters["tail_current_ua"] * 1e-6
+    measured_tail_current_a = abs(source_values["tail_source_current_a"])
+    tail_source_error_percent = (
+        abs(measured_tail_current_a - expected_tail_current_a)
+        / max(abs(expected_tail_current_a), measured_tail_current_a, 1e-18)
+        * 100.0
+    )
+    if tail_source_error_percent > 1.0:
+        raise RuntimeError(
+            "DC tail source current does not match the requested value: "
+            f"{tail_source_error_percent:.6g}%"
+        )
+
+    branch_nodes = {
+        "MN0": (node_values["INP"], node_values["OUTP"]),
+        "MN1": (node_values["INN"], node_values["OUTN"]),
+    }
+    for instance, (gate_v, drain_v) in branch_nodes.items():
+        expected_vgs = gate_v - node_values["TAIL"]
+        expected_vds = drain_v - node_values["TAIL"]
+        for quantity, expected in (("vgs_v", expected_vgs), ("vds_v", expected_vds)):
+            actual = branch_values[instance][quantity]
+            tolerance = max(abs(expected) * 1e-4, 1e-5)
+            if abs(abs(actual) - abs(expected)) > tolerance:
+                raise RuntimeError(
+                    f"DC node/device mismatch for {instance}.{quantity}: "
+                    f"node={expected:.12g}, device={actual:.12g}"
+                )
+
+    metrics = extract_differential_pair_dc_metrics(
+        vdd_v=node_values["VDD"],
+        common_mode_v=0.5 * (node_values["INP"] + node_values["INN"]),
+        outp_v=node_values["OUTP"],
+        outn_v=node_values["OUTN"],
+        tail_v=node_values["TAIL"],
+        branch_p_current_a=branch_values["MN0"]["ids_a"],
+        branch_n_current_a=branch_values["MN1"]["ids_a"],
+        tail_source_current_a=source_values["tail_source_current_a"],
+        supply_source_current_a=source_values["supply_source_current_a"],
+        branch_p_vdsat_v=branch_values["MN0"]["vdsat_v"],
+        branch_n_vdsat_v=branch_values["MN1"]["vdsat_v"],
+        branch_p_gm_s=branch_values["MN0"]["gm_s"],
+        branch_n_gm_s=branch_values["MN1"]["gm_s"],
+        branch_p_gds_s=branch_values["MN0"]["gds_s"],
+        branch_n_gds_s=branch_values["MN1"]["gds_s"],
+        load_resistance_ohm=parameters["load_resistance_ohm"],
+    )
+    metrics["tail_source_setpoint_error_percent"] = tail_source_error_percent
+    kcl_metrics = (
+        "tail_current_mismatch_percent",
+        "supply_current_mismatch_percent",
+        "max_load_current_mismatch_percent",
+    )
+    for metric in kcl_metrics:
+        if metrics[metric] > 1.0:
+            raise RuntimeError(
+                f"differential-pair DC KCL mismatch in {metric}: "
+                f"{metrics[metric]:.6g}%"
+            )
+    return metrics, {
+        "node_values_v": node_values,
+        "device_values": branch_values,
+        "source_values_a": source_values,
+        "operating_regions": {
+            "MN0": (
+                "saturation"
+                if abs(branch_values["MN0"]["ids_a"]) > 0.0
+                and metrics["branch_p_saturation_margin_v"] >= 0.0
+                else "non_saturation"
+            ),
+            "MN1": (
+                "saturation"
+                if abs(branch_values["MN1"]["ids_a"]) > 0.0
+                and metrics["branch_n_saturation_margin_v"] >= 0.0
+                else "non_saturation"
+            ),
+        },
+        "region_rule": "saturation when |VDS| >= |VDSAT| and |IDS| > 0",
+        "node_device_consistency": "matched",
+        "tail_source_consistency": "matched",
+        "kcl_consistency": "matched",
     }
 
 
@@ -7976,6 +8666,36 @@ dcOp dc write="spectre.dc" maxiters=150 maxsteps=10000 annotate=status
 dcOpInfo info what=oppoint where=rawfile
 {analysis_statement}save {saved_nodes} VDD_SRC:p VIN_SRC:p
 save MN0:ids MN0:vgs MN0:vds MN0:vdsat MN0:gm MN0:gds
+saveOptions options save=allpub
+'''
+
+
+def _differential_pair_testbench_deck(
+    profile: dict[str, Any],
+    parameters: dict[str, float],
+    remote_netlist_path: str,
+) -> str:
+    if '"' in remote_netlist_path:
+        raise ValueError("netlist path contains an unsupported quote")
+    model_configuration, _ = _common_source_model_configuration(profile, None)
+    return f'''simulator lang=spectre
+{model_configuration}
+include "{remote_netlist_path}"
+
+parameters vdd={parameters["vdd_v"]:.12g} vcm={parameters["common_mode_v"]:.12g} itail={parameters["tail_current_ua"]:.12g}u
+
+VDD_SRC (VDD 0) vsource dc=vdd
+VSS_SRC (VSS 0) vsource dc=0
+VINP_SRC (INP 0) vsource dc=vcm
+VINN_SRC (INN 0) vsource dc=vcm
+ITAIL_SRC (TAIL 0) isource dc=itail
+
+simulatorOptions options psfversion="1.4.0" reltol=1e-4 vabstol=1e-6 iabstol=1e-12
+dcOp dc write="spectre.dc" maxiters=150 maxsteps=10000 annotate=status
+dcOpInfo info what=oppoint where=rawfile
+save INP INN OUTP OUTN TAIL VDD VSS VDD_SRC:p ITAIL_SRC:p
+save MN0:ids MN0:vgs MN0:vds MN0:vdsat MN0:gm MN0:gds
+save MN1:ids MN1:vgs MN1:vds MN1:vdsat MN1:gm MN1:gds
 saveOptions options save=allpub
 '''
 
@@ -8723,6 +9443,164 @@ def simulate_common_source(
         }
 
 
+def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
+    from virtuoso_bridge.spectre.runner import SpectreSimulator
+
+    analysis = str(payload.get("analysis", "dc"))
+    if analysis != "dc":
+        raise RuntimeError("differential-pair live adapter currently supports only dc")
+    profile = payload["profile"]
+    timeout = int(payload.get("timeout_seconds", 600))
+    client = _client()
+    library, cell = _target(payload)
+    schematic = _read_schematic(client, library, cell)
+    topology_variant = _assert_differential_pair(schematic, profile)
+    oa_parameters = _differential_pair_semantic_parameters_from_schematic(schematic)
+    oa_geometry = _differential_pair_device_geometry_from_schematic(schematic)
+    requested_oa_parameters = {
+        name: float(payload.get("parameters", {})[name])
+        for name in ("input_width_um", "length_um", "load_resistance_ohm")
+        if name in payload.get("parameters", {})
+    }
+    _assert_parameter_consistency(
+        requested_oa_parameters,
+        oa_parameters,
+        expected_label="requested candidate",
+        actual_label="OA readback",
+    )
+    parameters = _resolved_differential_pair_parameters(payload, oa_parameters)
+
+    with tempfile.TemporaryDirectory(prefix="vda_differential_pair_") as temp_dir:
+        work_dir = Path(temp_dir)
+        netlist_evidence = _generate_oa_netlist(
+            client, payload, work_dir, timeout=timeout
+        )
+        netlist_parameters = netlist_evidence["parsed"]["semantic_parameters"]
+        netlist_geometry = netlist_evidence["parsed"]["device_geometry"]
+        try:
+            if netlist_evidence["parsed"]["topology_variant"] != topology_variant:
+                raise RuntimeError(
+                    "OA schematic and si netlist topology variants do not match"
+                )
+            _assert_parameter_consistency(
+                oa_parameters,
+                netlist_parameters,
+                expected_label="OA readback",
+                actual_label="si netlist",
+            )
+            _assert_parameter_consistency(
+                oa_geometry,
+                netlist_geometry,
+                expected_label="OA device geometry",
+                actual_label="si netlist geometry",
+            )
+        except RuntimeError as consistency_error:
+            raise RuntimeError(
+                f"{consistency_error}; si netlist retained at "
+                f"{netlist_evidence['remote_netlist_path']} "
+                f"(sha256={netlist_evidence['netlist_sha256']})"
+            ) from consistency_error
+
+        wrapper = work_dir / "differential_pair_from_oa.scs"
+        deck = _differential_pair_testbench_deck(
+            profile, parameters, netlist_evidence["remote_netlist_path"]
+        )
+        wrapper.write_text(deck, encoding="utf-8")
+        remote_wrapper = (
+            f"{netlist_evidence['remote_run_dir']}/input_from_oa.scs"
+        )
+        _upload_file(client, wrapper, remote_wrapper, timeout=min(timeout, 60))
+        simulator = SpectreSimulator.from_env(
+            timeout=timeout,
+            work_dir=work_dir,
+            output_format="psfascii",
+            keep_remote_files=False,
+            ssh_runner=getattr(client, "ssh_runner", None),
+        )
+        ssh_runner = getattr(simulator, "_ssh_runner", None)
+        if ssh_runner is not None:
+            ssh_runner._persistent_shell_enabled = False
+        result = simulator.run_simulation(wrapper, {})
+        if not result.ok:
+            detail = result.errors[0] if result.errors else result.status.value
+            raise RuntimeError(f"Spectre simulation failed: {detail}")
+        dc_data, dc_psf_evidence = _common_source_dc_data_from_result(result)
+        metrics, operating_point = _differential_pair_metrics_from_result(
+            dc_data, parameters
+        )
+        operating_point["raw_files"] = dc_psf_evidence
+        metric_sources = {name: "eda_result" for name in metrics}
+        metric_sources["both_saturation_region"] = "software_inference"
+        testbench_values = {
+            "analysis": "dc",
+            "tail_current_ua": parameters["tail_current_ua"],
+            "common_mode_v": parameters["common_mode_v"],
+            "vdd_v": parameters["vdd_v"],
+        }
+        testbench_value_sources = {
+            "analysis": str(payload.get("analysis_source", "software_inference")),
+            **{
+                name: (
+                    "user_input"
+                    if name in payload.get("parameters", {})
+                    else "software_inference"
+                )
+                for name in ("tail_current_ua", "common_mode_v", "vdd_v")
+            },
+        }
+        return {
+            "parameters": parameters,
+            "metrics": metrics,
+            "metric_sources": metric_sources,
+            "analysis_complete": True,
+            "analysis_issues": [],
+            "analysis_warnings": [],
+            "scalar_count": len(dc_data),
+            "tool_version": result.tool_version,
+            "warnings": result.warnings[:20],
+            "evidence": {
+                "schematic_readback": {
+                    "source": "bridge_readback",
+                    "target": payload["target"],
+                    "semantic_parameters": oa_parameters,
+                    "device_geometry": oa_geometry,
+                    "topology_variant": topology_variant,
+                },
+                "netlist": {
+                    "source": "eda_result",
+                    "generator": "Cadence si -batch",
+                    "remote_path": netlist_evidence["remote_netlist_path"],
+                    "sha256": netlist_evidence["netlist_sha256"],
+                    "semantic_parameters": netlist_parameters,
+                    "device_geometry": netlist_geometry,
+                    "topology_variant": netlist_evidence["parsed"][
+                        "topology_variant"
+                    ],
+                    "parameter_consistency": "matched",
+                    "instances": netlist_evidence["parsed"]["instances"],
+                    "si_log_tail": netlist_evidence["si_log_tail"],
+                },
+                "testbench": {
+                    "source": "software_inference",
+                    "remote_path": remote_wrapper,
+                    "sha256": hashlib.sha256(deck.encode("utf-8")).hexdigest(),
+                    "values": testbench_values,
+                    "value_sources": testbench_value_sources,
+                    "tail_source_location": "external_wrapper_only",
+                    "model_resolution_source": "pdk_profile",
+                    "model_configuration": _common_source_model_manifest(
+                        profile, None
+                    ),
+                },
+                "operating_point": {
+                    "source": "eda_result",
+                    **operating_point,
+                    "operating_region_source": "software_inference",
+                },
+            },
+        }
+
+
 _ACTIONS = {
     "probe": probe,
     "prepare_maestro": prepare_maestro,
@@ -8748,6 +9626,10 @@ _ACTIONS = {
     ),
     "apply_common_source_parameters": apply_common_source_parameters,
     "simulate_common_source": simulate_common_source,
+    "create_differential_pair": create_differential_pair,
+    "inspect_differential_pair": inspect_differential_pair,
+    "apply_differential_pair_parameters": apply_differential_pair_parameters,
+    "simulate_differential_pair": simulate_differential_pair,
 }
 
 

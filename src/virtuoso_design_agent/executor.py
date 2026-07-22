@@ -46,6 +46,11 @@ _OA_SEMANTIC_PARAMETERS = {
         "length_um",
         "load_resistance_ohm",
     ),
+    CircuitKind.DIFFERENTIAL_PAIR: (
+        "input_width_um",
+        "length_um",
+        "load_resistance_ohm",
+    ),
 }
 
 _COMMON_SOURCE_OPTIONAL_OA_PARAMETERS = ("source_resistance_ohm",)

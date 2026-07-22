@@ -12,6 +12,7 @@ from virtuoso_design_agent.metrics import (
     extract_common_source_linearity_point_metrics,
     extract_common_source_noise_metrics,
     extract_dc_supply_metrics,
+    extract_differential_pair_dc_metrics,
     extract_inverter_metrics,
     extract_supply_metrics,
 )
@@ -251,6 +252,68 @@ def test_common_source_dc_metrics_reject_nonfinite_or_zero_gds() -> None:
             gds_s=0.0,
             load_resistance_ohm=20_000.0,
         )
+
+
+def test_extract_balanced_differential_pair_dc_metrics() -> None:
+    metrics = extract_differential_pair_dc_metrics(
+        vdd_v=0.9,
+        common_mode_v=0.45,
+        outp_v=0.4,
+        outn_v=0.4,
+        tail_v=0.08,
+        branch_p_current_a=25e-6,
+        branch_n_current_a=25e-6,
+        tail_source_current_a=50e-6,
+        supply_source_current_a=-50e-6,
+        branch_p_vdsat_v=0.12,
+        branch_n_vdsat_v=0.12,
+        branch_p_gm_s=400e-6,
+        branch_n_gm_s=400e-6,
+        branch_p_gds_s=20e-6,
+        branch_n_gds_s=20e-6,
+        load_resistance_ohm=20_000.0,
+    )
+
+    assert metrics["branch_p_current_ua"] == pytest.approx(25.0)
+    assert metrics["branch_n_current_ua"] == pytest.approx(25.0)
+    assert metrics["tail_current_ua"] == pytest.approx(50.0)
+    assert metrics["branch_current_mismatch_percent"] == pytest.approx(0.0)
+    assert metrics["tail_current_mismatch_percent"] == pytest.approx(0.0)
+    assert metrics["supply_current_mismatch_percent"] == pytest.approx(0.0)
+    assert metrics["max_load_current_mismatch_percent"] == pytest.approx(0.0)
+    assert metrics["output_offset_abs_mv"] == pytest.approx(0.0)
+    assert metrics["minimum_saturation_margin_v"] == pytest.approx(0.2)
+    assert metrics["both_saturation_region"] == pytest.approx(1.0)
+    assert metrics["minimum_intrinsic_gain_v_per_v"] == pytest.approx(20.0)
+    assert metrics["dc_supply_power_uw"] == pytest.approx(45.0)
+
+
+def test_differential_pair_dc_metrics_expose_imbalance_without_hiding_kcl() -> None:
+    metrics = extract_differential_pair_dc_metrics(
+        vdd_v=0.9,
+        common_mode_v=0.45,
+        outp_v=0.42,
+        outn_v=0.38,
+        tail_v=0.08,
+        branch_p_current_a=24e-6,
+        branch_n_current_a=26e-6,
+        tail_source_current_a=50e-6,
+        supply_source_current_a=-50e-6,
+        branch_p_vdsat_v=0.12,
+        branch_n_vdsat_v=0.12,
+        branch_p_gm_s=390e-6,
+        branch_n_gm_s=410e-6,
+        branch_p_gds_s=20e-6,
+        branch_n_gds_s=21e-6,
+        load_resistance_ohm=20_000.0,
+    )
+
+    assert metrics["branch_current_mismatch_percent"] == pytest.approx(
+        2.0 / 26.0 * 100.0
+    )
+    assert metrics["output_offset_abs_mv"] == pytest.approx(40.0)
+    assert metrics["tail_current_mismatch_percent"] == pytest.approx(0.0)
+    assert metrics["max_load_current_mismatch_percent"] > 0.0
 
 
 def _first_order_ac_response(

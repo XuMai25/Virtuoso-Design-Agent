@@ -39,6 +39,8 @@ Gate 2A 又把相同执行语义扩展到电阻负载 NMOS 共源级：新 OA ce
 
 2026-07-23 又把 raw CDF 参数作为显式、有限的 `instance_parameter_space` 接入原有 candidate/checkpoint 状态机。它不自动枚举完整 CDF，也不改变独立 `parameters.apply`：搜索必须使用未过滤 OA readback 中实际存在的字段名和值字符串，并与固定实例字段及 semantic space 形成一个受预算截断的笛卡尔积。真实共源 Gate 搜索 `MN0.fingers=["1","2"]`；两个点均完成 callback 后定向回读、OA→`si` 网表与 DC/AC，网表总宽度从 1 µm 变为 2 µm，最终按 GBW 写回 fingers=2。第一次 candidate 1 的 `si -batch` transport reset 在恢复初始 RD/fingers 后从 index 1 重试，未跳点。状态升级为 **bounded explicit-instance-parameter tuning, same-source evidence, writeback, and recovery verified**；多字段 callback 耦合、alias 搜索、PVT-aware raw 写回和自动参数物理语义仍未闭合。
 
+同日进入 Gate 3 本地主线。固定电阻负载 NMOS 差分对已经接入正式 task/catalog/planner/demo/Bridge worker：可创建并精确回读 `MN0/MN1/RD0/RD1`，对称应用 W/L/R，解析 OA→`si` 的双管/双负载 geometry，并用外部理想尾电流与匹配共模输入 wrapper 提取双支路 DC OP、三类 KCL、双管饱和、输出偏移/摆幅、gm/gds 和实际 VDD 功耗。原有有限 candidate、OA 暂存/恢复、预算和最佳写回状态机直接复用；本地成功、全不可行和预算路径均通过。离线 3 点选择只标为 `software_inference`。当前状态是 **differential-pair nominal DC contract implemented locally**；新 TSMC N28 cell 的 create/readback、Spectre DC、只读 bias 搜索、OA 设计参数写回和 transport recovery 尚未 live，AC/CMRR/输入共模范围更未开始。
+
 Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发送前的 tunnel 自愈。新的 9 点压力任务仍在候选 8 发生一次本地端口拒绝，但 OA 恢复、候选前缀和续跑均正确，最终 9/9 与最佳写回成功；确定性同-client smoke 已覆盖 pre-send 自愈。payload 发送后的不确定错误仍不自动重放，这是保留的可靠性边界而不是跳过的工作。
 
 2026-07-21 又完成 `ade.prepare` + `ade.capture` 的本地纵向实现。`prepare` 只在已有 design schematic 且目标 Maestro view 不存在时新建持久化 Spectre test，保存后重新打开核对；已有 view 一律拒绝，不配置 analysis/stimulus/sweep/output。人工补全并运行后，`capture` 只读核对聚焦的 `library/cell/maestro`，默认要求 setup 已保存，捕获 setup、指定/最新 history、Spectre netlist、PSF/log 和 ADE 逐 sweep 点 output/spec，并生成逐文件及聚合 SHA-256。两者都不把准备或捕获成功算作 VDA 规格 closure。Bridge 当前公开的持久化后端是 Maestro；旧 ADE L state 非破坏迁移、VDA-managed variable sweep/corner 和 live nics4304 prepare/capture 仍待 Gate，因此此项当前只能称为 **local bidirectional human-operated ADE handoff contract implemented**。
@@ -105,11 +107,12 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> ADE 双路径（prepare + analysis/output add-only patch + background run/resume/raw-input consistency + global CL/VDD sweep + test-scope CL × VDD environmental-corner + delay/skew/energy constraint mapping 已 live；capture 与人工交接待验证）
   -> 共源 L/VDD + 多 analysis + 固定设计有限真实 PVT（已通过）
   -> 可选 PVT-aware 候选调优（testbench bias 已 live；OA 设计变量写回待可选 live）
-  -> 差分对
+  -> 差分对 nominal DC（本地实现已完成；live create/DC/搜索/恢复待 Gate）
+  -> 差分对 AC/CMRR/输入共模范围（nominal DC live 后）
   -> L5B 单模块闭环
   -> layout/DRC/LVS/PEX Gate
 ```
 
 每一级只有在真实 Bridge smoke、结构回读、指标解析和失败注入均通过后才升级状态。
 
-反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化可逆 transform/DC/AC、quality、W/RD/RS/L/VDD 写回、固定设计 TT/SS/FF、可选 PVT-aware bias 选优，以及预算/不可行/transport 恢复均已有 live 证据。跨 PVT 不再是进入下一拓扑的强制默认门；需要加严时，可继续做 OA 设计变量的 PVT 最佳写回、全不可行、预算耗尽和 completed-prefix checkpoint live。默认主线先把已支持的任意实例参数从单点 apply 扩展到受控有限搜索，再进入差分对或下一项受控拓扑。ADE 的真实 PVT/multi-test、已有 output 安全替换，以及人工打开/修改/重跑和旧 ADE L 迁移继续是独立 Gate；完成前仍不能升级为可重复的 L5B 单模块规格闭环。
+反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化可逆 transform/DC/AC、quality、W/RD/RS/L/VDD 写回、固定设计 TT/SS/FF、可选 PVT-aware bias 选优，以及预算/不可行/transport 恢复均已有 live 证据。跨 PVT 不再是进入下一拓扑的强制默认门；需要加严时，可继续做 OA 设计变量的 PVT 最佳写回、全不可行、预算耗尽和 completed-prefix checkpoint live。默认主线现在是差分对 nominal DC live：先建一个非覆盖新 cell，完成只读单点与 testbench bias 搜索，再做受控 W/RD 写回、不可行、预算和中断恢复；只有该 Gate 完整后才增加 differential AC/CMRR。ADE 的真实 PVT/multi-test、已有 output 安全替换，以及人工打开/修改/重跑和旧 ADE L 迁移继续是独立 Gate；完成前仍不能升级为可重复的 L5B 单模块规格闭环。

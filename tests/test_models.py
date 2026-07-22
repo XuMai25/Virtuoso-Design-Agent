@@ -240,12 +240,72 @@ def test_unknown_semantic_parameter_is_rejected_by_catalog() -> None:
         build_plan(task)
 
 
-def test_unimplemented_circuit_is_explicit() -> None:
+def test_differential_pair_dc_gate_accepts_only_declared_parameters() -> None:
     data = _base_task()
     data["circuit"] = "differential_pair"
-    data["parameter_space"] = {"input_width_um": [1.0]}
+    data["parameters"] = {
+        "length_um": 0.03,
+        "load_resistance_ohm": 20_000.0,
+        "tail_current_ua": 50.0,
+        "common_mode_v": 0.45,
+        "vdd_v": 0.9,
+    }
+    data["parameter_space"] = {"input_width_um": [0.5, 1.0]}
+    data["constraints"] = [
+        {"metric": "both_saturation_region", "relation": ">=", "value": 1.0}
+    ]
     task = TaskSpec.model_validate(data)
-    with pytest.raises(UnsupportedCapability, match="Gate 3"):
+
+    assert build_plan(task).circuit.value == "differential_pair"
+
+    invalid = task.model_copy(
+        update={"parameters": dict(task.parameters) | {"load_ff": 2.0}}
+    )
+    with pytest.raises(UnsupportedCapability, match="load_ff"):
+        build_plan(invalid)
+
+
+def test_differential_pair_rejects_unimplemented_ac_analysis() -> None:
+    data = _base_task()
+    data.update(
+        {
+            "circuit": "differential_pair",
+            "analysis": "ac",
+            "ac_sweep": {"start_hz": 1e3, "stop_hz": 1e9},
+            "parameters": {
+                "tail_current_ua": 50.0,
+                "common_mode_v": 0.45,
+                "vdd_v": 0.9,
+            },
+            "parameter_space": {"input_width_um": [0.5, 1.0]},
+        }
+    )
+
+    with pytest.raises(ValidationError, match="currently supports only dc"):
+        TaskSpec.model_validate(data)
+
+
+def test_differential_pair_create_rejects_testbench_only_parameters() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "diffpair-create-testbench-leak",
+            "operation": "schematic.create",
+            "circuit": "differential_pair",
+            "target": {"library": "vda_test", "cell": "vda_diffpair"},
+            "parameters": {
+                "input_width_um": 1.0,
+                "length_um": 0.03,
+                "load_resistance_ohm": 10_000.0,
+                "tail_current_ua": 50.0,
+            },
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+
+    with pytest.raises(UnsupportedCapability, match="tail_current_ua"):
         build_plan(task)
 
 

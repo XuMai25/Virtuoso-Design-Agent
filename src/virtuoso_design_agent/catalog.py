@@ -55,6 +55,9 @@ OA_SEMANTIC_PARAMETER_NAMES: dict[CircuitKind, frozenset[str]] = {
             "source_resistance_ohm",
         }
     ),
+    CircuitKind.DIFFERENTIAL_PAIR: frozenset(
+        {"input_width_um", "length_um", "load_resistance_ohm"}
+    ),
 }
 
 CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
@@ -151,12 +154,31 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     ),
     CircuitKind.DIFFERENTIAL_PAIR: CircuitCapability(
         circuit=CircuitKind.DIFFERENTIAL_PAIR,
-        stage="Gate 3",
-        executable=False,
-        operations=(),
-        parameters=("input_width_um", "length_um", "tail_current_ua", "load_ff"),
-        explicit_instance_parameters=False,
-        evidence_gate="DC balance/common-mode range + differential AC + CMRR",
+        stage="Gate 3 nominal DC implemented; live validation pending",
+        executable=True,
+        operations=(
+            Operation.SCHEMATIC_CREATE,
+            Operation.SCHEMATIC_INSPECT,
+            Operation.PARAMETERS_APPLY,
+            Operation.SIMULATION_RUN,
+            Operation.DESIGN_TUNE,
+            Operation.DESIGN_CLOSE_LOOP,
+        ),
+        parameters=(
+            "input_width_um",
+            "length_um",
+            "load_resistance_ohm",
+            "tail_current_ua",
+            "common_mode_v",
+            "vdd_v",
+        ),
+        explicit_instance_parameters=True,
+        evidence_gate=(
+            "exact MN0/MN1/RD0/RD1 OA topology + symmetric W/L/R readback + "
+            "si netlist consistency + Spectre DC branch balance/tail-current/KCL/"
+            "dual-saturation metrics; local implementation only, live TSMC N28 "
+            "create/DC/search and differential AC/CMRR remain pending"
+        ),
     ),
 }
 
@@ -221,6 +243,18 @@ def validate_task_capability(task: TaskSpec) -> None:
         and task.operation in {Operation.SCHEMATIC_CREATE, Operation.PARAMETERS_APPLY}
     ):
         testbench_only = sorted(supplied & {"bias_v", "vdd_v", "load_ff"})
+        if testbench_only:
+            raise UnsupportedCapability(
+                f"{task.operation.value} cannot persist testbench-only parameters: "
+                + ", ".join(testbench_only)
+            )
+    if (
+        task.circuit is CircuitKind.DIFFERENTIAL_PAIR
+        and task.operation in {Operation.SCHEMATIC_CREATE, Operation.PARAMETERS_APPLY}
+    ):
+        testbench_only = sorted(
+            supplied & {"tail_current_ua", "common_mode_v", "vdd_v"}
+        )
         if testbench_only:
             raise UnsupportedCapability(
                 f"{task.operation.value} cannot persist testbench-only parameters: "

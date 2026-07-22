@@ -1518,6 +1518,23 @@ class TaskSpec(StrictModel):
                         "common_source supports dc, ac, transient, noise, or quality "
                         "analysis"
                     )
+            elif self.circuit is CircuitKind.DIFFERENTIAL_PAIR:
+                if resolved_analysis is not AnalysisKind.DC:
+                    raise ValueError(
+                        "differential_pair currently supports only dc analysis"
+                    )
+                if any(
+                    setting is not None
+                    for setting in (
+                        self.ac_sweep,
+                        self.linearity_sweep,
+                        self.noise_sweep,
+                    )
+                ):
+                    raise ValueError(
+                        "differential_pair DC does not accept AC, linearity, or "
+                        "noise sweep settings"
+                    )
             elif analysis_settings:
                 raise ValueError(
                     "analysis settings are not implemented for this circuit"

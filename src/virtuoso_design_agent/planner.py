@@ -31,6 +31,7 @@ def _step(
 
 def _steps_for(task: TaskSpec) -> list[PlanStep]:
     common_source = task.circuit is CircuitKind.COMMON_SOURCE
+    differential_pair = task.circuit is CircuitKind.DIFFERENTIAL_PAIR
     analysis = task.resolved_analysis()
     common_source_ac = common_source and analysis is AnalysisKind.AC
     common_source_linearity = (
@@ -40,7 +41,13 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
     common_source_quality = common_source and analysis is AnalysisKind.QUALITY
     candidate_oa_write = task_requests_oa_parameter_write(task)
     explicit_instance_search = bool(task.instance_parameter_space)
-    template_name = "共源放大器" if common_source else "反相器"
+    template_name = (
+        "共源放大器"
+        if common_source
+        else "NMOS 差分对"
+        if differential_pair
+        else "反相器"
+    )
     simulation_description = (
         "从同一次 OA/si 参数与拓扑核对生成的网表，分别运行 Spectre 复数 AC、"
         "相干 transient 线性度和 noise；三项均完整才接受候选"
@@ -57,6 +64,11 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             "小信号 noise sweep"
         )
         if common_source_noise
+        else (
+            "用 OA 导出网表和外部共模/尾电流 testbench 运行 Spectre DC，"
+            "核对双支路 operating point"
+        )
+        if differential_pair
         else "用 OA 导出网表和受控 testbench 运行 Spectre DC operating point"
         if common_source
         else "用 OA 导出网表和受控 testbench 运行 Spectre transient"
@@ -71,6 +83,8 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         if common_source_linearity
         else "在 max_iterations 内运行 OA 同源 DC + noise 候选"
         if common_source_noise
+        else "在 max_iterations 内运行 OA 同源双支路 DC operating-point 候选"
+        if differential_pair
         else "在 max_iterations 内运行 OA 同源 DC operating-point 候选"
         if common_source
         else "在 max_iterations 内运行 OA 同源网表候选"
@@ -92,6 +106,11 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             "工作区逐条判断规格"
         )
         if common_source_noise
+        else (
+            "联合判断双支路电流平衡、尾电流/供电/负载 KCL、两管饱和区、"
+            "输出失调、摆幅余量和真实 DC 功耗"
+        )
+        if differential_pair
         else "从波形指标逐条判断规格"
     )
     if task.operating_conditions:

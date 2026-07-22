@@ -211,12 +211,22 @@ AC 核心结果只有在 DC 工作点为饱和、低频参考足够平坦且扫�
 
 同日的 raw CDF Gate 在全新 `vda_cs_topology_patch_001` nominal cell 上固定 Wfg=1 µm、L=0.03 µm、RD=10 kΩ、bias=0.35 V、VDD=0.9 V、CL=2 fF，只搜索 `MN0.fingers=["1","2"]`。两个点的 OA 定向回读、`si` 网表 `nf` 与总宽度分别为 1/1 µm 和 2/2 µm，网表 SHA 不同，均得到完整 DC+复数 AC。GBW 从 39.582 GHz 增至 58.375 GHz，两个点都通过本任务的饱和/KCL/gain/BW 约束，最终写回 fingers=2 并独立回读。首个点第一次在 `si -batch` 遇到 `WinError 10054`，未产生候选；VDA 恢复 RD=20 kΩ/fingers=1，随后从 checkpoint index 1 重试并保留失败 action。这个 Gate 证明明确点名的实际 CDF 字段可以进入同源有限搜索，不证明 PDK 的 233 个 MOS 字段都可持久化、物理独立或适合联合优化。
 
+## 差分对 Gate 3 nominal DC 路径
+
+Gate 3 沿用现有 task、adapter、`si`、Spectre 和 checkpoint 机制。首个固定 DUT 是电阻负载 NMOS 差分对：`MN0(OUTP,INP,TAIL,VSS)`、`MN1(OUTN,INN,TAIL,VSS)`、`RD0(VDD,OUTP)`、`RD1(VDD,OUTN)`。OA 中显式保留 `TAIL` pin，不放测试用尾电流源；两个匹配共模输入源、VDD/VSS 和理想尾电流源都由本次 simulation wrapper 提供。这样同一 DUT 可以后续由人工 ADE 或另一个明确 testbench 驱动，不把自动化激励固化为设计拓扑。
+
+canonical OA 参数只有 `input_width_um`、`length_um` 和 `load_resistance_ohm`，且 semantic 写入必须同时更新两只 NMOS 或两只负载；`tail_current_ua`、`common_mode_v` 和 `vdd_v` 是 testbench 参数，`schematic.create`/`parameters.apply` 拒绝把它们伪装成 OA 属性。显式 `instance_parameter_updates`/`instance_parameter_space` 仍可点名单个实例的实际 CDF 字段，但固定差分对 adapter 会在随后 topology/semantic/geometry 回读中拒绝破坏当前匹配模板的结果。该限制不收窄 `existing_schematic` 的 Bridge 参数透传能力。
+
+同源链要求 OA 与 `si` 同时精确匹配四个 instance、端口和 master，并分别比较 MN0/MN1 的单指宽、`fingers/nf`、`m/multi`、总宽和 L，以及 RD0/RD1 的 R。wrapper 保存七个节点、VDD/TAIL source current 和两只 NMOS 的 `ids/vgs/vds/vdsat/gm/gds`。结果解析先核对输入/电源设定值和每只器件的节点 VGS/VDS，再独立检查支路和、尾源、电源源以及两只负载电流；任一 KCL 残差超过 1% 都停止，不把它当作不满足规格的普通候选。连续 OP/KCL/功耗值来自 `eda_result`，OA 回读来自 `bridge_readback`，双管饱和分类和一致性判断是 `software_inference`。
+
+2026-07-23 已完成该路径的本地 worker、parser、adapter、planner、demo、可行/不可行/预算测试和 3 点离线闭环；离线选择 `input_width_um=2 µm` 只属于 `software_inference`。尚未连接 nics4304 创建 cell 或运行真实 Spectre，因此当前状态只能称为 **differential-pair nominal DC contract implemented locally**。live create/readback、只读 DC、testbench-only bias 搜索、设计参数写回、失败恢复，以及后续 differential AC/CMRR/输入共模范围均是独立 Gate。
+
 ## 证据链
 
 每次运行至少保存任务和计划 token、adapter 与证据来源、动作状态、候选参数、仿真指标、逐条规格判定、最终选择、OA 回读摘要，以及错误和未验证边界。显式实例写入还保存请求、写入前目标字段、立即确认和独立 inspect 的完整参数表。ADE `prepare` 保存 design/test/simulator 请求、持久化 view/test 回读、未覆盖既有 view 以及没有设置 analysis/sweep 的范围；`capture` 保存焦点目标、是否已保存、setup/simulation 聚合指纹、逐文件 manifest、history 选择来源以及可用时的逐点 output/spec；变量/setup patch 保存声明目标、全部旧值、即时值、独立重开值、targeted 前后指纹及未覆盖范围，并明确记录没有运行仿真；严格 sweep run 还保存 setup 前后 scope 指纹、每个 point 的 Detail 参数/非空 output、逐 test input/result hash、OA/input comparison hash 和逐点绑定指纹。存在显式 legacy output evaluation-error 契约时，还保存任务期望、RDB 实际错误单元格、completion-log 数量、逐项匹配和零未解释错误；启用 result mapping 时再保存 output expression 前后状态/指纹、显式 scale、映射后的候选、逐条 constraint 与 selection。调优 checkpoint 保留历史失败 actions，但恢复后只有完成的候选证据参与选择；最终 run 可以在完整证据和最终回读成立时成功，同时仍显式留下已恢复的 transport 事件。自动 netlisting 还保存远端网表/wrapper 路径、SHA-256、解析后的实例参数和一致性结论。
 
 有限 PVT 还保存每个原始 condition 的完整 `CandidateEvaluation`、同一 OA/netlist identity、每个 analysis 的 testbench/model manifest、独立 noise PSF，以及跨条件 `all_conditions_required`/worst-case 聚合。缺一个条件、条件顺序或值与任务不一致、任一 analysis 不完整、netlist 漂移或 model corner 未映射都直接失败，不会降级为 nominal 结果。
 
-timing、过冲/欠冲、`supply_energy_per_cycle_fj`、`average_supply_power_uw`、共源 DC/供电连续指标，以及从 AC、相干 transient 或 noise PSF 提取的连续量标为 `eda_result`；OA 结构和参数标为 `bridge_readback`；任务显式给出的 VDD、负载、偏置、analysis 或 sweep 字段标为 `user_input`；默认 analysis/sweep 字段、`gate_area_proxy_um2=(Wn+Wp)L`、饱和区分类、交点/压缩点规则和指标完整性判断是 `software_inference`。供电能量或功耗保留积分窗口和源电流方向，不能称为纯动态开关能量；AC、linearity 和 noise 指标也必须保存提取公式、范围和 unresolved 诊断，不能只保存一个无来源标量。后续 Maestro、Calibre 和 PEX 沿用同一证据模型。
+timing、过冲/欠冲、`supply_energy_per_cycle_fj`、`average_supply_power_uw`、共源与差分对的 DC/供电/KCL 连续指标，以及从 AC、相干 transient 或 noise PSF 提取的连续量标为 `eda_result`；OA 结构和参数标为 `bridge_readback`；任务显式给出的 VDD、负载、偏置、尾电流、analysis 或 sweep 字段标为 `user_input`；默认 analysis/sweep 字段、`gate_area_proxy_um2=(Wn+Wp)L`、饱和区分类、交点/压缩点规则和指标完整性判断是 `software_inference`。供电能量或功耗保留积分窗口和源电流方向，不能称为纯动态开关能量；AC、linearity 和 noise 指标也必须保存提取公式、范围和 unresolved 诊断，不能只保存一个无来源标量。后续 Maestro、Calibre 和 PEX 沿用同一证据模型。
 
 PVT 中的角名、温度和逐角 VDD 是 `user_input`；profile include 映射来自 `pdk_profile`，映射选择及 manifest 组合标为 `software_inference`；每角 Spectre 标量/波形指标仍是 `eda_result`；跨角保守 constraint/objective 值全部标为 `software_inference`。因此聚合最坏值不能被误读为某个单独 Spectre analysis 直接输出的标量。

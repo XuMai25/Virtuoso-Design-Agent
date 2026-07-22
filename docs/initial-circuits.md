@@ -43,7 +43,19 @@ Gate 2 已分别覆盖 bias/load、W/RD/RS 和 L/VDD 网格，能对固定 OA �
 
 ## Gate 3：差分对
 
-至少覆盖输入共模范围、尾电流、支路平衡、差模增益、带宽、CMRR 和受控 transient。nominal 稳定后再加入有限 PVT，不在第一步盲目扩展组合。
+状态：2026-07-23 已完成固定电阻负载 NMOS 差分对的 **nominal DC 本地实现**，尚未执行新的远端 OA 写入或真实 Spectre smoke。不能把离线 demo 数值称为 EDA 结果，也不能把本状态升级为 Gate 3 live 通过。
+
+- OA DUT 固定为 `MN0/MN1/RD0/RD1`；连接为 `MN0(OUTP,INP,TAIL,VSS)`、`MN1(OUTN,INN,TAIL,VSS)`、`RD0(VDD,OUTP)`、`RD1(VDD,OUTN)`，顶层 pins 为 `INP/INN/OUTP/OUTN/TAIL/VDD/VSS`。
+- 尾电流源和匹配共模输入源属于外部 testbench，不写进 DUT OA。这样 VDA 自动 wrapper 与后续人工 ADE 都能使用同一 cellview。
+- OA semantic 参数为两管共同 `input_width_um/length_um` 和两负载共同 `load_resistance_ohm`；testbench 参数为 `tail_current_ua/common_mode_v/vdd_v`。创建或参数应用会拒绝把 testbench 参数持久化。
+- `si` parser 要求两管、两负载的 topology/master 完全匹配，并核对两管单指宽、指数量、multiplicity、总宽、L 和两只 R 的对称性；OA 与网表任一差异停止。
+- nominal DC 指标包括两支路 Id、支路失配、尾源/电源/两负载 KCL、VGS/VDS/VDSAT、双管饱和余量、输出偏移/共模、上下摆幅余量、gm/gds、最小 intrinsic gain 和真实 VDD 功耗。三类 KCL 任一超过 1% 是证据错误，不是普通不可行候选。
+- `schematic.create`、`schematic.inspect`、`parameters.apply`、`simulation.run`、`design.tune` 和 `design.close_loop` 已接入；原始 CDF 参数仍可显式 apply/有限 search，但若最终破坏固定匹配模板，对称回读会拒绝继续。
+- 本地 3 点 demo 在明确标记 `software_inference` 的分析模型下选择 `input_width_um=2 µm`；可行、全不可行恢复和预算截断均有单元测试。它只证明编排与保护语义。
+
+下一 live Gate 使用新 cell `vb_pdk_smoke/vda_diffpair_gate3_001/schematic`，顺序为非覆盖创建与独立回读、单点只读 DC、只改尾电流/共模且不写 OA 的有限搜索，再做 W/RD 的逐候选写回、全不可行、预算和 transport checkpoint。完成这些证据前不进入 differential AC。
+
+后续才扩展输入共模范围、差模增益、带宽、CMRR 和受控 transient；nominal 稳定后再把有限 PVT 作为可选加严项，不在第一步盲目扩展组合。
 
 ## 升级原则
 

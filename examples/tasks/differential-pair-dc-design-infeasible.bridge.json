@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-dc-design-infeasible-bridge",
+  "operation": "design.tune",
+  "circuit": "differential_pair",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_diffpair_gate3_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis": "dc",
+  "parameters": {
+    "length_um": 0.03,
+    "load_resistance_ohm": 10000.0,
+    "tail_current_ua": 50.0,
+    "common_mode_v": 0.45,
+    "vdd_v": 0.9
+  },
+  "parameter_space": {"input_width_um": [0.5, 1.0, 2.0]},
+  "constraints": [
+    {"metric": "both_saturation_region", "relation": ">=", "value": 1.0},
+    {"metric": "tail_voltage_v", "relation": ">=", "value": 0.0},
+    {"metric": "minimum_branch_gm_us", "relation": ">=", "value": 1000000000.0},
+    {"metric": "tail_current_mismatch_percent", "relation": "<=", "value": 1.0},
+    {"metric": "supply_current_mismatch_percent", "relation": "<=", "value": 1.0},
+    {"metric": "max_load_current_mismatch_percent", "relation": "<=", "value": 1.0}
+  ],
+  "objective": {"metric": "minimum_branch_gm_us", "goal": "maximize"},
+  "create_if_missing": false,
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 3, "timeout_seconds": 600}
+}

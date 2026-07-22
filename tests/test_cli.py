@@ -24,11 +24,14 @@ def test_catalog_marks_gate2a_common_source_executable(capsys) -> None:
     )
     assert output.count(
         "explicit instance parameters: parameters.apply + bounded tuning + OA readback"
-    ) == 2
+    ) == 3
     assert output.count(
         "explicit instance parameters: parameters.apply + OA readback"
     ) == 1
-    assert "differential_pair: Gate 3 [planned]" in output
+    assert (
+        "differential_pair: Gate 3 nominal DC implemented; live validation pending "
+        "[executable]" in output
+    )
 
 
 def test_plan_prints_confirmation_token(capsys) -> None:

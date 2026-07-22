@@ -636,6 +636,38 @@ def test_common_source_simulation_plan_is_dc_op_and_read_only_to_oa() -> None:
     assert not plan.requires_remote_write
 
 
+def test_differential_pair_dc_plan_discloses_balance_tail_and_kcl_gate() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "differential-pair-dc",
+            "operation": "simulation.run",
+            "circuit": "differential_pair",
+            "target": {"library": "vda_test", "cell": "vda_diffpair"},
+            "analysis": "dc",
+            "parameters": {
+                "tail_current_ua": 50.0,
+                "common_mode_v": 0.45,
+                "vdd_v": 0.9,
+            },
+        }
+    )
+
+    plan = build_plan(task)
+    simulation = next(
+        step for step in plan.steps if step.capability == "simulation.run"
+    )
+    evaluation = next(
+        step for step in plan.steps if step.capability == "results.evaluate"
+    )
+
+    assert "外部共模/尾电流" in simulation.description
+    assert "双支路" in simulation.description
+    assert "KCL" in evaluation.description
+    assert "输出失调" in evaluation.description
+    assert plan.requires_remote_compute
+    assert not plan.requires_remote_write
+
+
 def test_common_source_ac_plan_discloses_dc_precheck_and_complex_metrics() -> None:
     task = TaskSpec.model_validate(
         {

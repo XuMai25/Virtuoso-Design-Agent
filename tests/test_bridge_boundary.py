@@ -36,6 +36,11 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     _complex_signal,
     _complete_si_env,
     _discard_failed_existing_schematic_edit,
+    _differential_pair_device_geometry_from_schematic,
+    _differential_pair_instance_parameter_updates,
+    _differential_pair_metrics_from_result,
+    _differential_pair_semantic_parameters_from_schematic,
+    _differential_pair_testbench_deck,
     _delete_source_degeneration_operation,
     _edit_existing_schematic,
     _generate_oa_netlist,
@@ -46,6 +51,7 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     _manifest_fingerprint,
     _merge_common_source_operating_condition_results,
     _parse_common_source_netlist,
+    _parse_differential_pair_netlist,
     _parse_inverter_netlist,
     _placement_snapshot_from_readback,
     _preflight_mn0_source_label,
@@ -61,8 +67,10 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     _simulate_common_source_operating_conditions,
     _validate_si_log,
     _verify_instance_parameter_values,
+    _assert_differential_pair,
     prepare_maestro,
     simulate_common_source,
+    simulate_differential_pair,
     simulate_inverter,
 )
 from virtuoso_design_agent.adapters.subprocess_bridge import (
@@ -6480,3 +6488,338 @@ def test_subprocess_boundary_converts_timeout(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("subprocess.run", fake_run)
     with pytest.raises(BridgeWorkerError, match="timed out"):
         SubprocessBridgeAdapter(bridge_python).probe("nics4304_tsmc28")
+
+
+def _differential_pair_readback() -> dict:
+    return {
+        "instances": [
+            {
+                "name": "MN0",
+                "lib": "tsmcN28",
+                "cell": "nch_lvt_mac",
+                "params": {"Wfg": "1u", "l": "30n", "fingers": "2", "m": "1"},
+                "terms": {"D": "OUTP", "G": "INP", "S": "TAIL", "B": "VSS"},
+            },
+            {
+                "name": "MN1",
+                "lib": "tsmcN28",
+                "cell": "nch_lvt_mac",
+                "params": {"Wfg": "1u", "l": "30n", "fingers": "2", "m": "1"},
+                "terms": {"D": "OUTN", "G": "INN", "S": "TAIL", "B": "VSS"},
+            },
+            {
+                "name": "RD0",
+                "lib": "analogLib",
+                "cell": "res",
+                "params": {"r": "10k"},
+                "terms": {"PLUS": "VDD", "MINUS": "OUTP"},
+            },
+            {
+                "name": "RD1",
+                "lib": "analogLib",
+                "cell": "res",
+                "params": {"r": "10k"},
+                "terms": {"PLUS": "VDD", "MINUS": "OUTN"},
+            },
+        ],
+        "nets": {name: {} for name in ("INP", "INN", "OUTP", "OUTN", "TAIL", "VDD", "VSS")},
+        "pins": {name: {} for name in ("INP", "INN", "OUTP", "OUTN", "TAIL", "VDD", "VSS")},
+    }
+
+
+def test_differential_pair_oa_contract_requires_exact_symmetric_topology() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump(mode="json")
+    readback = _differential_pair_readback()
+
+    assert _assert_differential_pair(readback, profile) == (
+        "resistive_load_nmos_differential_pair"
+    )
+    assert _differential_pair_semantic_parameters_from_schematic(readback) == {
+        "input_width_um": pytest.approx(1.0),
+        "length_um": pytest.approx(0.03),
+        "load_resistance_ohm": pytest.approx(10_000.0),
+    }
+    assert _differential_pair_device_geometry_from_schematic(readback) == {
+        "finger_width_um": pytest.approx(1.0),
+        "fingers": pytest.approx(2.0),
+        "multiplicity": pytest.approx(1.0),
+        "total_width_um": pytest.approx(2.0),
+    }
+
+    asymmetric = deepcopy(readback)
+    asymmetric["instances"][1]["params"]["Wfg"] = "1.1u"
+    with pytest.raises(RuntimeError, match="input widths differ"):
+        _differential_pair_semantic_parameters_from_schematic(asymmetric)
+
+    wrong_tail = deepcopy(readback)
+    wrong_tail["instances"][1]["terms"]["S"] = "VSS"
+    with pytest.raises(RuntimeError, match="MN1 terminals"):
+        _assert_differential_pair(wrong_tail, profile)
+
+
+def test_differential_pair_semantic_write_updates_both_branches() -> None:
+    assert _differential_pair_instance_parameter_updates(
+        {
+            "input_width_um": 1.2,
+            "length_um": 0.04,
+            "load_resistance_ohm": 12_000.0,
+        }
+    ) == {
+        "MN0": {"wf": "1.2u", "l": "0.04u"},
+        "MN1": {"wf": "1.2u", "l": "0.04u"},
+        "RD0": {"r": "12000"},
+        "RD1": {"r": "12000"},
+    }
+
+
+def test_differential_pair_si_netlist_proves_topology_and_matched_geometry() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump(mode="json")
+    text = """
+MN0 (OUTP INP TAIL VSS) nch_lvt_mac l=30n w=2u nf=2 multi=1
+MN1 (OUTN INN TAIL VSS) nch_lvt_mac l=30n w=2u nf=2 multi=1
+RD0 (VDD OUTP) resistor r=10k
+RD1 (VDD OUTN) resistor r=10k
+"""
+    parsed = _parse_differential_pair_netlist(text, profile)
+
+    assert parsed["topology_variant"] == "resistive_load_nmos_differential_pair"
+    assert parsed["semantic_parameters"] == {
+        "input_width_um": pytest.approx(1.0),
+        "length_um": pytest.approx(0.03),
+        "load_resistance_ohm": pytest.approx(10_000.0),
+    }
+    assert parsed["device_geometry"]["total_width_um"] == pytest.approx(2.0)
+
+    with pytest.raises(RuntimeError, match="load_resistance_ohm"):
+        _parse_differential_pair_netlist(text.replace("RD1 (VDD OUTN) resistor r=10k", "RD1 (VDD OUTN) resistor r=11k"), profile)
+
+
+def test_differential_pair_dc_deck_keeps_tail_source_outside_oa() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump(mode="json")
+    deck = _differential_pair_testbench_deck(
+        profile,
+        {
+            "input_width_um": 1.0,
+            "length_um": 0.03,
+            "load_resistance_ohm": 10_000.0,
+            "tail_current_ua": 50.0,
+            "common_mode_v": 0.45,
+            "vdd_v": 0.9,
+        },
+        "/data/xum/virtuoso_bridge_smoke/vda_diffpair/netlist",
+    )
+
+    assert 'include "/data/xum/virtuoso_bridge_smoke/vda_diffpair/netlist"' in deck
+    assert "ITAIL_SRC (TAIL 0) isource dc=itail" in deck
+    assert "VINP_SRC (INP 0) vsource dc=vcm" in deck
+    assert "VINN_SRC (INN 0) vsource dc=vcm" in deck
+    assert "dcOpInfo info what=oppoint where=rawfile" in deck
+    assert "save MN0:ids" in deck and "save MN1:ids" in deck
+    assert "MN0 (" not in deck and "RD0 (" not in deck
+
+
+def test_differential_pair_result_requires_independent_kcl_and_node_evidence() -> None:
+    data = {
+        "dc_INP": 0.45,
+        "dc_INN": 0.45,
+        "dc_OUTP": 0.65,
+        "dc_OUTN": 0.65,
+        "dc_TAIL": 0.10,
+        "dc_VDD": 0.9,
+        "dc_VSS": 0.0,
+        "dc_VDD_SRC:p": -50e-6,
+        "dc_ITAIL_SRC:p": 50e-6,
+        "dcOpInfo_MN0:ids": 25e-6,
+        "dcOpInfo_MN0:vgs": 0.35,
+        "dcOpInfo_MN0:vds": 0.55,
+        "dcOpInfo_MN0:vdsat": 0.10,
+        "dcOpInfo_MN0:gm": 200e-6,
+        "dcOpInfo_MN0:gds": 5e-6,
+        "dcOpInfo_MN1:ids": 25e-6,
+        "dcOpInfo_MN1:vgs": 0.35,
+        "dcOpInfo_MN1:vds": 0.55,
+        "dcOpInfo_MN1:vdsat": 0.10,
+        "dcOpInfo_MN1:gm": 200e-6,
+        "dcOpInfo_MN1:gds": 5e-6,
+    }
+    parameters = {
+        "input_width_um": 1.0,
+        "length_um": 0.03,
+        "load_resistance_ohm": 10_000.0,
+        "tail_current_ua": 50.0,
+        "common_mode_v": 0.45,
+        "vdd_v": 0.9,
+    }
+
+    metrics, evidence = _differential_pair_metrics_from_result(data, parameters)
+
+    assert metrics["branch_current_mismatch_percent"] == pytest.approx(0.0)
+    assert metrics["tail_current_mismatch_percent"] == pytest.approx(0.0)
+    assert metrics["supply_current_mismatch_percent"] == pytest.approx(0.0)
+    assert metrics["max_load_current_mismatch_percent"] == pytest.approx(0.0)
+    assert metrics["both_saturation_region"] == 1.0
+    assert metrics["output_offset_abs_mv"] == pytest.approx(0.0)
+    assert evidence["node_device_consistency"] == "matched"
+    assert evidence["kcl_consistency"] == "matched"
+
+    broken_supply = dict(data, **{"dc_VDD_SRC:p": -40e-6})
+    with pytest.raises(RuntimeError, match="supply_current_mismatch_percent"):
+        _differential_pair_metrics_from_result(broken_supply, parameters)
+
+    one_branch_off = dict(data)
+    one_branch_off.update(
+        {
+            "dc_OUTP": 0.9,
+            "dc_OUTN": 0.4,
+            "dcOpInfo_MN0:ids": 0.0,
+            "dcOpInfo_MN0:vds": 0.8,
+            "dcOpInfo_MN0:gm": 0.0,
+            "dcOpInfo_MN1:ids": 50e-6,
+            "dcOpInfo_MN1:vds": 0.3,
+        }
+    )
+    off_metrics, off_evidence = _differential_pair_metrics_from_result(
+        one_branch_off, parameters
+    )
+    assert off_metrics["both_saturation_region"] == 0.0
+    assert off_metrics["branch_current_mismatch_percent"] == pytest.approx(100.0)
+    assert off_evidence["operating_regions"]["MN0"] == "non_saturation"
+
+
+def test_differential_pair_subprocess_adapter_routes_real_operations(
+    tmp_path, monkeypatch
+) -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "diffpair-route",
+            "operation": "simulation.run",
+            "circuit": "differential_pair",
+            "target": {"library": "vda_test", "cell": "vda_diffpair"},
+            "analysis": "dc",
+            "parameters": {
+                "tail_current_ua": 50.0,
+                "common_mode_v": 0.45,
+                "vdd_v": 0.9,
+            },
+        }
+    )
+    adapter = SubprocessBridgeAdapter(tmp_path / "bridge-python.exe")
+    observed = {}
+
+    def fake_request(action, payload, *, timeout):
+        observed.update(action=action, payload=payload, timeout=timeout)
+        return {"metrics": {"both_saturation_region": 1.0}}
+
+    monkeypatch.setattr(adapter, "_request", fake_request)
+    result = adapter.simulate(task, task.parameters)
+
+    assert observed["action"] == "simulate_differential_pair"
+    assert observed["payload"]["circuit"] == "differential_pair"
+    assert observed["payload"]["analysis"] == "dc"
+    assert result.evidence_source is EvidenceSource.EDA_RESULT
+
+
+def test_differential_pair_live_worker_returns_bound_oa_netlist_and_dc_evidence(
+    monkeypatch,
+) -> None:
+    runner_module = ModuleType("virtuoso_bridge.spectre.runner")
+    dc_data = {
+        "dc_INP": 0.45,
+        "dc_INN": 0.45,
+        "dc_OUTP": 0.65,
+        "dc_OUTN": 0.65,
+        "dc_TAIL": 0.10,
+        "dc_VDD": 0.9,
+        "dc_VSS": 0.0,
+        "dc_VDD_SRC:p": -50e-6,
+        "dc_ITAIL_SRC:p": 50e-6,
+        "dcOpInfo_MN0:ids": 25e-6,
+        "dcOpInfo_MN0:vgs": 0.35,
+        "dcOpInfo_MN0:vds": 0.55,
+        "dcOpInfo_MN0:vdsat": 0.10,
+        "dcOpInfo_MN0:gm": 200e-6,
+        "dcOpInfo_MN0:gds": 5e-6,
+        "dcOpInfo_MN1:ids": 25e-6,
+        "dcOpInfo_MN1:vgs": 0.35,
+        "dcOpInfo_MN1:vds": 0.55,
+        "dcOpInfo_MN1:vdsat": 0.10,
+        "dcOpInfo_MN1:gm": 200e-6,
+        "dcOpInfo_MN1:gds": 5e-6,
+    }
+
+    class Simulator:
+        _ssh_runner = None
+
+        @classmethod
+        def from_env(cls, **kwargs):
+            return cls()
+
+        def run_simulation(self, netlist, parameters):
+            assert "ITAIL_SRC (TAIL 0)" in netlist.read_text(encoding="utf-8")
+            return SimpleNamespace(
+                ok=True,
+                data=dc_data,
+                metadata={},
+                tool_version="test-spectre-diffpair",
+                warnings=[],
+            )
+
+    runner_module.SpectreSimulator = Simulator
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.spectre.runner", runner_module)
+    monkeypatch.setattr(bridge_worker, "_client", lambda: SimpleNamespace(ssh_runner=None))
+    monkeypatch.setattr(bridge_worker, "_read_schematic", lambda *args: _differential_pair_readback())
+    monkeypatch.setattr(
+        bridge_worker,
+        "_common_source_dc_data_from_result",
+        lambda result: (result.data, {"selection": "test fixture"}),
+    )
+    monkeypatch.setattr(bridge_worker, "_upload_file", lambda *args, **kwargs: None)
+    parsed = _parse_differential_pair_netlist(
+        """
+MN0 (OUTP INP TAIL VSS) nch_lvt_mac l=30n w=2u nf=2 multi=1
+MN1 (OUTN INN TAIL VSS) nch_lvt_mac l=30n w=2u nf=2 multi=1
+RD0 (VDD OUTP) resistor r=10k
+RD1 (VDD OUTN) resistor r=10k
+""",
+        load_pdk_profile("nics4304_tsmc28").model_dump(mode="json"),
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_generate_oa_netlist",
+        lambda *args, **kwargs: {
+            "remote_run_dir": "/data/xum/virtuoso_bridge_smoke/vda_diffpair",
+            "remote_netlist_path": "/data/xum/virtuoso_bridge_smoke/vda_diffpair/netlist",
+            "netlist_sha256": "d" * 64,
+            "parsed": parsed,
+            "si_log_tail": ["End netlisting"],
+        },
+    )
+
+    result = simulate_differential_pair(
+        {
+            "task_id": "diffpair-worker",
+            "target": {"library": "vda_test", "cell": "vda_diffpair", "view": "schematic"},
+            "circuit": "differential_pair",
+            "profile": load_pdk_profile("nics4304_tsmc28").model_dump(mode="json"),
+            "analysis": "dc",
+            "analysis_source": "user_input",
+            "parameters": {
+                "input_width_um": 1.0,
+                "length_um": 0.03,
+                "load_resistance_ohm": 10_000.0,
+                "tail_current_ua": 50.0,
+                "common_mode_v": 0.45,
+                "vdd_v": 0.9,
+            },
+            "timeout_seconds": 60,
+        }
+    )
+
+    assert result["analysis_complete"] is True
+    assert result["metrics"]["both_saturation_region"] == 1.0
+    assert result["metric_sources"]["both_saturation_region"] == "software_inference"
+    assert result["evidence"]["schematic_readback"]["source"] == "bridge_readback"
+    assert result["evidence"]["netlist"]["source"] == "eda_result"
+    assert result["evidence"]["netlist"]["parameter_consistency"] == "matched"
+    assert result["evidence"]["testbench"]["tail_source_location"] == "external_wrapper_only"
+    assert result["evidence"]["operating_point"]["kcl_consistency"] == "matched"

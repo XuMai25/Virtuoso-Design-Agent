@@ -669,6 +669,152 @@ def extract_common_source_dc_metrics(
     }
 
 
+def extract_differential_pair_dc_metrics(
+    *,
+    vdd_v: float,
+    common_mode_v: float,
+    outp_v: float,
+    outn_v: float,
+    tail_v: float,
+    branch_p_current_a: float,
+    branch_n_current_a: float,
+    tail_source_current_a: float,
+    supply_source_current_a: float,
+    branch_p_vdsat_v: float,
+    branch_n_vdsat_v: float,
+    branch_p_gm_s: float,
+    branch_n_gm_s: float,
+    branch_p_gds_s: float,
+    branch_n_gds_s: float,
+    load_resistance_ohm: float,
+) -> dict[str, float]:
+    """Derive symmetric resistive-load NMOS differential-pair DC metrics.
+
+    Branch ``p`` is MN0/INP/OUTP and branch ``n`` is MN1/INN/OUTN.  Current
+    arguments retain their raw simulator polarity at the worker boundary; this
+    pure metric layer compares magnitudes and reports every independent KCL
+    residual instead of assuming an ideal split.
+    """
+    values = {
+        "vdd_v": vdd_v,
+        "common_mode_v": common_mode_v,
+        "outp_v": outp_v,
+        "outn_v": outn_v,
+        "tail_v": tail_v,
+        "branch_p_current_a": branch_p_current_a,
+        "branch_n_current_a": branch_n_current_a,
+        "tail_source_current_a": tail_source_current_a,
+        "supply_source_current_a": supply_source_current_a,
+        "branch_p_vdsat_v": branch_p_vdsat_v,
+        "branch_n_vdsat_v": branch_n_vdsat_v,
+        "branch_p_gm_s": branch_p_gm_s,
+        "branch_n_gm_s": branch_n_gm_s,
+        "branch_p_gds_s": branch_p_gds_s,
+        "branch_n_gds_s": branch_n_gds_s,
+        "load_resistance_ohm": load_resistance_ohm,
+    }
+    if any(not math.isfinite(float(value)) for value in values.values()):
+        raise MetricExtractionError(
+            "differential-pair operating-point values must be finite"
+        )
+    if vdd_v <= 0 or load_resistance_ohm <= 0:
+        raise MetricExtractionError(
+            "differential-pair supply and load resistance must be positive"
+        )
+    if branch_p_gds_s <= 0 or branch_n_gds_s <= 0:
+        raise MetricExtractionError(
+            "differential-pair branch gds values must be positive"
+        )
+
+    branch_p_current = abs(float(branch_p_current_a))
+    branch_n_current = abs(float(branch_n_current_a))
+    tail_current = abs(float(tail_source_current_a))
+    supply_current = abs(float(supply_source_current_a))
+    branch_sum = branch_p_current + branch_n_current
+    branch_scale = max(branch_p_current, branch_n_current, 1e-18)
+    total_scale = max(branch_sum, tail_current, supply_current, 1e-18)
+
+    branch_p_vdsat = abs(float(branch_p_vdsat_v))
+    branch_n_vdsat = abs(float(branch_n_vdsat_v))
+    branch_p_vds = float(outp_v) - float(tail_v)
+    branch_n_vds = float(outn_v) - float(tail_v)
+    branch_p_margin = branch_p_vds - branch_p_vdsat
+    branch_n_margin = branch_n_vds - branch_n_vdsat
+    upper_p_headroom = float(vdd_v) - float(outp_v)
+    upper_n_headroom = float(vdd_v) - float(outn_v)
+    resistor_p_current = abs(upper_p_headroom / float(load_resistance_ohm))
+    resistor_n_current = abs(upper_n_headroom / float(load_resistance_ohm))
+    load_p_scale = max(branch_p_current, resistor_p_current, 1e-18)
+    load_n_scale = max(branch_n_current, resistor_n_current, 1e-18)
+    load_p_mismatch = (
+        abs(branch_p_current - resistor_p_current) / load_p_scale * 100.0
+    )
+    load_n_mismatch = (
+        abs(branch_n_current - resistor_n_current) / load_n_scale * 100.0
+    )
+
+    gm_p = abs(float(branch_p_gm_s))
+    gm_n = abs(float(branch_n_gm_s))
+    gds_p = float(branch_p_gds_s)
+    gds_n = float(branch_n_gds_s)
+    output_offset = float(outp_v) - float(outn_v)
+    minimum_saturation_margin = min(branch_p_margin, branch_n_margin)
+    minimum_upper_headroom = min(upper_p_headroom, upper_n_headroom)
+    return {
+        "branch_p_current_ua": branch_p_current * 1e6,
+        "branch_n_current_ua": branch_n_current * 1e6,
+        "branch_current_sum_ua": branch_sum * 1e6,
+        "tail_current_ua": tail_current * 1e6,
+        "supply_current_ua": supply_current * 1e6,
+        "branch_current_mismatch_percent": (
+            abs(branch_p_current - branch_n_current) / branch_scale * 100.0
+        ),
+        "tail_current_mismatch_percent": (
+            abs(branch_sum - tail_current) / total_scale * 100.0
+        ),
+        "supply_current_mismatch_percent": (
+            abs(branch_sum - supply_current) / total_scale * 100.0
+        ),
+        "load_p_current_ua": resistor_p_current * 1e6,
+        "load_n_current_ua": resistor_n_current * 1e6,
+        "load_p_current_mismatch_percent": load_p_mismatch,
+        "load_n_current_mismatch_percent": load_n_mismatch,
+        "max_load_current_mismatch_percent": max(
+            load_p_mismatch, load_n_mismatch
+        ),
+        "common_mode_input_v": float(common_mode_v),
+        "tail_voltage_v": float(tail_v),
+        "branch_p_vgs_v": float(common_mode_v) - float(tail_v),
+        "branch_n_vgs_v": float(common_mode_v) - float(tail_v),
+        "branch_p_vds_v": branch_p_vds,
+        "branch_n_vds_v": branch_n_vds,
+        "branch_p_vdsat_v": branch_p_vdsat,
+        "branch_n_vdsat_v": branch_n_vdsat,
+        "branch_p_saturation_margin_v": branch_p_margin,
+        "branch_n_saturation_margin_v": branch_n_margin,
+        "minimum_saturation_margin_v": minimum_saturation_margin,
+        "both_saturation_region": float(
+            branch_p_current > 0.0
+            and branch_n_current > 0.0
+            and minimum_saturation_margin >= 0.0
+        ),
+        "output_common_mode_v": 0.5 * (float(outp_v) + float(outn_v)),
+        "output_differential_v": output_offset,
+        "output_offset_abs_mv": abs(output_offset) * 1e3,
+        "minimum_upper_output_headroom_v": minimum_upper_headroom,
+        "minimum_output_swing_margin_v": min(
+            minimum_upper_headroom, minimum_saturation_margin
+        ),
+        "branch_p_gm_us": gm_p * 1e6,
+        "branch_n_gm_us": gm_n * 1e6,
+        "minimum_branch_gm_us": min(gm_p, gm_n) * 1e6,
+        "branch_p_gds_us": gds_p * 1e6,
+        "branch_n_gds_us": gds_n * 1e6,
+        "minimum_intrinsic_gain_v_per_v": min(gm_p / gds_p, gm_n / gds_n),
+        "dc_supply_power_uw": supply_current * float(vdd_v) * 1e6,
+    }
+
+
 def _log_frequency_crossing(
     frequency_before_hz: float,
     frequency_after_hz: float,
