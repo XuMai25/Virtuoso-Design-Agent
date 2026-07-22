@@ -13,8 +13,18 @@ from pydantic import ValidationError
 from .adapters import DeterministicDemoAdapter, SubprocessBridgeAdapter
 from .adapters.subprocess_bridge import BridgeWorkerError
 from .catalog import UnsupportedCapability, catalog_as_dicts
-from .executor import TaskExecutor, save_run_record
-from .models import ExecutionPlan, RunStatus, TaskSpec
+from .executor import (
+    TaskExecutor,
+    load_execution_checkpoint,
+    save_run_record,
+)
+from .models import (
+    DEFAULT_PDK_PROFILE,
+    ExecutionPlan,
+    Operation,
+    RunStatus,
+    TaskSpec,
+)
 from .planner import build_plan
 from .safety import SafetyViolation
 
@@ -59,6 +69,8 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
         print(f"{item['circuit']}: {item['stage']} [{state}]")
         if item["operations"]:
             print(f"  operations: {', '.join(item['operations'])}")
+        if item["explicit_instance_parameters"]:
+            print("  explicit instance parameters: parameters.apply + OA readback")
         print(f"  evidence gate: {item['evidence_gate']}")
     return 0
 
@@ -79,9 +91,26 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if not args.token:
         raise SafetyViolation("--execute requires --token")
 
-    adapter = _adapter(args.adapter, args.bridge_python)
-    record = TaskExecutor(adapter).execute(task, plan, token=args.token)
     output = args.output or _run_path(args.artifact_root, task.id)
+    tuning = task.operation in {Operation.DESIGN_TUNE, Operation.DESIGN_CLOSE_LOOP}
+    if args.resume is not None and args.checkpoint is not None:
+        if args.resume.resolve() != args.checkpoint.resolve():
+            raise ValueError("--resume and --checkpoint must name the same file")
+    checkpoint_path = args.resume or args.checkpoint
+    if tuning and checkpoint_path is None:
+        checkpoint_path = output.with_name(f"{output.stem}.checkpoint.json")
+    resume_checkpoint = (
+        load_execution_checkpoint(args.resume) if args.resume is not None else None
+    )
+
+    adapter = _adapter(args.adapter, args.bridge_python)
+    record = TaskExecutor(adapter).execute(
+        task,
+        plan,
+        token=args.token,
+        checkpoint_path=checkpoint_path,
+        resume_checkpoint=resume_checkpoint,
+    )
     save_run_record(record, output)
     print(f"Status: {record.status.value}")
     print(f"Adapter: {record.adapter}")
@@ -97,6 +126,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         )
     for note in record.notes:
         print(f"Note: {note}")
+    if checkpoint_path is not None:
+        print(f"Checkpoint: {checkpoint_path.resolve()}")
     print(f"Run record: {output.resolve()}")
     return 1 if record.status is RunStatus.FAILED else 0
 
@@ -133,12 +164,22 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--bridge-python")
     run.add_argument("--artifact-root", type=Path, default=Path("artifacts/runs"))
     run.add_argument("--output", type=Path)
+    run.add_argument(
+        "--checkpoint",
+        type=Path,
+        help="checkpoint tuning progress after each confirmed candidate boundary",
+    )
+    run.add_argument(
+        "--resume",
+        type=Path,
+        help="resume an incomplete tuning checkpoint after probing and OA readback",
+    )
     run.set_defaults(handler=_cmd_run)
 
     doctor = subparsers.add_parser("doctor", help="probe an adapter without writing OA")
     doctor.add_argument("--adapter", choices=("demo", "bridge"), default="bridge")
     doctor.add_argument("--bridge-python")
-    doctor.add_argument("--pdk-profile", default="nics4304_tsmc28")
+    doctor.add_argument("--pdk-profile", default=DEFAULT_PDK_PROFILE)
     doctor.set_defaults(handler=_cmd_doctor)
     return parser
 

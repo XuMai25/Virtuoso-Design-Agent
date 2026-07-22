@@ -65,3 +65,120 @@ def test_remote_compute_needs_separate_permission() -> None:
     plan = build_plan(task)
     with pytest.raises(SafetyViolation, match="remote compute"):
         authorize_execution(task, plan, plan.confirmation_token)
+
+
+def test_background_ade_run_needs_compute_but_not_oa_write_permission() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "run-saved-maestro",
+            "operation": "ade.run",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "any_library",
+                "cell": "existing_tb",
+                "view": "maestro",
+            },
+            "ade_run": {},
+        }
+    )
+    plan = build_plan(task)
+    with pytest.raises(SafetyViolation, match="remote compute"):
+        authorize_execution(task, plan, plan.confirmation_token)
+
+    authorized = task.model_copy(
+        update={"safety": task.safety.model_copy(update={"allow_remote_compute": True})}
+    )
+    authorized_plan = build_plan(authorized)
+    authorize_execution(
+        authorized, authorized_plan, authorized_plan.confirmation_token
+    )
+
+
+def test_ade_variable_patch_requires_full_oa_write_scope() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "patch-maestro-variables",
+            "operation": "ade.variables.apply",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_variables": {
+                "expected_tests": ["VDA"],
+                "updates": [
+                    {"name": "bias_v", "expected_value": None, "value": "0.35"}
+                ],
+            },
+            "safety": {"allowed_library": "vda_test"},
+        }
+    )
+    plan = build_plan(task)
+    with pytest.raises(SafetyViolation, match="remote OA write"):
+        authorize_execution(task, plan, plan.confirmation_token)
+
+    authorized = task.model_copy(
+        update={"safety": task.safety.model_copy(update={"allow_remote_write": True})}
+    )
+    authorized_plan = build_plan(authorized)
+    authorize_execution(
+        authorized, authorized_plan, authorized_plan.confirmation_token
+    )
+
+
+def test_ade_setup_patch_requires_oa_write_but_not_compute_scope() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "patch-maestro-setup",
+            "operation": "ade.setup.apply",
+            "circuit": "existing_schematic",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_manual_tb",
+                "view": "maestro",
+            },
+            "ade_setup": {
+                "expected_tests": ["AC"],
+                "outputs": [
+                    {
+                        "test": "AC",
+                        "name": "Vout",
+                        "output_type": "net",
+                        "signal_name": "/OUT",
+                    }
+                ],
+            },
+            "safety": {"allowed_library": "vda_test"},
+        }
+    )
+    plan = build_plan(task)
+
+    assert plan.requires_remote_write
+    assert not plan.requires_remote_compute
+    with pytest.raises(SafetyViolation, match="remote OA write"):
+        authorize_execution(task, plan, plan.confirmation_token)
+
+    authorized = task.model_copy(
+        update={"safety": task.safety.model_copy(update={"allow_remote_write": True})}
+    )
+    authorized_plan = build_plan(authorized)
+    authorize_execution(
+        authorized, authorized_plan, authorized_plan.confirmation_token
+    )
+
+
+def test_in_place_transform_still_requires_explicit_remote_write_permission() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "transform",
+            "operation": "schematic.transform",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "parameters": {"source_resistance_ohm": 1_000.0},
+            "safety": {"allowed_library": "vda_test"},
+        }
+    )
+    plan = build_plan(task)
+    with pytest.raises(SafetyViolation, match="remote OA write"):
+        authorize_execution(task, plan, plan.confirmation_token)

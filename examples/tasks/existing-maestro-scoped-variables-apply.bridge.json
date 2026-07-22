@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "id": "existing-maestro-scoped-variables-apply",
+  "operation": "ade.variables.apply",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_manual_ade_handoff_001",
+    "view": "maestro"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "ade_variables": {
+    "backend": "maestro",
+    "expected_tests": [
+      "VDA"
+    ],
+    "expected_corners": [
+      "nominal"
+    ],
+    "updates": [
+      {
+        "name": "bias_v",
+        "scope": "test",
+        "scope_name": "VDA",
+        "expected_value": null,
+        "value": "0.30,0.35,0.40"
+      },
+      {
+        "name": "vdd",
+        "scope": "corner",
+        "scope_name": "nominal",
+        "expected_value": null,
+        "value": "0.90"
+      }
+    ]
+  },
+  "safety": {
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 600
+  }
+}

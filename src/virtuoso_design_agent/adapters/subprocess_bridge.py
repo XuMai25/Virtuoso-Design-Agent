@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Any
 
-from ..models import EvidenceSource, TaskSpec
+from ..models import AnalysisKind, CircuitKind, EvidenceSource, Operation, TaskSpec
 from ..profiles import load_pdk_profile
-from .base import AdapterResult
+from .base import AdapterInterrupted, AdapterResult
 
 
 DEFAULT_BRIDGE_PYTHON = Path(
@@ -18,18 +19,48 @@ DEFAULT_BRIDGE_PYTHON = Path(
 )
 _MARKER = "VDA_RESULT="
 
+_WORKER_ACTIONS = {
+    CircuitKind.EXISTING_SCHEMATIC: {
+        "inspect": "inspect_existing_schematic",
+        "apply": "apply_existing_schematic_parameters",
+    },
+    CircuitKind.INVERTER: {
+        "create": "create_inverter",
+        "inspect": "inspect_inverter",
+        "apply": "apply_inverter_parameters",
+        "simulate": "simulate_inverter",
+    },
+    CircuitKind.COMMON_SOURCE: {
+        "create": "create_common_source",
+        "inspect": "inspect_common_source",
+        "transform": "transform_common_source_source_degeneration",
+        "apply": "apply_common_source_parameters",
+        "simulate": "simulate_common_source",
+    },
+}
 
-class BridgeWorkerError(RuntimeError):
+
+class BridgeWorkerError(AdapterInterrupted):
     pass
 
 
 class SubprocessBridgeAdapter:
     name = "virtuoso-bridge-subprocess"
 
-    def __init__(self, bridge_python: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        bridge_python: str | Path | None = None,
+        *,
+        artifact_root: str | Path | None = None,
+    ) -> None:
         configured = bridge_python or os.getenv("VDA_BRIDGE_PYTHON")
         self.bridge_python = Path(configured) if configured else DEFAULT_BRIDGE_PYTHON
         self.source_root = Path(__file__).resolve().parents[2]
+        self.artifact_root = (
+            Path(artifact_root)
+            if artifact_root is not None
+            else Path(__file__).resolve().parents[3] / "artifacts" / "ade-captures"
+        )
 
     def _request(
         self, action: str, payload: dict[str, Any], *, timeout: int
@@ -73,13 +104,70 @@ class SubprocessBridgeAdapter:
 
     @staticmethod
     def _task_payload(task: TaskSpec) -> dict[str, Any]:
-        return {
+        payload = {
+            "task_id": task.id,
+            "operation": task.operation.value,
+            "circuit": task.circuit.value,
             "target": task.target.model_dump(mode="json"),
             "profile": load_pdk_profile(task.pdk_profile).model_dump(mode="json"),
             "parameters": task.parameters,
+            "instance_parameter_updates": [
+                update.model_dump(mode="json")
+                for update in task.instance_parameter_updates
+            ],
             "replace_existing": task.safety.replace_existing,
             "timeout_seconds": task.limits.timeout_seconds,
         }
+        if task.operation not in {
+            Operation.ADE_PREPARE,
+            Operation.ADE_CAPTURE,
+            Operation.ADE_RUN,
+            Operation.ADE_VARIABLES_APPLY,
+            Operation.ADE_SETUP_APPLY,
+        }:
+            payload["analysis"] = task.resolved_analysis().value
+            payload["analysis_source"] = (
+                "user_input" if task.analysis is not None else "software_inference"
+            )
+        if task.ac_sweep is not None:
+            payload["ac_sweep"] = task.ac_sweep.model_dump(mode="json")
+            payload["ac_sweep_user_fields"] = sorted(
+                task.ac_sweep.model_fields_set
+            )
+        if task.linearity_sweep is not None:
+            payload["linearity_sweep"] = task.linearity_sweep.model_dump(mode="json")
+            payload["linearity_sweep_user_fields"] = sorted(
+                task.linearity_sweep.model_fields_set
+            )
+        if task.noise_sweep is not None:
+            payload["noise_sweep"] = task.noise_sweep.model_dump(mode="json")
+            payload["noise_sweep_user_fields"] = sorted(
+                task.noise_sweep.model_fields_set
+            )
+        if task.ade_capture is not None:
+            payload["ade_capture"] = task.ade_capture.model_dump(mode="json")
+            payload["ade_capture_user_fields"] = sorted(
+                task.ade_capture.model_fields_set
+            )
+        if task.ade_prepare is not None:
+            payload["ade_prepare"] = task.ade_prepare.model_dump(mode="json")
+            payload["ade_prepare_user_fields"] = sorted(
+                task.ade_prepare.model_fields_set
+            )
+        if task.ade_run is not None:
+            payload["ade_run"] = task.ade_run.model_dump(mode="json")
+            payload["ade_run_user_fields"] = sorted(task.ade_run.model_fields_set)
+        if task.ade_variables is not None:
+            payload["ade_variables"] = task.ade_variables.model_dump(mode="json")
+            payload["ade_variables_user_fields"] = sorted(
+                task.ade_variables.model_fields_set
+            )
+        if task.ade_setup is not None:
+            payload["ade_setup"] = task.ade_setup.model_dump(mode="json")
+            payload["ade_setup_user_fields"] = sorted(
+                task.ade_setup.model_fields_set
+            )
+        return payload
 
     def probe(self, pdk_profile: str) -> AdapterResult:
         profile = load_pdk_profile(pdk_profile)
@@ -90,7 +178,7 @@ class SubprocessBridgeAdapter:
 
     def create_schematic(self, task: TaskSpec) -> AdapterResult:
         data = self._request(
-            "create_inverter",
+            _WORKER_ACTIONS[task.circuit]["create"],
             self._task_payload(task),
             timeout=task.limits.timeout_seconds,
         )
@@ -98,9 +186,30 @@ class SubprocessBridgeAdapter:
 
     def inspect_schematic(self, task: TaskSpec) -> AdapterResult:
         data = self._request(
-            "inspect_inverter",
+            _WORKER_ACTIONS[task.circuit]["inspect"],
             self._task_payload(task),
             timeout=min(task.limits.timeout_seconds, 120),
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
+
+    def transform_schematic(self, task: TaskSpec) -> AdapterResult:
+        data = self._request(
+            _WORKER_ACTIONS[task.circuit]["transform"],
+            self._task_payload(task),
+            timeout=min(task.limits.timeout_seconds, 180),
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
+
+    def verify_parameters(
+        self, task: TaskSpec, expected: dict[str, dict[str, str]]
+    ) -> AdapterResult:
+        payload = self._task_payload(task)
+        payload["verify_instance_parameters"] = True
+        payload["expected_instance_parameters"] = expected
+        data = self._request(
+            _WORKER_ACTIONS[task.circuit]["inspect"],
+            payload,
+            timeout=min(task.limits.timeout_seconds, 180),
         )
         return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
 
@@ -110,9 +219,53 @@ class SubprocessBridgeAdapter:
         payload = self._task_payload(task)
         payload["parameters"] = parameters
         data = self._request(
-            "apply_inverter_parameters",
+            _WORKER_ACTIONS[task.circuit]["apply"],
             payload,
             timeout=min(task.limits.timeout_seconds, 180),
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
+
+    def capture_ade(self, task: TaskSpec) -> AdapterResult:
+        payload = self._task_payload(task)
+        payload["capture_output_root"] = str(
+            self.artifact_root / task.id / uuid.uuid4().hex
+        )
+        data = self._request(
+            "capture_focused_maestro",
+            payload,
+            timeout=task.limits.timeout_seconds + 240,
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
+
+    def prepare_ade(self, task: TaskSpec) -> AdapterResult:
+        data = self._request(
+            "prepare_maestro",
+            self._task_payload(task),
+            timeout=min(task.limits.timeout_seconds, 180),
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
+
+    def run_ade(self, task: TaskSpec) -> AdapterResult:
+        data = self._request(
+            "run_background_maestro",
+            self._task_payload(task),
+            timeout=task.limits.timeout_seconds + 240,
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.EDA_RESULT)
+
+    def apply_ade_variables(self, task: TaskSpec) -> AdapterResult:
+        data = self._request(
+            "apply_maestro_variables",
+            self._task_payload(task),
+            timeout=min(task.limits.timeout_seconds, 180),
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
+
+    def apply_ade_setup(self, task: TaskSpec) -> AdapterResult:
+        data = self._request(
+            "apply_maestro_setup",
+            self._task_payload(task),
+            timeout=min(task.limits.timeout_seconds, 240),
         )
         return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
 
@@ -122,8 +275,12 @@ class SubprocessBridgeAdapter:
         payload = self._task_payload(task)
         payload["parameters"] = parameters
         data = self._request(
-            "simulate_inverter",
+            _WORKER_ACTIONS[task.circuit]["simulate"],
             payload,
-            timeout=task.limits.timeout_seconds + 60,
+            timeout=(
+                task.limits.timeout_seconds * 3 + 240
+                if task.resolved_analysis() is AnalysisKind.QUALITY
+                else task.limits.timeout_seconds + 240
+            ),
         )
         return AdapterResult(data=data, evidence_source=EvidenceSource.EDA_RESULT)

@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
-from ..models import EvidenceSource, TaskSpec
-from .base import AdapterResult
+from ..metrics import (
+    aggregate_common_source_linearity_metrics,
+    extract_common_source_ac_metrics,
+    extract_common_source_dc_metrics,
+    extract_common_source_noise_metrics,
+)
+from ..models import AnalysisKind, CircuitKind, EvidenceSource, TaskSpec
+from .base import AdapterResult, merge_analysis_bundle
 
 
 class DeterministicDemoAdapter:
@@ -27,15 +34,139 @@ class DeterministicDemoAdapter:
     def _key(self, task: TaskSpec) -> tuple[str, str]:
         return task.target.library, task.target.cell
 
+    @staticmethod
+    def _semantic_parameters(task: TaskSpec) -> dict[str, float]:
+        if task.circuit is CircuitKind.EXISTING_SCHEMATIC:
+            return {}
+        if task.circuit is CircuitKind.COMMON_SOURCE:
+            return {
+                "device_width_um": float(task.parameters.get("device_width_um", 1.0)),
+                "length_um": float(task.parameters.get("length_um", 0.03)),
+                "load_resistance_ohm": float(
+                    task.parameters.get("load_resistance_ohm", 20_000.0)
+                ),
+            }
+        return {
+            "nmos_width_um": float(task.parameters.get("nmos_width_um", 0.5)),
+            "pmos_width_um": float(task.parameters.get("pmos_width_um", 1.0)),
+            "length_um": float(task.parameters.get("length_um", 0.03)),
+        }
+
+    @staticmethod
+    def _instance_parameters(
+        task: TaskSpec, semantic_parameters: dict[str, float]
+    ) -> dict[str, dict[str, str]]:
+        if task.circuit is CircuitKind.EXISTING_SCHEMATIC:
+            return {
+                update.instance: {}
+                for update in task.instance_parameter_updates
+            }
+        if task.circuit is CircuitKind.COMMON_SOURCE:
+            parameters = {
+                "MN0": {
+                    "Wfg": f"{semantic_parameters['device_width_um']:.12g}u",
+                    "l": f"{semantic_parameters['length_um']:.12g}u",
+                    "fingers": "1",
+                    "m": "1",
+                },
+                "RD0": {
+                    "r": f"{semantic_parameters['load_resistance_ohm']:.12g}"
+                },
+            }
+            if "source_resistance_ohm" in semantic_parameters:
+                parameters["RS0"] = {
+                    "r": f"{semantic_parameters['source_resistance_ohm']:.12g}"
+                }
+            return parameters
+        return {
+            "MN0": {
+                "Wfg": f"{semantic_parameters['nmos_width_um']:.12g}u",
+                "l": f"{semantic_parameters['length_um']:.12g}u",
+                "fingers": "1",
+                "m": "1",
+            },
+            "MP0": {
+                "Wfg": f"{semantic_parameters['pmos_width_um']:.12g}u",
+                "l": f"{semantic_parameters['length_um']:.12g}u",
+                "fingers": "1",
+                "m": "1",
+            },
+        }
+
+    @staticmethod
+    def _applied_instance_parameters(
+        requested: dict[str, dict[str, str]],
+    ) -> dict[str, dict[str, str]]:
+        applied: dict[str, dict[str, str]] = {}
+        for instance, parameters in requested.items():
+            if "w" in parameters and "wf" in parameters:
+                raise ValueError("Specify w (total width) or wf (finger width), not both")
+            resolved = {
+                ({"wf": "Wfg", "nf": "fingers"}.get(name, name)): value
+                for name, value in parameters.items()
+            }
+            applied[instance] = resolved
+        return applied
+
     def create_schematic(self, task: TaskSpec) -> AdapterResult:
         key = self._key(task)
         existing = key in self._schematics
         if not existing:
+            semantic_parameters = self._semantic_parameters(task)
+            common_source = task.circuit is CircuitKind.COMMON_SOURCE
+            instance_parameters = self._instance_parameters(
+                task, semantic_parameters
+            )
             self._schematics[key] = {
-                "instances": ["MN0", "MP0"],
-                "nets": ["IN", "OUT", "VDD", "VSS"],
-                "pins": ["IN", "OUT", "VDD", "VSS"],
-                "parameters": dict(task.parameters),
+                "instances": (
+                    list(instance_parameters)
+                    if task.circuit is CircuitKind.EXISTING_SCHEMATIC
+                    else (
+                        [
+                            {
+                                "name": "MN0",
+                                "library": "demo_pdk",
+                                "cell": "nmos",
+                                "parameters": dict(instance_parameters["MN0"]),
+                                "terminals": {
+                                    "D": "OUT",
+                                    "G": "IN",
+                                    "S": "VSS",
+                                    "B": "VSS",
+                                },
+                                "xy": [0.0, 0.0],
+                                "orient": "R0",
+                            },
+                            {
+                                "name": "RD0",
+                                "library": "analogLib",
+                                "cell": "res",
+                                "parameters": dict(instance_parameters["RD0"]),
+                                "terminals": {"PLUS": "VDD", "MINUS": "OUT"},
+                                "xy": [0.0, 1.3],
+                                "orient": "R0",
+                            },
+                        ]
+                        if common_source
+                        else ["MN0", "MP0"]
+                    )
+                ),
+                "nets": (
+                    []
+                    if task.circuit is CircuitKind.EXISTING_SCHEMATIC
+                    else ["IN", "OUT", "VDD", "VSS"]
+                ),
+                "pins": (
+                    []
+                    if task.circuit is CircuitKind.EXISTING_SCHEMATIC
+                    else ["IN", "OUT", "VDD", "VSS"]
+                ),
+                "parameters": dict(task.parameters) | semantic_parameters,
+                "semantic_parameters": semantic_parameters,
+                "instance_parameters": instance_parameters,
+                "topology_variant": (
+                    "common_source" if common_source else task.circuit.value
+                ),
             }
         return AdapterResult(
             data={"created": not existing, "already_exists": existing},
@@ -46,8 +177,107 @@ class DeterministicDemoAdapter:
         schematic = self._schematics.get(self._key(task))
         if schematic is None:
             raise RuntimeError("demo schematic does not exist")
+        data = {
+            **schematic,
+            "instances": [
+                (
+                    {
+                        **item,
+                        "parameters": dict(
+                            schematic["instance_parameters"].get(
+                                str(item.get("name")), item.get("parameters", {})
+                            )
+                        ),
+                        "terminals": dict(item.get("terminals", {})),
+                    }
+                    if isinstance(item, dict)
+                    else item
+                )
+                for item in schematic["instances"]
+            ],
+            "nets": list(schematic["nets"]),
+            "pins": list(schematic["pins"]),
+            "parameters": dict(schematic["parameters"]),
+            "semantic_parameters": dict(schematic["semantic_parameters"]),
+            "instance_parameters": {
+                instance: dict(parameters)
+                for instance, parameters in schematic["instance_parameters"].items()
+            },
+        }
         return AdapterResult(
-            data=dict(schematic),
+            data=data,
+            evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+        )
+
+    def transform_schematic(self, task: TaskSpec) -> AdapterResult:
+        if task.circuit is not CircuitKind.COMMON_SOURCE:
+            raise RuntimeError("demo transform supports only common_source")
+        schematic = self._schematics.get(self._key(task))
+        if schematic is None:
+            raise RuntimeError("demo schematic does not exist")
+        resistance = float(task.parameters["source_resistance_ohm"])
+        variant = schematic.get("topology_variant")
+        changed = variant == "common_source"
+        if variant not in {"common_source", "source_degenerated_common_source"}:
+            raise RuntimeError(f"unsupported demo topology variant: {variant}")
+        if changed:
+            for item in schematic["instances"]:
+                if isinstance(item, dict) and item.get("name") == "MN0":
+                    item["terminals"]["S"] = "NSRC"
+            schematic["instances"].append(
+                {
+                    "name": "RS0",
+                    "library": "analogLib",
+                    "cell": "res",
+                    "parameters": {"r": f"{resistance:.12g}"},
+                    "terminals": {"PLUS": "NSRC", "MINUS": "VSS"},
+                    "xy": [0.0, -1.3],
+                    "orient": "R0",
+                }
+            )
+            schematic["nets"] = sorted(set(schematic["nets"]) | {"NSRC"})
+            schematic["topology_variant"] = "source_degenerated_common_source"
+        previous = schematic["semantic_parameters"].get("source_resistance_ohm")
+        schematic["semantic_parameters"]["source_resistance_ohm"] = resistance
+        schematic["parameters"]["source_resistance_ohm"] = resistance
+        schematic["instance_parameters"]["RS0"] = {
+            "r": f"{resistance:.12g}"
+        }
+        return AdapterResult(
+            data={
+                "transformed": changed,
+                "already_transformed": not changed,
+                "resistance_changed": previous is None or previous != resistance,
+                "topology_delta": {
+                    "renamed_terminal_net": "MN0.S: VSS -> NSRC" if changed else None,
+                    "added_instance": "RS0" if changed else None,
+                    "added_net": "NSRC" if changed else None,
+                },
+                "readback": self.inspect_schematic(task).data,
+            },
+            evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+        )
+
+    def verify_parameters(
+        self, task: TaskSpec, expected: dict[str, dict[str, str]]
+    ) -> AdapterResult:
+        result = self.inspect_schematic(task)
+        data = dict(result.data)
+        for instance, parameters in expected.items():
+            if instance not in data["instance_parameters"]:
+                raise RuntimeError(
+                    f"parameter confirmation is missing instance {instance}"
+                )
+            for name, value in parameters.items():
+                if data["instance_parameters"][instance].get(name) != value:
+                    raise RuntimeError(
+                        f"parameter confirmation mismatch for {instance}.{name}"
+                    )
+        data["confirmed_instance_parameters"] = expected
+        data["confirmed_evidence_source"] = "software_inference"
+        data["confirmation_method"] = "demo_exact_value_equality"
+        return AdapterResult(
+            data=data,
             evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
         )
 
@@ -57,35 +287,379 @@ class DeterministicDemoAdapter:
         schematic = self._schematics.get(self._key(task))
         if schematic is None:
             raise RuntimeError("demo schematic does not exist")
-        schematic["parameters"] = dict(parameters)
+        result_data: dict[str, Any] = {}
+        if parameters:
+            if (
+                task.circuit is CircuitKind.COMMON_SOURCE
+                and "source_resistance_ohm" in parameters
+                and "RS0" not in schematic["instance_parameters"]
+            ):
+                raise RuntimeError(
+                    "source_resistance_ohm requires source-degenerated topology"
+                )
+            schematic["parameters"].update(parameters)
+            semantic_names = (
+                (
+                    "device_width_um",
+                    "length_um",
+                    "load_resistance_ohm",
+                    "source_resistance_ohm",
+                )
+                if task.circuit is CircuitKind.COMMON_SOURCE
+                else (
+                    ()
+                    if task.circuit is CircuitKind.EXISTING_SCHEMATIC
+                    else ("nmos_width_um", "pmos_width_um", "length_um")
+                )
+            )
+            for name in semantic_names:
+                if name in parameters:
+                    schematic["semantic_parameters"][name] = float(parameters[name])
+            if task.circuit is CircuitKind.COMMON_SOURCE:
+                if "device_width_um" in parameters:
+                    schematic["instance_parameters"]["MN0"]["Wfg"] = (
+                        f"{float(parameters['device_width_um']):.12g}u"
+                    )
+                if "length_um" in parameters:
+                    schematic["instance_parameters"]["MN0"]["l"] = (
+                        f"{float(parameters['length_um']):.12g}u"
+                    )
+                if "load_resistance_ohm" in parameters:
+                    schematic["instance_parameters"]["RD0"]["r"] = (
+                        f"{float(parameters['load_resistance_ohm']):.12g}"
+                    )
+                if "source_resistance_ohm" in parameters:
+                    schematic["instance_parameters"]["RS0"]["r"] = (
+                        f"{float(parameters['source_resistance_ohm']):.12g}"
+                    )
+            result_data.update(
+                {
+                    "applied": dict(parameters),
+                    "semantic_parameters": dict(schematic["semantic_parameters"]),
+                }
+            )
+        if task.instance_parameter_updates:
+            requested = {
+                update.instance: dict(update.parameters)
+                for update in task.instance_parameter_updates
+            }
+            applied = self._applied_instance_parameters(requested)
+            missing = sorted(set(applied) - set(schematic["instance_parameters"]))
+            if missing:
+                raise RuntimeError(
+                    "explicit parameter write targets missing instances: "
+                    + ", ".join(missing)
+                )
+            before = {
+                instance: {
+                    name: schematic["instance_parameters"][instance].get(name)
+                    for name in parameters
+                }
+                for instance, parameters in applied.items()
+            }
+            for instance, parameters in applied.items():
+                schematic["instance_parameters"][instance].update(parameters)
+            confirmed = {
+                instance: {
+                    name: schematic["instance_parameters"][instance][name]
+                    for name in parameters
+                }
+                for instance, parameters in applied.items()
+            }
+            result_data.update(
+                {
+                    "requested_instance_parameters": requested,
+                    "requested_evidence_source": "user_input",
+                    "applied_instance_parameters": applied,
+                    "before_instance_parameters": before,
+                    "confirmed_instance_parameters": confirmed,
+                    "confirmed_evidence_source": "software_inference",
+                    "confirmation_method": "demo_exact_value_equality",
+                }
+            )
         return AdapterResult(
-            data={"applied": dict(parameters)},
+            data=result_data,
             evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+        )
+
+    def prepare_ade(self, task: TaskSpec) -> AdapterResult:
+        raise RuntimeError(
+            "ade.prepare requires the real Bridge; the demo adapter cannot create "
+            "or verify a persistent Maestro view"
+        )
+
+    def capture_ade(self, task: TaskSpec) -> AdapterResult:
+        raise RuntimeError(
+            "ade.capture requires the real Bridge; the demo adapter cannot "
+            "fabricate a human-operated ADE session or EDA results"
+        )
+
+    def run_ade(self, task: TaskSpec) -> AdapterResult:
+        raise RuntimeError(
+            "ade.run requires the real Bridge; the demo adapter cannot fabricate "
+            "a Maestro history or EDA results"
+        )
+
+    def apply_ade_variables(self, task: TaskSpec) -> AdapterResult:
+        raise RuntimeError(
+            "ade.variables.apply requires the real Bridge; the demo adapter cannot "
+            "write or verify a persistent Maestro setup"
+        )
+
+    def apply_ade_setup(self, task: TaskSpec) -> AdapterResult:
+        raise RuntimeError(
+            "ade.setup.apply requires the real Bridge; the demo adapter cannot "
+            "write or verify persistent Maestro analyses/outputs"
         )
 
     def simulate(
         self, task: TaskSpec, parameters: dict[str, float]
     ) -> AdapterResult:
-        wn = parameters.get("nmos_width_um", 0.5)
-        wp = parameters.get("pmos_width_um", 1.0)
-        load = parameters.get("load_ff", 2.0)
-        vdd = parameters.get("vdd_v", 0.9)
+        if task.resolved_analysis() is AnalysisKind.QUALITY:
+            results = {
+                analysis.value: self.simulate(
+                    task.model_copy(update={"analysis": analysis}), parameters
+                ).data
+                for analysis in task.resolved_analyses()
+            }
+            data = merge_analysis_bundle(results)
+            data["warning"] = "analytical demo only; not an EDA result"
+            return AdapterResult(
+                data=data,
+                evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+            )
+        schematic = self._schematics.get(self._key(task))
+        if schematic is None:
+            raise RuntimeError("demo schematic does not exist")
+        effective_parameters = dict(parameters)
+        effective_parameters.update(schematic["semantic_parameters"])
+        if task.circuit is CircuitKind.COMMON_SOURCE:
+            width = effective_parameters["device_width_um"]
+            length = effective_parameters["length_um"]
+            resistance = effective_parameters["load_resistance_ohm"]
+            bias = effective_parameters.get("bias_v", 0.45)
+            vdd = effective_parameters.get("vdd_v", 0.9)
+            overdrive = max(bias - 0.25, 0.0)
+            transconductance_factor = 100.0 * width * (0.03 / length) * 1e-6
+            source_resistance = effective_parameters.get(
+                "source_resistance_ohm", 0.0
+            )
+            drain_current_a = (
+                transconductance_factor
+                * overdrive
+                / (1.0 + transconductance_factor * source_resistance)
+            )
+            source_v = drain_current_a * source_resistance
+            vout = vdd - drain_current_a * resistance
+            effective_overdrive = max(overdrive - source_v, 0.0)
+            gm_s = 2.0 * drain_current_a / max(effective_overdrive, 0.01)
+            gds_s = max(gm_s / 20.0, 1e-9)
+            metrics = extract_common_source_dc_metrics(
+                vdd_v=vdd,
+                vin_v=bias,
+                vout_v=vout,
+                vss_v=source_v,
+                drain_current_a=drain_current_a,
+                vdsat_v=overdrive,
+                gm_s=gm_s,
+                gds_s=gds_s,
+                load_resistance_ohm=resistance,
+            )
+            metrics.update(
+                {
+                    "supply_current_ua": drain_current_a * 1e6,
+                    "dc_supply_power_uw": drain_current_a * vdd * 1e6,
+                }
+            )
+            if source_resistance > 0.0:
+                metrics.update(
+                    {
+                        "source_voltage_v": source_v,
+                        "source_degeneration_drop_v": source_v,
+                        "source_resistor_current_ua": (
+                            source_v / source_resistance * 1e6
+                        ),
+                        "source_current_mismatch_percent": 0.0,
+                    }
+                )
+            analysis_complete = True
+            analysis_issues: list[str] = []
+            analysis_warnings: list[str] = []
+            ac_diagnostics: dict[str, object] | None = None
+            linearity_diagnostics: dict[str, object] | None = None
+            noise_diagnostics: dict[str, object] | None = None
+            output_resistance = 1.0 / (1.0 / resistance + gds_s)
+            effective_gm = gm_s / (1.0 + gm_s * source_resistance)
+            low_frequency_gain = effective_gm * output_resistance
+            if task.resolved_analysis() is AnalysisKind.AC:
+                if task.ac_sweep is None:
+                    raise RuntimeError("demo AC analysis requires ac_sweep")
+                sweep = task.ac_sweep
+                decades = math.log10(sweep.stop_hz / sweep.start_hz)
+                steps = math.ceil(decades * sweep.points_per_decade)
+                frequency_hz = [
+                    sweep.start_hz * 10.0 ** (index / sweep.points_per_decade)
+                    for index in range(steps + 1)
+                    if sweep.start_hz
+                    * 10.0 ** (index / sweep.points_per_decade)
+                    <= sweep.stop_hz
+                ]
+                if not math.isclose(frequency_hz[-1], sweep.stop_hz, rel_tol=1e-12):
+                    frequency_hz.append(sweep.stop_hz)
+                capacitance_f = (
+                    2.0 + 0.2 * width + effective_parameters.get("load_ff", 0.0)
+                ) * 1e-15
+                pole_hz = 1.0 / (
+                    2.0 * math.pi * output_resistance * capacitance_f
+                )
+                transfer = [
+                    -low_frequency_gain / (1.0 + 1j * frequency / pole_hz)
+                    for frequency in frequency_hz
+                ]
+                ac_metrics, ac_diagnostics = extract_common_source_ac_metrics(
+                    frequency_hz,
+                    [1.0 + 0.0j] * len(frequency_hz),
+                    transfer,
+                    reference_points=sweep.reference_points,
+                    max_reference_variation_db=sweep.max_reference_variation_db,
+                )
+                metrics.update(ac_metrics)
+                analysis_issues.extend(
+                    str(value) for value in ac_diagnostics.get("issues", [])
+                )
+                analysis_warnings.extend(
+                    str(value) for value in ac_diagnostics.get("warnings", [])
+                )
+                if metrics["saturation_region"] != 1.0:
+                    analysis_issues.append(
+                        "AC design metrics require a saturated DC operating point"
+                    )
+                analysis_complete = (
+                    bool(ac_diagnostics.get("analysis_complete", False))
+                    and not analysis_issues
+                )
+            elif task.resolved_analysis() is AnalysisKind.TRANSIENT:
+                if task.linearity_sweep is None:
+                    raise RuntimeError(
+                        "demo transient analysis requires linearity_sweep"
+                    )
+                amplitudes = task.linearity_sweep.amplitudes_v
+                compression_scale_v = max(
+                    min(bias, vdd - bias, 0.2), amplitudes[0] * 2.0
+                )
+                point_metrics: list[dict[str, float]] = []
+                for amplitude in amplitudes:
+                    normalized = amplitude / compression_scale_v
+                    gain = low_frequency_gain / math.sqrt(1.0 + normalized**4)
+                    thd_percent = 2.0 * normalized**2
+                    power_uw = metrics["dc_supply_power_uw"] * (
+                        1.0 + 0.05 * normalized**2
+                    )
+                    point_metrics.append(
+                        {
+                            "large_signal_gain_v_per_v": gain,
+                            "output_fundamental_v_peak": amplitude * gain,
+                            "thd_percent": thd_percent,
+                            "average_supply_power_uw": power_uw,
+                            "output_peak_to_peak_v": 2.0 * amplitude * gain,
+                            "hd2_dbc": 20.0
+                            * math.log10(max(thd_percent / 100.0, 1e-15)),
+                            "hd3_dbc": 20.0
+                            * math.log10(max(thd_percent / 200.0, 1e-15)),
+                        }
+                    )
+                linearity_metrics, linearity_diagnostics = (
+                    aggregate_common_source_linearity_metrics(
+                        amplitudes,
+                        point_metrics,
+                        compression_db=task.linearity_sweep.compression_db,
+                    )
+                )
+                metrics.update(linearity_metrics)
+                analysis_warnings.extend(
+                    str(value)
+                    for value in linearity_diagnostics.get("warnings", [])
+                )
+                if metrics["saturation_region"] != 1.0:
+                    analysis_issues.append(
+                        "linearity metrics require a saturated DC operating point"
+                    )
+                analysis_complete = not analysis_issues
+            elif task.resolved_analysis() is AnalysisKind.NOISE:
+                if task.noise_sweep is None:
+                    raise RuntimeError("demo noise analysis requires noise_sweep")
+                sweep = task.noise_sweep
+                decades = math.log10(sweep.stop_hz / sweep.start_hz)
+                steps = math.ceil(decades * sweep.points_per_decade)
+                frequency_hz = [
+                    sweep.start_hz * 10.0 ** (index / sweep.points_per_decade)
+                    for index in range(steps + 1)
+                    if sweep.start_hz
+                    * 10.0 ** (index / sweep.points_per_decade)
+                    <= sweep.stop_hz
+                ]
+                if not math.isclose(frequency_hz[-1], sweep.stop_hz, rel_tol=1e-12):
+                    frequency_hz.append(sweep.stop_hz)
+                boltzmann = 1.380649e-23
+                input_density = math.sqrt(
+                    4.0 * boltzmann * 300.0 * (2.0 / 3.0) / max(gm_s, 1e-12)
+                )
+                noise_metrics, noise_diagnostics = extract_common_source_noise_metrics(
+                    frequency_hz,
+                    [input_density * low_frequency_gain] * len(frequency_hz),
+                    [input_density] * len(frequency_hz),
+                )
+                metrics.update(noise_metrics)
+                if metrics["saturation_region"] != 1.0:
+                    analysis_issues.append(
+                        "noise metrics require a saturated DC operating point"
+                    )
+                analysis_complete = not analysis_issues
+            return AdapterResult(
+                data={
+                    "parameters": effective_parameters,
+                    "metrics": metrics,
+                    "metric_sources": {
+                        name: EvidenceSource.SOFTWARE_INFERENCE.value
+                        for name in metrics
+                    },
+                    "analysis_complete": analysis_complete,
+                    "analysis_issues": analysis_issues,
+                    "analysis_warnings": analysis_warnings,
+                    "ac_diagnostics": ac_diagnostics,
+                    "linearity_diagnostics": linearity_diagnostics,
+                    "noise_diagnostics": noise_diagnostics,
+                    "warning": "analytical demo only; not an EDA result",
+                },
+                evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+            )
+        wn = effective_parameters["nmos_width_um"]
+        wp = effective_parameters["pmos_width_um"]
+        load = effective_parameters.get("load_ff", 2.0)
+        vdd = effective_parameters.get("vdd_v", 0.9)
         drive = max(wn + 0.55 * wp, 0.05)
         ratio_penalty = 5.0 * abs(wp / max(wn, 0.05) - 2.0)
         delay = 12.0 + 18.0 * load / drive + ratio_penalty
         rise = 8.0 + 12.0 * load / max(wp, 0.05)
         fall = 8.0 + 8.0 * load / max(wn, 0.05)
+        gate_area_proxy = (wn + wp) * effective_parameters["length_um"]
+        metrics = {
+            "delay_ps": delay,
+            "tphl_ps": delay + 0.25 * (fall - rise),
+            "tplh_ps": delay - 0.25 * (fall - rise),
+            "rise_ps": rise,
+            "fall_ps": fall,
+            "rise_fall_skew_ps": abs(rise - fall),
+            "voh_v": 0.995 * vdd,
+            "vol_v": 0.005 * vdd,
+            "gate_area_proxy_um2": gate_area_proxy,
+        }
         return AdapterResult(
             data={
-                "metrics": {
-                    "delay_ps": delay,
-                    "tphl_ps": delay + 0.25 * (fall - rise),
-                    "tplh_ps": delay - 0.25 * (fall - rise),
-                    "rise_ps": rise,
-                    "fall_ps": fall,
-                    "rise_fall_skew_ps": abs(rise - fall),
-                    "voh_v": 0.995 * vdd,
-                    "vol_v": 0.005 * vdd,
+                "parameters": effective_parameters,
+                "metrics": metrics,
+                "metric_sources": {
+                    name: EvidenceSource.SOFTWARE_INFERENCE.value for name in metrics
                 },
                 "warning": "analytical demo only; not an EDA result",
             },
