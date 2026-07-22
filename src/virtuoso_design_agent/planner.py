@@ -104,6 +104,16 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             "；每个条件独立保留 EDA 指标，全部满足约束才通过，objective 按"
             "跨条件最坏值判定"
         )
+        sweep_description += (
+            f"；每个候选复用一份已核对 OA/si 网表，跨 "
+            f"{len(task.operating_conditions)} 个显式 PVT 条件运行："
+            f"{condition_names}"
+        )
+    selection_description = "按规格违例与 objective 选择候选"
+    if task.operating_conditions:
+        selection_description += (
+            "；只有全部条件均通过的候选才可提交，objective 使用跨条件最坏值"
+        )
     probe = _step(
         "01-probe",
         "bridge.probe",
@@ -645,6 +655,8 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             if candidate_oa_write
             else "候选只改变显式 testbench 条件；每点复用同一 OA readback，不写 OA"
         )
+        if task.operating_conditions and candidate_oa_write:
+            stage_description += "；每个候选只暂存一次 OA，再跨条件复用"
         finalize_description = (
             "提交最佳可行参数，或恢复搜索前 OA 参数"
             if candidate_oa_write
@@ -669,7 +681,7 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             _step(
                 "06-select",
                 "results.select",
-                "按规格违例与 objective 选择候选",
+                selection_description,
                 SideEffect.READ_ONLY,
             ),
             _step(
@@ -701,6 +713,11 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 "逐候选暂存 OA 参数并回读；失败或无可行点时恢复初始参数"
                 if candidate_oa_write
                 else "候选只改变显式 testbench 条件；每点复用同一 OA readback，不写 OA"
+            )
+            + (
+                "；每个候选只暂存一次 OA，再跨条件复用"
+                if task.operating_conditions and candidate_oa_write
+                else ""
             ),
             SideEffect.REMOTE_WRITE if candidate_oa_write else SideEffect.READ_ONLY,
         ),
@@ -714,7 +731,7 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         _step(
             "06-select",
             "results.select",
-            "按规格违例与 objective 选择候选",
+            selection_description,
             SideEffect.READ_ONLY,
         ),
         _step(

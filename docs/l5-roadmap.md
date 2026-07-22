@@ -59,6 +59,8 @@ Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发�
 
 2026-07-22 又在 direct common-source 路径闭合下一自动化 Gate。`L=[0.03,0.04] µm × VDD=[0.8,0.9] V` 四点三分析搜索全部可行，GBW objective 写回并复核 `L=0.03 µm`，VDD 保持 testbench 条件。随后同一 OA/同一 `si` 网表在 TT/25℃/0.90V、SS/125℃/0.81V、FF/−40℃/0.99V 下运行九项 Spectre 分析；每个条件都保留原始指标，全部满足规格，objective 按跨条件最坏值聚合。状态升级为 **bounded common-source L/VDD quality tuning and fixed-design PVT verification verified**。当前缺口收敛为 PVT-aware 设计候选调优、ADE 真实 PVT/multi-test 映射和差分对，而不是 L/VDD 或固定设计 process/temperature 执行能力。
 
+2026-07-23 将 `operating_conditions` 作为显式可选项接入 `design.tune`/`design.close_loop`。不声明时仍按 nominal 单条件运行；声明后每个候选必须跨完整条件集，按最坏值选优。真实只读 Gate 对 `bias_v=[0.35,0.40] V` 跑完 18 项分析，`0.40 V` 因多角 THD、SS 摆幅和 FF 功耗失败，选择 `0.35 V`，OA 前后不变。状态升级为 **optional PVT-aware testbench tuning verified**。OA 设计变量的跨 PVT 最佳写回、全不可行、预算和 completed-prefix transport resume 已有本地测试，但 live 仍是可选加严 Gate，不作为所有调优的默认成本。
+
 需要用户操作 Virtuoso/ADE 的验证已按用户决定延期，并集中记录在 [`deferred-manual-gates.md`](deferred-manual-gates.md)：包括人工修改/保存/重跑后的双向交接、旧 ADE L state 备份后迁移与重开，以及相同 history/output 的人工数值交叉检查。这些项目不阻塞后台自动化实现，但在真实完成前仍保留为未验证边界；延期记录本身不构成远端授权。
 
 ## L5B：单模块设计代理（产品目标）
@@ -100,7 +102,7 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> 多 analysis 质量约束与受预算调优（W/RD/RS 写回、失败门与恢复已通过）
   -> ADE 双路径（prepare + analysis/output add-only patch + background run/resume/raw-input consistency + global CL/VDD sweep + test-scope CL × VDD environmental-corner + delay/skew/energy constraint mapping 已 live；capture 与人工交接待验证）
   -> 共源 L/VDD + 多 analysis + 固定设计有限真实 PVT（已通过）
-  -> PVT-aware 设计候选调优（下一自动化 Gate）
+  -> 可选 PVT-aware 候选调优（testbench bias 已 live；OA 设计变量写回待可选 live）
   -> 差分对
   -> L5B 单模块闭环
   -> layout/DRC/LVS/PEX Gate
@@ -108,4 +110,4 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
 
 每一级只有在真实 Bridge smoke、结构回读、指标解析和失败注入均通过后才升级状态。
 
-反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化原位 transform/DC tuning、AC/quality、W/RD/RS/L/VDD 写回、固定设计 TT/SS/FF，以及预算/不可行/transport 恢复均已有 live 证据。Gate 2A 现在可以让不同 objective 在同一候选证据上得到不同 OA 设计，并对一个固定设计做跨条件最坏值判定。下一自动化硬门是把相同 `operating_conditions` 证据门接入有限 `design.tune`：每个设计候选都必须跨全部 PVT 条件完成，随后验证最佳 OA 写回、全不可行、预算耗尽和 transport checkpoint。通过后再进入差分对。ADE 的真实 PVT/multi-test、已有 output 安全替换，以及人工打开/修改/重跑和旧 ADE L 迁移继续是独立 Gate；完成前仍不能升级为可重复的 L5B 单模块规格闭环。
+反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化原位 transform/DC tuning、AC/quality、W/RD/RS/L/VDD 写回、固定设计 TT/SS/FF、可选 PVT-aware bias 选优，以及预算/不可行/transport 恢复均已有 live 证据。跨 PVT 不再是进入下一拓扑的强制默认门；需要加严时，可继续做 OA 设计变量的 PVT 最佳写回、全不可行、预算耗尽和 completed-prefix checkpoint live。默认主线可进入差分对或下一项受控拓扑能力。ADE 的真实 PVT/multi-test、已有 output 安全替换，以及人工打开/修改/重跑和旧 ADE L 迁移继续是独立 Gate；完成前仍不能升级为可重复的 L5B 单模块规格闭环。

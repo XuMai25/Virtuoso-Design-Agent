@@ -1,6 +1,6 @@
 # 2026-07-22 共源 L/VDD 质量调优与真实 PVT Gate
 
-状态：**bounded common-source L/VDD quality tuning and fixed-design PVT verification verified; PVT-aware design tuning pending**。
+状态：**bounded common-source L/VDD quality tuning and fixed-design PVT verification verified**。本 Gate 当时尚未接入 PVT-aware 调优；2026-07-23 已补上显式可选的 testbench 候选路径，见[后续记录](2026-07-23-common-source-optional-pvt-tuning-live.md)。
 
 本 Gate 在既有源极退化共源级
 `vb_pdk_smoke/vda_cs_ac_tradeoff_001/schematic` 上完成两件事：
@@ -38,7 +38,7 @@ plan token = 410a6f092fc7361a
 
 ## 新增契约
 
-`operating_conditions` 当前是 common-source `simulation.run` 的有限验证
+本 Gate 首版的 `operating_conditions` 是 common-source `simulation.run` 的有限验证
 集合，每项要求唯一名称、profile 已映射的 `process_corner`、温度和可选
 VDD。worker 只做一次 OA readback 和一次 `si` netlist，再跨条件复用。
 
@@ -48,7 +48,7 @@ executor 保留每个条件的完整指标、来源、analysis completion 和逐
 - maximize objective 取各条件最小值，minimize objective 取最大值；
 - 原始连续指标保持 `eda_result`；
 - 跨条件 constraint/objective 聚合标为 `software_inference`；
-- 当前拒绝把该字段与 `design.tune`/`design.close_loop` 组合，避免把固定
+- 当时拒绝把该字段与 `design.tune`/`design.close_loop` 组合，避免把固定
   设计验证提前包装成鲁棒 PVT 优化。
 
 profile 对 TT/SS/FF 各显式映射四类 section：MOS/MOSCAP、
@@ -202,16 +202,17 @@ artifacts/runs/common-source-quality-pvt-verify/live-manifest-20260722.json
 
 1. 当前 PVT 只有三个明确组合，不代表 PDK 全部 signoff corners；没有
    Monte Carlo、local mismatch、aging、PEX 或 statistical yield。
-2. `operating_conditions` 目前只允许 fixed-design `simulation.run`，尚未让
-   每个 W/L/RD/RS/bias/load 候选跨全部条件评估。
-3. 本次三个条件全部可行，尚未 live 验证 PVT-aware 调优中的全不可行、预算
-   耗尽、最佳 OA 写回和中途 transport checkpoint。
+2. 本 Gate 当时只允许 fixed-design `simulation.run`；2026-07-23 已 live
+   验证可选的 bias 候选跨条件评估，但 OA 设计变量写回仍未 live。
+3. 本次三个条件全部可行；后续 bias Gate 已出现不可行候选并正确拒绝，
+   跨 PVT 的全不可行、预算耗尽、最佳 OA 写回和 completed-prefix transport
+   resume 仍只有本地编排测试。
 4. direct wrapper 的 PVT 不等于已保存 Maestro/ADE corner；人工打开、修改、
    重跑和旧 ADE L 迁移仍按延期记录处理。
 5. 结果只适用于当前 `nics4304_tsmc28` profile、model 文件版本、服务器和
    目标 cell；切换 TSMC/SMIC 工艺、节点、section 或服务器必须重新过 Gate。
 6. 尚未进入差分对、CMRR、多 test/multi-analysis ADE 或 L5B 单模块可重复闭环。
 
-下一自动化 Gate 是把同一有限 `operating_conditions` 契约接入
-`design.tune`：每个设计候选必须跨全部条件完成，然后再验证最佳 OA 写回、
-全不可行恢复、预算耗尽和 transport resume。通过后才进入差分对。
+后续已经把同一有限 `operating_conditions` 契约可选接入 `design.tune`，
+并完成不写 OA 的两点 bias live。OA 设计变量的跨 PVT 写回/恢复仍可按需
+加严，但不再作为默认 nominal 工作流进入差分对前的强制成本。

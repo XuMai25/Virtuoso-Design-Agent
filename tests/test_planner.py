@@ -58,6 +58,58 @@ def test_common_source_pvt_plan_discloses_finite_worst_case_gate() -> None:
     assert "最坏值" in evaluate.description
 
 
+def test_common_source_pvt_tuning_plan_is_explicit_and_optional() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "cs-pvt-tune-plan",
+            "operation": "design.tune",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "parameters": {"bias_v": 0.35},
+            "parameter_space": {"length_um": [0.03, 0.04]},
+            "operating_conditions": [
+                {
+                    "name": "tt_25c_0p90v",
+                    "process_corner": "tt",
+                    "temperature_c": 25.0,
+                    "vdd_v": 0.9,
+                },
+                {
+                    "name": "ss_125c_0p81v",
+                    "process_corner": "ss",
+                    "temperature_c": 125.0,
+                    "vdd_v": 0.81,
+                },
+            ],
+            "constraints": [
+                {"metric": "saturation_region", "relation": ">=", "value": 1.0}
+            ],
+            "objective": {
+                "metric": "gain_bandwidth_product_hz",
+                "goal": "maximize",
+            },
+            "safety": {
+                "allow_remote_compute": True,
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+
+    plan = build_plan(task)
+    stage = next(step for step in plan.steps if step.capability == "parameters.stage")
+    sweep = next(step for step in plan.steps if step.capability == "simulation.sweep")
+    select = next(step for step in plan.steps if step.capability == "results.select")
+
+    assert stage.side_effect is SideEffect.REMOTE_WRITE
+    assert "每个候选只暂存一次 OA" in stage.description
+    assert "每个候选" in sweep.description
+    assert "2 个显式 PVT 条件" in sweep.description
+    assert "tt_25c_0p90v" in sweep.description
+    assert "全部条件" in select.description
+    assert "最坏值" in select.description
+
+
 def test_create_plan_discloses_replace_existing() -> None:
     task = _task(
         "schematic.create",
@@ -555,12 +607,14 @@ def test_testbench_only_tuning_does_not_request_oa_write() -> None:
     finalize = next(
         step for step in plan.steps if step.capability == "parameters.finalize"
     )
+    sweep = next(step for step in plan.steps if step.capability == "simulation.sweep")
 
     assert plan.requires_remote_compute
     assert not plan.requires_remote_write
     assert stage.side_effect is SideEffect.READ_ONLY
     assert finalize.side_effect is SideEffect.READ_ONLY
     assert "不写 OA" in stage.description
+    assert "PVT" not in sweep.description
 
 
 def test_common_source_simulation_plan_is_dc_op_and_read_only_to_oa() -> None:

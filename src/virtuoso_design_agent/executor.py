@@ -234,8 +234,20 @@ class TaskExecutor:
             effective_vdd = (
                 expected_condition["vdd_v"]
                 if expected_condition["vdd_v"] is not None
-                else task.parameters["vdd_v"]
+                else parameters["vdd_v"]
             )
+            for name, value in parameters.items():
+                expected_value = effective_vdd if name == "vdd_v" else value
+                if not math.isclose(
+                    float(evaluated_parameters.get(name, float("nan"))),
+                    float(expected_value),
+                    rel_tol=1e-9,
+                    abs_tol=1e-12,
+                ):
+                    raise RuntimeError(
+                        f"operating condition {expected_condition['name']} did not "
+                        f"confirm candidate parameter {name}"
+                    )
             if not math.isclose(
                 float(evaluated_parameters.get("vdd_v", float("nan"))),
                 float(effective_vdd),
@@ -3138,6 +3150,11 @@ class TaskExecutor:
                     ]
                     if not feasible:
                         status = RunStatus.PARTIAL
+                        if task.operating_conditions:
+                            notes.append(
+                                "no candidate met the full specification across every "
+                                "declared operating condition"
+                            )
                         if candidate_oa_write:
                             apply_with_checkpoint(
                                 "parameters.restore", initial_parameters
@@ -3157,6 +3174,13 @@ class TaskExecutor:
                         selected = min(feasible, key=lambda item: self._rank(task, item))
                         selected_parameters = selected.parameters
                         selected_metrics = selected.metrics
+                        if task.operating_conditions:
+                            notes.append(
+                                "selected candidate satisfied the full specification in "
+                                "all declared operating conditions; aggregate metrics "
+                                "and objective use conservative worst-case software "
+                                "inference"
+                            )
                         if candidate_oa_write:
                             apply_with_checkpoint(
                                 "parameters.apply.best", selected.parameters

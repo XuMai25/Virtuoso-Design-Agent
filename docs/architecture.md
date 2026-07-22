@@ -60,7 +60,7 @@ VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PD
 
 `analysis` 与电路参数分离。反相器省略时解析为 `transient`，共源级省略时解析为 `dc`；共源 AC 必须显式声明 `analysis: "ac"` 以及 `ac_sweep.start_hz/stop_hz`。固定多 analysis 质量门使用 `analysis: "quality"`，并要求 `ac_sweep`、`linearity_sweep`、`noise_sweep` 同时存在。扫频点密度、低频参考点数、参考窗变化、线性度窗口和噪声频带都属于任务与 plan token。这样换 analysis 或改变指标定义不会复用旧 token，也不会把默认设置伪装成 `user_input`。
 
-`operating_conditions` 是独立于设计参数的有限验证集合。当前只允许 common-source `simulation.run`：每项显式声明唯一名称、PDK profile 已映射的 `process_corner`、温度和可选 VDD；同一任务最多五项。worker 只回读一次 OA、只生成并核对一次 `si` 网表，再为每个条件生成 AC/transient/noise wrapper。executor 保留每个条件的原始指标和判定，要求全部完整且全部满足约束；maximize objective 取各条件最小值，minimize objective 取最大值。跨条件聚合是 `software_inference`，不能覆盖各条件 `eda_result`。该字段暂不允许与 `design.tune`/`design.close_loop` 组合，直到候选级 PVT checkpoint、不可行恢复和最佳 OA 写回单独通过 Gate。
+`operating_conditions` 是独立于设计参数的显式可选有限验证集合。省略时 common-source `simulation.run`、`design.tune` 和 `design.close_loop` 保持原有单条件行为与旧 token；声明时每项给出唯一名称、PDK profile 已映射的 `process_corner`、温度和可选 VDD，同一任务最多五项。对调优任务，每个候选只暂存一次 OA 并生成、核对一份 `si` 网表，再为每个条件生成 AC/transient/noise wrapper；完整候选 bundle 才能写入 checkpoint。executor 保留逐条件原始指标和判定，要求全部完整且全部满足约束；maximize objective 取各条件最小值，minimize objective 取最大值。跨条件聚合是 `software_inference`，不能覆盖各条件 `eda_result`。逐条件 VDD 存在时拒绝 task/搜索空间中的 `vdd_v`；全部条件省略 VDD 时则共同继承当前候选的 VDD，避免同一个供电出现两套真源。
 
 `schematic.transform` 不等同于重建模板。共源 transform 要求目标先通过 VDA common-source 结构检查，然后在同一 cellview 中把 MN0 源极标签从 VSS 改为内部网 `NSRC`，新增 `analogLib/RS0(NSRC,VSS)` 并设置 `source_resistance_ohm`。反相器 testbench transform 则要求现有 cell 是 MN0/MP0 core 或已经完成同一变更；它保留 MOS/pins，只把地归一到 `gnd!` 并增加固定的 `VDD0/VIN0/CL0/GND0`，其中供电和负载来自显式任务参数。两者都强制使用 Bridge editor append mode；preflight 拒绝带未保存改动的目标，编辑 batch 失败时只 purge 未保存缓存且不保存。前后回读必须证明未点名器件的完整参数、master、位置和顶层 pins 保持不变，重复调用幂等。为了避免把任意图编辑伪装成安全能力，当前没有通用图重写 DSL，也没有自动逆变换。若保存已成功而后置审计失败，目前会保留失败和真实 OA 状态，尚没有通用 snapshot 回滚。
 
@@ -205,7 +205,9 @@ AC 核心结果只有在 DC 工作点为饱和、低频参考足够平坦且扫�
 
 2026-07-22 的 L/VDD Gate 在同一 `vda_cs_ac_tradeoff_001` 上固定 W=1 µm、RD=20 kΩ、RS=2 kΩ、bias=0.35 V、load=1 fF，搜索 `L=[0.03,0.04] µm × VDD=[0.8,0.9] V`。L 属于 OA 设计参数，逐候选写入、回读并进入 `si` 网表；VDD 只存在于三个 testbench wrapper。四个候选均完成 AC/transient/noise 且通过约束，GBW objective 选择 `L=0.03 µm/VDD=0.9 V`，最终只把 OA 子集写回并独立回读。两种 L 分别产生不同 netlist SHA，同一 L 的两个 VDD 点复用相同结构 netlist SHA，证明两层参数契约按预期分离。
 
-随后 fixed-design PVT Gate 对这一 OA 只读执行 TT/25℃/0.90V、SS/125℃/0.81V、FF/−40℃/0.99V。`nics4304_tsmc28` profile 为每个角显式列出 MOS/MOSCAP、res/bip/dio/disres、MOM 和 metal-R 四个 section；wrapper 另写 `simulatorOptions temp=...`。三条件共九个唯一 wrapper 共享一份 `si` 网表和 OA readback，各项分析完整、全部约束通过；SS 是 GBW 等多项指标的最坏角。run record 的 testbench evidence 保存 profile、角名、温度、四个 include path/section、wrapper SHA 和来源，避免只凭角名推断实际模型输入。该 Gate 是有限三条件验证，不是完整 foundry signoff corner set、Monte Carlo/mismatch，也不是跨 PVT 的设计候选优化。
+随后 fixed-design PVT Gate 对这一 OA 只读执行 TT/25℃/0.90V、SS/125℃/0.81V、FF/−40℃/0.99V。`nics4304_tsmc28` profile 为每个角显式列出 MOS/MOSCAP、res/bip/dio/disres、MOM 和 metal-R 四个 section；wrapper 另写 `simulatorOptions temp=...`。三条件共九个唯一 wrapper 共享一份 `si` 网表和 OA readback，各项分析完整、全部约束通过；SS 是 GBW 等多项指标的最坏角。run record 的 testbench evidence 保存 profile、角名、温度、四个 include path/section、wrapper SHA 和来源，避免只凭角名推断实际模型输入。该 Gate 是有限三条件验证，不是完整 foundry signoff corner set 或 Monte Carlo/mismatch。
+
+2026-07-23 的可选 PVT-aware Gate 把相同三条件接入 `design.tune`，只搜索 `bias_v=[0.35,0.40] V`，因此没有 OA 参数 action。两个候选各自完成九项分析且各自只生成一份网表；两份网表 SHA 也相同，符合设计未变、testbench bias 改变的契约。`0.40 V` 虽有更高的最坏 GBW，但在 TT/SS/FF 分别违反 THD、摆幅和功耗约束，最终选择所有条件都可行的 `0.35 V`。调优前后 OA semantic parameters 完全相同。OA 设计变量跨 PVT 的 checkpoint/writeback、全不可行恢复和预算路径已有本地确定性测试，但仍需独立 live Gate 才能升级为真实 OA 写回证据。
 
 ## 证据链
 

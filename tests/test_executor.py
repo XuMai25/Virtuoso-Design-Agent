@@ -3561,6 +3561,249 @@ def test_pvt_bundle_requires_every_condition_and_uses_robust_objective() -> None
     assert any("ss_125c_0p81v" in note for note in record.notes)
 
 
+def _pvt_tuning_task(
+    *, widths: list[float] | None = None, max_iterations: int = 2
+) -> TaskSpec:
+    return TaskSpec.model_validate(
+        {
+            "id": "cs-pvt-design-tune",
+            "operation": "design.tune",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs_pvt_tune"},
+            "analysis": "quality",
+            "ac_sweep": {"start_hz": 1e4, "stop_hz": 1e11},
+            "linearity_sweep": {
+                "frequency_hz": 100e6,
+                "amplitudes_v": [0.005, 0.05],
+            },
+            "noise_sweep": {"start_hz": 1e3, "stop_hz": 1e10},
+            "parameters": {
+                "length_um": 0.03,
+                "load_resistance_ohm": 20_000.0,
+                "bias_v": 0.35,
+                "load_ff": 1.0,
+            },
+            "parameter_space": {"device_width_um": widths or [1.0, 2.0]},
+            "operating_conditions": [
+                {
+                    "name": "tt_25c_0p90v",
+                    "process_corner": "tt",
+                    "temperature_c": 25.0,
+                    "vdd_v": 0.9,
+                },
+                {
+                    "name": "ss_125c_0p81v",
+                    "process_corner": "ss",
+                    "temperature_c": 125.0,
+                    "vdd_v": 0.81,
+                },
+            ],
+            "constraints": [
+                {
+                    "metric": "low_frequency_gain_v_per_v",
+                    "relation": ">=",
+                    "value": 2.0,
+                },
+                {"metric": "dc_supply_power_uw", "relation": "<=", "value": 30.0},
+            ],
+            "objective": {
+                "metric": "gain_bandwidth_product_hz",
+                "goal": "maximize",
+            },
+            "safety": {
+                "allow_remote_compute": True,
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+            "limits": {
+                "max_iterations": max_iterations,
+                "timeout_seconds": 600,
+            },
+        }
+    )
+
+
+class _SyntheticPvtTuningAdapter(DeterministicDemoAdapter):
+    def __init__(
+        self,
+        *,
+        all_infeasible: bool = False,
+        interrupt_width: float | None = None,
+    ) -> None:
+        super().__init__()
+        self.all_infeasible = all_infeasible
+        self.interrupt_width = interrupt_width
+        self.interrupted = False
+        self.widths: list[float] = []
+
+    def simulate(self, task, parameters):
+        width = float(parameters["device_width_um"])
+        self.widths.append(width)
+        if self.interrupt_width == width and not self.interrupted:
+            self.interrupted = True
+            raise BridgeWorkerError("injected PVT transport reset")
+        gbw_by_width = {
+            1.0: (20e9, 4e9),
+            2.0: (12e9, 8e9),
+            3.0: (10e9, 9e9),
+        }
+        gbw = gbw_by_width[width]
+        rows = []
+        for index, condition in enumerate(task.operating_conditions):
+            metrics = {
+                "low_frequency_gain_v_per_v": (
+                    1.0 if self.all_infeasible and index == 1 else 2.5
+                ),
+                "dc_supply_power_uw": 20.0 + 2.0 * width + index,
+                "gain_bandwidth_product_hz": gbw[index],
+            }
+            effective = dict(parameters)
+            effective["vdd_v"] = float(condition.vdd_v)
+            rows.append(
+                {
+                    "condition": condition.model_dump(mode="json"),
+                    "result": {
+                        "parameters": effective,
+                        "metrics": metrics,
+                        "metric_sources": {
+                            name: "eda_result" for name in metrics
+                        },
+                        "analysis_complete": True,
+                        "analysis_issues": [],
+                        "analysis_warnings": [],
+                    },
+                }
+            )
+        return AdapterResult(
+            data={
+                "parameters": dict(parameters),
+                "operating_condition_results": rows,
+                "analysis_complete": True,
+                "analysis_issues": [],
+                "analysis_warnings": [],
+            },
+            evidence_source=EvidenceSource.EDA_RESULT,
+        )
+
+
+def test_pvt_design_tuning_selects_robust_candidate_and_writes_back(
+    tmp_path,
+) -> None:
+    task = _pvt_tuning_task()
+    adapter = _SyntheticPvtTuningAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+    checkpoint_path = tmp_path / "pvt-tune.checkpoint.json"
+
+    record = TaskExecutor(adapter).execute(
+        task,
+        plan,
+        token=plan.confirmation_token,
+        checkpoint_path=checkpoint_path,
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert [candidate.objective_value for candidate in record.candidates] == [
+        pytest.approx(4e9),
+        pytest.approx(8e9),
+    ]
+    assert record.selected_parameters is not None
+    assert record.selected_parameters["device_width_um"] == pytest.approx(2.0)
+    assert adapter.inspect_schematic(task).data["semantic_parameters"][
+        "device_width_um"
+    ] == pytest.approx(2.0)
+    assert all(
+        len(candidate.operating_conditions) == 2
+        for candidate in record.candidates
+    )
+    checkpoint = load_execution_checkpoint(checkpoint_path)
+    assert checkpoint.complete is True
+    assert len(checkpoint.candidates[0].operating_conditions) == 2
+    assert any("all declared operating conditions" in note for note in record.notes)
+
+
+def test_pvt_candidate_rejects_per_condition_design_parameter_drift() -> None:
+    task = _pvt_tuning_task()
+    adapter = _SyntheticPvtTuningAdapter()
+    parameters = dict(task.parameters) | {"device_width_um": 1.0}
+    result = adapter.simulate(task, parameters)
+    result.data["operating_condition_results"][1]["result"]["parameters"][
+        "device_width_um"
+    ] = 9.0
+
+    with pytest.raises(RuntimeError, match="confirm candidate parameter"):
+        TaskExecutor._evaluate_candidate(task, 1, parameters, result)
+
+
+def test_all_infeasible_pvt_tuning_restores_initial_oa() -> None:
+    task = _pvt_tuning_task()
+    adapter = _SyntheticPvtTuningAdapter(all_infeasible=True)
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.PARTIAL
+    assert all(not candidate.feasible for candidate in record.candidates)
+    assert any(action.action == "parameters.restore" for action in record.actions)
+    assert adapter.inspect_schematic(task).data["semantic_parameters"][
+        "device_width_um"
+    ] == pytest.approx(1.0)
+    assert any("across every declared operating condition" in note for note in record.notes)
+
+
+def test_pvt_tuning_budget_is_best_only_within_evaluated_prefix() -> None:
+    task = _pvt_tuning_task(widths=[1.0, 2.0, 3.0], max_iterations=2)
+    adapter = _SyntheticPvtTuningAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.PARTIAL
+    assert len(record.candidates) == 2
+    assert record.selected_parameters is not None
+    assert record.selected_parameters["device_width_um"] == pytest.approx(2.0)
+    assert any("evaluated prefix" in note for note in record.notes)
+
+
+def test_pvt_tuning_checkpoint_resumes_completed_candidate_bundle(tmp_path) -> None:
+    task = _pvt_tuning_task()
+    adapter = _SyntheticPvtTuningAdapter(interrupt_width=2.0)
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+    checkpoint_path = tmp_path / "pvt-resume.checkpoint.json"
+
+    first = TaskExecutor(adapter).execute(
+        task,
+        plan,
+        token=plan.confirmation_token,
+        checkpoint_path=checkpoint_path,
+    )
+    checkpoint = load_execution_checkpoint(checkpoint_path)
+
+    assert first.status is RunStatus.FAILED
+    assert checkpoint.next_candidate_index == 2
+    assert len(checkpoint.candidates[0].operating_conditions) == 2
+
+    resumed = TaskExecutor(adapter).execute(
+        task,
+        plan,
+        token=plan.confirmation_token,
+        checkpoint_path=checkpoint_path,
+        resume_checkpoint=checkpoint,
+    )
+
+    assert resumed.status is RunStatus.SUCCEEDED
+    assert adapter.widths.count(1.0) == 1
+    assert adapter.widths.count(2.0) == 2
+    assert load_execution_checkpoint(checkpoint_path).complete is True
+
+
 def test_common_source_ac_short_sweep_is_partial_not_a_fake_bandwidth() -> None:
     task = _common_source_ac_run(stop_hz=1e8).model_copy(
         update={"constraints": []}

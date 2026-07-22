@@ -124,7 +124,7 @@ def test_pvt_conditions_reject_ambiguous_grids(conditions, message) -> None:
         TaskSpec.model_validate(data)
 
 
-def test_pvt_conditions_are_verification_only_and_cannot_override_task_vdd() -> None:
+def test_pvt_conditions_can_tune_but_cannot_conflict_with_condition_vdd() -> None:
     base = {
         "id": "cs-invalid-pvt-scope",
         "operation": "simulation.run",
@@ -146,8 +146,54 @@ def test_pvt_conditions_are_verification_only_and_cannot_override_task_vdd() -> 
     base["operation"] = "design.tune"
     base["parameters"] = {"bias_v": 0.35}
     base["parameter_space"] = {"length_um": [0.03, 0.04]}
-    with pytest.raises(ValidationError, match="currently verification-only"):
+    base["constraints"] = [
+        {"metric": "saturation_region", "relation": ">=", "value": 1.0}
+    ]
+    task = TaskSpec.model_validate(base)
+
+    assert task.operation.value == "design.tune"
+    assert len(task.operating_conditions) == 1
+
+    base["operation"] = "design.close_loop"
+    assert TaskSpec.model_validate(base).operation.value == "design.close_loop"
+
+    base["parameter_space"] = {
+        "length_um": [0.03, 0.04],
+        "vdd_v": [0.8, 0.9],
+    }
+    with pytest.raises(ValidationError, match="must not also tune vdd_v"):
         TaskSpec.model_validate(base)
+
+
+def test_pvt_conditions_without_vdd_can_inherit_each_candidate_vdd() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "cs-pvt-vdd-tune",
+            "operation": "design.tune",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "parameters": {"bias_v": 0.35, "vdd_v": 0.9},
+            "parameter_space": {"vdd_v": [0.8, 0.9]},
+            "operating_conditions": [
+                {
+                    "name": "tt_25c",
+                    "process_corner": "tt",
+                    "temperature_c": 25.0,
+                },
+                {
+                    "name": "ss_125c",
+                    "process_corner": "ss",
+                    "temperature_c": 125.0,
+                },
+            ],
+            "constraints": [
+                {"metric": "saturation_region", "relation": ">=", "value": 1.0}
+            ],
+        }
+    )
+
+    assert all(condition.vdd_v is None for condition in task.operating_conditions)
+    assert task.parameter_space["vdd_v"] == [0.8, 0.9]
 
 
 def test_plan_rejects_process_corner_absent_from_selected_profile() -> None:

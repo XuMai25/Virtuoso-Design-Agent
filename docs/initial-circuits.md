@@ -15,7 +15,7 @@
 
 ## Gate 2：单 MOS 共源与源极退化
 
-状态：Gate 2A 电阻负载 NMOS 共源与源极退化的 DC、复数 AC、bias/load 条件搜索和 W/RD/RS 写入调优已真实通过。专用 cell 还完成同参数只加 RS 的控制变量比较、预算/不可行/transport 恢复、5 点 transient 线性度/真实功耗和 ordinary noise。AC+linearity+noise 固定质量组合已经覆盖 bias/load、W/RD/RS 和 L/VDD；随后同一 OA/`si` 网表又通过 TT/SS/FF 三个显式温度/供电条件。当前状态是 **bounded common-source L/VDD quality tuning and fixed-design PVT verification verified**；PVT-aware 设计候选调优、差分对和完整 L5B 仍未闭合。
+状态：Gate 2A 电阻负载 NMOS 共源与源极退化的 DC、复数 AC、bias/load 条件搜索和 W/RD/RS 写入调优已真实通过。专用 cell 还完成同参数只加 RS 的控制变量比较、预算/不可行/transport 恢复、5 点 transient 线性度/真实功耗和 ordinary noise。AC+linearity+noise 固定质量组合已经覆盖 bias/load、W/RD/RS 和 L/VDD；随后同一 OA/`si` 网表又通过 TT/SS/FF 三个显式温度/供电条件，并完成可选的两候选 PVT-aware bias 调优。当前状态是 **optional PVT-aware common-source quality tuning verified**；真实 OA 设计变量跨 PVT 写回、差分对和完整 L5B 仍未闭合。
 
 - OA：`MN0` 与 `analogLib/RD0`，连接 `IN/OUT/VDD/VSS`，W/L/R 创建后结构化回读。
 - 同源：`si` 网表中的 MN0/RD0/可选 RS0 master、端口和 W/L/R 与 OA 一致；DC wrapper 只提供 VDD/VIN/VSS。AC 复用同一网表和 DC OP，额外提供 unit AC input、显式 sweep 和可选 `load_ff`，不复制器件 topology。
@@ -33,11 +33,12 @@
 - 质量组合：`analysis: quality` 强制声明 AC、linearity、noise 三组 sweep；每候选复用一次 OA/`si` 网表，任一子分析不完整或共享证据不一致即拒绝。真实 4 点搜索得到 2 个可行点；两个 0.40 V 点虽有更高 GBW，但因 THD 与 DC 功耗超限被拒绝，最终选择 `0.35 V/1 fF`。预算、全不可行和首候选 transport 恢复均正确，before/after OA 参数一致。
 - 质量写回：8 点 W/RD/RS 搜索全部三项完整，候选 4 transport 中断后从独立 OA 回读恢复；GBW objective 写回 `1 µm/20 kΩ/1 kΩ`。线性度 objective 随后选择 `RS=2 kΩ`，真实获得 THD/P1dB/功耗改善并接受 GBW/noise 代价。2 点全不可行任务恢复初始 OA，selection 保持为空。
 - L/VDD + PVT：固定 W=1 µm、RD=20 kΩ、RS=2 kΩ、bias=0.35 V、load=1 fF 的四点 `L×VDD` 质量搜索全部可行，按 GBW 选择并回读 `L=0.03 µm/VDD=0.9 V`。随后不写 OA 的 TT/25℃/0.90V、SS/125℃/0.81V、FF/−40℃/0.99V 共九项分析共享一个网表，全部通过；SS 给出最坏 GBW 18.696 GHz、P1dB 97.56 mV peak 和输入参考噪声 1348.7 µV RMS。
+- 可选 PVT 调优：`bias=[0.35,0.40] V` 两候选各跨上述三条件运行九项分析。0.40 V 最坏 GBW 更高，但 TT/SS/FF 均违反至少一项 THD、摆幅或功耗约束；0.35 V 三条件全部通过并被选择。该任务无 `parameters.*` action，OA W/L/RD/RS 前后完全相同。
 - ADE 自动链已在专用 Maestro cell 真实通过 prepare/setup patch/background run/sweep/corner/result mapping。反相器的 named corner 只改变同一 `top_tt` 下的 VDD；真实 process/temperature corner 目前只在 direct common-source `si`/Spectre Gate 通过，尚未写入或人工打开 Maestro setup。人工打开/调整/重跑和 ADE L 迁移继续按延期记录处理。
 
 跨拓扑的基础有两条。`existing_schematic` 可以不依赖固定模板读取已有 schematic，并用 `instance_parameter_updates` 人工指定实例原始 CDF 参数和值字符串；固定模板还可把它与 W/L/R semantic parameters 组合。写入必须经过 callback、立即定向 OA 回读和独立再次回读。ADE 路径保留 prepare/capture/corner/variable/setup/run 的正交能力和明确真源；当前 ADE live 证据仍不证明真实 process/temperature corner、history 名唯一或 multi-test 通用映射。direct `si`/Spectre 已证明三条件 PVT，但不会把该状态静默包装成 Maestro setup。通用 OA smoke 已枚举 MN0 的 233 个 CDF 字段；专用新 cell 上又真实闭合 `MN0.fingers=2` 和 `RD0.r=22K` 的双重回读。`MN0.m=2` 被当前 PDK callback 恢复为 `1`，因此保留为字段不可持久化边界。这些能力只证明“按名字修改并以 OA 值确认”或“准备、修改声明 setup 范围、运行当前 ADE 状态”，不证明 VDA 理解任意参数的物理作用，也不自动允许该参数参与调优。
 
-Gate 2 已分别覆盖 bias/load、W/RD/RS 和 L/VDD 网格，并能对一个固定 OA 设计执行有限 PVT 验证；尚未把每个设计候选都跨同一 PVT 集合评估，也未把全部维度塞入一个受预算约束的联合搜索。实现不要求为源极退化新建模板或复制执行器：`schematic.transform` 在同一既有 common-source cellview 上应用固定最小 delta，`source_resistance_ohm` 随后直接进入原有 `parameters.apply`/`design.tune`。当前未实现自动逆变换，且保存成功后的后置审计失败尚无通用 snapshot 回滚；任何拓扑都必须先满足偏置和工作区，再比较增益/带宽。
+Gate 2 已分别覆盖 bias/load、W/RD/RS 和 L/VDD 网格，能对固定 OA 设计执行有限 PVT 验证，也能在任务显式要求时让每个 testbench 候选跨相同 PVT 集合评估；该能力不默认启用，也没有把全部维度塞入一个爆炸式联合搜索。OA 设计变量跨 PVT 的写回路径已有本地测试，尚未 live。实现不要求为源极退化新建模板或复制执行器：`schematic.transform` 在同一既有 common-source cellview 上应用固定最小 delta，`source_resistance_ohm` 随后直接进入原有 `parameters.apply`/`design.tune`。当前未实现自动逆变换，且保存成功后的后置审计失败尚无通用 snapshot 回滚；任何拓扑都必须先满足偏置和工作区，再比较增益/带宽。
 
 ## Gate 3：差分对
 

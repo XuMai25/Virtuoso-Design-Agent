@@ -1408,10 +1408,9 @@ class TaskSpec(StrictModel):
     @model_validator(mode="after")
     def validate_operation_inputs(self) -> "TaskSpec":
         if self.operating_conditions:
-            if self.operation is not Operation.SIMULATION_RUN:
+            if self.operation not in _SIMULATION_OPERATIONS:
                 raise ValueError(
-                    "operating_conditions are currently verification-only and "
-                    "require operation='simulation.run'"
+                    "operating_conditions require a simulation or tuning operation"
                 )
             if self.circuit is not CircuitKind.COMMON_SOURCE:
                 raise ValueError(
@@ -1429,11 +1428,17 @@ class TaskSpec(StrictModel):
                     "operating_conditions must all provide vdd_v or all inherit "
                     "one task-level vdd_v"
                 )
-            if all(condition_vdds) and "vdd_v" in self.parameters:
-                raise ValueError(
-                    "operating_conditions with per-condition supplies must not "
-                    "also declare vdd_v in task parameters"
-                )
+            if all(condition_vdds):
+                if "vdd_v" in self.parameters:
+                    raise ValueError(
+                        "operating_conditions with per-condition supplies must not "
+                        "also declare vdd_v in task parameters"
+                    )
+                if "vdd_v" in self.parameter_space:
+                    raise ValueError(
+                        "operating_conditions with per-condition supplies must not "
+                        "also tune vdd_v"
+                    )
             if not any(condition_vdds) and "vdd_v" not in self.parameters:
                 raise ValueError(
                     "operating_conditions without per-condition supplies require "

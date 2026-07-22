@@ -103,7 +103,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     ),
     CircuitKind.COMMON_SOURCE: CircuitCapability(
         circuit=CircuitKind.COMMON_SOURCE,
-        stage="Gate 2 L/VDD quality tuning + fixed PVT verification verified",
+        stage="Gate 2 optional PVT-aware quality tuning verified",
         executable=True,
         operations=_STANDARD_OPERATIONS + (Operation.SCHEMATIC_TRANSFORM,),
         parameters=(
@@ -119,11 +119,12 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
         evidence_gate=(
             "OA readback + si netlist consistency + DC region + complex AC + "
             "bounded W/L/RD/RS plus bias/load quality tuning, OA writeback, "
-            "infeasible restore, checkpoint recovery, and fixed-design TT/SS/FF "
-            "AC/linearity/noise verification live on TSMC N28; non-overwrite ADE "
+            "infeasible restore, checkpoint recovery, fixed-design TT/SS/FF "
+            "verification, and optional read-only PVT-aware bias tuning live on "
+            "TSMC N28; non-overwrite ADE "
             "prepare/setup/background exact-history run-resume is live on the "
-            "inverter handoff; PVT-aware design tuning and common-source "
-            "capture/variable/sweep/real-PVT ADE gates remain pending"
+            "inverter handoff; live PVT-aware OA-design-variable writeback and "
+            "common-source capture/variable/sweep/real-PVT ADE gates remain pending"
         ),
     ),
     CircuitKind.SOURCE_DEGENERATED_COMMON_SOURCE: CircuitCapability(
