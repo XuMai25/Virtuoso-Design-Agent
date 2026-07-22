@@ -92,6 +92,18 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         if common_source_noise
         else "从波形指标逐条判断规格"
     )
+    if task.operating_conditions:
+        condition_names = ", ".join(
+            condition.name for condition in task.operating_conditions
+        )
+        simulation_description += (
+            f"；复用同一份已核对 OA/si 网表，在 {len(task.operating_conditions)} "
+            f"个显式 PVT 条件运行：{condition_names}"
+        )
+        evaluation_description += (
+            "；每个条件独立保留 EDA 指标，全部满足约束才通过，objective 按"
+            "跨条件最坏值判定"
+        )
     probe = _step(
         "01-probe",
         "bridge.probe",
@@ -728,8 +740,13 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
 def build_plan(task: TaskSpec) -> ExecutionPlan:
     validate_task_capability(task)
     steps = _steps_for(task)
+    task_payload = task.model_dump(mode="json", exclude_none=True)
+    if not task.operating_conditions:
+        # Keep pre-PVT task tokens stable; this field did not exist in schema v1
+        # records before the bounded operating-condition extension.
+        task_payload.pop("operating_conditions", None)
     payload = {
-        "task": task.model_dump(mode="json", exclude_none=True),
+        "task": task_payload,
         "steps": [step.model_dump(mode="json") for step in steps],
     }
     canonical = json.dumps(

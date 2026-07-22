@@ -55,7 +55,9 @@ Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发�
 
 下一步的二维 Gate 也已真实闭合：在同一 schematic 中把 `VDD0.vdc` 与 `VIN0.v2` 都改为 `VDD` 符号，global `VDD=0.8,0.9` 保存并独立重开，七个 VDD-aware outputs 以 add-only 方式持久化。`Interactive.2` 的 `VDD×CL` 六点全部进入同一个共享符号 `input.scs`+`netlist` 和 exact-history RDB；五点通过原 6 ps/5 ps/5 fJ 约束，能量 objective 选择 `0.8 V/1 fF`，得到 delay=3.254 ps、skew=1.425 ps、周期供电能量=1.309 fJ。第一次本地等待边界先于 worker 清理窗口终止，但远端已完成；孤立 background session 按旧 record 恢复 runtime path 后关闭，后续固定同一 history/scratch 恢复没有重算或写 OA/setup。旧固定阈值 `Rise/RiseFallSkew` 在三个 0.8 V 点产生的 6 个 `eval err` 被 exact test/output/point 契约、RDB 单元格和 log 数量双层核对，未解释错误为零；默认仍要求 0 error，mapped output 不得进入该声明。最终本地回归 `323 passed`、`65/65` example plans。状态升级为 **native Maestro two-variable VDD×CL same-source quality selection and recovery verified**；下一自动化门转为有限 corner/test-scope，L/VDD 联合设计搜索仍未闭合。
 
-有限 scope/corner Gate 随后真实闭合。`CL=1f,4f` 位于 test scope，global CL selection 明确 disabled；global VDD=0.9，两个 named corner 覆盖 0.8/0.9 V。Bridge 0.7.0 的普通 Detail parser 只保留 Nominal 值，因此 VDA 通过其公开 `include_raw=True` 读取原始 CSV，按 2 个 Maestro parametric point × 3 个 corner 列构造 6 个可审计 case，并保留 raw hash。`Interactive.4/5` 的 4 个低压 legacy error 全部被精确解释，5 个 case 可行，仍选中 0.8 V/1 fF。Bridge callback marker 两次未触发；第一次显式固定 history/scratch 恢复，第二次由 VDA 在 90 秒后只接受唯一新增且已 completed 的 `Interactive.5`，没有重跑或写 OA。最终本地回归 `353 passed`、`71/71` example plans。状态升级为 **native Maestro test-scope × environmental-corner quality selection and bounded timeout recovery verified**；真实 PVT corner、multi-test/multi-analysis 和共源 L/VDD 联合设计仍待 Gate。
+有限 scope/corner Gate 随后真实闭合。`CL=1f,4f` 位于 test scope，global CL selection 明确 disabled；global VDD=0.9，两个 named corner 覆盖 0.8/0.9 V。Bridge 0.7.0 的普通 Detail parser 只保留 Nominal 值，因此 VDA 通过其公开 `include_raw=True` 读取原始 CSV，按 2 个 Maestro parametric point × 3 个 corner 列构造 6 个可审计 case，并保留 raw hash。`Interactive.4/5` 的 4 个低压 legacy error 全部被精确解释，5 个 case 可行，仍选中 0.8 V/1 fF。状态升级为 **native Maestro test-scope × environmental-corner quality selection and bounded timeout recovery verified**；这里仍是 nominal model 下的环境 VDD corner，不等于真实 PVT。
+
+2026-07-22 又在 direct common-source 路径闭合下一自动化 Gate。`L=[0.03,0.04] µm × VDD=[0.8,0.9] V` 四点三分析搜索全部可行，GBW objective 写回并复核 `L=0.03 µm`，VDD 保持 testbench 条件。随后同一 OA/同一 `si` 网表在 TT/25℃/0.90V、SS/125℃/0.81V、FF/−40℃/0.99V 下运行九项 Spectre 分析；每个条件都保留原始指标，全部满足规格，objective 按跨条件最坏值聚合。状态升级为 **bounded common-source L/VDD quality tuning and fixed-design PVT verification verified**。当前缺口收敛为 PVT-aware 设计候选调优、ADE 真实 PVT/multi-test 映射和差分对，而不是 L/VDD 或固定设计 process/temperature 执行能力。
 
 需要用户操作 Virtuoso/ADE 的验证已按用户决定延期，并集中记录在 [`deferred-manual-gates.md`](deferred-manual-gates.md)：包括人工修改/保存/重跑后的双向交接、旧 ADE L state 备份后迁移与重开，以及相同 history/output 的人工数值交叉检查。这些项目不阻塞后台自动化实现，但在真实完成前仍保留为未验证边界；延期记录本身不构成远端授权。
 
@@ -97,7 +99,8 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> 功耗 + transient 线性度 + noise（单点只读 live 已通过）
   -> 多 analysis 质量约束与受预算调优（W/RD/RS 写回、失败门与恢复已通过）
   -> ADE 双路径（prepare + analysis/output add-only patch + background run/resume/raw-input consistency + global CL/VDD sweep + test-scope CL × VDD environmental-corner + delay/skew/energy constraint mapping 已 live；capture 与人工交接待验证）
-  -> 共源 L/VDD + 多 analysis + 有限真实 PVT corner
+  -> 共源 L/VDD + 多 analysis + 固定设计有限真实 PVT（已通过）
+  -> PVT-aware 设计候选调优（下一自动化 Gate）
   -> 差分对
   -> L5B 单模块闭环
   -> layout/DRC/LVS/PEX Gate
@@ -105,4 +108,4 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
 
 每一级只有在真实 Bridge smoke、结构回读、指标解析和失败注入均通过后才升级状态。
 
-反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化原位 transform/DC tuning、只读 AC 条件搜索、W/RD/RS AC 与多 analysis 质量写回、单项功耗/linearity/noise，以及预算/不可行/transport 恢复均已有 live 证据。Gate 2A 现在可以让不同 objective 在同一候选证据上得到不同 OA 设计。ADE 的 prepare、analysis/output add-only patch、corner membership add、global/test/corner variable 与 selection CAS、background run/resume、exact-history/result/log 与 unique-runtime input manifest、OA→input raw 参数一致性、global CL/VDD sweep、受限 point×environmental-corner sweep，以及表达式固定的 delay/skew/周期供电能量到 VDA constraints/objective 的映射也已有 live 证据。下一自动化硬门转为共源 L/VDD + 多 analysis + 有限真实 PVT corner；已有 output 安全替换仍是独立 setup Gate。需要人工打开/修改/重跑、旧 ADE L 迁移和数值交叉检查的 Gate 已按用户决定延期，不再阻塞自动实现，但完成前仍不能升级为可重复的 L5B 单模块规格闭环。
+反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化原位 transform/DC tuning、AC/quality、W/RD/RS/L/VDD 写回、固定设计 TT/SS/FF，以及预算/不可行/transport 恢复均已有 live 证据。Gate 2A 现在可以让不同 objective 在同一候选证据上得到不同 OA 设计，并对一个固定设计做跨条件最坏值判定。下一自动化硬门是把相同 `operating_conditions` 证据门接入有限 `design.tune`：每个设计候选都必须跨全部 PVT 条件完成，随后验证最佳 OA 写回、全不可行、预算耗尽和 transport checkpoint。通过后再进入差分对。ADE 的真实 PVT/multi-test、已有 output 安全替换，以及人工打开/修改/重跑和旧 ADE L 迁移继续是独立 Gate；完成前仍不能升级为可重复的 L5B 单模块规格闭环。

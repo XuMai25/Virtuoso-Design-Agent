@@ -10,6 +10,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import re
 import shlex
 import sys
@@ -76,6 +77,43 @@ def _cellview_exists(client, library: str, cell: str, view: str) -> bool:
     if output not in {"t", "nil"}:
         raise RuntimeError(f"unexpected {view} existence result: {output!r}")
     return output == "t"
+
+
+def _focus_target_schematic(client, library: str, cell: str) -> None:
+    opened = client.open_window(library, cell, view="schematic")
+    open_errors = getattr(opened, "errors", None) or []
+    if open_errors:
+        raise RuntimeError(f"target schematic open failed: {open_errors[0]}")
+    result = client.execute_skill(
+        "let((cv) "
+        "hiSetCurrentWindow(window) "
+        "cv = geGetEditCellView() "
+        f'if(cv && cv~>libName == "{library}" '
+        f'&& cv~>cellName == "{cell}" '
+        '&& cv~>viewName == "schematic" t nil))',
+        timeout=15,
+    )
+    errors = getattr(result, "errors", None) or []
+    if errors:
+        raise RuntimeError(f"target schematic focus failed: {errors[0]}")
+    output = str(getattr(result, "output", "")).strip().strip('"').lower()
+    if output != "t":
+        raise RuntimeError(
+            "Bridge active schematic does not match the requested parameter target"
+        )
+
+
+def _set_target_instance_params(
+    client,
+    library: str,
+    cell: str,
+    instance: str,
+    **parameters: Any,
+) -> dict[str, str]:
+    from virtuoso_bridge.virtuoso.schematic.params import set_instance_params
+
+    _focus_target_schematic(client, library, cell)
+    return set_instance_params(client, instance, **parameters)
 
 
 def _schematic_exists(client, library: str, cell: str) -> bool:
@@ -706,11 +744,10 @@ def _apply_parameters(
     parameters: dict[str, float],
     profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    from virtuoso_bridge.virtuoso.schematic.params import set_instance_params
-
-    client.open_window(library, cell, view="schematic")
-    set_instance_params(
+    _set_target_instance_params(
         client,
+        library,
+        cell,
         "MN0",
         wf=_um(parameters["nmos_width_um"]),
         l=_um(parameters["length_um"]),
@@ -718,8 +755,10 @@ def _apply_parameters(
         m="1",
         param_filters=None,
     )
-    set_instance_params(
+    _set_target_instance_params(
         client,
+        library,
+        cell,
         "MP0",
         wf=_um(parameters["pmos_width_um"]),
         l=_um(parameters["length_um"]),
@@ -767,8 +806,6 @@ def _apply_common_source_parameters(
     parameters: dict[str, float],
     profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    from virtuoso_bridge.virtuoso.schematic.params import set_instance_params
-
     persistable = {
         name: float(parameters[name])
         for name in (
@@ -791,25 +828,30 @@ def _apply_common_source_parameters(
             "source_resistance_ohm requires a source-degenerated common-source topology"
         )
 
-    client.open_window(library, cell, view="schematic")
     instance_updates = _common_source_instance_parameter_updates(persistable)
     if "MN0" in instance_updates:
-        set_instance_params(
+        _set_target_instance_params(
             client,
+            library,
+            cell,
             "MN0",
             param_filters=None,
             **instance_updates["MN0"],
         )
     if "RD0" in instance_updates:
-        set_instance_params(
+        _set_target_instance_params(
             client,
+            library,
+            cell,
             "RD0",
             param_filters=None,
             **instance_updates["RD0"],
         )
     if "RS0" in instance_updates:
-        set_instance_params(
+        _set_target_instance_params(
             client,
+            library,
+            cell,
             "RS0",
             param_filters=None,
             **instance_updates["RS0"],
@@ -832,8 +874,6 @@ def _apply_explicit_instance_parameters(
     cell: str,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    from virtuoso_bridge.virtuoso.schematic.params import set_instance_params
-
     requested = _requested_instance_parameters(payload)
     current = _read_schematic(client, library, cell)
     if payload["circuit"] == "inverter":
@@ -856,11 +896,12 @@ def _apply_explicit_instance_parameters(
             "explicit parameter write targets missing instances: "
             + ", ".join(missing_instances)
         )
-    client.open_window(library, cell, view="schematic")
     applied_parameters: dict[str, dict[str, str]] = {}
     for instance, parameters in requested.items():
-        applied = set_instance_params(
+        applied = _set_target_instance_params(
             client,
+            library,
+            cell,
             instance,
             param_filters=None,
             **parameters,
@@ -897,8 +938,10 @@ def _apply_explicit_instance_parameters(
         for instance, parameters in requested.items():
             repaired: dict[str, str] = {}
             for name, value in parameters.items():
-                applied = set_instance_params(
+                applied = _set_target_instance_params(
                     client,
+                    library,
+                    cell,
                     instance,
                     param_filters=None,
                     **{name: value},
@@ -5080,8 +5123,6 @@ def transform_inverter_testbench(payload: dict[str, Any]) -> dict[str, Any]:
         schematic_create_inst_by_master_name as inst,
         schematic_label_instance_term as label_term,
     )
-    from virtuoso_bridge.virtuoso.schematic.params import set_instance_params
-
     client = _client()
     library, cell = _target(payload)
     before = _read_schematic(client, library, cell)
@@ -5124,16 +5165,19 @@ def transform_inverter_testbench(payload: dict[str, Any]) -> dict[str, Any]:
 
     vdd_v = float(payload["parameters"]["vdd_v"])
     load_ff = float(payload["parameters"]["load_ff"])
-    client.open_window(library, cell, view="schematic")
-    set_instance_params(
+    _set_target_instance_params(
         client,
+        library,
+        cell,
         "VDD0",
         param_filters=None,
         vdc=f"{vdd_v:.12g}",
         srcType="dc",
     )
-    set_instance_params(
+    _set_target_instance_params(
         client,
+        library,
+        cell,
         "VIN0",
         param_filters=None,
         v1="0",
@@ -5145,8 +5189,10 @@ def transform_inverter_testbench(payload: dict[str, Any]) -> dict[str, Any]:
         pw="50p",
         srcType="pulse",
     )
-    set_instance_params(
+    _set_target_instance_params(
         client,
+        library,
+        cell,
         "CL0",
         param_filters=None,
         c=f"{load_ff:.12g}f",
@@ -7464,6 +7510,71 @@ save IN OUT VDD VSS VDD_SRC:p
 '''
 
 
+def _common_source_model_manifest(
+    profile: dict[str, Any],
+    operating_condition: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if operating_condition is None:
+        model_path = str(profile["model_include"])
+        model_section = str(profile["model_section"])
+        if '"' in model_path or not re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*", model_section
+        ):
+            raise ValueError("invalid default model include")
+        return {
+            "source": "pdk_profile",
+            "profile": str(profile["name"]),
+            "profile_source": "pdk_profile",
+            "process_corner": None,
+            "process_corner_source": "pdk_profile",
+            "temperature_c": None,
+            "temperature_source": "simulator_default",
+            "includes": [{"path": model_path, "section": model_section}],
+        }
+
+    corner = str(operating_condition["process_corner"])
+    raw_corners = profile.get("process_corners", {})
+    raw_includes = raw_corners.get(corner)
+    if not isinstance(raw_includes, list) or not raw_includes:
+        raise ValueError(f"PDK profile does not map process corner {corner!r}")
+    includes: list[dict[str, str]] = []
+    for item in raw_includes:
+        if not isinstance(item, dict):
+            raise ValueError(f"invalid model include for process corner {corner!r}")
+        path = str(item.get("path") or "")
+        section = str(item.get("section") or "")
+        if not path or '"' in path or not re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*", section
+        ):
+            raise ValueError(f"invalid model include for process corner {corner!r}")
+        includes.append({"path": path, "section": section})
+    temperature_c = float(operating_condition["temperature_c"])
+    if not (-273.15 <= temperature_c <= 300.0):
+        raise ValueError("operating-condition temperature is outside the safe range")
+    return {
+        "source": "software_inference",
+        "profile": str(profile["name"]),
+        "profile_source": "pdk_profile",
+        "process_corner": corner,
+        "process_corner_source": "user_input",
+        "temperature_c": temperature_c,
+        "temperature_source": "user_input",
+        "includes": includes,
+    }
+
+
+def _common_source_model_configuration(
+    profile: dict[str, Any],
+    operating_condition: dict[str, Any] | None,
+) -> tuple[str, float | None]:
+    manifest = _common_source_model_manifest(profile, operating_condition)
+    lines = [
+        f'include "{item["path"]}" section={item["section"]}'
+        for item in manifest["includes"]
+    ]
+    return "\n".join(lines), manifest["temperature_c"]
+
+
 def _common_source_testbench_deck(
     profile: dict[str, Any],
     parameters: dict[str, float],
@@ -7473,10 +7584,13 @@ def _common_source_testbench_deck(
     ac_sweep: dict[str, Any] | None = None,
     linearity_sweep: dict[str, Any] | None = None,
     noise_sweep: dict[str, Any] | None = None,
+    operating_condition: dict[str, Any] | None = None,
 ) -> str:
-    model_path = str(profile["model_include"])
-    if '"' in model_path or '"' in remote_netlist_path:
-        raise ValueError("netlist/model path contains an unsupported quote")
+    if '"' in remote_netlist_path:
+        raise ValueError("netlist path contains an unsupported quote")
+    model_configuration, temperature_c = _common_source_model_configuration(
+        profile, operating_condition
+    )
     saved_nodes = "IN OUT VDD VSS" + (
         " NSRC" if "source_resistance_ohm" in parameters else ""
     )
@@ -7538,8 +7652,11 @@ def _common_source_testbench_deck(
         )
         if "load_ff" in parameters:
             load = f'CL0 (OUT 0) capacitor c={parameters["load_ff"]:.12g}f\n'
+    temperature_option = (
+        "" if temperature_c is None else f" temp={temperature_c:.12g}"
+    )
     return f'''simulator lang=spectre
-include "{model_path}" section={profile["model_section"]}
+{model_configuration}
 include "{remote_netlist_path}"
 
 parameters vdd={parameters["vdd_v"]:.12g} vbias={parameters["bias_v"]:.12g}{extra_parameters}
@@ -7549,7 +7666,7 @@ VSS_SRC (VSS 0) vsource dc=0
 {source}
 {load}
 
-simulatorOptions options psfversion="1.4.0" reltol=1e-4 vabstol=1e-6 iabstol=1e-12
+simulatorOptions options{temperature_option} psfversion="1.4.0" reltol=1e-4 vabstol=1e-6 iabstol=1e-12
 dcOp dc write="spectre.dc" maxiters=150 maxsteps=10000 annotate=status
 dcOpInfo info what=oppoint where=rawfile
 {analysis_statement}save {saved_nodes} VDD_SRC:p VIN_SRC:p
@@ -7764,6 +7881,143 @@ def _merge_common_source_quality_results(
     return merged
 
 
+def _operating_condition_slug(condition: dict[str, Any] | None) -> str | None:
+    if condition is None:
+        return None
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(condition.get("name") or ""))
+    slug = slug.strip("_.-")
+    if not slug:
+        raise RuntimeError("operating condition requires a filesystem-safe name")
+    return slug[:96]
+
+
+def _merge_common_source_operating_condition_results(
+    payload: dict[str, Any],
+    rows: list[tuple[dict[str, Any], dict[str, Any]]],
+) -> dict[str, Any]:
+    if not rows:
+        raise RuntimeError("operating-condition simulation returned no cases")
+    expected = payload.get("operating_conditions")
+    if not isinstance(expected, list) or [condition for condition, _ in rows] != expected:
+        raise RuntimeError(
+            "operating-condition result identity/order does not match the request"
+        )
+
+    common_parameters = {
+        str(name): float(value)
+        for name, value in rows[0][1].get("parameters", {}).items()
+    }
+    first_evidence = rows[0][1].get("evidence", {})
+    first_netlist = first_evidence.get("netlist")
+    first_schematic = first_evidence.get("schematic_readback")
+    issues: list[str] = []
+    warnings: list[str] = []
+    condition_results: list[dict[str, Any]] = []
+    completion: dict[str, bool] = {}
+    for condition, result in rows:
+        name = str(condition["name"])
+        parameters = {
+            str(parameter): float(value)
+            for parameter, value in result.get("parameters", {}).items()
+        }
+        for parameter in list(common_parameters):
+            if parameter not in parameters or not math.isclose(
+                common_parameters[parameter],
+                parameters[parameter],
+                rel_tol=1e-9,
+                abs_tol=1e-12,
+            ):
+                common_parameters.pop(parameter)
+        effective_vdd = condition.get(
+            "vdd_v", payload.get("parameters", {}).get("vdd_v")
+        )
+        if effective_vdd is None or not math.isclose(
+            parameters.get("vdd_v", float("nan")),
+            float(effective_vdd),
+            rel_tol=1e-9,
+            abs_tol=1e-12,
+        ):
+            raise RuntimeError(
+                f"operating condition {name} did not confirm its effective vdd_v"
+            )
+        evidence = result.get("evidence", {})
+        if (
+            evidence.get("netlist") != first_netlist
+            or evidence.get("schematic_readback") != first_schematic
+        ):
+            raise RuntimeError(
+                "operating-condition cases did not reuse identical OA/netlist evidence"
+            )
+        complete = bool(result.get("analysis_complete", True))
+        completion[name] = complete
+        raw_issues = [str(value) for value in result.get("analysis_issues", [])]
+        if not complete and not raw_issues:
+            raw_issues = ["analysis did not produce its required core metrics"]
+        issues.extend(f"{name}: {value}" for value in raw_issues)
+        warnings.extend(
+            f"{name}: {value}"
+            for value in result.get("analysis_warnings", [])
+        )
+        condition_results.append({"condition": dict(condition), "result": result})
+
+    return {
+        "parameters": common_parameters,
+        "metrics": {},
+        "metric_sources": {},
+        "analysis_complete": all(completion.values()),
+        "analysis_issues": issues,
+        "analysis_warnings": warnings,
+        "operating_condition_results": condition_results,
+        "evidence": {
+            "schematic_readback": first_schematic,
+            "netlist": first_netlist,
+            "operating_condition_bundle": {
+                "source": "software_inference",
+                "requested_conditions_source": str(
+                    payload.get("operating_conditions_source", "user_input")
+                ),
+                "conditions": [dict(condition) for condition, _ in rows],
+                "completion": completion,
+                "oa_netlist_reuse": "one_verified_netlist",
+                "selection_semantics": (
+                    "all_conditions_with_robust_worst_case_objective"
+                ),
+            },
+        },
+    }
+
+
+def _simulate_common_source_operating_conditions(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    raw_conditions = payload.get("operating_conditions")
+    if not isinstance(raw_conditions, list) or not raw_conditions:
+        raise RuntimeError("operating_conditions must contain at least one case")
+    cache: dict[str, Any] = {}
+    rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for raw_condition in raw_conditions:
+        if not isinstance(raw_condition, dict):
+            raise RuntimeError("operating condition is not structured")
+        condition = dict(raw_condition)
+        condition_payload = dict(payload)
+        condition_payload.pop("operating_conditions", None)
+        condition_payload["operating_condition"] = condition
+        condition_parameters = dict(payload.get("parameters", {}))
+        if condition.get("vdd_v") is not None:
+            condition_parameters["vdd_v"] = float(condition["vdd_v"])
+        condition_payload["parameters"] = condition_parameters
+        rows.append(
+            (
+                condition,
+                simulate_common_source(
+                    condition_payload,
+                    _bundle_cache=cache,
+                ),
+            )
+        )
+    return _merge_common_source_operating_condition_results(payload, rows)
+
+
 def simulate_common_source(
     payload: dict[str, Any], *, _bundle_cache: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -7772,6 +8026,9 @@ def simulate_common_source(
     profile = payload["profile"]
     timeout = int(payload.get("timeout_seconds", 600))
     analysis = str(payload.get("analysis", "dc"))
+    raw_conditions = payload.get("operating_conditions")
+    if raw_conditions is not None and payload.get("operating_condition") is None:
+        return _simulate_common_source_operating_conditions(payload)
     if analysis not in {"dc", "ac", "transient", "noise", "quality"}:
         raise RuntimeError(f"unsupported common-source analysis: {analysis}")
     ac_sweep = payload.get("ac_sweep")
@@ -7799,7 +8056,7 @@ def simulate_common_source(
             raise RuntimeError(
                 "common-source quality simulation requires " + ", ".join(missing)
             )
-        cache: dict[str, Any] = {}
+        cache = _bundle_cache if _bundle_cache is not None else {}
         results: dict[str, dict[str, Any]] = {}
         for member in ("ac", "transient", "noise"):
             member_payload = dict(payload)
@@ -7893,13 +8150,18 @@ def simulate_common_source(
             ac_sweep=ac_sweep,
             linearity_sweep=linearity_sweep,
             noise_sweep=noise_sweep,
+            operating_condition=payload.get("operating_condition"),
         )
         netlist.write_text(deck, encoding="utf-8")
-        wrapper_name = (
-            f"input_from_oa_{analysis}.scs"
-            if _bundle_cache is not None
-            else "input_from_oa.scs"
+        condition_slug = _operating_condition_slug(
+            payload.get("operating_condition")
         )
+        if condition_slug is not None:
+            wrapper_name = f"input_from_oa_{condition_slug}_{analysis}.scs"
+        elif _bundle_cache is not None:
+            wrapper_name = f"input_from_oa_{analysis}.scs"
+        else:
+            wrapper_name = "input_from_oa.scs"
         remote_wrapper = f"{netlist_evidence['remote_run_dir']}/{wrapper_name}"
         _upload_file(client, netlist, remote_wrapper, timeout=min(timeout, 60))
         simulator = SpectreSimulator.from_env(
@@ -7978,8 +8240,13 @@ def simulate_common_source(
             )
             temporary_psf = noise_diagnostics.pop("temporary_psf_file", None)
             if temporary_psf is not None:
+                noise_name = (
+                    "noise.noise.psfascii"
+                    if condition_slug is None
+                    else f"noise_{condition_slug}.noise.psfascii"
+                )
                 remote_noise_psf = (
-                    f"{netlist_evidence['remote_run_dir']}/noise.noise.psfascii"
+                    f"{netlist_evidence['remote_run_dir']}/{noise_name}"
                 )
                 _upload_file(
                     client,
@@ -8021,6 +8288,16 @@ def simulate_common_source(
                 for name in ("bias_v", "vdd_v")
             },
         }
+        operating_condition = payload.get("operating_condition")
+        model_manifest = _common_source_model_manifest(
+            profile,
+            operating_condition if isinstance(operating_condition, dict) else None,
+        )
+        if isinstance(operating_condition, dict):
+            testbench_values["operating_condition"] = dict(operating_condition)
+            testbench_value_sources["operating_condition"] = {
+                name: "user_input" for name in operating_condition
+            }
         if analysis == "ac":
             assert isinstance(ac_sweep, dict)
             testbench_values["ac_sweep"] = dict(ac_sweep)
@@ -8102,6 +8379,8 @@ def simulate_common_source(
                     "sha256": hashlib.sha256(deck.encode("utf-8")).hexdigest(),
                     "values": testbench_values,
                     "value_sources": testbench_value_sources,
+                    "model_resolution_source": "pdk_profile",
+                    "model_configuration": model_manifest,
                 },
                 "operating_point": {
                     "source": "eda_result",

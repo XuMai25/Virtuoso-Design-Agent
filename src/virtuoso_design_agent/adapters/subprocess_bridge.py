@@ -146,6 +146,12 @@ class SubprocessBridgeAdapter:
             payload["noise_sweep_user_fields"] = sorted(
                 task.noise_sweep.model_fields_set
             )
+        if task.operating_conditions:
+            payload["operating_conditions"] = [
+                condition.model_dump(mode="json")
+                for condition in task.operating_conditions
+            ]
+            payload["operating_conditions_source"] = "user_input"
         if task.ade_capture is not None:
             payload["ade_capture"] = task.ade_capture.model_dump(mode="json")
             payload["ade_capture_user_fields"] = sorted(

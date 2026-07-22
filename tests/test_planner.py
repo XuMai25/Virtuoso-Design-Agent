@@ -21,6 +21,43 @@ def test_plan_token_is_stable() -> None:
     assert build_plan(task).confirmation_token == build_plan(task).confirmation_token
 
 
+def test_common_source_pvt_plan_discloses_finite_worst_case_gate() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "cs-pvt-plan",
+            "operation": "simulation.run",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "parameters": {"bias_v": 0.35},
+            "operating_conditions": [
+                {
+                    "name": "tt_25c_0p90v",
+                    "process_corner": "tt",
+                    "temperature_c": 25.0,
+                    "vdd_v": 0.9,
+                },
+                {
+                    "name": "ss_125c_0p81v",
+                    "process_corner": "ss",
+                    "temperature_c": 125.0,
+                    "vdd_v": 0.81,
+                },
+            ],
+            "safety": {"allow_remote_compute": True},
+        }
+    )
+
+    plan = build_plan(task)
+    simulate = next(step for step in plan.steps if step.capability == "simulation.run")
+    evaluate = next(step for step in plan.steps if step.capability == "results.evaluate")
+
+    assert "2 个显式 PVT 条件" in simulate.description
+    assert "tt_25c_0p90v" in simulate.description
+    assert "ss_125c_0p81v" in simulate.description
+    assert "全部满足约束" in evaluate.description
+    assert "最坏值" in evaluate.description
+
+
 def test_create_plan_discloses_replace_existing() -> None:
     task = _task(
         "schematic.create",

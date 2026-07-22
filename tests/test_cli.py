@@ -18,7 +18,7 @@ def test_catalog_marks_gate2a_common_source_executable(capsys) -> None:
     assert "existing_schematic: Bridge-preserving manual OA surface [executable]" in output
     assert "inverter: L5A vertical slice [executable]" in output
     assert (
-        "common_source: Gate 2 quality design tuning/recovery verified "
+        "common_source: Gate 2 L/VDD quality tuning + fixed PVT verification verified "
         "[executable]" in output
     )
     assert output.count("explicit instance parameters: parameters.apply") == 3

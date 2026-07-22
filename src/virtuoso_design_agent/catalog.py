@@ -103,7 +103,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     ),
     CircuitKind.COMMON_SOURCE: CircuitCapability(
         circuit=CircuitKind.COMMON_SOURCE,
-        stage="Gate 2 quality design tuning/recovery verified",
+        stage="Gate 2 L/VDD quality tuning + fixed PVT verification verified",
         executable=True,
         operations=_STANDARD_OPERATIONS + (Operation.SCHEMATIC_TRANSFORM,),
         parameters=(
@@ -118,13 +118,12 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
         explicit_instance_parameters=True,
         evidence_gate=(
             "OA readback + si netlist consistency + DC region + complex AC + "
-            "bounded W/RD/RS AC + AC/linearity/noise quality tuning, OA writeback, "
-            "infeasible restore, checkpoint recovery, and non-overwrite ADE "
-            "prepare/setup/background exact-history run-resume path live on the TSMC "
-            "inverter handoff; native Maestro CL sweep is live on the inverter "
-            "testbench, including test-scope CL x environmental-corner result "
-            "binding; common-source capture/variable/sweep/PVT-corner ADE gates and "
-            "L/VDD design search pending"
+            "bounded W/L/RD/RS plus bias/load quality tuning, OA writeback, "
+            "infeasible restore, checkpoint recovery, and fixed-design TT/SS/FF "
+            "AC/linearity/noise verification live on TSMC N28; non-overwrite ADE "
+            "prepare/setup/background exact-history run-resume is live on the "
+            "inverter handoff; PVT-aware design tuning and common-source "
+            "capture/variable/sweep/real-PVT ADE gates remain pending"
         ),
     ),
     CircuitKind.SOURCE_DEGENERATED_COMMON_SOURCE: CircuitCapability(
@@ -168,6 +167,19 @@ def validate_task_capability(task: TaskSpec) -> None:
         raise UnsupportedCapability(
             f"unsupported parameters for {task.circuit.value}: {', '.join(unknown)}"
         )
+    if task.operating_conditions:
+        from .profiles import load_pdk_profile
+
+        profile = load_pdk_profile(task.pdk_profile)
+        requested_corners = {
+            condition.process_corner for condition in task.operating_conditions
+        }
+        missing_corners = sorted(requested_corners - set(profile.process_corners))
+        if missing_corners:
+            raise UnsupportedCapability(
+                f"PDK profile {profile.name} does not map process corner(s): "
+                + ", ".join(missing_corners)
+            )
     if task.operation is Operation.SCHEMATIC_TRANSFORM:
         expected = (
             {"vdd_v", "load_ff"}

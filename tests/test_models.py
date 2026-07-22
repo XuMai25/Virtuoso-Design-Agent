@@ -32,6 +32,146 @@ def test_default_pdk_is_the_verified_tsmc_n28_foundry_profile() -> None:
     assert task.pdk_profile == DEFAULT_PDK_PROFILE
 
 
+def test_common_source_simulation_accepts_explicit_finite_pvt_conditions() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "cs-pvt-quality",
+            "operation": "simulation.run",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "analysis": "quality",
+            "ac_sweep": {"start_hz": 1e4, "stop_hz": 1e11},
+            "linearity_sweep": {
+                "frequency_hz": 100e6,
+                "amplitudes_v": [0.005, 0.05],
+            },
+            "noise_sweep": {"start_hz": 1e3, "stop_hz": 1e10},
+            "parameters": {"bias_v": 0.35, "load_ff": 1.0},
+            "operating_conditions": [
+                {
+                    "name": "tt_25c_0p90v",
+                    "process_corner": "tt",
+                    "temperature_c": 25.0,
+                    "vdd_v": 0.9,
+                },
+                {
+                    "name": "ss_125c_0p81v",
+                    "process_corner": "ss",
+                    "temperature_c": 125.0,
+                    "vdd_v": 0.81,
+                },
+            ],
+            "safety": {"allow_remote_compute": True},
+        }
+    )
+
+    assert [condition.name for condition in task.operating_conditions] == [
+        "tt_25c_0p90v",
+        "ss_125c_0p81v",
+    ]
+    assert task.operating_conditions[1].temperature_c == 125.0
+
+
+@pytest.mark.parametrize(
+    ("conditions", "message"),
+    [
+        (
+            [
+                {
+                    "name": "same",
+                    "process_corner": "tt",
+                    "temperature_c": 25.0,
+                    "vdd_v": 0.9,
+                },
+                {
+                    "name": "same",
+                    "process_corner": "ss",
+                    "temperature_c": 125.0,
+                    "vdd_v": 0.81,
+                },
+            ],
+            "unique names",
+        ),
+        (
+            [
+                {
+                    "name": "tt",
+                    "process_corner": "tt",
+                    "temperature_c": 25.0,
+                    "vdd_v": 0.9,
+                },
+                {
+                    "name": "ss",
+                    "process_corner": "ss",
+                    "temperature_c": 125.0,
+                },
+            ],
+            "all provide vdd_v or all inherit",
+        ),
+    ],
+)
+def test_pvt_conditions_reject_ambiguous_grids(conditions, message) -> None:
+    data = {
+        "id": "cs-invalid-pvt",
+        "operation": "simulation.run",
+        "circuit": "common_source",
+        "target": {"library": "vda_test", "cell": "vda_cs"},
+        "parameters": {"bias_v": 0.35},
+        "operating_conditions": conditions,
+    }
+
+    with pytest.raises(ValidationError, match=message):
+        TaskSpec.model_validate(data)
+
+
+def test_pvt_conditions_are_verification_only_and_cannot_override_task_vdd() -> None:
+    base = {
+        "id": "cs-invalid-pvt-scope",
+        "operation": "simulation.run",
+        "circuit": "common_source",
+        "target": {"library": "vda_test", "cell": "vda_cs"},
+        "parameters": {"bias_v": 0.35, "vdd_v": 0.9},
+        "operating_conditions": [
+            {
+                "name": "tt",
+                "process_corner": "tt",
+                "temperature_c": 25.0,
+                "vdd_v": 0.9,
+            }
+        ],
+    }
+    with pytest.raises(ValidationError, match="must not also declare vdd_v"):
+        TaskSpec.model_validate(base)
+
+    base["operation"] = "design.tune"
+    base["parameters"] = {"bias_v": 0.35}
+    base["parameter_space"] = {"length_um": [0.03, 0.04]}
+    with pytest.raises(ValidationError, match="currently verification-only"):
+        TaskSpec.model_validate(base)
+
+
+def test_plan_rejects_process_corner_absent_from_selected_profile() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "cs-unknown-corner",
+            "operation": "simulation.run",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "parameters": {"bias_v": 0.35, "vdd_v": 0.9},
+            "operating_conditions": [
+                {
+                    "name": "unknown",
+                    "process_corner": "not_a_real_corner",
+                    "temperature_c": 25.0,
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(UnsupportedCapability, match="not_a_real_corner"):
+        build_plan(task)
+
+
 def test_tuning_requires_parameter_space() -> None:
     data = _base_task()
     data["parameter_space"] = {}

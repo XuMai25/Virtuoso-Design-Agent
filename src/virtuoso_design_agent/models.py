@@ -150,6 +150,23 @@ class Objective(StrictModel):
     goal: ObjectiveGoal = ObjectiveGoal.MINIMIZE
 
 
+class OperatingCondition(StrictModel):
+    """One explicit process/voltage/temperature verification condition."""
+
+    name: StrictStr = Field(
+        min_length=1,
+        max_length=96,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
+    process_corner: StrictStr = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
+    temperature_c: float = Field(ge=-273.15, le=300.0)
+    vdd_v: float | None = Field(default=None, gt=0.0, le=10.0)
+
+
 class ExecutionLimits(StrictModel):
     max_iterations: int = Field(default=12, ge=1, le=64)
     timeout_seconds: int = Field(default=600, ge=10, le=7200)
@@ -1351,6 +1368,10 @@ class TaskSpec(StrictModel):
     ade_variables: AdeVariablesApplySpec | None = None
     ade_corners: AdeCornersApplySpec | None = None
     ade_setup: AdeSetupApplySpec | None = None
+    operating_conditions: list[OperatingCondition] = Field(
+        default_factory=list,
+        max_length=5,
+    )
     parameters: dict[str, float] = Field(default_factory=dict)
     instance_parameter_updates: list[InstanceParameterUpdate] = Field(
         default_factory=list
@@ -1386,6 +1407,38 @@ class TaskSpec(StrictModel):
 
     @model_validator(mode="after")
     def validate_operation_inputs(self) -> "TaskSpec":
+        if self.operating_conditions:
+            if self.operation is not Operation.SIMULATION_RUN:
+                raise ValueError(
+                    "operating_conditions are currently verification-only and "
+                    "require operation='simulation.run'"
+                )
+            if self.circuit is not CircuitKind.COMMON_SOURCE:
+                raise ValueError(
+                    "operating_conditions currently support only common_source"
+                )
+            names = [condition.name for condition in self.operating_conditions]
+            if len(names) != len(set(names)):
+                raise ValueError("operating_conditions require unique names")
+            condition_vdds = [
+                condition.vdd_v is not None
+                for condition in self.operating_conditions
+            ]
+            if any(condition_vdds) and not all(condition_vdds):
+                raise ValueError(
+                    "operating_conditions must all provide vdd_v or all inherit "
+                    "one task-level vdd_v"
+                )
+            if all(condition_vdds) and "vdd_v" in self.parameters:
+                raise ValueError(
+                    "operating_conditions with per-condition supplies must not "
+                    "also declare vdd_v in task parameters"
+                )
+            if not any(condition_vdds) and "vdd_v" not in self.parameters:
+                raise ValueError(
+                    "operating_conditions without per-condition supplies require "
+                    "one explicit task-level vdd_v"
+                )
         analysis_settings = (
             self.analysis is not None
             or self.ac_sweep is not None
@@ -1743,6 +1796,27 @@ class CandidateEvaluation(StrictModel):
     analysis_complete: bool = True
     analysis_issues: list[str] = Field(default_factory=list)
     analysis_warnings: list[str] = Field(default_factory=list)
+    operating_conditions: list["OperatingConditionEvaluation"] = Field(
+        default_factory=list
+    )
+
+
+class OperatingConditionEvaluation(StrictModel):
+    name: str
+    process_corner: str
+    temperature_c: float
+    vdd_v: float
+    parameters: dict[str, float]
+    metrics: dict[str, float]
+    constraints: list[ConstraintEvaluation]
+    feasible: bool
+    total_violation: float
+    objective_value: float | None = None
+    evidence_source: EvidenceSource
+    metric_sources: dict[str, EvidenceSource] = Field(default_factory=dict)
+    analysis_complete: bool = True
+    analysis_issues: list[str] = Field(default_factory=list)
+    analysis_warnings: list[str] = Field(default_factory=list)
 
 
 class ActionRecord(StrictModel):
@@ -1785,6 +1859,14 @@ class ExecutionCheckpoint(StrictModel):
     complete: bool = False
 
 
+class SpectreModelInclude(StrictModel):
+    path: str = Field(min_length=1)
+    section: str = Field(
+        min_length=1,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_]*$",
+    )
+
+
 class PdkProfile(StrictModel):
     name: str
     tech_library: str
@@ -1801,6 +1883,9 @@ class PdkProfile(StrictModel):
     default_common_source_width_um: float = Field(gt=0)
     default_common_source_bias_v: float = Field(gt=0)
     default_common_source_load_resistance_ohm: float = Field(gt=0)
+    process_corners: dict[str, list[SpectreModelInclude]] = Field(
+        default_factory=dict
+    )
 
     @model_validator(mode="after")
     def validate_remote_write_paths(self) -> "PdkProfile":
@@ -1808,4 +1893,14 @@ class PdkProfile(StrictModel):
             value = getattr(self, name)
             if not value.startswith("/data/xum/"):
                 raise ValueError(f"{name} must stay under /data/xum")
+        for corner, includes in self.process_corners.items():
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", corner):
+                raise ValueError(f"invalid process corner name: {corner!r}")
+            if not includes:
+                raise ValueError(f"process corner {corner!r} has no model includes")
+            identities = [(item.path, item.section) for item in includes]
+            if len(identities) != len(set(identities)):
+                raise ValueError(
+                    f"process corner {corner!r} repeats a model include"
+                )
         return self

@@ -60,6 +60,8 @@ VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PD
 
 `analysis` 与电路参数分离。反相器省略时解析为 `transient`，共源级省略时解析为 `dc`；共源 AC 必须显式声明 `analysis: "ac"` 以及 `ac_sweep.start_hz/stop_hz`。固定多 analysis 质量门使用 `analysis: "quality"`，并要求 `ac_sweep`、`linearity_sweep`、`noise_sweep` 同时存在。扫频点密度、低频参考点数、参考窗变化、线性度窗口和噪声频带都属于任务与 plan token。这样换 analysis 或改变指标定义不会复用旧 token，也不会把默认设置伪装成 `user_input`。
 
+`operating_conditions` 是独立于设计参数的有限验证集合。当前只允许 common-source `simulation.run`：每项显式声明唯一名称、PDK profile 已映射的 `process_corner`、温度和可选 VDD；同一任务最多五项。worker 只回读一次 OA、只生成并核对一次 `si` 网表，再为每个条件生成 AC/transient/noise wrapper。executor 保留每个条件的原始指标和判定，要求全部完整且全部满足约束；maximize objective 取各条件最小值，minimize objective 取最大值。跨条件聚合是 `software_inference`，不能覆盖各条件 `eda_result`。该字段暂不允许与 `design.tune`/`design.close_loop` 组合，直到候选级 PVT checkpoint、不可行恢复和最佳 OA 写回单独通过 Gate。
+
 `schematic.transform` 不等同于重建模板。共源 transform 要求目标先通过 VDA common-source 结构检查，然后在同一 cellview 中把 MN0 源极标签从 VSS 改为内部网 `NSRC`，新增 `analogLib/RS0(NSRC,VSS)` 并设置 `source_resistance_ohm`。反相器 testbench transform 则要求现有 cell 是 MN0/MP0 core 或已经完成同一变更；它保留 MOS/pins，只把地归一到 `gnd!` 并增加固定的 `VDD0/VIN0/CL0/GND0`，其中供电和负载来自显式任务参数。两者都强制使用 Bridge editor append mode；preflight 拒绝带未保存改动的目标，编辑 batch 失败时只 purge 未保存缓存且不保存。前后回读必须证明未点名器件的完整参数、master、位置和顶层 pins 保持不变，重复调用幂等。为了避免把任意图编辑伪装成安全能力，当前没有通用图重写 DSL，也没有自动逆变换。若保存已成功而后置审计失败，目前会保留失败和真实 OA 状态，尚没有通用 snapshot 回滚。
 
 ## 两层参数契约
@@ -72,6 +74,8 @@ VDA 保留两种用途不同的参数表示：
 `existing_schematic` 是不依赖固定拓扑模板的通用 circuit kind，开放 `schematic.inspect`、`parameters.apply`、`ade.prepare`、`ade.capture`、`ade.run`、`ade.corners.apply`、`ade.variables.apply` 与 `ade.setup.apply`：前者保留 Bridge reader 的完整结构对象、geometry、notes、nets/pins 细节和所有可回读 CDF 参数；参数操作允许人工指定任意已有实例；ADE 操作则为已有 design 准备新的 Maestro 人工入口、读取人工状态、后台运行一个已保存 setup，或用显式旧状态前置条件增量修改 corner、变量/selection、analysis 和新增 output/spec，不要求 VDA 理解 DUT 拓扑。反相器和共源模板也能使用相同原始参数与 ADE 交接路径，并可在一个参数任务中组合 semantic parameters 与原始实例参数；semantic 写入先执行，原始 CDF callback 后执行，最终 OA 必须同时满足所有已声明 semantic 值和原始字段值。
 
 执行路径先结构化回读目标 schematic 并确认实例存在，再复用 Bridge 的 `set_instance_params(..., param_filters=None)` 触发 CDF callback、`schCheck` 和 `dbSave`。通用 reader 为控制输出会省略空值和超长值，因此 VDA 不用摘要缺失来限制 Bridge：写入后另发只读 SKILL，直接打开目标 OA、定位实例 CDF，并逐字段比较真实 `p~>value` 与请求字符串；executor 的 `schematic.inspect.after` 再独立执行一次同样的定向读取。首次值不一致时，worker 至多按任务声明顺序逐字段重放一次；计划必须披露该副作用，最终仍不一致则整个 run 失败。
+
+Bridge 0.7.0 的公共 `set_instance_params` 通过 `geGetEditCellView()` 选择写入目标，而公共 `open_window` 在已有窗口时只执行 `hiRaiseWindow`，不会保证该窗口成为当前 edit window。2026-07-22 的 L/VDD 首轮因此在另一个已打开的反相器窗口中错误解析实例，并以 `RD0` 不存在停止；没有把该系统错误记作电路不可行。VDA 的兼容层现在先调用 Bridge `open_window`，再用同一 SKILL channel 执行 `hiSetCurrentWindow`，立即核对当前 library/cell/view 完全匹配，最后仍调用 Bridge 原公共参数写入函数。这里没有复制 CDF callback、`schCheck`、保存或 transport，也没有修改第三方 Bridge 仓库；它是 Bridge 0.7.0 的显式兼容依赖，升级 Bridge 后必须回归目标聚焦测试。
 
 定向读取的字段名来自 Bridge 写入函数返回的实际应用映射，而不是 VDA 复制的别名表。因此 Bridge 公开的 `wf -> Wfg`、`nf -> fingers` 等简写仍可使用；run record 同时保存原始请求和 Bridge 报告的实际 CDF 目标。
 
@@ -114,6 +118,8 @@ corner membership 使用正交的 `ade.corners.apply`，不塞进 variable patch
 首版本只新增不存在的命名 output，不替换已有 output：Bridge public writer 没有暴露删除接口，而仅凭同名 `add_output` 无法证明是更新、重复还是丢失未建模的 plot/save/description 状态。VDA 没有删除或屏蔽 Bridge 原有接口；需要直接使用 Bridge 的场景仍可独立进行。要把已有 output 替换纳入受控 operation，必须先扩充完整旧状态契约、删除/恢复语义和 live smoke。analysis options 当前只接受可精确回读的扁平 string/bool/null alist；嵌套 option 返回会保守失败而非丢弃。
 
 当前受支持的持久化后端是 `maestro`，因为这是 Bridge 已公开并带 setup/history/result API 的路径。Bridge 同时提供 ADE L state 到 Maestro 的迁移原语，但 VDA 尚未把迁移包装成 operation，也不会在没有备份、目标冲突检查和 live smoke 时改写旧 state。2026-07-21 已在 nics4304 真实通过 `ade.prepare → ade.setup.apply → ade.run/resume`；2026-07-22 又真实通过 global 与 test/corner scoped `ade.variables.apply`、add-only `ade.corners.apply`、global selection CAS、原生 CL/VDD×CL/point×corner sweep 的输入束/RDB/Detail 绑定，以及表达式固定的 delay/skew/周期供电能量到 VDA constraints/objective 的映射。`ade.capture` 的人工入口、已有 output 安全替换、真实 process/temperature corner、multi-test/multi-analysis mapping 和共源 L/VDD 联合搜索仍待 live；需要打开 ADE、旧 ADE L 迁移和人工数值对照的 Gate 已延期到 [`deferred-manual-gates.md`](deferred-manual-gates.md)。人工改动必须通过前置条件、setup/output 指纹或重新 snapshot 被发现，而不是被 VDA 静默覆盖。
+
+这里的待验证项只针对 Maestro/ADE setup；direct common-source `si`/Spectre 已另行通过 L/VDD 和 fixed-design TT/SS/FF，二者不会静默共享状态或证据。
 
 ## 反相器同源仿真路径
 
@@ -167,7 +173,7 @@ Spectre 的通用 `dcOpInfo` 在当前 Bridge parser 中以器件聚合对象出
 
 工作区分类不读取一个未验证的模型枚举值：`saturation_region` 由 Spectre 给出的 `VDS`、`VDSAT` 和 `IDS` 按显式规则推导，标为 `software_inference`；原始器件量、节点量和从它们计算的连续指标标为 `eda_result`。Gate 2A 已在 `vb_pdk_smoke/vda_cs_gate2a_001/schematic` 完成 6 点真实搜索和最终独立 OA→si→DC OP 复核。
 
-源极退化沿用该路径而不复制 executor：结构回读动态返回 `topology_variant`；`si` parser 在同一 common-source action 中要求 `MN0(OUT IN NSRC VSS)` 与 `RS0(NSRC VSS)`，并把 RS0.r 纳入 OA/网表参数一致性；DC wrapper 额外保存 NSRC，器件 VGS/VDS 改由 NSRC 计算，同时核对 MN0/RD0 与 MN0/RS0 两组 KCL。`source_resistance_ohm` 可直接进入原有有限 `parameter_space`。2026-07-20 的真实 smoke 已完成原位 transform、DC/AC、有限搜索、W/RD/RS AC design tuning、checkpoint 恢复和最佳回读；2026-07-21 又把同一参数 staging/writeback 路径接入多 analysis 质量组合。尚未闭合的是 L/VDD、corner 和更复杂拓扑，而不是基本 gain/bandwidth 或 W/RD/RS 质量调优执行路径。
+源极退化沿用该路径而不复制 executor：结构回读动态返回 `topology_variant`；`si` parser 在同一 common-source action 中要求 `MN0(OUT IN NSRC VSS)` 与 `RS0(NSRC VSS)`，并把 RS0.r 纳入 OA/网表参数一致性；DC wrapper 额外保存 NSRC，器件 VGS/VDS 改由 NSRC 计算，同时核对 MN0/RD0 与 MN0/RS0 两组 KCL。`source_resistance_ohm` 可直接进入原有有限 `parameter_space`。2026-07-20/21 的真实 smoke 已完成原位 transform、DC/AC、W/RD/RS 搜索、多 analysis 质量组合、checkpoint 恢复和最佳回读；2026-07-22 又闭合 L/VDD 四点质量搜索和固定设计的有限 PVT 验证。尚未闭合的是 PVT-aware 设计参数调优和更复杂拓扑，而不是基本 gain/bandwidth、W/RD/RS/L/VDD 或固定设计 corner 验证路径。
 
 AC 没有第二套 topology、netlister 或 executor。相同 wrapper 保留 `dcOp/info`，把 VIN 设为 DC bias + unit AC source，可选加入任务声明的 `CL0=load_ff`，再运行对数 AC sweep。Bridge 现有 PSFASCII parser 原样返回 `ac_freq/ac_IN/ac_OUT` 的复数向量；VDA 不修改 Bridge，也不把幅度解析复制回第三方库，而是在 worker 内计算复数传递函数 `H(f)=VOUT/VIN`。
 
@@ -197,8 +203,16 @@ AC 核心结果只有在 DC 工作点为饱和、低频参考足够平坦且扫�
 
 同日的 8 点 W/RD/RS 质量搜索把上述证据门接入原有 OA candidate staging：每个候选先写入并回读，再从该 OA 生成一份网表供三项分析复用。候选 4 的 Spectre upload timeout 后，自动恢复 readback 也失败，checkpoint 因此保留 3 个完成候选和未确认 OA 状态；连接恢复后 `schematic.inspect.resume` 发现 OA 仍为候选 4，只重跑 4–8，最终写回并回读 GBW 最优点。全不可行任务恢复初始 OA 后，run record 不再把“最接近但未提交”的候选放进 `selected_parameters`；尝试证据仍完整保留在 `candidates`。另一个只改变 objective 的两点任务自动把 RS 从 1 kΩ 写为 2 kΩ，证明 THD 优先时同一工作流会选择不同于 GBW 优先的设计，而不是只生成更多指标。
 
+2026-07-22 的 L/VDD Gate 在同一 `vda_cs_ac_tradeoff_001` 上固定 W=1 µm、RD=20 kΩ、RS=2 kΩ、bias=0.35 V、load=1 fF，搜索 `L=[0.03,0.04] µm × VDD=[0.8,0.9] V`。L 属于 OA 设计参数，逐候选写入、回读并进入 `si` 网表；VDD 只存在于三个 testbench wrapper。四个候选均完成 AC/transient/noise 且通过约束，GBW objective 选择 `L=0.03 µm/VDD=0.9 V`，最终只把 OA 子集写回并独立回读。两种 L 分别产生不同 netlist SHA，同一 L 的两个 VDD 点复用相同结构 netlist SHA，证明两层参数契约按预期分离。
+
+随后 fixed-design PVT Gate 对这一 OA 只读执行 TT/25℃/0.90V、SS/125℃/0.81V、FF/−40℃/0.99V。`nics4304_tsmc28` profile 为每个角显式列出 MOS/MOSCAP、res/bip/dio/disres、MOM 和 metal-R 四个 section；wrapper 另写 `simulatorOptions temp=...`。三条件共九个唯一 wrapper 共享一份 `si` 网表和 OA readback，各项分析完整、全部约束通过；SS 是 GBW 等多项指标的最坏角。run record 的 testbench evidence 保存 profile、角名、温度、四个 include path/section、wrapper SHA 和来源，避免只凭角名推断实际模型输入。该 Gate 是有限三条件验证，不是完整 foundry signoff corner set、Monte Carlo/mismatch，也不是跨 PVT 的设计候选优化。
+
 ## 证据链
 
 每次运行至少保存任务和计划 token、adapter 与证据来源、动作状态、候选参数、仿真指标、逐条规格判定、最终选择、OA 回读摘要，以及错误和未验证边界。显式实例写入还保存请求、写入前目标字段、立即确认和独立 inspect 的完整参数表。ADE `prepare` 保存 design/test/simulator 请求、持久化 view/test 回读、未覆盖既有 view 以及没有设置 analysis/sweep 的范围；`capture` 保存焦点目标、是否已保存、setup/simulation 聚合指纹、逐文件 manifest、history 选择来源以及可用时的逐点 output/spec；变量/setup patch 保存声明目标、全部旧值、即时值、独立重开值、targeted 前后指纹及未覆盖范围，并明确记录没有运行仿真；严格 sweep run 还保存 setup 前后 scope 指纹、每个 point 的 Detail 参数/非空 output、逐 test input/result hash、OA/input comparison hash 和逐点绑定指纹。存在显式 legacy output evaluation-error 契约时，还保存任务期望、RDB 实际错误单元格、completion-log 数量、逐项匹配和零未解释错误；启用 result mapping 时再保存 output expression 前后状态/指纹、显式 scale、映射后的候选、逐条 constraint 与 selection。调优 checkpoint 保留历史失败 actions，但恢复后只有完成的候选证据参与选择；最终 run 可以在完整证据和最终回读成立时成功，同时仍显式留下已恢复的 transport 事件。自动 netlisting 还保存远端网表/wrapper 路径、SHA-256、解析后的实例参数和一致性结论。
 
+有限 PVT 还保存每个原始 condition 的完整 `CandidateEvaluation`、同一 OA/netlist identity、每个 analysis 的 testbench/model manifest、独立 noise PSF，以及跨条件 `all_conditions_required`/worst-case 聚合。缺一个条件、条件顺序或值与任务不一致、任一 analysis 不完整、netlist 漂移或 model corner 未映射都直接失败，不会降级为 nominal 结果。
+
 timing、过冲/欠冲、`supply_energy_per_cycle_fj`、`average_supply_power_uw`、共源 DC/供电连续指标，以及从 AC、相干 transient 或 noise PSF 提取的连续量标为 `eda_result`；OA 结构和参数标为 `bridge_readback`；任务显式给出的 VDD、负载、偏置、analysis 或 sweep 字段标为 `user_input`；默认 analysis/sweep 字段、`gate_area_proxy_um2=(Wn+Wp)L`、饱和区分类、交点/压缩点规则和指标完整性判断是 `software_inference`。供电能量或功耗保留积分窗口和源电流方向，不能称为纯动态开关能量；AC、linearity 和 noise 指标也必须保存提取公式、范围和 unresolved 诊断，不能只保存一个无来源标量。后续 Maestro、Calibre 和 PEX 沿用同一证据模型。
+
+PVT 中的角名、温度和逐角 VDD 是 `user_input`；profile include 映射来自 `pdk_profile`，映射选择及 manifest 组合标为 `software_inference`；每角 Spectre 标量/波形指标仍是 `eda_result`；跨角保守 constraint/objective 值全部标为 `software_inference`。因此聚合最坏值不能被误读为某个单独 Spectre analysis 直接输出的标量。

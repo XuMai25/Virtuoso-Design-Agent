@@ -25,6 +25,8 @@ from .models import (
     ExecutionPlan,
     ObjectiveGoal,
     Operation,
+    OperatingConditionEvaluation,
+    Relation,
     RunRecord,
     RunStatus,
     TaskSpec,
@@ -104,6 +106,15 @@ class TaskExecutor:
         parameters: dict[str, float],
         simulation: AdapterResult,
     ) -> CandidateEvaluation:
+        raw_conditions = simulation.data.get("operating_condition_results")
+        if raw_conditions is not None:
+            return TaskExecutor._evaluate_operating_condition_candidate(
+                task,
+                index,
+                parameters,
+                simulation,
+                raw_conditions,
+            )
         metrics = {
             str(name): float(value)
             for name, value in simulation.data.get("metrics", {}).items()
@@ -150,6 +161,206 @@ class TaskExecutor:
             analysis_complete=analysis_complete,
             analysis_issues=analysis_issues,
             analysis_warnings=analysis_warnings,
+        )
+
+    @staticmethod
+    def _evaluate_operating_condition_candidate(
+        task: TaskSpec,
+        index: int,
+        parameters: dict[str, float],
+        simulation: AdapterResult,
+        raw_conditions: Any,
+    ) -> CandidateEvaluation:
+        if not isinstance(raw_conditions, list) or not raw_conditions:
+            raise RuntimeError("operating-condition simulation returned no cases")
+        expected = [
+            condition.model_dump(mode="json")
+            for condition in task.operating_conditions
+        ]
+        if len(raw_conditions) != len(expected):
+            raise RuntimeError(
+                "operating-condition simulation did not return every declared case"
+            )
+
+        evaluations: list[OperatingConditionEvaluation] = []
+        for position, (raw, expected_condition) in enumerate(
+            zip(raw_conditions, expected, strict=True), start=1
+        ):
+            if not isinstance(raw, dict) or not isinstance(raw.get("result"), dict):
+                raise RuntimeError(
+                    f"operating-condition result {position} is not structured"
+                )
+            condition = raw.get("condition")
+            if condition != expected_condition:
+                raise RuntimeError(
+                    "operating-condition result identity/order does not match the task"
+                )
+            result = raw["result"]
+            metrics = {
+                str(name): float(value)
+                for name, value in result.get("metrics", {}).items()
+            }
+            constraints = evaluate_constraints(metrics, task.constraints)
+            objective_value = (
+                metrics.get(task.objective.metric)
+                if task.objective is not None
+                else None
+            )
+            objective_missing = (
+                task.objective is not None and objective_value is None
+            )
+            analysis_complete = bool(result.get("analysis_complete", True))
+            analysis_issues = [
+                str(value) for value in result.get("analysis_issues", [])
+            ]
+            analysis_warnings = [
+                str(value) for value in result.get("analysis_warnings", [])
+            ]
+            if not analysis_complete and not analysis_issues:
+                analysis_issues = [
+                    "analysis did not produce its required core metrics"
+                ]
+            raw_sources = result.get("metric_sources", {})
+            metric_sources = {
+                name: EvidenceSource(
+                    raw_sources.get(name, simulation.evidence_source)
+                )
+                for name in metrics
+            }
+            evaluated_parameters = {
+                str(name): float(value)
+                for name, value in result.get("parameters", parameters).items()
+            }
+            effective_vdd = (
+                expected_condition["vdd_v"]
+                if expected_condition["vdd_v"] is not None
+                else task.parameters["vdd_v"]
+            )
+            if not math.isclose(
+                float(evaluated_parameters.get("vdd_v", float("nan"))),
+                float(effective_vdd),
+                rel_tol=1e-9,
+                abs_tol=1e-12,
+            ):
+                raise RuntimeError(
+                    f"operating condition {expected_condition['name']} did not "
+                    "confirm its effective vdd_v"
+                )
+            evaluations.append(
+                OperatingConditionEvaluation(
+                    name=str(expected_condition["name"]),
+                    process_corner=str(expected_condition["process_corner"]),
+                    temperature_c=float(expected_condition["temperature_c"]),
+                    vdd_v=float(effective_vdd),
+                    parameters=evaluated_parameters,
+                    metrics=metrics,
+                    constraints=constraints,
+                    feasible=(
+                        all(item.passed for item in constraints)
+                        and not objective_missing
+                        and analysis_complete
+                    ),
+                    total_violation=(
+                        sum(item.normalized_violation for item in constraints)
+                        + (1_000_000.0 if objective_missing else 0.0)
+                        + (1_000_000.0 if not analysis_complete else 0.0)
+                    ),
+                    objective_value=objective_value,
+                    evidence_source=simulation.evidence_source,
+                    metric_sources=metric_sources,
+                    analysis_complete=analysis_complete,
+                    analysis_issues=analysis_issues,
+                    analysis_warnings=analysis_warnings,
+                )
+            )
+
+        aggregate_metrics: dict[str, float] = {}
+        aggregate_constraints = []
+        for constraint_index, constraint in enumerate(task.constraints):
+            rows = [item.constraints[constraint_index] for item in evaluations]
+            if constraint.relation is Relation.LESS_OR_EQUAL:
+                worst = max(
+                    rows,
+                    key=lambda item: (
+                        item.normalized_violation,
+                        -math.inf if item.actual is None else item.actual,
+                    ),
+                )
+            elif constraint.relation is Relation.GREATER_OR_EQUAL:
+                worst = max(
+                    rows,
+                    key=lambda item: (
+                        item.normalized_violation,
+                        math.inf if item.actual is None else -item.actual,
+                    ),
+                )
+            else:
+                worst = max(
+                    rows,
+                    key=lambda item: (
+                        item.normalized_violation,
+                        math.inf
+                        if item.actual is None
+                        else abs(item.actual - constraint.value),
+                    ),
+                )
+            aggregate_constraints.append(worst)
+            if worst.actual is not None:
+                aggregate_metrics[constraint.metric] = float(worst.actual)
+
+        objective_value: float | None = None
+        if task.objective is not None:
+            objective_values = [
+                item.objective_value
+                for item in evaluations
+                if item.objective_value is not None
+            ]
+            if len(objective_values) == len(evaluations):
+                objective_value = (
+                    max(objective_values)
+                    if task.objective.goal is ObjectiveGoal.MINIMIZE
+                    else min(objective_values)
+                )
+                aggregate_metrics[task.objective.metric] = float(objective_value)
+
+        analysis_complete = all(item.analysis_complete for item in evaluations)
+        analysis_issues = [
+            f"{item.name}: {issue}"
+            for item in evaluations
+            for issue in item.analysis_issues
+        ]
+        analysis_warnings = [
+            f"{item.name}: {warning}"
+            for item in evaluations
+            for warning in item.analysis_warnings
+        ]
+        evaluated_parameters = {
+            str(name): float(value)
+            for name, value in simulation.data.get("parameters", parameters).items()
+        }
+        objective_missing = task.objective is not None and objective_value is None
+        feasible = (
+            all(item.feasible for item in evaluations)
+            and not objective_missing
+            and analysis_complete
+        )
+        return CandidateEvaluation(
+            index=index,
+            parameters=evaluated_parameters,
+            metrics=aggregate_metrics,
+            constraints=aggregate_constraints,
+            feasible=feasible,
+            total_violation=sum(item.total_violation for item in evaluations),
+            objective_value=objective_value,
+            evidence_source=simulation.evidence_source,
+            metric_sources={
+                name: EvidenceSource.SOFTWARE_INFERENCE
+                for name in aggregate_metrics
+            },
+            analysis_complete=analysis_complete,
+            analysis_issues=analysis_issues,
+            analysis_warnings=analysis_warnings,
+            operating_conditions=evaluations,
         )
 
     @staticmethod
@@ -2863,7 +3074,18 @@ class TaskExecutor:
                         notes.append("simulation produced no completed EDA result")
                     elif not selected.feasible:
                         status = RunStatus.PARTIAL
-                        if selected.analysis_issues:
+                        failed_conditions = [
+                            condition.name
+                            for condition in selected.operating_conditions
+                            if not condition.feasible
+                        ]
+                        if failed_conditions:
+                            notes.append(
+                                "simulation completed, but not every declared "
+                                "operating condition met the full specification: "
+                                + ", ".join(failed_conditions)
+                            )
+                        elif selected.analysis_issues:
                             notes.append(
                                 "simulation completed but required analysis metrics were "
                                 "incomplete: " + "; ".join(selected.analysis_issues)

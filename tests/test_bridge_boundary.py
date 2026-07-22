@@ -30,16 +30,19 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     _common_source_instance_parameter_updates,
     _common_source_device_geometry_from_schematic,
     _common_source_metrics_from_result,
+    _common_source_model_manifest,
     _common_source_testbench_deck,
     _complex_signal,
     _complete_si_env,
     _discard_failed_existing_schematic_edit,
     _edit_existing_schematic,
     _generate_oa_netlist,
+    _focus_target_schematic,
     _inverter_testbench_deck,
     _instance_parameters_from_schematic,
     _has_structured_ade_outputs,
     _manifest_fingerprint,
+    _merge_common_source_operating_condition_results,
     _parse_common_source_netlist,
     _parse_inverter_netlist,
     _preflight_mn0_source_label,
@@ -50,6 +53,7 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     _requested_instance_parameters,
     _schematic_exists,
     _signal,
+    _simulate_common_source_operating_conditions,
     _validate_si_log,
     _verify_instance_parameter_values,
     prepare_maestro,
@@ -4184,6 +4188,185 @@ def test_common_source_ac_deck_reuses_oa_topology_and_adds_only_testbench() -> N
     assert "RD0 (" not in deck
 
 
+def test_common_source_pvt_deck_uses_profile_mapped_process_and_temperature() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump(mode="json")
+    condition = {
+        "name": "ss_125c_0p81v",
+        "process_corner": "ss",
+        "temperature_c": 125.0,
+        "vdd_v": 0.81,
+    }
+    deck = _common_source_testbench_deck(
+        profile,
+        {
+            "device_width_um": 1.0,
+            "length_um": 0.03,
+            "load_resistance_ohm": 20_000.0,
+            "bias_v": 0.35,
+            "vdd_v": 0.81,
+            "load_ff": 1.0,
+        },
+        "/data/xum/virtuoso_bridge_smoke/vda_cs_pvt/netlist",
+        analysis="ac",
+        ac_sweep={"start_hz": 1e4, "stop_hz": 1e11},
+        operating_condition=condition,
+    )
+    manifest = _common_source_model_manifest(profile, condition)
+
+    assert 'include "' + profile["model_include"] + '" section=top_tt' not in deck
+    for section in (
+        "ssmacro_mos_moscap",
+        "ss_res_bip_dio_disres",
+        "ss_mom",
+        "ss_r_metal",
+    ):
+        assert f"section={section}" in deck
+    assert "simulatorOptions options temp=125" in deck
+    assert "parameters vdd=0.81" in deck
+    assert manifest == {
+        "source": "software_inference",
+        "profile": "nics4304_tsmc28",
+        "profile_source": "pdk_profile",
+        "process_corner": "ss",
+        "process_corner_source": "user_input",
+        "temperature_c": 125.0,
+        "temperature_source": "user_input",
+        "includes": profile["process_corners"]["ss"],
+    }
+
+
+def test_common_source_pvt_bundle_keeps_per_condition_results_and_one_netlist() -> None:
+    conditions = [
+        {
+            "name": "tt_25c_0p90v",
+            "process_corner": "tt",
+            "temperature_c": 25.0,
+            "vdd_v": 0.9,
+        },
+        {
+            "name": "ss_125c_0p81v",
+            "process_corner": "ss",
+            "temperature_c": 125.0,
+            "vdd_v": 0.81,
+        },
+    ]
+    schematic = {"source": "bridge_readback", "semantic_parameters": {"length_um": 0.03}}
+    netlist = {"source": "eda_result", "remote_path": "/data/xum/vda/netlist", "sha256": "a" * 64}
+
+    def result(vdd_v: float, gain: float) -> dict:
+        return {
+            "parameters": {
+                "device_width_um": 1.0,
+                "length_um": 0.03,
+                "load_resistance_ohm": 20_000.0,
+                "bias_v": 0.35,
+                "vdd_v": vdd_v,
+            },
+            "metrics": {"low_frequency_gain_v_per_v": gain},
+            "metric_sources": {"low_frequency_gain_v_per_v": "eda_result"},
+            "analysis_complete": True,
+            "analysis_issues": [],
+            "analysis_warnings": [],
+            "evidence": {
+                "schematic_readback": schematic,
+                "netlist": netlist,
+            },
+        }
+
+    merged = _merge_common_source_operating_condition_results(
+        {
+            "parameters": {"bias_v": 0.35},
+            "operating_conditions": conditions,
+            "operating_conditions_source": "user_input",
+        },
+        [
+            (conditions[0], result(0.9, 3.0)),
+            (conditions[1], result(0.81, 2.0)),
+        ],
+    )
+
+    assert merged["analysis_complete"] is True
+    assert "vdd_v" not in merged["parameters"]
+    assert merged["parameters"]["length_um"] == pytest.approx(0.03)
+    assert [
+        row["condition"]["name"]
+        for row in merged["operating_condition_results"]
+    ] == ["tt_25c_0p90v", "ss_125c_0p81v"]
+    bundle = merged["evidence"]["operating_condition_bundle"]
+    assert bundle["oa_netlist_reuse"] == "one_verified_netlist"
+    assert bundle["requested_conditions_source"] == "user_input"
+
+    drifted = result(0.81, 2.0)
+    drifted["evidence"] = dict(drifted["evidence"])
+    drifted["evidence"]["netlist"] = netlist | {"sha256": "b" * 64}
+    with pytest.raises(RuntimeError, match="identical OA/netlist evidence"):
+        _merge_common_source_operating_condition_results(
+            {"parameters": {}, "operating_conditions": conditions},
+            [(conditions[0], result(0.9, 3.0)), (conditions[1], drifted)],
+        )
+
+
+def test_common_source_pvt_orchestration_overrides_vdd_and_shares_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conditions = [
+        {
+            "name": "tt_25c_0p90v",
+            "process_corner": "tt",
+            "temperature_c": 25.0,
+            "vdd_v": 0.9,
+        },
+        {
+            "name": "ff_m40c_0p99v",
+            "process_corner": "ff",
+            "temperature_c": -40.0,
+            "vdd_v": 0.99,
+        },
+    ]
+    calls: list[tuple[dict, int]] = []
+    shared_schematic = {"source": "bridge_readback"}
+    shared_netlist = {"source": "eda_result", "sha256": "a" * 64}
+
+    def fake_simulate(payload, *, _bundle_cache=None):
+        assert _bundle_cache is not None
+        calls.append((deepcopy(payload), id(_bundle_cache)))
+        return {
+            "parameters": {
+                "device_width_um": 1.0,
+                "length_um": 0.03,
+                "load_resistance_ohm": 20_000.0,
+                "bias_v": 0.35,
+                "vdd_v": payload["parameters"]["vdd_v"],
+            },
+            "metrics": {"gain": 2.0},
+            "metric_sources": {"gain": "eda_result"},
+            "analysis_complete": True,
+            "analysis_issues": [],
+            "analysis_warnings": [],
+            "evidence": {
+                "schematic_readback": shared_schematic,
+                "netlist": shared_netlist,
+            },
+        }
+
+    monkeypatch.setattr(bridge_worker, "simulate_common_source", fake_simulate)
+    merged = _simulate_common_source_operating_conditions(
+        {
+            "parameters": {"bias_v": 0.35},
+            "operating_conditions": conditions,
+            "operating_conditions_source": "user_input",
+        }
+    )
+
+    assert [call[0]["parameters"]["vdd_v"] for call in calls] == [0.9, 0.99]
+    assert len({call[1] for call in calls}) == 1
+    assert all("operating_conditions" not in call[0] for call in calls)
+    assert [
+        call[0]["operating_condition"]["name"] for call in calls
+    ] == ["tt_25c_0p90v", "ff_m40c_0p99v"]
+    assert len(merged["operating_condition_results"]) == 2
+
+
 def test_common_source_linearity_deck_uses_one_nested_transient_sweep() -> None:
     profile = load_pdk_profile("nics4304_tsmc28").model_dump()
     deck = _common_source_testbench_deck(
@@ -4996,6 +5179,33 @@ def test_explicit_parameter_contract_keeps_unfiltered_cdf_values() -> None:
     assert requested == {"MN0": {"m": "2", "geo": "3"}}
 
 
+def test_parameter_write_focuses_and_verifies_exact_target_window() -> None:
+    calls: list[tuple] = []
+
+    class Client:
+        def open_window(self, library, cell, view):
+            calls.append(("open", library, cell, view))
+            return SimpleNamespace(errors=[])
+
+        def execute_skill(self, expression, timeout):
+            calls.append(("skill", expression, timeout))
+            return SimpleNamespace(output="t", errors=[])
+
+    _focus_target_schematic(Client(), "vda_test", "vda_cs")
+
+    assert calls[0] == ("open", "vda_test", "vda_cs", "schematic")
+    assert "hiSetCurrentWindow(window)" in calls[1][1]
+    assert 'cv~>libName == "vda_test"' in calls[1][1]
+    assert 'cv~>cellName == "vda_cs"' in calls[1][1]
+
+    class WrongTarget(Client):
+        def execute_skill(self, expression, timeout):
+            return SimpleNamespace(output="nil", errors=[])
+
+    with pytest.raises(RuntimeError, match="does not match"):
+        _focus_target_schematic(WrongTarget(), "vda_test", "vda_cs")
+
+
 def test_explicit_parameter_worker_uses_bridge_callback_and_exact_readback(
     monkeypatch,
 ) -> None:
@@ -5024,6 +5234,10 @@ def test_explicit_parameter_worker_uses_bridge_callback_and_exact_readback(
     monkeypatch.setattr(
         "virtuoso_design_agent.adapters.bridge_worker._verify_instance_parameter_values",
         lambda client, library, cell, expected: expected,
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._focus_target_schematic",
+        lambda *args, **kwargs: None,
     )
 
     class Client:
@@ -5103,6 +5317,10 @@ def test_explicit_parameter_worker_repairs_callback_order_once(monkeypatch) -> N
     monkeypatch.setattr(
         "virtuoso_design_agent.adapters.bridge_worker._verify_instance_parameter_values",
         verify,
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._focus_target_schematic",
+        lambda *args, **kwargs: None,
     )
 
     class Client:
@@ -5713,6 +5931,24 @@ def test_common_source_quality_worker_routes_metrics_and_evidence(
     assert result["metrics"]["dc_supply_power_uw"] == pytest.approx(9.0)
     assert result["evidence"][evidence_key]["source"] == "eda_result"
     assert result["evidence"]["testbench"]["values"][sweep_field] == sweep
+    assert result["evidence"]["testbench"]["model_resolution_source"] == (
+        "pdk_profile"
+    )
+    assert result["evidence"]["testbench"]["model_configuration"] == {
+        "source": "pdk_profile",
+        "profile": "nics4304_tsmc28",
+        "profile_source": "pdk_profile",
+        "process_corner": None,
+        "process_corner_source": "pdk_profile",
+        "temperature_c": None,
+        "temperature_source": "simulator_default",
+        "includes": [
+            {
+                "path": payload["profile"]["model_include"],
+                "section": payload["profile"]["model_section"],
+            }
+        ],
+    }
     if analysis == "noise":
         assert result["evidence"][evidence_key]["remote_psf_path"].endswith(
             "/noise.noise.psfascii"
@@ -6022,6 +6258,50 @@ def test_subprocess_payload_preserves_linearity_and_noise_sweep_sources() -> Non
     noise_payload = SubprocessBridgeAdapter._task_payload(noise_task)
     assert noise_payload["noise_sweep"]["points_per_decade"] == 20
     assert noise_payload["noise_sweep_user_fields"] == ["start_hz", "stop_hz"]
+
+
+def test_subprocess_payload_preserves_explicit_pvt_conditions() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "payload-pvt",
+            "operation": "simulation.run",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "parameters": {"bias_v": 0.35, "load_ff": 1.0},
+            "operating_conditions": [
+                {
+                    "name": "tt_25c_0p90v",
+                    "process_corner": "tt",
+                    "temperature_c": 25.0,
+                    "vdd_v": 0.9,
+                },
+                {
+                    "name": "ff_m40c_0p99v",
+                    "process_corner": "ff",
+                    "temperature_c": -40.0,
+                    "vdd_v": 0.99,
+                },
+            ],
+        }
+    )
+
+    payload = SubprocessBridgeAdapter._task_payload(task)
+
+    assert payload["operating_conditions"] == [
+        {
+            "name": "tt_25c_0p90v",
+            "process_corner": "tt",
+            "temperature_c": 25.0,
+            "vdd_v": 0.9,
+        },
+        {
+            "name": "ff_m40c_0p99v",
+            "process_corner": "ff",
+            "temperature_c": -40.0,
+            "vdd_v": 0.99,
+        },
+    ]
+    assert payload["operating_conditions_source"] == "user_input"
 
     quality_task = TaskSpec.model_validate(
         {

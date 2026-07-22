@@ -3380,6 +3380,187 @@ def test_common_source_quality_design_tuning_writes_and_reads_back_best_oa() -> 
     )
 
 
+def test_common_source_quality_joint_length_vdd_search_writes_only_oa_subset() -> None:
+    task = _common_source_quality_task(
+        id="cs-quality-length-vdd-tune",
+        operation="design.tune",
+        parameters={
+            "device_width_um": 1.0,
+            "load_resistance_ohm": 20_000.0,
+            "bias_v": 0.35,
+            "load_ff": 1.0,
+        },
+        parameter_space={
+            "length_um": [0.03, 0.04],
+            "vdd_v": [0.8, 0.9],
+        },
+        constraints=[
+            {"metric": "saturation_region", "relation": ">=", "value": 1.0},
+            {
+                "metric": "gain_bandwidth_product_hz",
+                "relation": ">=",
+                "value": 1e9,
+            },
+        ],
+        objective={"metric": "gain_bandwidth_product_hz", "goal": "maximize"},
+        safety={
+            "allow_remote_compute": True,
+            "allow_remote_write": True,
+            "allowed_library": "vda_test",
+        },
+        limits={"max_iterations": 4, "timeout_seconds": 600},
+    )
+    adapter = DeterministicDemoAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+    readback = adapter.inspect_schematic(task).data["semantic_parameters"]
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert plan.requires_remote_write is True
+    assert len(record.candidates) == 4
+    assert all(candidate.analysis_complete for candidate in record.candidates)
+    assert {
+        (candidate.parameters["length_um"], candidate.parameters["vdd_v"])
+        for candidate in record.candidates
+    } == {(0.03, 0.8), (0.03, 0.9), (0.04, 0.8), (0.04, 0.9)}
+    assert record.selected_parameters is not None
+    assert readback["length_um"] == pytest.approx(
+        record.selected_parameters["length_um"]
+    )
+    assert "vdd_v" not in readback
+    staged = [
+        action
+        for action in record.actions
+        if action.action.startswith("parameters.stage.")
+    ]
+    assert len(staged) == 4
+    assert all("vdd_v" not in action.details["semantic_parameters"] for action in staged)
+
+
+def test_pvt_bundle_requires_every_condition_and_uses_robust_objective() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "cs-pvt-evaluate",
+            "operation": "simulation.run",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs_pvt"},
+            "parameters": {"bias_v": 0.35},
+            "operating_conditions": [
+                {
+                    "name": "tt_25c_0p90v",
+                    "process_corner": "tt",
+                    "temperature_c": 25.0,
+                    "vdd_v": 0.9,
+                },
+                {
+                    "name": "ss_125c_0p81v",
+                    "process_corner": "ss",
+                    "temperature_c": 125.0,
+                    "vdd_v": 0.81,
+                },
+            ],
+            "constraints": [
+                {
+                    "metric": "low_frequency_gain_v_per_v",
+                    "relation": ">=",
+                    "value": 2.0,
+                },
+                {"metric": "dc_supply_power_uw", "relation": "<=", "value": 30.0},
+            ],
+            "objective": {
+                "metric": "gain_bandwidth_product_hz",
+                "goal": "maximize",
+            },
+            "safety": {"allow_remote_compute": True},
+        }
+    )
+
+    class PvtEvidenceAdapter(DeterministicDemoAdapter):
+        def simulate(self, task, parameters):
+            common = {
+                "device_width_um": 1.0,
+                "length_um": 0.03,
+                "load_resistance_ohm": 20_000.0,
+                "bias_v": 0.35,
+            }
+            rows = [
+                (
+                    task.operating_conditions[0],
+                    common | {"vdd_v": 0.9},
+                    {
+                        "low_frequency_gain_v_per_v": 3.0,
+                        "dc_supply_power_uw": 20.0,
+                        "gain_bandwidth_product_hz": 8e9,
+                    },
+                ),
+                (
+                    task.operating_conditions[1],
+                    common | {"vdd_v": 0.81},
+                    {
+                        "low_frequency_gain_v_per_v": 1.8,
+                        "dc_supply_power_uw": 25.0,
+                        "gain_bandwidth_product_hz": 5e9,
+                    },
+                ),
+            ]
+            return AdapterResult(
+                data={
+                    "parameters": common,
+                    "operating_condition_results": [
+                        {
+                            "condition": condition.model_dump(mode="json"),
+                            "result": {
+                                "parameters": effective,
+                                "metrics": metrics,
+                                "metric_sources": {
+                                    name: "eda_result" for name in metrics
+                                },
+                                "analysis_complete": True,
+                                "analysis_issues": [],
+                                "analysis_warnings": [],
+                            },
+                        }
+                        for condition, effective, metrics in rows
+                    ],
+                    "analysis_complete": True,
+                    "analysis_issues": [],
+                    "analysis_warnings": [],
+                },
+                evidence_source=EvidenceSource.EDA_RESULT,
+            )
+
+    adapter = PvtEvidenceAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.PARTIAL
+    candidate = record.candidates[0]
+    assert candidate.feasible is False
+    assert candidate.analysis_complete is True
+    assert candidate.metrics["low_frequency_gain_v_per_v"] == pytest.approx(1.8)
+    assert candidate.metrics["dc_supply_power_uw"] == pytest.approx(25.0)
+    assert candidate.objective_value == pytest.approx(5e9)
+    assert candidate.metric_sources == {
+        "low_frequency_gain_v_per_v": EvidenceSource.SOFTWARE_INFERENCE,
+        "dc_supply_power_uw": EvidenceSource.SOFTWARE_INFERENCE,
+        "gain_bandwidth_product_hz": EvidenceSource.SOFTWARE_INFERENCE,
+    }
+    assert [item.name for item in candidate.operating_conditions] == [
+        "tt_25c_0p90v",
+        "ss_125c_0p81v",
+    ]
+    assert candidate.operating_conditions[0].feasible is True
+    assert candidate.operating_conditions[1].feasible is False
+    assert any("ss_125c_0p81v" in note for note in record.notes)
+
+
 def test_common_source_ac_short_sweep_is_partial_not_a_fake_bandwidth() -> None:
     task = _common_source_ac_run(stop_hz=1e8).model_copy(
         update={"constraints": []}

@@ -13,5 +13,61 @@
   "default_length_um": 0.03,
   "default_common_source_width_um": 1.0,
   "default_common_source_bias_v": 0.45,
-  "default_common_source_load_resistance_ohm": 20000.0
+  "default_common_source_load_resistance_ohm": 20000.0,
+  "process_corners": {
+    "tt": [
+      {
+        "path": "/data/technique/tsmcn28_lo_0v9_1p10m_5X2Y2Z/models/spectre/cln28hpcp_1d8_elk_v1d0_2p2_shrink0d9_embedded_usage.scs",
+        "section": "ttmacro_mos_moscap"
+      },
+      {
+        "path": "/data/technique/tsmcn28_lo_0v9_1p10m_5X2Y2Z/models/spectre/cln28hpcp_1d8_elk_v1d0_2p2_shrink0d9_embedded_usage.scs",
+        "section": "tt_res_bip_dio_disres"
+      },
+      {
+        "path": "/data/technique/tsmcn28_lo_0v9_1p10m_5X2Y2Z/models/spectre/cln28hpcp_1d8_elk_v1d0_2p2_shrink0d9_embedded_usage.scs",
+        "section": "tt_mom"
+      },
+      {
+        "path": "/data/technique/tsmcn28_lo_0v9_1p10m_5X2Y2Z/models/spectre/cln28hpcp_1d8_elk_v1d0_2p2_shrink0d9_embedded_usage.scs",
+        "section": "tt_r_metal"
+      }
+    ],
+    "ff": [
+      {
+        "path": "/data/technique/tsmcn28_lo_0v9_1p10m_5X2Y2Z/models/spectre/cln28hpcp_1d8_elk_v1d0_2p2_shrink0d9_embedded_usage.scs",
+        "section": "ffmacro_mos_moscap"
+      },
+      {
+        "path": "/data/technique/tsmcn28_lo_0v9_1p10m_5X2Y2Z/models/spectre/cln28hpcp_1d8_elk_v1d0_2p2_shrink0d9_embedded_usage.scs",
+        "section": "ff_res_bip_dio_disres"
+      },
+      {
+        "path": "/data/technique/tsmcn28_lo_0v9_1p10m_5X2Y2Z/models/spectre/cln28hpcp_1d8_elk_v1d0_2p2_shrink0d9_embedded_usage.scs",
+        "section": "ff_mom"
+      },
+      {
+        "path": "/data/technique/tsmcn28_lo_0v9_1p10m_5X2Y2Z/models/spectre/cln28hpcp_1d8_elk_v1d0_2p2_shrink0d9_embedded_usage.scs",
+        "section": "ff_r_metal"
+      }
+    ],
+    "ss": [
+      {
+        "path": "/data/technique/tsmcn28_lo_0v9_1p10m_5X2Y2Z/models/spectre/cln28hpcp_1d8_elk_v1d0_2p2_shrink0d9_embedded_usage.scs",
+        "section": "ssmacro_mos_moscap"
+      },
+      {
+        "path": "/data/technique/tsmcn28_lo_0v9_1p10m_5X2Y2Z/models/spectre/cln28hpcp_1d8_elk_v1d0_2p2_shrink0d9_embedded_usage.scs",
+        "section": "ss_res_bip_dio_disres"
+      },
+      {
+        "path": "/data/technique/tsmcn28_lo_0v9_1p10m_5X2Y2Z/models/spectre/cln28hpcp_1d8_elk_v1d0_2p2_shrink0d9_embedded_usage.scs",
+        "section": "ss_mom"
+      },
+      {
+        "path": "/data/technique/tsmcn28_lo_0v9_1p10m_5X2Y2Z/models/spectre/cln28hpcp_1d8_elk_v1d0_2p2_shrink0d9_embedded_usage.scs",
+        "section": "ss_r_metal"
+      }
+    ]
+  }
 }

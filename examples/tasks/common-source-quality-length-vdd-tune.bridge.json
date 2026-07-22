@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "id": "common-source-quality-length-vdd-tune",
+  "operation": "design.tune",
+  "circuit": "common_source",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_cs_ac_tradeoff_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis": "quality",
+  "ac_sweep": {
+    "start_hz": 10000.0,
+    "stop_hz": 100000000000.0,
+    "points_per_decade": 20
+  },
+  "linearity_sweep": {
+    "frequency_hz": 100000000.0,
+    "amplitudes_v": [0.005, 0.05, 0.1, 0.15],
+    "settling_cycles": 4,
+    "measurement_cycles": 8,
+    "points_per_cycle": 128,
+    "max_harmonic": 5,
+    "compression_db": 1.0
+  },
+  "noise_sweep": {
+    "start_hz": 1000.0,
+    "stop_hz": 10000000000.0,
+    "points_per_decade": 20
+  },
+  "parameters": {
+    "device_width_um": 1.0,
+    "load_resistance_ohm": 20000.0,
+    "source_resistance_ohm": 2000.0,
+    "bias_v": 0.35,
+    "load_ff": 1.0
+  },
+  "parameter_space": {
+    "length_um": [0.03, 0.04],
+    "vdd_v": [0.8, 0.9]
+  },
+  "constraints": [
+    {"metric": "saturation_region", "relation": ">=", "value": 1.0},
+    {"metric": "output_swing_margin_v", "relation": ">=", "value": 0.08},
+    {"metric": "current_mismatch_percent", "relation": "<=", "value": 1.0},
+    {
+      "metric": "source_current_mismatch_percent",
+      "relation": "<=",
+      "value": 1.0
+    },
+    {
+      "metric": "low_frequency_gain_v_per_v",
+      "relation": ">=",
+      "value": 2.0
+    },
+    {"metric": "bandwidth_3db_hz", "relation": ">=", "value": 3000000000.0},
+    {
+      "metric": "input_1db_compression_v_peak",
+      "relation": ">=",
+      "value": 0.04
+    },
+    {"metric": "max_thd_percent", "relation": "<=", "value": 25.0},
+    {
+      "metric": "integrated_input_referred_noise_uv_rms",
+      "relation": "<=",
+      "value": 2500.0
+    },
+    {"metric": "dc_supply_power_uw", "relation": "<=", "value": 30.0}
+  ],
+  "objective": {
+    "metric": "gain_bandwidth_product_hz",
+    "goal": "maximize"
+  },
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 4, "timeout_seconds": 1200}
+}

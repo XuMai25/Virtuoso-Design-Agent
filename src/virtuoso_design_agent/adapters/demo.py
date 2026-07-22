@@ -523,6 +523,62 @@ class DeterministicDemoAdapter:
     def simulate(
         self, task: TaskSpec, parameters: dict[str, float]
     ) -> AdapterResult:
+        if task.operating_conditions:
+            base_task = task.model_copy(update={"operating_conditions": []})
+            rows: list[dict[str, Any]] = []
+            common_parameters: dict[str, float] | None = None
+            issues: list[str] = []
+            warnings: list[str] = []
+            for condition in task.operating_conditions:
+                condition_parameters = dict(parameters)
+                if condition.vdd_v is not None:
+                    condition_parameters["vdd_v"] = condition.vdd_v
+                result = self.simulate(base_task, condition_parameters).data
+                effective = {
+                    str(name): float(value)
+                    for name, value in result.get("parameters", {}).items()
+                }
+                if common_parameters is None:
+                    common_parameters = dict(effective)
+                else:
+                    for name in list(common_parameters):
+                        if name not in effective or not math.isclose(
+                            common_parameters[name],
+                            effective[name],
+                            rel_tol=1e-9,
+                            abs_tol=1e-12,
+                        ):
+                            common_parameters.pop(name)
+                issues.extend(
+                    f"{condition.name}: {value}"
+                    for value in result.get("analysis_issues", [])
+                )
+                warnings.extend(
+                    f"{condition.name}: {value}"
+                    for value in result.get("analysis_warnings", [])
+                )
+                rows.append(
+                    {
+                        "condition": condition.model_dump(mode="json"),
+                        "result": result,
+                    }
+                )
+            return AdapterResult(
+                data={
+                    "parameters": common_parameters or dict(parameters),
+                    "metrics": {},
+                    "metric_sources": {},
+                    "analysis_complete": all(
+                        bool(row["result"].get("analysis_complete", True))
+                        for row in rows
+                    ),
+                    "analysis_issues": issues,
+                    "analysis_warnings": warnings,
+                    "operating_condition_results": rows,
+                    "warning": "analytical demo only; not an EDA result",
+                },
+                evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+            )
         if task.resolved_analysis() is AnalysisKind.QUALITY:
             results = {
                 analysis.value: self.simulate(
