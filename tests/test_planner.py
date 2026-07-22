@@ -838,6 +838,40 @@ def test_source_degeneration_removal_plan_discloses_exact_inverse_delta() -> Non
     assert [step.capability for step in plan.steps].count("schematic.inspect") == 2
 
 
+def test_raw_instance_parameter_search_is_disclosed_as_verified_oa_write() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "raw-instance-search",
+            "operation": "design.tune",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "parameters": {"bias_v": 0.35, "vdd_v": 0.9},
+            "instance_parameter_space": [
+                {
+                    "instance": "MN0",
+                    "parameter": "fingers",
+                    "values": ["1", "2"],
+                }
+            ],
+            "constraints": [
+                {"metric": "drain_current_ua", "relation": ">=", "value": 1.0}
+            ],
+        }
+    )
+
+    plan = build_plan(task)
+    stage = next(step for step in plan.steps if step.capability == "parameters.stage")
+    finalize = next(
+        step for step in plan.steps if step.capability == "parameters.finalize"
+    )
+
+    assert plan.requires_remote_write
+    assert stage.side_effect is SideEffect.REMOTE_WRITE
+    assert "原始字符串透传" in stage.description
+    assert "逐项定向回读" in stage.description
+    assert "最佳实例字段" in finalize.description
+
+
 def test_inverter_testbench_plan_discloses_fixed_minimal_delta() -> None:
     task = TaskSpec.model_validate(
         {

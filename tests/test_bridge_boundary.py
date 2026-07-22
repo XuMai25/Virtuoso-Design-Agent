@@ -5071,6 +5071,38 @@ def test_bridge_payload_preserves_explicit_removal_action() -> None:
     assert payload["parameters"] == {}
 
 
+def test_bridge_payload_preserves_raw_instance_search_dimensions() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "raw-instance-search",
+            "operation": "design.tune",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "parameters": {"bias_v": 0.35, "vdd_v": 0.9},
+            "instance_parameter_space": [
+                {
+                    "instance": "MN0",
+                    "parameter": "fingers",
+                    "values": ["1", "2"],
+                }
+            ],
+            "constraints": [
+                {"metric": "drain_current_ua", "relation": ">=", "value": 1.0}
+            ],
+        }
+    )
+
+    payload = SubprocessBridgeAdapter._task_payload(task)
+
+    assert payload["instance_parameter_space"] == [
+        {
+            "instance": "MN0",
+            "parameter": "fingers",
+            "values": ["1", "2"],
+        }
+    ]
+
+
 def test_placement_snapshot_is_order_independent_and_shape_sensitive() -> None:
     first = {
         "instances": [{"name": "RD0"}, {"name": "MN0"}],

@@ -81,7 +81,7 @@ Bridge 0.7.0 的公共 `set_instance_params` 通过 `geGetEditCellView()` 选择
 
 CDF 的 `display` 和 `editable` 元数据不是写入 allowlist。2026-07-20 的真实 smoke 中，`MN0.m` 为 `editable=nil` 且 callback 后不能保持 `2`，但 `RD0.r` 同样报告 `editable=nil` 却能成功持久化为 `22K`。因此 VDA 不依据 UI 元数据缩窄 Bridge 能力，最终权威只来自 callback 后目标 OA 值；失败仍可能留下部分写入，因为 Bridge 的多实例调用不是 OA 事务。
 
-任务请求及原始值标为 `user_input`；真实 OA 确认标为 `bridge_readback`；demo 只能产生 `software_inference`。完整 inspect 会保留 callback 导致的旁路参数变化，但 VDA 只对任务显式列出的字段宣称确认。`instance_parameter_updates` 当前不会自动进入 `parameter_space`；这保留有限搜索的显式边界，但后续会提供实例参数搜索维度，而不是长期维持人工透传上限。
+任务请求及原始值标为 `user_input`；真实 OA 确认标为 `bridge_readback`；demo 只能产生 `software_inference`。完整 inspect 会保留 callback 导致的旁路参数变化，但 VDA 只对任务显式列出的字段宣称确认。`instance_parameter_updates` 不会隐式进入搜索；调优必须用 `instance_parameter_space` 逐维声明 exact instance、未过滤 OA inspect 中真实存在的 CDF 字段名和有限原始字符串集合。executor 将固定实例字段、raw sweep 与 semantic space 组合成一个受 `max_iterations` 截断的确定性笛卡尔积，不把所有 CDF 自动扩成搜索空间。每个 candidate 只把具体点交给 Bridge，要求请求、实际应用映射、立即定向回读一致；candidate/checkpoint 分别保存原始字段与 canonical OA semantic 状态，最佳值或初始值写回后再独立定向回读。独立 `parameters.apply` 继续保留 Bridge 的别名和更广字符串能力；有限搜索为保证初始值恢复而只接受可在完整 readback 中精确定位的实际字段名。
 
 ## ADE 人工介入与状态所有权
 
@@ -173,7 +173,7 @@ Spectre 的通用 `dcOpInfo` 在当前 Bridge parser 中以器件聚合对象出
 
 工作区分类不读取一个未验证的模型枚举值：`saturation_region` 由 Spectre 给出的 `VDS`、`VDSAT` 和 `IDS` 按显式规则推导，标为 `software_inference`；原始器件量、节点量和从它们计算的连续指标标为 `eda_result`。Gate 2A 已在 `vb_pdk_smoke/vda_cs_gate2a_001/schematic` 完成 6 点真实搜索和最终独立 OA→si→DC OP 复核。
 
-源极退化沿用该路径而不复制 executor：结构回读动态返回 `topology_variant`；`si` parser 在同一 common-source action 中要求 nominal `MN0(OUT IN VSS VSS)` 或退化 `MN0(OUT IN NSRC VSS)`+`RS0(NSRC VSS)`，并把 RS0.r 纳入 OA/网表参数一致性；DC wrapper 额外保存 NSRC，器件 VGS/VDS 改由 NSRC 计算，同时核对 MN0/RD0 与 MN0/RS0 两组 KCL。`source_resistance_ohm` 可直接进入原有有限 `parameter_space`。2026-07-20/21 的真实 smoke 已完成原位 add、DC/AC、W/RD/RS 搜索、多 analysis 质量组合、checkpoint 恢复和最佳回读；2026-07-22/23 又闭合 L/VDD、固定 PVT、可选 PVT-aware bias 和 add/remove 可逆拓扑。尚未闭合的是 PVT-aware OA 设计参数 live 写回、任意实例参数有限搜索和更复杂拓扑。
+源极退化沿用该路径而不复制 executor：结构回读动态返回 `topology_variant`；`si` parser 在同一 common-source action 中要求 nominal `MN0(OUT IN VSS VSS)` 或退化 `MN0(OUT IN NSRC VSS)`+`RS0(NSRC VSS)`，并把 RS0.r 纳入 OA/网表参数一致性；DC wrapper 额外保存 NSRC，器件 VGS/VDS 改由 NSRC 计算，同时核对 MN0/RD0 与 MN0/RS0 两组 KCL。`source_resistance_ohm` 可直接进入原有有限 `parameter_space`。2026-07-20/21 的真实 smoke 已完成原位 add、DC/AC、W/RD/RS 搜索、多 analysis 质量组合、checkpoint 恢复和最佳回读；2026-07-22/23 又闭合 L/VDD、固定 PVT、可选 PVT-aware bias、add/remove 可逆拓扑，以及 `MN0.fingers` 原始 CDF 两点搜索和最佳写回。尚未闭合的是 PVT-aware OA 设计参数 live 写回、更复杂 CDF callback 组合和更复杂拓扑。
 
 AC 没有第二套 topology、netlister 或 executor。相同 wrapper 保留 `dcOp/info`，把 VIN 设为 DC bias + unit AC source，可选加入任务声明的 `CL0=load_ff`，再运行对数 AC sweep。Bridge 现有 PSFASCII parser 原样返回 `ac_freq/ac_IN/ac_OUT` 的复数向量；VDA 不修改 Bridge，也不把幅度解析复制回第三方库，而是在 worker 内计算复数传递函数 `H(f)=VOUT/VIN`。
 
@@ -208,6 +208,8 @@ AC 核心结果只有在 DC 工作点为饱和、低频参考足够平坦且扫�
 随后 fixed-design PVT Gate 对这一 OA 只读执行 TT/25℃/0.90V、SS/125℃/0.81V、FF/−40℃/0.99V。`nics4304_tsmc28` profile 为每个角显式列出 MOS/MOSCAP、res/bip/dio/disres、MOM 和 metal-R 四个 section；wrapper 另写 `simulatorOptions temp=...`。三条件共九个唯一 wrapper 共享一份 `si` 网表和 OA readback，各项分析完整、全部约束通过；SS 是 GBW 等多项指标的最坏角。run record 的 testbench evidence 保存 profile、角名、温度、四个 include path/section、wrapper SHA 和来源，避免只凭角名推断实际模型输入。该 Gate 是有限三条件验证，不是完整 foundry signoff corner set 或 Monte Carlo/mismatch。
 
 2026-07-23 的可选 PVT-aware Gate 把相同三条件接入 `design.tune`，只搜索 `bias_v=[0.35,0.40] V`，因此没有 OA 参数 action。两个候选各自完成九项分析且各自只生成一份网表；两份网表 SHA 也相同，符合设计未变、testbench bias 改变的契约。`0.40 V` 虽有更高的最坏 GBW，但在 TT/SS/FF 分别违反 THD、摆幅和功耗约束，最终选择所有条件都可行的 `0.35 V`。调优前后 OA semantic parameters 完全相同。OA 设计变量跨 PVT 的 checkpoint/writeback、全不可行恢复和预算路径已有本地确定性测试，但仍需独立 live Gate 才能升级为真实 OA 写回证据。
+
+同日的 raw CDF Gate 在全新 `vda_cs_topology_patch_001` nominal cell 上固定 Wfg=1 µm、L=0.03 µm、RD=10 kΩ、bias=0.35 V、VDD=0.9 V、CL=2 fF，只搜索 `MN0.fingers=["1","2"]`。两个点的 OA 定向回读、`si` 网表 `nf` 与总宽度分别为 1/1 µm 和 2/2 µm，网表 SHA 不同，均得到完整 DC+复数 AC。GBW 从 39.582 GHz 增至 58.375 GHz，两个点都通过本任务的饱和/KCL/gain/BW 约束，最终写回 fingers=2 并独立回读。首个点第一次在 `si -batch` 遇到 `WinError 10054`，未产生候选；VDA 恢复 RD=20 kΩ/fingers=1，随后从 checkpoint index 1 重试并保留失败 action。这个 Gate 证明明确点名的实际 CDF 字段可以进入同源有限搜索，不证明 PDK 的 233 个 MOS 字段都可持久化、物理独立或适合联合优化。
 
 ## 证据链
 

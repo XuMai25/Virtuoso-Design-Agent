@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from virtuoso_design_agent.cli import main
@@ -18,10 +19,15 @@ def test_catalog_marks_gate2a_common_source_executable(capsys) -> None:
     assert "existing_schematic: Bridge-preserving manual OA surface [executable]" in output
     assert "inverter: L5A vertical slice [executable]" in output
     assert (
-        "common_source: Gate 2 optional PVT-aware quality tuning verified "
+        "common_source: Gate 2 bounded topology and raw-parameter tuning verified "
         "[executable]" in output
     )
-    assert output.count("explicit instance parameters: parameters.apply") == 3
+    assert output.count(
+        "explicit instance parameters: parameters.apply + bounded tuning + OA readback"
+    ) == 2
+    assert output.count(
+        "explicit instance parameters: parameters.apply + OA readback"
+    ) == 1
     assert "differential_pair: Gate 3 [planned]" in output
 
 
@@ -64,3 +70,60 @@ def test_tuning_run_creates_complete_checkpoint_by_default(tmp_path, capsys) -> 
     assert output.is_file()
     assert load_execution_checkpoint(checkpoint).complete is True
     assert f"Checkpoint: {checkpoint.resolve()}" in capsys.readouterr().out
+
+
+def test_cli_prints_selected_raw_instance_parameters(tmp_path, capsys) -> None:
+    task_path = tmp_path / "raw-close-loop.json"
+    task_payload = {
+        "id": "raw-close-loop-cli",
+        "operation": "design.close_loop",
+        "circuit": "common_source",
+        "target": {"library": "vda_test", "cell": "vda_raw_cli"},
+        "parameters": {
+            "device_width_um": 1.0,
+            "length_um": 0.03,
+            "load_resistance_ohm": 10_000.0,
+            "bias_v": 0.35,
+            "vdd_v": 0.9,
+        },
+        "instance_parameter_space": [
+            {
+                "instance": "MN0",
+                "parameter": "fingers",
+                "values": ["1", "2"],
+            }
+        ],
+        "constraints": [
+            {"metric": "drain_current_ua", "relation": ">=", "value": 0.0}
+        ],
+        "objective": {"metric": "drain_current_ua", "goal": "maximize"},
+        "create_if_missing": True,
+        "safety": {
+            "allow_remote_compute": True,
+            "allow_remote_write": True,
+            "allowed_library": "vda_test",
+        },
+        "limits": {"max_iterations": 2, "timeout_seconds": 600},
+    }
+    task_path.write_text(json.dumps(task_payload), encoding="utf-8")
+    task = TaskSpec.model_validate(task_payload)
+    plan = build_plan(task)
+
+    assert (
+        main(
+            [
+                "run",
+                str(task_path),
+                "--adapter",
+                "demo",
+                "--execute",
+                "--token",
+                plan.confirmation_token,
+                "--output",
+                str(tmp_path / "raw-run.json"),
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert 'Selected instance parameters: {"MN0": {"fingers": "1"}}' in output

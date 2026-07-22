@@ -39,6 +39,7 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
     common_source_noise = common_source and analysis is AnalysisKind.NOISE
     common_source_quality = common_source and analysis is AnalysisKind.QUALITY
     candidate_oa_write = task_requests_oa_parameter_write(task)
+    explicit_instance_search = bool(task.instance_parameter_space)
     template_name = "共源放大器" if common_source else "反相器"
     simulation_description = (
         "从同一次 OA/si 参数与拓扑核对生成的网表，分别运行 Spectre 复数 AC、"
@@ -679,11 +680,17 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         )
         if task.operating_conditions and candidate_oa_write:
             stage_description += "；每个候选只暂存一次 OA，再跨条件复用"
+        if explicit_instance_search:
+            stage_description += (
+                "；实例 CDF 候选按原始字符串透传并逐项定向回读，不猜单位或别名"
+            )
         finalize_description = (
             "提交最佳可行参数，或恢复搜索前 OA 参数"
             if candidate_oa_write
             else "记录最佳 testbench 条件，并再次确认 OA 参数保持不变"
         )
+        if explicit_instance_search:
+            finalize_description += "；最佳实例字段必须再次定向回读"
         return [
             probe,
             inspect.model_copy(update={"id": "02-before"}),
@@ -740,6 +747,11 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 "；每个候选只暂存一次 OA，再跨条件复用"
                 if task.operating_conditions and candidate_oa_write
                 else ""
+            )
+            + (
+                "；实例 CDF 候选按原始字符串透传并逐项定向回读，不猜单位或别名"
+                if explicit_instance_search
+                else ""
             ),
             SideEffect.REMOTE_WRITE if candidate_oa_write else SideEffect.READ_ONLY,
         ),
@@ -763,6 +775,11 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 "提交最佳可行参数，或恢复搜索前 OA 参数"
                 if candidate_oa_write
                 else "记录最佳 testbench 条件，并再次确认 OA 参数保持不变"
+            )
+            + (
+                "；最佳实例字段必须再次定向回读"
+                if explicit_instance_search
+                else ""
             ),
             SideEffect.REMOTE_WRITE if candidate_oa_write else SideEffect.READ_ONLY,
         ),
@@ -780,6 +797,9 @@ def build_plan(task: TaskSpec) -> ExecutionPlan:
     validate_task_capability(task)
     steps = _steps_for(task)
     task_payload = task.model_dump(mode="json", exclude_none=True)
+    if not task.instance_parameter_space:
+        # Preserve tokens for tasks created before raw instance sweeps existed.
+        task_payload.pop("instance_parameter_space", None)
     if not task.operating_conditions:
         # Keep pre-PVT task tokens stable; this field did not exist in schema v1
         # records before the bounded operating-condition extension.

@@ -121,6 +121,10 @@ class SubprocessBridgeAdapter:
                 update.model_dump(mode="json")
                 for update in task.instance_parameter_updates
             ],
+            "instance_parameter_space": [
+                sweep.model_dump(mode="json")
+                for sweep in task.instance_parameter_space
+            ],
             "replace_existing": task.safety.replace_existing,
             "timeout_seconds": task.limits.timeout_seconds,
         }

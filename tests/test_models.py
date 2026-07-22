@@ -554,6 +554,154 @@ def test_instance_parameter_updates_are_apply_only_and_can_mix_semantics() -> No
     assert combined.instance_parameter_updates[0].parameters == {"m": "2"}
 
 
+def test_raw_instance_parameter_space_supports_bounded_tuning() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "raw-instance-search",
+            "operation": "design.tune",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "parameters": {"bias_v": 0.35, "vdd_v": 0.9},
+            "instance_parameter_updates": [
+                {"instance": "MN0", "parameters": {"m": "1"}}
+            ],
+            "instance_parameter_space": [
+                {
+                    "instance": "MN0",
+                    "parameter": "fingers",
+                    "values": ["1", "2"],
+                }
+            ],
+            "constraints": [
+                {"metric": "drain_current_ua", "relation": ">=", "value": 1.0}
+            ],
+        }
+    )
+
+    assert task.parameter_space == {}
+    assert task.instance_parameter_updates[0].parameters == {"m": "1"}
+    assert task.instance_parameter_space[0].values == ["1", "2"]
+
+
+@pytest.mark.parametrize(
+    ("patch", "message"),
+    [
+        (
+            {
+                "instance_parameter_space": [
+                    {
+                        "instance": "MN0",
+                        "parameter": "fingers",
+                        "values": ["1", "1"],
+                    }
+                ]
+            },
+            "contain duplicates",
+        ),
+        (
+            {
+                "instance_parameter_space": [
+                    {
+                        "instance": "MN0",
+                        "parameter": "fingers",
+                        "values": ["1", "2"],
+                    },
+                    {
+                        "instance": "MN0",
+                        "parameter": "fingers",
+                        "values": ["3"],
+                    },
+                ]
+            },
+            "cannot repeat an instance/parameter",
+        ),
+        (
+            {
+                "instance_parameter_updates": [
+                    {"instance": "MN0", "parameters": {"fingers": "1"}}
+                ],
+                "instance_parameter_space": [
+                    {
+                        "instance": "MN0",
+                        "parameter": "fingers",
+                        "values": ["1", "2"],
+                    }
+                ],
+            },
+            "overlap swept dimensions",
+        ),
+    ],
+)
+def test_raw_instance_parameter_space_rejects_ambiguous_dimensions(
+    patch: dict, message: str
+) -> None:
+    payload = {
+        "id": "invalid-raw-instance-search",
+        "operation": "design.tune",
+        "circuit": "common_source",
+        "target": {"library": "vda_test", "cell": "vda_cs"},
+        "parameters": {"bias_v": 0.35, "vdd_v": 0.9},
+        "instance_parameter_space": [
+            {
+                "instance": "MN0",
+                "parameter": "fingers",
+                "values": ["1", "2"],
+            }
+        ],
+        "constraints": [
+            {"metric": "drain_current_ua", "relation": ">=", "value": 1.0}
+        ],
+    }
+    payload.update(patch)
+
+    with pytest.raises(ValidationError, match=message):
+        TaskSpec.model_validate(payload)
+
+
+def test_raw_instance_parameter_space_is_tuning_only_and_string_strict() -> None:
+    with pytest.raises(ValidationError, match="requires design.tune"):
+        TaskSpec.model_validate(
+            {
+                "id": "raw-space-on-apply",
+                "operation": "parameters.apply",
+                "circuit": "common_source",
+                "target": {"library": "vda_test", "cell": "vda_cs"},
+                "instance_parameter_space": [
+                    {
+                        "instance": "MN0",
+                        "parameter": "fingers",
+                        "values": ["1", "2"],
+                    }
+                ],
+            }
+        )
+
+    with pytest.raises(ValidationError, match="string"):
+        TaskSpec.model_validate(
+            {
+                "id": "numeric-raw-space",
+                "operation": "design.tune",
+                "circuit": "common_source",
+                "target": {"library": "vda_test", "cell": "vda_cs"},
+                "parameters": {"bias_v": 0.35, "vdd_v": 0.9},
+                "instance_parameter_space": [
+                    {
+                        "instance": "MN0",
+                        "parameter": "fingers",
+                        "values": [1, 2],
+                    }
+                ],
+                "constraints": [
+                    {
+                        "metric": "drain_current_ua",
+                        "relation": ">=",
+                        "value": 1.0,
+                    }
+                ],
+            }
+        )
+
+
 def test_existing_schematic_exposes_only_read_and_manual_parameter_write() -> None:
     inspect = TaskSpec.model_validate(
         {

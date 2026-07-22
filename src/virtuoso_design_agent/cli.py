@@ -70,7 +70,15 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
         if item["operations"]:
             print(f"  operations: {', '.join(item['operations'])}")
         if item["explicit_instance_parameters"]:
-            print("  explicit instance parameters: parameters.apply + OA readback")
+            raw_tuning = (
+                " + bounded tuning"
+                if Operation.DESIGN_TUNE.value in item["operations"]
+                else ""
+            )
+            print(
+                "  explicit instance parameters: parameters.apply"
+                f"{raw_tuning} + OA readback"
+            )
         print(f"  evidence gate: {item['evidence_gate']}")
     return 0
 
@@ -118,6 +126,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(
             "Selected parameters: "
             + json.dumps(record.selected_parameters, ensure_ascii=False, sort_keys=True)
+        )
+    if record.selected_instance_parameters:
+        print(
+            "Selected instance parameters: "
+            + json.dumps(
+                record.selected_instance_parameters,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
         )
     if record.selected_metrics:
         print(

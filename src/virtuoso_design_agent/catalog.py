@@ -109,7 +109,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     ),
     CircuitKind.COMMON_SOURCE: CircuitCapability(
         circuit=CircuitKind.COMMON_SOURCE,
-        stage="Gate 2 optional PVT-aware quality tuning verified",
+        stage="Gate 2 bounded topology and raw-parameter tuning verified",
         executable=True,
         operations=_STANDARD_OPERATIONS + (Operation.SCHEMATIC_TRANSFORM,),
         parameters=(
@@ -126,8 +126,9 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "OA readback + si netlist consistency + DC region + complex AC + "
             "bounded W/L/RD/RS plus bias/load quality tuning, OA writeback, "
             "infeasible restore, checkpoint recovery, fixed-design TT/SS/FF "
-            "verification, and optional read-only PVT-aware bias tuning live on "
-            "TSMC N28; non-overwrite ADE "
+            "verification, optional read-only PVT-aware bias tuning, reversible "
+            "source-degeneration patching, and explicit MN0.fingers bounded tuning "
+            "live on TSMC N28; non-overwrite ADE "
             "prepare/setup/background exact-history run-resume is live on the "
             "inverter handoff; live PVT-aware OA-design-variable writeback and "
             "common-source capture/variable/sweep/real-PVT ADE gates remain pending"
@@ -166,6 +167,13 @@ def validate_task_capability(task: TaskSpec) -> None:
         raise UnsupportedCapability(
             f"{task.circuit.value} is {capability.stage}; "
             f"operation {task.operation.value} is not executable yet"
+        )
+    if (
+        (task.instance_parameter_updates or task.instance_parameter_space)
+        and not capability.explicit_instance_parameters
+    ):
+        raise UnsupportedCapability(
+            f"{task.circuit.value} does not expose explicit instance parameters"
         )
     allowed = set(capability.parameters)
     supplied = set(task.parameters) | set(task.parameter_space)
@@ -241,7 +249,11 @@ def validate_task_capability(task: TaskSpec) -> None:
 def task_requests_oa_parameter_write(task: TaskSpec) -> bool:
     names = OA_SEMANTIC_PARAMETER_NAMES.get(task.circuit, frozenset())
     supplied = set(task.parameters) | set(task.parameter_space)
-    return bool(names & supplied)
+    return bool(
+        names & supplied
+        or task.instance_parameter_updates
+        or task.instance_parameter_space
+    )
 
 
 def catalog_as_dicts() -> list[dict]:

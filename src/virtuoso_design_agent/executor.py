@@ -8,6 +8,7 @@ import json
 import math
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
@@ -23,6 +24,7 @@ from .models import (
     EvidenceSource,
     ExecutionCheckpoint,
     ExecutionPlan,
+    InstanceParameterUpdate,
     ObjectiveGoal,
     Operation,
     OperatingConditionEvaluation,
@@ -47,6 +49,18 @@ _OA_SEMANTIC_PARAMETERS = {
 }
 
 _COMMON_SOURCE_OPTIONAL_OA_PARAMETERS = ("source_resistance_ohm",)
+
+
+@dataclass(frozen=True)
+class _CandidateInput:
+    parameters: dict[str, float]
+    instance_parameters: dict[str, dict[str, str]]
+
+
+@dataclass(frozen=True)
+class _AppliedCandidateState:
+    oa_parameters: dict[str, float]
+    oa_instance_parameters: dict[str, dict[str, str]]
 
 
 class TaskExecutor:
@@ -101,11 +115,58 @@ class TaskExecutor:
         return candidates
 
     @staticmethod
+    def _instance_parameter_candidates(
+        task: TaskSpec,
+    ) -> list[dict[str, dict[str, str]]]:
+        fixed = {
+            update.instance: dict(update.parameters)
+            for update in task.instance_parameter_updates
+        }
+        dimensions = sorted(
+            task.instance_parameter_space,
+            key=lambda sweep: (sweep.instance, sweep.parameter),
+        )
+        if not dimensions:
+            return [fixed]
+        candidates: list[dict[str, dict[str, str]]] = []
+        for values in itertools.product(*(sweep.values for sweep in dimensions)):
+            candidate = {
+                instance: dict(parameters)
+                for instance, parameters in fixed.items()
+            }
+            for sweep, value in zip(dimensions, values, strict=True):
+                candidate.setdefault(sweep.instance, {})[sweep.parameter] = value
+            candidates.append(candidate)
+            if len(candidates) >= task.limits.max_iterations:
+                break
+        return candidates
+
+    @classmethod
+    def _candidate_inputs(cls, task: TaskSpec) -> list[_CandidateInput]:
+        candidates: list[_CandidateInput] = []
+        for parameters in cls._candidates(task):
+            for instance_parameters in cls._instance_parameter_candidates(task):
+                candidates.append(
+                    _CandidateInput(
+                        parameters=dict(parameters),
+                        instance_parameters={
+                            instance: dict(values)
+                            for instance, values in instance_parameters.items()
+                        },
+                    )
+                )
+                if len(candidates) >= task.limits.max_iterations:
+                    return candidates
+        return candidates
+
+    @staticmethod
     def _evaluate_candidate(
         task: TaskSpec,
         index: int,
         parameters: dict[str, float],
         simulation: AdapterResult,
+        instance_parameters: dict[str, dict[str, str]] | None = None,
+        oa_parameters: dict[str, float] | None = None,
     ) -> CandidateEvaluation:
         raw_conditions = simulation.data.get("operating_condition_results")
         if raw_conditions is not None:
@@ -115,6 +176,8 @@ class TaskExecutor:
                 parameters,
                 simulation,
                 raw_conditions,
+                instance_parameters=instance_parameters,
+                oa_parameters=oa_parameters,
             )
         metrics = {
             str(name): float(value)
@@ -146,6 +209,8 @@ class TaskExecutor:
         return CandidateEvaluation(
             index=index,
             parameters=evaluated_parameters,
+            instance_parameters=instance_parameters or {},
+            oa_parameters=oa_parameters or {},
             metrics=metrics,
             constraints=constraints,
             feasible=(
@@ -171,6 +236,9 @@ class TaskExecutor:
         parameters: dict[str, float],
         simulation: AdapterResult,
         raw_conditions: Any,
+        *,
+        instance_parameters: dict[str, dict[str, str]] | None = None,
+        oa_parameters: dict[str, float] | None = None,
     ) -> CandidateEvaluation:
         if not isinstance(raw_conditions, list) or not raw_conditions:
             raise RuntimeError("operating-condition simulation returned no cases")
@@ -360,6 +428,8 @@ class TaskExecutor:
         return CandidateEvaluation(
             index=index,
             parameters=evaluated_parameters,
+            instance_parameters=instance_parameters or {},
+            oa_parameters=oa_parameters or {},
             metrics=aggregate_metrics,
             constraints=aggregate_constraints,
             feasible=feasible,
@@ -835,6 +905,24 @@ class TaskExecutor:
         )
 
     @staticmethod
+    def _checkpoint_applied_candidate_matches(
+        declared: dict[str, float],
+        actual: dict[str, float],
+        applied_oa: dict[str, float],
+    ) -> bool:
+        if not declared.keys() <= actual.keys():
+            return False
+        if not actual.keys() <= declared.keys() | applied_oa.keys():
+            return False
+        expected = dict(declared)
+        expected.update(applied_oa)
+        return all(
+            abs(float(actual[name]) - float(expected[name]))
+            <= max(abs(float(expected[name])) * 1e-6, 1e-9)
+            for name in actual
+        )
+
+    @staticmethod
     def _requested_instance_parameters(
         task: TaskSpec,
     ) -> dict[str, dict[str, str]]:
@@ -878,6 +966,96 @@ class TaskExecutor:
                         f"{instance}.{name}: requested={value!r}, "
                         f"readback={confirmed[instance].get(name)!r}"
                     )
+
+    @staticmethod
+    def _candidate_task(
+        task: TaskSpec,
+        instance_parameters: dict[str, dict[str, str]],
+    ) -> TaskSpec:
+        updates = [
+            InstanceParameterUpdate(instance=instance, parameters=parameters)
+            for instance, parameters in sorted(instance_parameters.items())
+        ]
+        return task.model_copy(
+            update={
+                "instance_parameter_updates": updates,
+                # Candidate enumeration belongs to VDA.  The Bridge receives only
+                # the exact point that it must apply/read back for this action.
+                "instance_parameter_space": [],
+            }
+        )
+
+    @staticmethod
+    def _instance_parameter_targets(
+        task: TaskSpec,
+    ) -> dict[str, set[str]]:
+        targets: dict[str, set[str]] = {}
+        for update in task.instance_parameter_updates:
+            targets.setdefault(update.instance, set()).update(update.parameters)
+        for sweep in task.instance_parameter_space:
+            targets.setdefault(sweep.instance, set()).add(sweep.parameter)
+        return targets
+
+    @classmethod
+    def _targeted_instance_parameters(
+        cls,
+        result: AdapterResult,
+        task: TaskSpec,
+    ) -> dict[str, dict[str, str]]:
+        targets = cls._instance_parameter_targets(task)
+        if not targets:
+            return {}
+        raw = result.data.get("instance_parameters")
+        if not isinstance(raw, dict):
+            raise RuntimeError(
+                "schematic inspection did not return full instance parameters"
+            )
+        selected: dict[str, dict[str, str]] = {}
+        for instance, names in targets.items():
+            parameters = raw.get(instance)
+            if not isinstance(parameters, dict):
+                raise RuntimeError(
+                    f"schematic inspection is missing instance {instance}"
+                )
+            missing = sorted(name for name in names if name not in parameters)
+            if missing:
+                raise RuntimeError(
+                    "instance parameter search requires names from unfiltered OA "
+                    f"readback; {instance} is missing {', '.join(missing)}"
+                )
+            selected[instance] = {
+                name: str(parameters[name]) for name in sorted(names)
+            }
+        return selected
+
+    @classmethod
+    def _applied_instance_parameter_state(
+        cls,
+        result: AdapterResult,
+        task: TaskSpec,
+    ) -> dict[str, dict[str, str]]:
+        requested = cls._requested_instance_parameters(task)
+        if not requested:
+            return {}
+        echoed = cls._confirmed_instance_parameters(
+            result.data, "requested_instance_parameters"
+        )
+        cls._assert_explicit_parameter_confirmation(requested, echoed)
+        applied = cls._confirmed_instance_parameters(
+            result.data, "applied_instance_parameters"
+        )
+        confirmed = cls._confirmed_instance_parameters(
+            result.data, "confirmed_instance_parameters"
+        )
+        cls._assert_explicit_parameter_confirmation(applied, confirmed)
+        return confirmed
+
+    @staticmethod
+    def _same_instance_parameters(
+        expected: dict[str, dict[str, str]],
+        actual: dict[str, dict[str, str]],
+    ) -> bool:
+        return expected == actual
 
     @staticmethod
     def _is_ade_output_evaluation_error(value: Any) -> bool:
@@ -1857,20 +2035,38 @@ class TaskExecutor:
         if checkpoint.adapter != adapter_name:
             raise ValueError("checkpoint adapter does not match the selected adapter")
 
-        declared = cls._candidates(task)
+        declared = cls._candidate_inputs(task)
         if checkpoint.next_candidate_index > len(declared) + 1:
             raise ValueError("checkpoint next candidate is outside the task search space")
         expected_indexes = list(range(1, checkpoint.next_candidate_index))
         if [candidate.index for candidate in checkpoint.candidates] != expected_indexes:
             raise ValueError("checkpoint candidates are not a completed search prefix")
         for candidate in checkpoint.candidates:
-            if not cls._checkpoint_candidate_matches(
-                declared[candidate.index - 1],
-                candidate.parameters,
-                checkpoint.initial_parameters,
-            ):
+            declared_parameters = declared[candidate.index - 1].parameters
+            parameters_match = (
+                cls._checkpoint_applied_candidate_matches(
+                    declared_parameters,
+                    candidate.parameters,
+                    candidate.oa_parameters,
+                )
+                if candidate.oa_parameters
+                else cls._checkpoint_candidate_matches(
+                    declared_parameters,
+                    candidate.parameters,
+                    checkpoint.initial_parameters,
+                )
+            )
+            if not parameters_match:
                 raise ValueError(
                     f"checkpoint candidate {candidate.index} parameters do not match task"
+                )
+            if (
+                candidate.instance_parameters
+                != declared[candidate.index - 1].instance_parameters
+            ):
+                raise ValueError(
+                    f"checkpoint candidate {candidate.index} instance parameters "
+                    "do not match task"
                 )
 
     @classmethod
@@ -1879,31 +2075,75 @@ class TaskExecutor:
         checkpoint: ExecutionCheckpoint,
         task: TaskSpec,
         actual: dict[str, float],
+        actual_instance_parameters: dict[str, dict[str, str]],
     ) -> None:
-        allowed = [
-            checkpoint.initial_parameters,
-            checkpoint.expected_oa_parameters,
+        allowed: list[
+            tuple[dict[str, float], dict[str, dict[str, str]]]
+        ] = [
+            (
+                checkpoint.initial_parameters,
+                checkpoint.initial_instance_parameters,
+            ),
+            (
+                checkpoint.expected_oa_parameters,
+                checkpoint.expected_oa_instance_parameters,
+            ),
         ]
         if checkpoint.pending_oa_parameters is not None:
-            allowed.append(checkpoint.pending_oa_parameters)
-        for parameters in cls._candidates(task):
             allowed.append(
-                {
-                    name: float(parameters.get(name, checkpoint.initial_parameters[name]))
-                    for name in checkpoint.initial_parameters
-                }
+                (
+                    checkpoint.pending_oa_parameters,
+                    checkpoint.pending_oa_instance_parameters or {},
+                )
             )
-        if not any(cls._same_parameters(expected, actual) for expected in allowed):
+        for candidate in checkpoint.candidates:
+            allowed.append(
+                (
+                    candidate.oa_parameters or checkpoint.initial_parameters,
+                    candidate.instance_parameters,
+                )
+            )
+        for candidate in cls._candidate_inputs(task):
+            allowed.append(
+                (
+                    {
+                        name: float(
+                            candidate.parameters.get(
+                                name, checkpoint.initial_parameters[name]
+                            )
+                        )
+                        for name in checkpoint.initial_parameters
+                    },
+                    candidate.instance_parameters,
+                )
+            )
+        if not any(
+            cls._same_parameters(expected, actual)
+            and cls._same_instance_parameters(
+                expected_instance_parameters,
+                actual_instance_parameters,
+            )
+            for expected, expected_instance_parameters in allowed
+        ):
             raise RuntimeError(
-                "current OA parameters do not match the checkpoint baseline, last "
-                "confirmed write, or pending write; refusing automatic resume"
+                "current OA semantic/instance parameters do not match the checkpoint "
+                "baseline, last confirmed write, or pending write; refusing "
+                "automatic resume"
             )
 
     @staticmethod
     def _candidate_space_size(task: TaskSpec) -> int:
-        if not task.parameter_space:
-            return 1
-        return math.prod(len(values) for values in task.parameter_space.values())
+        semantic_size = (
+            math.prod(len(values) for values in task.parameter_space.values())
+            if task.parameter_space
+            else 1
+        )
+        instance_size = (
+            math.prod(len(sweep.values) for sweep in task.instance_parameter_space)
+            if task.instance_parameter_space
+            else 1
+        )
+        return semantic_size * instance_size
 
     def _run_candidates(
         self,
@@ -1913,47 +2153,79 @@ class TaskExecutor:
         evaluations: list[CandidateEvaluation] | None = None,
         start_index: int = 1,
         progress: Callable[
-            [str, int, dict[str, float], list[CandidateEvaluation], dict[str, float] | None],
+            [
+                str,
+                int,
+                _CandidateInput,
+                list[CandidateEvaluation],
+                _AppliedCandidateState | None,
+            ],
             None,
         ]
         | None = None,
     ) -> list[CandidateEvaluation]:
         evaluations = evaluations if evaluations is not None else []
-        for index, parameters in enumerate(self._candidates(task), start=1):
+        for index, candidate in enumerate(self._candidate_inputs(task), start=1):
             if index < start_index:
                 continue
             if progress is not None:
-                progress("started", index, parameters, evaluations, None)
+                progress("started", index, candidate, evaluations, None)
+            stage_completed = not stage_parameters
+            applied_state: _AppliedCandidateState | None = None
+            candidate_task = self._candidate_task(
+                task, candidate.instance_parameters
+            )
             try:
                 if stage_parameters:
                     staged = self._action(
                         f"parameters.stage.{index}",
-                        lambda parameters=parameters: self.adapter.apply_parameters(
-                            task, parameters
+                        lambda candidate=candidate, candidate_task=candidate_task: self.adapter.apply_parameters(
+                            candidate_task, candidate.parameters
                         ),
                     )
+                    applied_state = _AppliedCandidateState(
+                        oa_parameters=self._applied_semantic_parameters(
+                            staged, candidate_task
+                        ),
+                        oa_instance_parameters=(
+                            self._applied_instance_parameter_state(
+                                staged, candidate_task
+                            )
+                        ),
+                    )
+                    stage_completed = True
                     if progress is not None:
                         progress(
                             "staged",
                             index,
-                            parameters,
+                            candidate,
                             evaluations,
-                            self._applied_semantic_parameters(staged, task),
+                            applied_state,
                         )
                 result = self._action(
                     f"simulation.candidate.{index}",
-                    lambda parameters=parameters: self.adapter.simulate(task, parameters),
+                    lambda candidate=candidate, candidate_task=candidate_task: self.adapter.simulate(
+                        candidate_task, candidate.parameters
+                    ),
                 )
             except AdapterInterrupted:
                 if progress is not None:
-                    progress("interrupted", index, parameters, evaluations, None)
+                    progress("interrupted", index, candidate, evaluations, None)
                 raise
             except Exception:
+                if stage_parameters and not stage_completed:
+                    raise
                 constraints = evaluate_constraints({}, task.constraints)
                 evaluations.append(
                     CandidateEvaluation(
                         index=index,
-                        parameters=parameters,
+                        parameters=candidate.parameters,
+                        instance_parameters=candidate.instance_parameters,
+                        oa_parameters=(
+                            applied_state.oa_parameters
+                            if applied_state is not None
+                            else {}
+                        ),
                         metrics={},
                         constraints=constraints,
                         feasible=False,
@@ -1965,13 +2237,24 @@ class TaskExecutor:
                     )
                 )
                 if progress is not None:
-                    progress("completed", index, parameters, evaluations, None)
+                    progress("completed", index, candidate, evaluations, None)
                 continue
             evaluations.append(
-                self._evaluate_candidate(task, index, parameters, result)
+                self._evaluate_candidate(
+                    task,
+                    index,
+                    candidate.parameters,
+                    result,
+                    instance_parameters=candidate.instance_parameters,
+                    oa_parameters=(
+                        applied_state.oa_parameters
+                        if applied_state is not None
+                        else {}
+                    ),
+                )
             )
             if progress is not None:
-                progress("completed", index, parameters, evaluations, None)
+                progress("completed", index, candidate, evaluations, None)
         return evaluations
 
     def _note_candidate_failures(
@@ -2055,6 +2338,7 @@ class TaskExecutor:
             else []
         )
         selected_parameters: dict[str, float] | None = None
+        selected_instance_parameters: dict[str, dict[str, str]] | None = None
         selected_metrics: dict[str, float] | None = None
         initial_parameters = (
             dict(resume_checkpoint.initial_parameters)
@@ -2072,6 +2356,31 @@ class TaskExecutor:
             and resume_checkpoint.pending_oa_parameters is not None
             else None
         )
+        initial_instance_parameters = (
+            {
+                instance: dict(parameters)
+                for instance, parameters in resume_checkpoint.initial_instance_parameters.items()
+            }
+            if resume_checkpoint is not None
+            else {}
+        )
+        expected_oa_instance_parameters = (
+            {
+                instance: dict(parameters)
+                for instance, parameters in resume_checkpoint.expected_oa_instance_parameters.items()
+            }
+            if resume_checkpoint is not None
+            else {}
+        )
+        pending_oa_instance_parameters = (
+            {
+                instance: dict(parameters)
+                for instance, parameters in resume_checkpoint.pending_oa_instance_parameters.items()
+            }
+            if resume_checkpoint is not None
+            and resume_checkpoint.pending_oa_instance_parameters is not None
+            else None
+        )
         next_candidate_index = (
             resume_checkpoint.next_candidate_index
             if resume_checkpoint is not None
@@ -2079,7 +2388,11 @@ class TaskExecutor:
         )
 
         def persist_checkpoint(*, complete: bool = False) -> None:
-            if checkpoint_path is None or not tuning or not initial_parameters:
+            if (
+                checkpoint_path is None
+                or not tuning
+                or (not initial_parameters and not initial_instance_parameters)
+            ):
                 return
             save_execution_checkpoint(
                 ExecutionCheckpoint(
@@ -2090,6 +2403,13 @@ class TaskExecutor:
                     initial_parameters=initial_parameters,
                     expected_oa_parameters=expected_oa_parameters,
                     pending_oa_parameters=pending_oa_parameters,
+                    initial_instance_parameters=initial_instance_parameters,
+                    expected_oa_instance_parameters=(
+                        expected_oa_instance_parameters
+                    ),
+                    pending_oa_instance_parameters=(
+                        pending_oa_instance_parameters
+                    ),
                     next_candidate_index=next_candidate_index,
                     actions=self.actions,
                     candidates=candidates,
@@ -2108,42 +2428,69 @@ class TaskExecutor:
         def candidate_progress(
             event: str,
             index: int,
-            parameters: dict[str, float],
+            candidate: _CandidateInput,
             _evaluations: list[CandidateEvaluation],
-            readback: dict[str, float] | None,
+            readback: _AppliedCandidateState | None,
         ) -> None:
             nonlocal expected_oa_parameters
+            nonlocal expected_oa_instance_parameters
             nonlocal next_candidate_index
             nonlocal pending_oa_parameters
+            nonlocal pending_oa_instance_parameters
             if event == "started":
                 pending_oa_parameters = (
-                    semantic_candidate(parameters) if candidate_oa_write else None
+                    semantic_candidate(candidate.parameters)
+                    if candidate_oa_write
+                    else None
+                )
+                pending_oa_instance_parameters = (
+                    candidate.instance_parameters if candidate_oa_write else None
                 )
             elif event == "staged":
                 if readback is None:
                     raise RuntimeError("candidate stage did not return OA readback")
-                expected_oa_parameters = readback
+                expected_oa_parameters = readback.oa_parameters
+                expected_oa_instance_parameters = (
+                    readback.oa_instance_parameters
+                )
                 pending_oa_parameters = None
+                pending_oa_instance_parameters = None
             elif event == "completed":
                 next_candidate_index = index + 1
                 pending_oa_parameters = None
+                pending_oa_instance_parameters = None
             persist_checkpoint()
 
         def apply_with_checkpoint(
-            action: str, parameters: dict[str, float]
-        ) -> dict[str, float]:
+            action: str,
+            parameters: dict[str, float],
+            instance_parameters: dict[str, dict[str, str]],
+        ) -> _AppliedCandidateState:
             nonlocal expected_oa_parameters
+            nonlocal expected_oa_instance_parameters
             nonlocal pending_oa_parameters
+            nonlocal pending_oa_instance_parameters
             pending_oa_parameters = semantic_candidate(parameters)
+            pending_oa_instance_parameters = instance_parameters
             persist_checkpoint()
+            candidate_task = self._candidate_task(task, instance_parameters)
             result = self._action(
                 action,
-                lambda: self.adapter.apply_parameters(task, parameters),
+                lambda: self.adapter.apply_parameters(candidate_task, parameters),
             )
-            expected_oa_parameters = self._applied_semantic_parameters(result, task)
+            expected_oa_parameters = self._applied_semantic_parameters(
+                result, candidate_task
+            )
+            expected_oa_instance_parameters = (
+                self._applied_instance_parameter_state(result, candidate_task)
+            )
             pending_oa_parameters = None
+            pending_oa_instance_parameters = None
             persist_checkpoint()
-            return expected_oa_parameters
+            return _AppliedCandidateState(
+                oa_parameters=expected_oa_parameters,
+                oa_instance_parameters=expected_oa_instance_parameters,
+            )
 
         try:
             self._action(
@@ -3282,16 +3629,26 @@ class TaskExecutor:
                     lambda: self.adapter.inspect_schematic(task),
                 )
                 current_parameters = self._semantic_parameters(before, task)
+                current_instance_parameters = self._targeted_instance_parameters(
+                    before, task
+                )
                 if resume_checkpoint is None:
                     initial_parameters = current_parameters
                     expected_oa_parameters = current_parameters
+                    initial_instance_parameters = current_instance_parameters
+                    expected_oa_instance_parameters = current_instance_parameters
                     persist_checkpoint()
                 else:
                     self._validate_resume_oa_state(
-                        resume_checkpoint, task, current_parameters
+                        resume_checkpoint,
+                        task,
+                        current_parameters,
+                        current_instance_parameters,
                     )
                     expected_oa_parameters = current_parameters
+                    expected_oa_instance_parameters = current_instance_parameters
                     pending_oa_parameters = None
+                    pending_oa_instance_parameters = None
                     notes.append(
                         "resumed candidate search at index "
                         f"{next_candidate_index} after independent OA readback"
@@ -3321,7 +3678,9 @@ class TaskExecutor:
                             )
                         if candidate_oa_write:
                             apply_with_checkpoint(
-                                "parameters.restore", initial_parameters
+                                "parameters.restore",
+                                initial_parameters,
+                                initial_instance_parameters,
                             )
                             notes.append(
                                 "no feasible candidate was committed; initial OA "
@@ -3337,6 +3696,9 @@ class TaskExecutor:
                     else:
                         selected = min(feasible, key=lambda item: self._rank(task, item))
                         selected_parameters = selected.parameters
+                        selected_instance_parameters = (
+                            selected.instance_parameters or None
+                        )
                         selected_metrics = selected.metrics
                         if task.operating_conditions:
                             notes.append(
@@ -3347,7 +3709,9 @@ class TaskExecutor:
                             )
                         if candidate_oa_write:
                             apply_with_checkpoint(
-                                "parameters.apply.best", selected.parameters
+                                "parameters.apply.best",
+                                selected.parameters,
+                                selected.instance_parameters,
                             )
                         else:
                             expected_oa_parameters = current_parameters
@@ -3356,16 +3720,38 @@ class TaskExecutor:
                                 "OA parameters"
                             )
                         parameters_finalized = True
-                    after = self._action(
-                        "schematic.inspect.after",
-                        lambda: self.adapter.inspect_schematic(task),
-                    )
+                    if expected_oa_instance_parameters:
+                        after = self._action(
+                            "schematic.inspect.after",
+                            lambda: self.adapter.verify_parameters(
+                                task, expected_oa_instance_parameters
+                            ),
+                        )
+                        final_instance_parameters = (
+                            self._confirmed_instance_parameters(
+                                after.data, "confirmed_instance_parameters"
+                            )
+                        )
+                    else:
+                        after = self._action(
+                            "schematic.inspect.after",
+                            lambda: self.adapter.inspect_schematic(task),
+                        )
+                        final_instance_parameters = {}
                     final_parameters = self._semantic_parameters(after, task)
                     if not self._same_parameters(
                         expected_oa_parameters, final_parameters
                     ):
                         raise RuntimeError(
                             "final OA readback does not match the confirmed parameter write"
+                        )
+                    if not self._same_instance_parameters(
+                        expected_oa_instance_parameters,
+                        final_instance_parameters,
+                    ):
+                        raise RuntimeError(
+                            "final OA readback does not match the confirmed instance "
+                            "parameter write"
                         )
                     expected_oa_parameters = final_parameters
                     persist_checkpoint(complete=True)
@@ -3374,7 +3760,9 @@ class TaskExecutor:
                     if not parameters_finalized and candidate_oa_write:
                         try:
                             apply_with_checkpoint(
-                                "parameters.restore.interrupted", initial_parameters
+                                "parameters.restore.interrupted",
+                                initial_parameters,
+                                initial_instance_parameters,
                             )
                         except Exception as restore_exc:
                             notes.append(
@@ -3400,6 +3788,7 @@ class TaskExecutor:
             actions=self.actions,
             candidates=candidates,
             selected_parameters=selected_parameters,
+            selected_instance_parameters=selected_instance_parameters,
             selected_metrics=selected_metrics,
             notes=notes,
         )

@@ -89,4 +89,4 @@ remove 后：
 - 未验证用户在 add/remove 之间人工移动 RS0 或 stub 后的恢复；当前 preflight 会因几何选择不唯一或缺失而拒绝，而不是猜测。
 - PVT 是可选项，本 Gate 只跑 nominal TT profile；不能外推到其他 foundry/node/model section。
 
-下一道默认 Gate 是把已有 `parameters.apply` 的任意实例 CDF 字符串能力接入受控有限搜索，同时保留逐候选定向回读、失败恢复和最终最佳写回；之后再进入差分对或新的固定拓扑 delta。
+该记录之后的 raw CDF Gate 已在同一测试 cell 上闭合 `MN0.fingers=1/2` 的逐候选定向回读、失败恢复、不同 `si` 网表和最终最佳写回，见 [`2026-07-23-common-source-raw-instance-tuning-live.md`](2026-07-23-common-source-raw-instance-tuning-live.md)。下一默认产品 Gate 转向差分对的固定模板、nominal DC 支路平衡/尾电流/工作区，再进入差模 AC 与 CMRR；不把任意图编辑或全部 CDF 自动搜索作为前置条件。

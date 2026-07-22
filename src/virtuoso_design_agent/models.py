@@ -145,6 +145,23 @@ class InstanceParameterUpdate(StrictModel):
         return value
 
 
+class InstanceParameterSweep(StrictModel):
+    """One finite raw CDF/OA string dimension for bounded tuning."""
+
+    instance: StrictStr = Field(min_length=1)
+    parameter: StrictStr = Field(min_length=1)
+    values: list[StrictStr] = Field(min_length=1, max_length=32)
+
+    @field_validator("values")
+    @classmethod
+    def validate_values(cls, value: list[StrictStr]) -> list[StrictStr]:
+        if any(not item for item in value):
+            raise ValueError("instance parameter sweep values cannot be empty")
+        if len(value) != len(set(value)):
+            raise ValueError("instance parameter sweep values contain duplicates")
+        return value
+
+
 class MetricConstraint(StrictModel):
     metric: str = Field(min_length=1, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
     relation: Relation
@@ -1391,6 +1408,10 @@ class TaskSpec(StrictModel):
         default_factory=list
     )
     parameter_space: dict[str, list[float]] = Field(default_factory=dict)
+    instance_parameter_space: list[InstanceParameterSweep] = Field(
+        default_factory=list,
+        max_length=12,
+    )
     constraints: list[MetricConstraint] = Field(default_factory=list)
     objective: Objective | None = None
     create_if_missing: bool = False
@@ -1714,15 +1735,43 @@ class TaskSpec(StrictModel):
         elif self.ade_setup is not None:
             raise ValueError("ade_setup settings require operation='ade.setup.apply'")
         if self.instance_parameter_updates:
-            if self.operation is not Operation.PARAMETERS_APPLY:
+            if self.operation not in ({Operation.PARAMETERS_APPLY} | _TUNING_OPERATIONS):
                 raise ValueError(
-                    "instance_parameter_updates are currently supported only by "
-                    "parameters.apply"
+                    "instance_parameter_updates are supported only by "
+                    "parameters.apply or tuning operations"
                 )
             instances = [update.instance for update in self.instance_parameter_updates]
             if len(instances) != len(set(instances)):
                 raise ValueError(
                     "instance_parameter_updates cannot repeat an instance"
+                )
+        if self.instance_parameter_space:
+            if self.operation not in _TUNING_OPERATIONS:
+                raise ValueError(
+                    "instance_parameter_space requires design.tune or "
+                    "design.close_loop"
+                )
+            dimensions = [
+                (sweep.instance, sweep.parameter)
+                for sweep in self.instance_parameter_space
+            ]
+            if len(dimensions) != len(set(dimensions)):
+                raise ValueError(
+                    "instance_parameter_space cannot repeat an instance/parameter"
+                )
+            fixed = {
+                (update.instance, parameter)
+                for update in self.instance_parameter_updates
+                for parameter in update.parameters
+            }
+            overlap = sorted(fixed & set(dimensions))
+            if overlap:
+                formatted = ", ".join(
+                    f"{instance}.{parameter}" for instance, parameter in overlap
+                )
+                raise ValueError(
+                    "fixed instance_parameter_updates overlap swept dimensions: "
+                    + formatted
                 )
         if (
             self.operation is Operation.PARAMETERS_APPLY
@@ -1778,8 +1827,11 @@ class TaskSpec(StrictModel):
                 "schematic_transform settings require operation='schematic.transform'"
             )
         if self.operation in _TUNING_OPERATIONS:
-            if not self.parameter_space:
-                raise ValueError(f"{self.operation.value} requires parameter_space")
+            if not self.parameter_space and not self.instance_parameter_space:
+                raise ValueError(
+                    f"{self.operation.value} requires parameter_space or "
+                    "instance_parameter_space"
+                )
             if not self.constraints:
                 raise ValueError(f"{self.operation.value} requires constraints")
         if self.operation is Operation.SIMULATION_RUN and not self.parameters:
@@ -1853,6 +1905,8 @@ class ConstraintEvaluation(StrictModel):
 class CandidateEvaluation(StrictModel):
     index: int
     parameters: dict[str, float]
+    instance_parameters: dict[str, dict[str, str]] = Field(default_factory=dict)
+    oa_parameters: dict[str, float] = Field(default_factory=dict)
     metrics: dict[str, float]
     constraints: list[ConstraintEvaluation]
     feasible: bool
@@ -1906,6 +1960,7 @@ class RunRecord(StrictModel):
     actions: list[ActionRecord]
     candidates: list[CandidateEvaluation] = Field(default_factory=list)
     selected_parameters: dict[str, float] | None = None
+    selected_instance_parameters: dict[str, dict[str, str]] | None = None
     selected_metrics: dict[str, float] | None = None
     notes: list[str] = Field(default_factory=list)
 
@@ -1919,6 +1974,13 @@ class ExecutionCheckpoint(StrictModel):
     initial_parameters: dict[str, float]
     expected_oa_parameters: dict[str, float]
     pending_oa_parameters: dict[str, float] | None = None
+    initial_instance_parameters: dict[str, dict[str, str]] = Field(
+        default_factory=dict
+    )
+    expected_oa_instance_parameters: dict[str, dict[str, str]] = Field(
+        default_factory=dict
+    )
+    pending_oa_instance_parameters: dict[str, dict[str, str]] | None = None
     next_candidate_index: int = Field(ge=1)
     actions: list[ActionRecord] = Field(default_factory=list)
     candidates: list[CandidateEvaluation] = Field(default_factory=list)

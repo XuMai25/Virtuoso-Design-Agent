@@ -4132,6 +4132,301 @@ def test_common_source_checkpoint_resumes_completed_prefix(tmp_path) -> None:
     assert load_execution_checkpoint(checkpoint_path).complete is True
 
 
+def _raw_instance_parameter_tune(
+    *,
+    score_limit: float = 1.0,
+    max_iterations: int = 2,
+) -> TaskSpec:
+    return TaskSpec.model_validate(
+        {
+            "id": "raw-instance-parameter-tune",
+            "operation": "design.tune",
+            "circuit": "common_source",
+            "target": {"library": "vda_test", "cell": "vda_cs"},
+            "parameters": {"bias_v": 0.35, "vdd_v": 0.9},
+            "instance_parameter_space": [
+                {
+                    "instance": "MN0",
+                    "parameter": "fingers",
+                    "values": ["1", "2"],
+                }
+            ],
+            "constraints": [
+                {"metric": "raw_score", "relation": ">=", "value": score_limit}
+            ],
+            "objective": {"metric": "raw_score", "goal": "maximize"},
+            "safety": {
+                "allow_remote_compute": True,
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+            "limits": {
+                "max_iterations": max_iterations,
+                "timeout_seconds": 600,
+            },
+        }
+    )
+
+
+class _RawInstanceMetricAdapter(DeterministicDemoAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.simulated_fingers: list[str] = []
+
+    def simulate(self, task, parameters):
+        schematic = self._schematics[self._key(task)]
+        fingers = schematic["instance_parameters"]["MN0"]["fingers"]
+        self.simulated_fingers.append(fingers)
+        effective = dict(parameters)
+        effective.update(schematic["semantic_parameters"])
+        return AdapterResult(
+            data={
+                "parameters": effective,
+                "metrics": {"raw_score": float(fingers)},
+                "metric_sources": {"raw_score": "software_inference"},
+                "analysis_complete": True,
+            },
+            evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+        )
+
+
+def test_raw_instance_parameter_search_selects_and_reconfirms_best_value(
+    tmp_path,
+) -> None:
+    task = _raw_instance_parameter_tune()
+    adapter = _RawInstanceMetricAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+    checkpoint_path = tmp_path / "raw-instance.checkpoint.json"
+
+    record = TaskExecutor(adapter).execute(
+        task,
+        plan,
+        token=plan.confirmation_token,
+        checkpoint_path=checkpoint_path,
+    )
+    checkpoint = load_execution_checkpoint(checkpoint_path)
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert [candidate.instance_parameters for candidate in record.candidates] == [
+        {"MN0": {"fingers": "1"}},
+        {"MN0": {"fingers": "2"}},
+    ]
+    assert all(candidate.oa_parameters for candidate in record.candidates)
+    assert record.selected_instance_parameters == {"MN0": {"fingers": "2"}}
+    assert adapter.inspect_schematic(task).data["instance_parameters"]["MN0"][
+        "fingers"
+    ] == "2"
+    assert checkpoint.initial_instance_parameters == {
+        "MN0": {"fingers": "1"}
+    }
+    assert checkpoint.expected_oa_instance_parameters == {
+        "MN0": {"fingers": "2"}
+    }
+    assert checkpoint.pending_oa_instance_parameters is None
+    assert checkpoint.complete is True
+    final = next(
+        action
+        for action in record.actions
+        if action.action == "schematic.inspect.after"
+    )
+    assert final.details["confirmed_instance_parameters"] == {
+        "MN0": {"fingers": "2"}
+    }
+
+
+def test_infeasible_raw_instance_search_restores_exact_initial_value() -> None:
+    task = _raw_instance_parameter_tune(score_limit=3.0)
+    adapter = _RawInstanceMetricAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.PARTIAL
+    assert record.selected_instance_parameters is None
+    assert adapter.inspect_schematic(task).data["instance_parameters"]["MN0"][
+        "fingers"
+    ] == "1"
+    restore = next(
+        action for action in record.actions if action.action == "parameters.restore"
+    )
+    assert restore.details["confirmed_instance_parameters"] == {
+        "MN0": {"fingers": "1"}
+    }
+
+
+def test_raw_instance_stage_failure_restores_and_resumes_from_checkpoint(
+    tmp_path,
+) -> None:
+    class InterruptingRawAdapter(_RawInstanceMetricAdapter):
+        fail_second_write = True
+
+        def apply_parameters(self, task, parameters):
+            result = super().apply_parameters(task, parameters)
+            requested = {
+                update.instance: dict(update.parameters)
+                for update in task.instance_parameter_updates
+            }
+            if (
+                self.fail_second_write
+                and requested == {"MN0": {"fingers": "2"}}
+            ):
+                raise BridgeWorkerError("injected raw parameter interruption")
+            return result
+
+    task = _raw_instance_parameter_tune()
+    adapter = InterruptingRawAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+    checkpoint_path = tmp_path / "raw-instance-resume.checkpoint.json"
+
+    first = TaskExecutor(adapter).execute(
+        task,
+        plan,
+        token=plan.confirmation_token,
+        checkpoint_path=checkpoint_path,
+    )
+    checkpoint = load_execution_checkpoint(checkpoint_path)
+
+    assert first.status is RunStatus.FAILED
+    assert adapter.inspect_schematic(task).data["instance_parameters"]["MN0"][
+        "fingers"
+    ] == "1"
+    assert checkpoint.next_candidate_index == 2
+    assert checkpoint.pending_oa_instance_parameters is None
+    assert [candidate.index for candidate in checkpoint.candidates] == [1]
+
+    adapter.fail_second_write = False
+    resumed = TaskExecutor(adapter).execute(
+        task,
+        plan,
+        token=plan.confirmation_token,
+        checkpoint_path=checkpoint_path,
+        resume_checkpoint=checkpoint,
+    )
+
+    assert resumed.status is RunStatus.SUCCEEDED
+    assert adapter.simulated_fingers.count("1") == 1
+    assert adapter.simulated_fingers.count("2") == 1
+    assert resumed.selected_instance_parameters == {"MN0": {"fingers": "2"}}
+    assert load_execution_checkpoint(checkpoint_path).complete is True
+
+
+def test_raw_instance_simulation_interruption_retries_unfinished_candidate(
+    tmp_path,
+) -> None:
+    class InterruptingRawSimulationAdapter(_RawInstanceMetricAdapter):
+        fail_first_simulation = True
+
+        def simulate(self, task, parameters):
+            if self.fail_first_simulation:
+                self.fail_first_simulation = False
+                raise BridgeWorkerError("injected raw simulation transport reset")
+            return super().simulate(task, parameters)
+
+    task = _raw_instance_parameter_tune()
+    adapter = InterruptingRawSimulationAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+    checkpoint_path = tmp_path / "raw-instance-simulation-resume.checkpoint.json"
+
+    first = TaskExecutor(adapter).execute(
+        task,
+        plan,
+        token=plan.confirmation_token,
+        checkpoint_path=checkpoint_path,
+    )
+    checkpoint = load_execution_checkpoint(checkpoint_path)
+
+    assert first.status is RunStatus.FAILED
+    assert checkpoint.next_candidate_index == 1
+    assert checkpoint.candidates == []
+    assert checkpoint.pending_oa_instance_parameters is None
+    assert adapter.inspect_schematic(task).data["instance_parameters"]["MN0"][
+        "fingers"
+    ] == "1"
+
+    resumed = TaskExecutor(adapter).execute(
+        task,
+        plan,
+        token=plan.confirmation_token,
+        checkpoint_path=checkpoint_path,
+        resume_checkpoint=checkpoint,
+    )
+
+    assert resumed.status is RunStatus.SUCCEEDED
+    assert [candidate.index for candidate in resumed.candidates] == [1, 2]
+    assert adapter.simulated_fingers == ["1", "2"]
+    assert resumed.selected_instance_parameters == {"MN0": {"fingers": "2"}}
+    assert any(
+        action.action == "simulation.candidate.1" and action.status == "failed"
+        for action in resumed.actions
+    )
+    assert any(
+        action.action == "simulation.candidate.1" and action.status == "succeeded"
+        for action in resumed.actions
+    )
+
+
+def test_raw_instance_search_budget_counts_cross_product() -> None:
+    task = _raw_instance_parameter_tune(max_iterations=1)
+    adapter = _RawInstanceMetricAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert len(record.candidates) == 1
+    assert record.status is RunStatus.PARTIAL
+    assert any("1 of 2 declared candidates" in note for note in record.notes)
+
+
+def test_raw_instance_candidate_generation_is_bounded_before_materialization() -> None:
+    payload = _raw_instance_parameter_tune(max_iterations=2).model_dump(mode="json")
+    payload["instance_parameter_space"] = [
+        {
+            "instance": "MN0",
+            "parameter": f"raw_{index}",
+            "values": [str(value) for value in range(32)],
+        }
+        for index in range(12)
+    ]
+    task = TaskSpec.model_validate(payload)
+
+    candidates = TaskExecutor._candidate_inputs(task)
+
+    assert len(candidates) == 2
+    assert candidates[0].instance_parameters["MN0"] == {
+        f"raw_{index}": "0" for index in range(12)
+    }
+    second_values = candidates[1].instance_parameters["MN0"]
+    assert list(second_values.values()).count("1") == 1
+    assert list(second_values.values()).count("0") == 11
+
+
+def test_semantic_and_raw_instance_spaces_form_one_bounded_cross_product() -> None:
+    payload = _raw_instance_parameter_tune(max_iterations=3).model_dump(mode="json")
+    payload["parameter_space"] = {"bias_v": [0.3, 0.35]}
+    task = TaskSpec.model_validate(payload)
+
+    candidates = TaskExecutor._candidate_inputs(task)
+
+    assert TaskExecutor._candidate_space_size(task) == 4
+    assert [
+        (candidate.parameters["bias_v"], candidate.instance_parameters)
+        for candidate in candidates
+    ] == [
+        (0.3, {"MN0": {"fingers": "1"}}),
+        (0.3, {"MN0": {"fingers": "2"}}),
+        (0.35, {"MN0": {"fingers": "1"}}),
+    ]
+
+
 def _source_degeneration_transform(resistance_ohm: float = 1_000.0) -> TaskSpec:
     return TaskSpec.model_validate(
         {
