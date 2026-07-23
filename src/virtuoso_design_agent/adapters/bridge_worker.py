@@ -32,6 +32,7 @@ from virtuoso_design_agent.metrics import (
     extract_differential_pair_cmrr_response_metrics,
     extract_differential_pair_common_mode_ac_metrics,
     extract_differential_pair_dc_metrics,
+    extract_differential_pair_psrr_metrics,
     extract_inverter_metrics,
     extract_supply_metrics,
 )
@@ -10260,6 +10261,39 @@ def _differential_pair_cmrr_metrics_from_results(
     )
 
 
+def _differential_pair_psrr_metrics_from_results(
+    differential_data: dict[str, Any],
+    positive_supply_data: dict[str, Any],
+    negative_supply_data: dict[str, Any],
+    ac_sweep: dict[str, Any],
+    topology_variant: str = _DIFFERENTIAL_PAIR_BASE_VARIANT,
+) -> tuple[dict[str, float], dict[str, Any]]:
+    return extract_differential_pair_psrr_metrics(
+        _signal(differential_data, "ac_freq"),
+        _complex_signal(differential_data, "ac_INP"),
+        _complex_signal(differential_data, "ac_INN"),
+        _complex_signal(differential_data, "ac_OUTP"),
+        _complex_signal(differential_data, "ac_OUTN"),
+        _signal(positive_supply_data, "ac_freq"),
+        _complex_signal(positive_supply_data, "ac_VDD"),
+        _complex_signal(positive_supply_data, "ac_OUTP"),
+        _complex_signal(positive_supply_data, "ac_OUTN"),
+        _signal(negative_supply_data, "ac_freq"),
+        _complex_signal(negative_supply_data, "ac_VSS"),
+        _complex_signal(negative_supply_data, "ac_OUTP"),
+        _complex_signal(negative_supply_data, "ac_OUTN"),
+        reference_points=int(ac_sweep.get("reference_points", 5)),
+        max_reference_variation_db=float(
+            ac_sweep.get("max_reference_variation_db", 0.5)
+        ),
+        output_mode=(
+            "single_ended_outn"
+            if _differential_pair_has_current_mirror_load(topology_variant)
+            else "differential"
+        ),
+    )
+
+
 def _common_source_linearity_metrics_from_result(
     metadata: dict[str, Any],
     linearity_sweep: dict[str, Any],
@@ -10708,7 +10742,12 @@ def _differential_pair_testbench_deck(
         raise ValueError("netlist path contains an unsupported quote")
     if analysis not in {"dc", "ac", "transient", "noise"}:
         raise ValueError(f"unsupported differential-pair analysis: {analysis}")
-    if ac_mode not in {"differential", "common_mode"}:
+    if ac_mode not in {
+        "differential",
+        "common_mode",
+        "positive_supply",
+        "negative_supply",
+    }:
         raise ValueError(f"unsupported differential-pair AC mode: {ac_mode}")
     current_mirror_load = _differential_pair_has_current_mirror_load(
         topology_variant
@@ -10722,15 +10761,21 @@ def _differential_pair_testbench_deck(
         "VINP_SRC (INP 0) vsource dc=vcm{inp_ac}\n"
         "VINN_SRC (INN 0) vsource dc=vcm{inn_ac}"
     )
+    vdd_ac = ""
+    vss_ac = ""
     if analysis == "ac":
         if ac_sweep is None:
             raise ValueError("differential-pair AC deck requires ac_sweep")
         if ac_mode == "differential":
             inp_ac = " mag=0.5 phase=0 type=dc"
             inn_ac = " mag=0.5 phase=180 type=dc"
-        else:
+        elif ac_mode == "common_mode":
             inp_ac = " mag=1 phase=0 type=dc"
             inn_ac = " mag=1 phase=0 type=dc"
+        elif ac_mode == "positive_supply":
+            vdd_ac = " mag=1 phase=0 type=dc"
+        else:
+            vss_ac = " mag=1 phase=0 type=dc"
         analysis_statement = (
             f'ac ac start={float(ac_sweep["start_hz"]):.12g} '
             f'stop={float(ac_sweep["stop_hz"]):.12g} '
@@ -10841,8 +10886,8 @@ include "{remote_netlist_path}"
 
 parameters vdd={parameters["vdd_v"]:.12g} vcm={parameters["common_mode_v"]:.12g}{tail_parameter}{tail_resistance_parameter}{extra_parameters}
 
-VDD_SRC (VDD 0) vsource dc=vdd
-VSS_SRC (VSS 0) vsource dc=0
+VDD_SRC (VDD 0) vsource dc=vdd{vdd_ac}
+VSS_SRC (VSS 0) vsource dc=0{vss_ac}
 {input_sources.format(inp_ac=inp_ac, inn_ac=inn_ac)}
 {tail_source}
 {tail_resistance_element}
@@ -11605,13 +11650,15 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
     from virtuoso_bridge.spectre.runner import SpectreSimulator
 
     analysis = str(payload.get("analysis", "dc"))
-    if analysis not in {"dc", "ac", "transient", "noise"}:
+    if analysis not in {"dc", "ac", "transient", "noise", "psrr"}:
         raise RuntimeError(f"unsupported differential-pair analysis: {analysis}")
     ac_sweep = payload.get("ac_sweep")
     linearity_sweep = payload.get("linearity_sweep")
     noise_sweep = payload.get("noise_sweep")
-    if analysis == "ac" and not isinstance(ac_sweep, dict):
-        raise RuntimeError("differential-pair AC simulation requires ac_sweep")
+    if analysis in {"ac", "psrr"} and not isinstance(ac_sweep, dict):
+        raise RuntimeError(
+            f"differential-pair {analysis.upper()} simulation requires ac_sweep"
+        )
     if analysis == "transient" and not isinstance(linearity_sweep, dict):
         raise RuntimeError(
             "differential-pair transient simulation requires linearity_sweep"
@@ -11624,6 +11671,13 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
     library, cell = _target(payload)
     schematic = _read_schematic(client, library, cell)
     topology_variant = _assert_differential_pair(schematic, profile)
+    if analysis == "psrr" and not _differential_pair_has_real_tail(
+        topology_variant
+    ):
+        raise RuntimeError(
+            "differential-pair PSRR requires an OA tail device so VSS injection "
+            "does not use the ideal-tail wrapper as a substitute circuit"
+        )
     oa_parameters = _differential_pair_semantic_parameters_from_schematic(schematic)
     oa_geometry = _differential_pair_device_geometry_from_schematic(schematic)
     oa_tail_geometry = _differential_pair_tail_device_geometry_from_schematic(
@@ -11724,7 +11778,7 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
             profile,
             parameters,
             netlist_evidence["remote_netlist_path"],
-            analysis=analysis,
+            analysis="ac" if analysis == "psrr" else analysis,
             ac_sweep=ac_sweep,
             linearity_sweep=linearity_sweep,
             noise_sweep=noise_sweep,
@@ -11760,12 +11814,18 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
         ac_diagnostics: dict[str, Any] | None = None
         common_mode_ac_diagnostics: dict[str, Any] | None = None
         cmrr_diagnostics: dict[str, Any] | None = None
+        psrr_diagnostics: dict[str, Any] | None = None
         linearity_diagnostics: dict[str, Any] | None = None
         noise_diagnostics: dict[str, Any] | None = None
         common_mode_operating_point: dict[str, Any] | None = None
         common_mode_deck: str | None = None
         common_mode_remote_wrapper: str | None = None
         common_mode_result = None
+        psrr_results: dict[str, Any] = {}
+        psrr_decks: dict[str, str] = {}
+        psrr_remote_wrappers: dict[str, str] = {}
+        psrr_operating_points: dict[str, dict[str, Any]] = {}
+        simulation_warnings = list(result.warnings)
         if (
             _differential_pair_has_real_tail(topology_variant)
             and metrics["tail_device_saturation_region"] != 1.0
@@ -11784,7 +11844,7 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                 "use both_load_saturation_region or "
                 "all_signal_devices_saturation_region to evaluate feasibility"
             )
-        if analysis == "ac":
+        if analysis in {"ac", "psrr"}:
             assert isinstance(ac_sweep, dict)
             ac_metrics, ac_diagnostics = _differential_pair_ac_metrics_from_result(
                 result.data, ac_sweep, topology_variant
@@ -11807,7 +11867,7 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                 and not analysis_issues
             )
             analysis_complete = differential_ac_complete
-            if (
+            if analysis == "ac" and (
                 "tail_output_resistance_ohm" in parameters
                 or _differential_pair_has_real_tail(topology_variant)
             ):
@@ -11957,6 +12017,129 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                     and bool(cmrr_diagnostics.get("analysis_complete", False))
                     and not analysis_issues
                 )
+            elif analysis == "psrr":
+                dc_consistency_names = (
+                    "branch_p_current_ua",
+                    "branch_n_current_ua",
+                    "tail_current_ua",
+                    "supply_current_ua",
+                    "tail_voltage_v",
+                    "output_common_mode_v",
+                    "minimum_saturation_margin_v",
+                )
+                if _differential_pair_has_source_degeneration(topology_variant):
+                    dc_consistency_names += (
+                        "source_p_voltage_v",
+                        "source_n_voltage_v",
+                        "max_source_current_mismatch_percent",
+                    )
+                if _differential_pair_has_current_mirror_load(topology_variant):
+                    dc_consistency_names += (
+                        "current_mirror_current_mismatch_percent",
+                        "minimum_load_saturation_margin_v",
+                    )
+                for label, ac_mode in (
+                    ("positive", "positive_supply"),
+                    ("negative", "negative_supply"),
+                ):
+                    supply_dir = work_dir / f"{label}_supply"
+                    supply_dir.mkdir()
+                    supply_wrapper = (
+                        supply_dir
+                        / f"differential_pair_{label}_supply_from_oa.scs"
+                    )
+                    supply_deck = _differential_pair_testbench_deck(
+                        profile,
+                        parameters,
+                        netlist_evidence["remote_netlist_path"],
+                        analysis="ac",
+                        ac_sweep=ac_sweep,
+                        ac_mode=ac_mode,
+                        topology_variant=topology_variant,
+                    )
+                    supply_wrapper.write_text(supply_deck, encoding="utf-8")
+                    supply_remote_wrapper = (
+                        f"{netlist_evidence['remote_run_dir']}/"
+                        f"input_from_oa_ac_{label}_supply.scs"
+                    )
+                    _upload_file(
+                        client,
+                        supply_wrapper,
+                        supply_remote_wrapper,
+                        timeout=min(timeout, 60),
+                    )
+                    supply_simulator = SpectreSimulator.from_env(
+                        timeout=timeout,
+                        work_dir=supply_dir,
+                        output_format="psfascii",
+                        keep_remote_files=False,
+                        ssh_runner=getattr(client, "ssh_runner", None),
+                    )
+                    supply_ssh_runner = getattr(
+                        supply_simulator, "_ssh_runner", None
+                    )
+                    if supply_ssh_runner is not None:
+                        supply_ssh_runner._persistent_shell_enabled = False
+                    supply_result = supply_simulator.run_simulation(
+                        supply_wrapper, {}
+                    )
+                    if not supply_result.ok:
+                        detail = _spectre_failure_detail(
+                            supply_result, supply_dir
+                        )
+                        raise RuntimeError(
+                            f"Spectre {label}-supply simulation failed: {detail}"
+                        )
+                    supply_dc_data, supply_dc_psf_evidence = (
+                        _common_source_dc_data_from_result(supply_result)
+                    )
+                    supply_dc_metrics, supply_operating_point = (
+                        _differential_pair_metrics_from_result(
+                            supply_dc_data, parameters, topology_variant
+                        )
+                    )
+                    supply_operating_point["raw_files"] = supply_dc_psf_evidence
+                    _assert_parameter_consistency(
+                        {
+                            name: metrics[name]
+                            for name in dc_consistency_names
+                        },
+                        {
+                            name: supply_dc_metrics[name]
+                            for name in dc_consistency_names
+                        },
+                        expected_label="differential-run DC operating point",
+                        actual_label=(
+                            f"{label}-supply-run DC operating point"
+                        ),
+                    )
+                    psrr_results[label] = supply_result
+                    psrr_decks[label] = supply_deck
+                    psrr_remote_wrappers[label] = supply_remote_wrapper
+                    psrr_operating_points[label] = supply_operating_point
+                    simulation_warnings.extend(supply_result.warnings)
+                psrr_metrics, psrr_diagnostics = (
+                    _differential_pair_psrr_metrics_from_results(
+                        result.data,
+                        psrr_results["positive"].data,
+                        psrr_results["negative"].data,
+                        ac_sweep,
+                        topology_variant,
+                    )
+                )
+                metrics.update(psrr_metrics)
+                analysis_issues.extend(
+                    str(value) for value in psrr_diagnostics.get("issues", [])
+                )
+                analysis_warnings.extend(
+                    str(value)
+                    for value in psrr_diagnostics.get("warnings", [])
+                )
+                analysis_complete = (
+                    differential_ac_complete
+                    and bool(psrr_diagnostics.get("analysis_complete", False))
+                    and not analysis_issues
+                )
         elif analysis == "transient":
             assert isinstance(linearity_sweep, dict)
             linearity_metrics, linearity_diagnostics = (
@@ -12056,7 +12239,7 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                 if "load_ff" in payload.get("parameters", {})
                 else "software_inference"
             )
-        if analysis == "ac":
+        if analysis in {"ac", "psrr"}:
             assert isinstance(ac_sweep, dict)
             testbench_values["ac_sweep"] = dict(ac_sweep)
             testbench_values["differential_ac_stimulus"] = {
@@ -12087,6 +12270,24 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                     "common_mode_input_magnitude_v": 1.0,
                 }
                 testbench_value_sources["common_mode_ac_stimulus"] = (
+                    "software_inference"
+                )
+            if analysis == "psrr":
+                testbench_values["psrr_ac_stimuli"] = {
+                    "positive_supply": {
+                        "vdd_magnitude_v": 1.0,
+                        "vss_magnitude_v": 0.0,
+                    },
+                    "negative_supply": {
+                        "vdd_magnitude_v": 0.0,
+                        "vss_magnitude_v": 1.0,
+                    },
+                    "input_and_bias_reference": (
+                        "ideal ground-referenced DC sources"
+                    ),
+                    "netlist_binding": "same_si_netlist_sha256",
+                }
+                testbench_value_sources["psrr_ac_stimuli"] = (
                     "software_inference"
                 )
         elif analysis == "transient":
@@ -12163,6 +12364,8 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
         for name in metrics:
             if "cmrr" in name:
                 metric_sources[name] = "software_inference"
+            if "psrr" in name:
+                metric_sources[name] = "software_inference"
         if real_tail:
             operating_point["source_value_sources"] = {
                 "supply_source_current_a": "eda_result",
@@ -12182,6 +12385,10 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
             common_mode_operating_point["source_value_sources"] = dict(
                 operating_point["source_value_sources"]
             )
+        for supply_operating_point in psrr_operating_points.values():
+            supply_operating_point["source_value_sources"] = dict(
+                operating_point["source_value_sources"]
+            )
         return {
             "parameters": parameters,
             "metrics": metrics,
@@ -12193,9 +12400,10 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                 len(common_mode_result.data)
                 if common_mode_result is not None
                 else 0
-            ),
+            )
+            + sum(len(value.data) for value in psrr_results.values()),
             "tool_version": result.tool_version,
-            "warnings": result.warnings[:20],
+            "warnings": simulation_warnings[:20],
             "evidence": {
                 "schematic_readback": {
                     "source": "bridge_readback",
@@ -12267,6 +12475,20 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                         and common_mode_remote_wrapper is not None
                         else {"status": "not_requested"}
                     ),
+                    "psrr_pair": (
+                        {
+                            label: {
+                                "remote_path": psrr_remote_wrappers[label],
+                                "sha256": hashlib.sha256(
+                                    psrr_decks[label].encode("utf-8")
+                                ).hexdigest(),
+                                "netlist_binding": "same_si_netlist_sha256",
+                            }
+                            for label in ("positive", "negative")
+                        }
+                        if psrr_decks
+                        else {"status": "not_requested"}
+                    ),
                 },
                 "operating_point": {
                     "source": "eda_result",
@@ -12329,6 +12551,24 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                         **cmrr_diagnostics,
                     }
                     if cmrr_diagnostics is not None
+                    else {"status": "not_requested"}
+                ),
+                "psrr_supply_operating_points": (
+                    {
+                        "source": "eda_result",
+                        "consistency_with_differential_run": "matched",
+                        **psrr_operating_points,
+                    }
+                    if psrr_operating_points
+                    else {"status": "not_requested"}
+                ),
+                "psrr": (
+                    {
+                        "source": "software_inference",
+                        "netlist_binding": "same_si_netlist_sha256",
+                        **psrr_diagnostics,
+                    }
+                    if psrr_diagnostics is not None
                     else {"status": "not_requested"}
                 ),
                 "linearity_response": (

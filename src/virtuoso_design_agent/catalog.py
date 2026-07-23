@@ -206,7 +206,9 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "single-ended OUTN AC/CMRR/transient/noise semantics, ICMR, bounded "
             "bias/load and geometry search, budget/infeasible paths, exact "
             "restore, and checkpoint recovery are live at nominal TSMC N28; "
-            "PVT/mismatch/PSRR/slew/ADE handoff remain pending"
+            "a same-si-netlist three-run PSRR+/PSRR- contract and one nominal "
+            "read-only live point are verified; PSRR-constrained bias/load search, "
+            "PVT/mismatch, slew, and ADE handoff remain pending"
         ),
     ),
 }

@@ -696,6 +696,40 @@ def test_common_source_ac_plan_discloses_dc_precheck_and_complex_metrics() -> No
     assert not plan.requires_remote_write
 
 
+def test_differential_pair_psrr_plan_discloses_three_bound_ac_runs() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "differential-pair-psrr",
+            "operation": "simulation.run",
+            "circuit": "differential_pair",
+            "target": {"library": "vda_test", "cell": "vda_diffpair_active"},
+            "analysis": "psrr",
+            "ac_sweep": {"start_hz": 1e3, "stop_hz": 1e11},
+            "parameters": {
+                "tail_bias_v": 0.32,
+                "common_mode_v": 0.55,
+                "vdd_v": 0.9,
+                "load_ff": 0.5,
+            },
+        }
+    )
+    plan = build_plan(task)
+    simulation = next(
+        step for step in plan.steps if step.capability == "simulation.run"
+    )
+    evaluation = next(
+        step for step in plan.steps if step.capability == "results.evaluate"
+    )
+
+    assert "平衡差模" in simulation.description
+    assert "VDD 正电源注入" in simulation.description
+    assert "VSS 负电源注入" in simulation.description
+    assert "PSRR+=|Ad/Avdd|" in evaluation.description
+    assert "频率网格" in evaluation.description
+    assert plan.requires_remote_compute
+    assert not plan.requires_remote_write
+
+
 def test_common_source_linearity_plan_discloses_sweep_distortion_and_power() -> None:
     task = TaskSpec.model_validate(
         {

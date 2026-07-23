@@ -37,6 +37,7 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
     differential_pair_real_tail = differential_pair and "tail_bias_v" in declared_parameters
     common_source_ac = common_source and analysis is AnalysisKind.AC
     differential_pair_ac = differential_pair and analysis is AnalysisKind.AC
+    differential_pair_psrr = differential_pair and analysis is AnalysisKind.PSRR
     differential_pair_cmrr = differential_pair_ac and (
         differential_pair_real_tail or "tail_output_resistance_ohm" in declared_parameters
     )
@@ -69,6 +70,11 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         if common_source_quality
         else "用 OA 导出网表，先核对 DC operating point，再运行 Spectre 复数 AC sweep"
         if common_source_ac
+        else (
+            "用同一次 OA/si 网表运行平衡差模、VDD 正电源注入和 VSS 负电源注入"
+            "三次 Spectre 复数 AC，并核对三次 DC 工作点与频率网格一致"
+        )
+        if differential_pair_psrr
         else (
             f"用 OA 导出网表，{differential_tail_description}，先核对双支路 DC "
             "operating point，再运行平衡差模 Spectre 复数 AC sweep"
@@ -118,6 +124,11 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         if common_source_quality
         else "在 max_iterations 内运行 OA 同源 DC + 复数 AC 候选"
         if common_source_ac
+        else (
+            "在 max_iterations 内运行 OA 同源双支路 DC + 差模/VDD/VSS 三路复数 "
+            "AC PSRR 候选"
+        )
+        if differential_pair_psrr
         else "在 max_iterations 内运行 OA 同源双支路 DC + 差模复数 AC 候选"
         if differential_pair_ac and not differential_pair_cmrr
         else (
@@ -148,6 +159,12 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         else "从复数 VOUT/VIN 提取低频增益、首个 -3 dB 带宽、GBW、"
         "unity-gain frequency，并结合 DC 工作区逐条判断规格"
         if common_source_ac
+        else (
+            "提取 VDD/VSS 到拓扑定义输出的 supply gain，计算 PSRR+=|Ad/Avdd|、"
+            "PSRR-=|Ad/Avss|、扫频最差值与首次下降 3 dB 频点；三次 AC 必须共享 "
+            "si 网表、频率网格和 DC 工作点"
+        )
+        if differential_pair_psrr
         else (
             "从复数 (OUTP-OUTN)/(INP-INN) 提取差模低频增益、首个 -3 dB "
             "带宽、GBW、unity-gain frequency，并结合双支路 DC/KCL 逐条判断规格"

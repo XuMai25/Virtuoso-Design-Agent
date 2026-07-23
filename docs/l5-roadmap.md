@@ -47,7 +47,9 @@ Gate 4 随后在新 `vda_diffpair_tail_gate4_001` 上以 exact-delta transform �
 
 Gate 5 随后在新 `vda_diffpair_deg_gate5_001` 上验证对称源极退化。exact-delta add 只把 `MN0.S/MN1.S` 分到 `NSP/NSN` 并加入 `RS0/RS1` 后汇回 TAIL；500 Ω 的 OA 回读、`si` 网表、两支路电阻电流和 KCL 完全绑定。既有 DC/差模与共模 AC/10 点 ICMR/六点 transient/noise 全部无缝复用；相对同参数无退化基线，输入 P1dB 提升 29.19%、200 mV THD 降低 30.11%，代价是低频增益降低 17.89%、GBW 降低 22.22%、输入参考积分噪声增加 17.82%。250/500 Ω 两点有限搜索按 P1dB 选择并独立回读 500 Ω。两次 remove 都把 placement SHA 精确恢复到 add 前值，恢复网表和 DC metrics 逐项相同。状态升级为 **differential-pair reversible symmetric source-degeneration, full-analysis migration, and bounded RS writeback verified**；PVT 仍按任务可选，未作为默认成本。
 
-同日继续完成 Gate 6 live。新 action 在全新 `vda_diffpair_active_gate6_001` 上把 `RD0/RD1` 精确替换为 `MP0/MP1` 电流镜，并按显式电阻值反向恢复；PMOS W/L 进入 semantic apply/search 面。OA/`si` parser 拒绝混合负载、单边缺失、错误 master/node 和几何不匹配；DC 增加 PMOS OP、支路 KCL、镜像误差、上下管工作区与联合摆幅；AC/CMRR/transient/noise 使用显式 `OUTN` 单端输出。真实 Gate 覆盖 10 点 ICMR、6 点 bias/load、6 点 Wn/Wp、预算耗尽、全不可行恢复、两次 transport timeout checkpoint/resume、最佳 OA 写回、精确 RD restore 和最终 active-load 重建。首版 `PM0/PM1` 因 Spectre `P` 前缀被解释为 port 而失败，保存日志、恢复基线并统一更名为 `MP0/MP1` 后闭合。状态升级为 **Gate 6 current-mirror-load same-source bounded closure verified at nominal TSMC N28**；可选 PVT、P1dB 包围、PSRR、slew/settling、mismatch 和 ADE handoff 仍待后续 Gate。
+同日继续完成 Gate 6 live。新 action 在全新 `vda_diffpair_active_gate6_001` 上把 `RD0/RD1` 精确替换为 `MP0/MP1` 电流镜，并按显式电阻值反向恢复；PMOS W/L 进入 semantic apply/search 面。OA/`si` parser 拒绝混合负载、单边缺失、错误 master/node 和几何不匹配；DC 增加 PMOS OP、支路 KCL、镜像误差、上下管工作区与联合摆幅；AC/CMRR/transient/noise 使用显式 `OUTN` 单端输出。真实 Gate 覆盖 10 点 ICMR、6 点 bias/load、6 点 Wn/Wp、预算耗尽、全不可行恢复、两次 transport timeout checkpoint/resume、最佳 OA 写回、精确 RD restore 和最终 active-load 重建。首版 `PM0/PM1` 因 Spectre `P` 前缀被解释为 port 而失败，保存日志、恢复基线并统一更名为 `MP0/MP1` 后闭合。状态升级为 **Gate 6 current-mirror-load same-source bounded closure verified at nominal TSMC N28**；可选 PVT、P1dB 包围、slew/settling、mismatch 和 ADE handoff 仍待后续 Gate。
+
+随后启动 Gate 6Q 的第一项设计质量指标：差分对 `analysis: psrr`。每个候选只生成一次 OA/`si` 网表，并运行平衡差模、VDD 注入和 VSS 注入三次复数 AC；三次 DC 工作点、频率网格和网表 identity 必须一致。指标明确区分 `Avdd/Avss`、低频 PSRR+/PSRR−、扫频最差值和首次下降 3 dB 频点，纯 `tail_bias_v/load_ff` 搜索沿用不写 OA 的有限搜索/选择状态机。2026-07-24 nominal 单点完成三组各 181 点的 live 运行，低频 PSRR 为 `11.5156/13.4535 dB`，全 sweep 最差为 `-15.2974 dB`；独立 OA 回读无变化。状态升级为 **PSRR same-source execution verified at one nominal point; specification-driven tuning pending**。
 
 Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发送前的 tunnel 自愈。新的 9 点压力任务仍在候选 8 发生一次本地端口拒绝，但 OA 恢复、候选前缀和续跑均正确，最终 9/9 与最佳写回成功；确定性同-client smoke 已覆盖 pre-send 自愈。payload 发送后的不确定错误仍不自动重放，这是保留的可靠性边界而不是跳过的工作。
 
@@ -120,10 +122,11 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> 差分对真实尾管/偏置网络 + DC/AC/CMRR/ICMR/transient/noise（已 live；PVT 按任务可选）
   -> 差分对对称源极退化 + 全分析迁移 + RS 写回 + 精确 remove/restore（已 live）
   -> 差分对 active-load/current-mirror exact-template Gate（nominal OA/si/DC/AC/CMRR/ICMR/transient/noise/有限搜索/恢复已 live）
+  -> 差分对 PSRR+/PSRR- 三次同网表 AC（nominal 单点 live；规格与有限搜索待闭合）
   -> L5B 单模块闭环
   -> layout/DRC/LVS/PEX Gate
 ```
 
 每一级只有在真实 Bridge smoke、结构回读、指标解析和失败注入均通过后才升级状态。
 
-反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化可逆 transform/DC/AC、quality、W/RD/RS/L/VDD 写回、固定设计 TT/SS/FF、可选 PVT-aware bias 选优，以及差分对 nominal、真实尾管、对称源极退化和 PMOS 电流镜有源负载四条路径均已有 live 证据。Gate 5 已证明源极退化支持严格增量 add、全分析迁移、有限搜索、最佳写回、checkpoint 与精确 remove/restore；Gate 6 又证明 active-load delta 能无缝进入同一 DC/AC/CMRR/ICMR/transient/noise、搜索、失败、预算和恢复状态机。跨 PVT 不再是进入下一拓扑的强制默认门；需要加严时才显式启用。当前下一道设计质量 Gate 应优先补 PSRR、slew/settling、输出驱动/摆幅边界或显式可选 PVT；若继续拓扑能力，则为 `RS0/RS1 + MP0/MP1` 单独定义组合 Gate。差分对 PVT、mismatch/Monte Carlo、ADE 真实 PVT/multi-test、差分对 setup、已有 output 安全替换，以及人工打开/修改/重跑和旧 ADE L 迁移继续是独立 Gate；完成前仍不能升级为可重复的 L5B 单模块规格闭环。
+反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化可逆 transform/DC/AC、quality、W/RD/RS/L/VDD 写回、固定设计 TT/SS/FF、可选 PVT-aware bias 选优，以及差分对 nominal、真实尾管、对称源极退化和 PMOS 电流镜有源负载四条路径均已有 live 证据。Gate 5 已证明源极退化支持严格增量 add、全分析迁移、有限搜索、最佳写回、checkpoint 与精确 remove/restore；Gate 6 又证明 active-load delta 能无缝进入同一 DC/AC/CMRR/ICMR/transient/noise、搜索、失败、预算和恢复状态机。PSRR 三次同网表 AC 已完成现有 Gate 6 cell 的只读 live 单点，实际 supply coupling 接近 unity，低频 PSRR 只有 `11.5156/13.4535 dB`。下一步应先声明目标频带和数值门，再决定 testbench bias/load 搜索、OA W/L 调优还是偏置参考/拓扑调整；不能仅按“最大 PSRR”选一点后宣称闭合。跨 PVT 不默认附加；slew/settling、输出驱动/摆幅边界、差分对 PVT、mismatch/Monte Carlo、ADE 真实 PVT/multi-test、差分对 setup、已有 output 安全替换，以及人工打开/修改/重跑和旧 ADE L 迁移继续是独立 Gate。若继续拓扑能力，则为 `RS0/RS1 + MP0/MP1` 单独定义组合 Gate；这些完成前仍不能升级为可重复的 L5B 单模块规格闭环。

@@ -15,6 +15,7 @@ from ..metrics import (
     extract_differential_pair_cmrr_response_metrics,
     extract_differential_pair_common_mode_ac_metrics,
     extract_differential_pair_dc_metrics,
+    extract_differential_pair_psrr_metrics,
 )
 from ..models import (
     AnalysisKind,
@@ -1217,6 +1218,13 @@ class DeterministicDemoAdapter:
                 "resistive_load_nmos_differential_pair_with_tail_device_and_source_degeneration",
                 "pmos_current_mirror_load_nmos_differential_pair_with_tail_device",
             }
+            if (
+                task.resolved_analysis() is AnalysisKind.PSRR
+                and not real_tail
+            ):
+                raise RuntimeError(
+                    "demo differential-pair PSRR requires a real-tail topology"
+                )
             source_resistance = (
                 float(effective_parameters["source_resistance_ohm"])
                 if source_degenerated
@@ -1413,9 +1421,12 @@ class DeterministicDemoAdapter:
             effective_gm_s = gm_s / (1.0 + gm_s * source_resistance)
             low_frequency_gain = effective_gm_s * output_resistance
             noise_diagnostics: dict[str, object] = {}
-            if task.resolved_analysis() is AnalysisKind.AC:
+            psrr_diagnostics: dict[str, object] = {}
+            if task.resolved_analysis() in {AnalysisKind.AC, AnalysisKind.PSRR}:
                 if task.ac_sweep is None:
-                    raise RuntimeError("demo differential AC analysis requires ac_sweep")
+                    raise RuntimeError(
+                        "demo differential AC/PSRR analysis requires ac_sweep"
+                    )
                 sweep = task.ac_sweep
                 decades = math.log10(sweep.stop_hz / sweep.start_hz)
                 steps = math.ceil(decades * sweep.points_per_decade)
@@ -1478,7 +1489,10 @@ class DeterministicDemoAdapter:
                     bool(diagnostics.get("analysis_complete", False))
                     and not analysis_issues
                 )
-                if tail_output_resistance is not None:
+                if (
+                    task.resolved_analysis() is AnalysisKind.AC
+                    and tail_output_resistance is not None
+                ):
                     common_mode_gain = (
                         effective_gm_s
                         * output_resistance
@@ -1566,6 +1580,83 @@ class DeterministicDemoAdapter:
                         analysis_complete
                         and common_mode_reference_complete
                         and bool(cmrr_diagnostics.get("analysis_complete", False))
+                        and not analysis_issues
+                    )
+                elif task.resolved_analysis() is AnalysisKind.PSRR:
+                    positive_supply_transfer = [
+                        -low_frequency_gain / 100.0 + 0.0j
+                        for _ in frequency_hz
+                    ]
+                    negative_supply_transfer = [
+                        low_frequency_gain / 1000.0 + 0.0j
+                        for _ in frequency_hz
+                    ]
+                    positive_outp = (
+                        [0.0j] * len(frequency_hz)
+                        if current_mirror_load
+                        else [
+                            0.5 * value for value in positive_supply_transfer
+                        ]
+                    )
+                    positive_outn = (
+                        positive_supply_transfer
+                        if current_mirror_load
+                        else [
+                            -0.5 * value
+                            for value in positive_supply_transfer
+                        ]
+                    )
+                    negative_outp = (
+                        [0.0j] * len(frequency_hz)
+                        if current_mirror_load
+                        else [
+                            0.5 * value for value in negative_supply_transfer
+                        ]
+                    )
+                    negative_outn = (
+                        negative_supply_transfer
+                        if current_mirror_load
+                        else [
+                            -0.5 * value
+                            for value in negative_supply_transfer
+                        ]
+                    )
+                    psrr_metrics, psrr_diagnostics = (
+                        extract_differential_pair_psrr_metrics(
+                            frequency_hz,
+                            [0.5 + 0.0j] * len(frequency_hz),
+                            [-0.5 + 0.0j] * len(frequency_hz),
+                            differential_outp,
+                            differential_outn,
+                            frequency_hz,
+                            [1.0 + 0.0j] * len(frequency_hz),
+                            positive_outp,
+                            positive_outn,
+                            frequency_hz,
+                            [1.0 + 0.0j] * len(frequency_hz),
+                            negative_outp,
+                            negative_outn,
+                            reference_points=sweep.reference_points,
+                            max_reference_variation_db=(
+                                sweep.max_reference_variation_db
+                            ),
+                            output_mode=output_mode,
+                        )
+                    )
+                    metrics.update(psrr_metrics)
+                    analysis_issues.extend(
+                        str(value)
+                        for value in psrr_diagnostics.get("issues", [])
+                    )
+                    analysis_warnings.extend(
+                        str(value)
+                        for value in psrr_diagnostics.get("warnings", [])
+                    )
+                    analysis_complete = (
+                        analysis_complete
+                        and bool(
+                            psrr_diagnostics.get("analysis_complete", False)
+                        )
                         and not analysis_issues
                     )
             elif task.resolved_analysis() is AnalysisKind.TRANSIENT:
@@ -1688,6 +1779,7 @@ class DeterministicDemoAdapter:
                     "analysis_issues": analysis_issues,
                     "analysis_warnings": analysis_warnings,
                     "noise_diagnostics": noise_diagnostics,
+                    "psrr_diagnostics": psrr_diagnostics,
                     "warning": "analytical demo only; not an EDA result",
                 },
                 evidence_source=EvidenceSource.SOFTWARE_INFERENCE,

@@ -17,6 +17,7 @@ from virtuoso_design_agent.metrics import (
     extract_differential_pair_cmrr_response_metrics,
     extract_differential_pair_common_mode_ac_metrics,
     extract_differential_pair_dc_metrics,
+    extract_differential_pair_psrr_metrics,
     extract_inverter_metrics,
     extract_low_frequency_cmrr_metrics,
     extract_supply_metrics,
@@ -486,6 +487,94 @@ def test_active_load_differential_pair_ac_uses_outn_single_ended_output() -> Non
     )
     assert diagnostics["transfer"] == "OUTN/(INP-INN) complex ratio"
     assert diagnostics["output_mode"] == "single_ended_outn"
+
+
+def test_extract_active_load_psrr_from_three_matched_ac_runs() -> None:
+    frequency_hz = [10.0 ** (2.0 + index / 10.0) for index in range(71)]
+    differential_transfer = [
+        -10.0 / (1.0 + 1j * frequency / 1e6)
+        for frequency in frequency_hz
+    ]
+    positive_supply_transfer = [
+        -0.1 / (1.0 + 1j * frequency / 1e7)
+        for frequency in frequency_hz
+    ]
+    negative_supply_transfer = [
+        0.01 / (1.0 + 1j * frequency / 1e7)
+        for frequency in frequency_hz
+    ]
+
+    metrics, diagnostics = extract_differential_pair_psrr_metrics(
+        frequency_hz,
+        [0.5 + 0.0j] * len(frequency_hz),
+        [-0.5 + 0.0j] * len(frequency_hz),
+        [100.0 + 0.0j] * len(frequency_hz),
+        differential_transfer,
+        frequency_hz,
+        [1.0 + 0.0j] * len(frequency_hz),
+        [100.0 + 0.0j] * len(frequency_hz),
+        positive_supply_transfer,
+        frequency_hz,
+        [1.0 + 0.0j] * len(frequency_hz),
+        [100.0 + 0.0j] * len(frequency_hz),
+        negative_supply_transfer,
+        output_mode="single_ended_outn",
+    )
+
+    assert metrics["positive_low_frequency_psrr_db"] == pytest.approx(40.0, abs=0.01)
+    assert metrics["negative_low_frequency_psrr_db"] == pytest.approx(60.0, abs=0.01)
+    assert metrics["positive_supply_low_frequency_gain_v_per_v"] == pytest.approx(
+        0.1, rel=1e-4
+    )
+    assert metrics["minimum_low_frequency_psrr_db"] == pytest.approx(40.0, abs=0.01)
+    assert metrics["positive_psrr_bandwidth_3db_hz"] == pytest.approx(
+        1.01e6, rel=0.03
+    )
+    assert metrics["minimum_psrr_db_over_sweep"] < 30.0
+    assert diagnostics["analysis_complete"] is True
+    assert diagnostics["frequency_grid_consistency"] == "matched"
+    assert diagnostics["output_mode"] == "single_ended_outn"
+
+
+def test_psrr_rejects_mismatched_grids_and_zero_supply_stimulus() -> None:
+    frequency_hz = [1e3, 1e4, 1e5, 1e6, 1e7, 1e8]
+    point_count = len(frequency_hz)
+    arguments = [
+        frequency_hz,
+        [0.5 + 0.0j] * point_count,
+        [-0.5 + 0.0j] * point_count,
+        [0.0j] * point_count,
+        [-10.0 + 0.0j] * point_count,
+        frequency_hz,
+        [1.0 + 0.0j] * point_count,
+        [0.0j] * point_count,
+        [-0.1 + 0.0j] * point_count,
+        frequency_hz,
+        [1.0 + 0.0j] * point_count,
+        [0.0j] * point_count,
+        [0.01 + 0.0j] * point_count,
+    ]
+
+    mismatched_grid = list(arguments)
+    mismatched_grid[5] = [1e3, 1e4, 2e5, 1e6, 1e7, 1e8]
+    with pytest.raises(MetricExtractionError, match="frequency grids differ"):
+        extract_differential_pair_psrr_metrics(
+            *mismatched_grid, output_mode="single_ended_outn"
+        )
+
+    nonfinite_grid = list(arguments)
+    nonfinite_grid[9] = [1e3, 1e4, math.nan, 1e6, 1e7, 1e8]
+    with pytest.raises(MetricExtractionError, match="finite and positive"):
+        extract_differential_pair_psrr_metrics(
+            *nonfinite_grid, output_mode="single_ended_outn"
+        )
+
+    zero_positive_supply = list(arguments)
+    zero_positive_supply[6] = [0.0j] * point_count
+    with pytest.raises(MetricExtractionError, match="zero supply input"):
+        extract_differential_pair_psrr_metrics(
+            *zero_positive_supply, output_mode="single_ended_outn"
+        )
 
 
 def test_namespace_differential_pair_linearity_metrics() -> None:

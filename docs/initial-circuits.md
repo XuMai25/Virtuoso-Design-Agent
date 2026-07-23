@@ -94,8 +94,9 @@ Gate 4 的真实尾管能力继续保留；Gate 5 不替换它，而是在其上
 - live 先暴露 `PM0/PM1` 会被 Spectre 解释为 port primitive；失败日志被保留，RD 基线精确恢复，固定模板改用 `MP0/MP1` 后再继续，没有把执行错误包装成电路不可行。
 - 同一 OA/自动网表完成 DC、AC/CMRR、10 点 ICMR、transient 和 noise。最终 `Wn=Wp(load)=1.5 µm`、`L=30 nm` 得到增益 `3.7421 V/V`、带宽 `2.9756 GHz`、GBW `11.1351 GHz`、CMRR `34.8451 dB`、50 mVpeak THD `1.5089%` 和输入参考积分噪声 `699.24 µVrms`。
 - 6 点 bias/load 与 6 点 Wn/Wp 搜索、预算耗尽、两点全不可行、两次真实 transport timeout checkpoint/resume 均按既有状态机执行；最佳几何写回并独立回读。恢复 RD 后 placement SHA 精确等于基线，再重建最佳 active load 并以新 DC 复核最终状态。
+- PSRR+/PSRR− 已加入为独立 `analysis: psrr`：每个候选复用一份 OA/`si` 网表，依次运行差模、VDD 注入和 VSS 注入三次 AC，核对 DC 与频率网格后计算 supply gain、低频 PSRR、扫频最差值和首次下降 3 dB 频点。只改 `tail_bias_v/load_ff` 时不会写 OA。2026-07-24 nominal 单点三组各 181 点已 live，低频 PSRR+=`11.5156 dB`、PSRR−=`13.4535 dB`，独立 OA 回读无变化；该任务没有 PSRR 门，因此不是设计质量合格声明。
 
-下一步优先补单模块设计质量指标：PSRR、slew/settling、输出驱动/摆幅边界，或按任务显式启用差分对 PVT；PVT 不默认附加。若继续拓扑能力，则把 `RS0/RS1 + MP0/MP1` 定义成独立组合 Gate。当前 P1dB 未在 5–50 mVpeak 范围内被包围，PMOS L 尚未进入 live 搜索；差分对 ADE/Maestro setup、人工打开/调整/重跑、mismatch/Monte Carlo 和多 test/multi-analysis 仍未闭合。
+下一步先明确目标应用的 PSRR+/PSRR− 数值与频带，再决定是否运行不写 OA 的四点 bias/load 搜索；当前结果已经说明不能仅把执行成功当成 PSRR 合格。之后再处理 OA W/L/偏置参考结构、slew/settling、输出驱动/摆幅边界，或按任务显式启用差分对 PVT；PVT 不默认附加。若继续拓扑能力，则把 `RS0/RS1 + MP0/MP1` 定义成独立组合 Gate。当前 P1dB 未在 5–50 mVpeak 范围内被包围，PMOS L 尚未进入 live 搜索；差分对 ADE/Maestro setup、人工打开/调整/重跑、mismatch/Monte Carlo 和多 test/multi-analysis 仍未闭合。
 
 ## 升级原则
 

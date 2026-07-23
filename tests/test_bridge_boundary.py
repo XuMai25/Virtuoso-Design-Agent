@@ -43,6 +43,7 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     _differential_pair_instance_parameter_updates,
     _differential_pair_linearity_metrics_from_result,
     _differential_pair_metrics_from_result,
+    _differential_pair_psrr_metrics_from_results,
     _differential_pair_semantic_parameters_from_schematic,
     _differential_pair_testbench_deck,
     _delete_source_degeneration_operation,
@@ -7182,6 +7183,90 @@ def test_differential_pair_common_mode_deck_uses_explicit_finite_tail_resistance
     assert diagnostics["analysis_complete"] is True
 
 
+def test_differential_pair_psrr_decks_inject_exactly_one_supply() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump(mode="json")
+    parameters = {
+        "input_width_um": 1.5,
+        "length_um": 0.03,
+        "pmos_load_width_um": 1.5,
+        "pmos_load_length_um": 0.03,
+        "tail_width_um": 0.8,
+        "tail_length_um": 0.03,
+        "tail_bias_v": 0.32,
+        "common_mode_v": 0.55,
+        "vdd_v": 0.9,
+        "load_ff": 0.5,
+    }
+    sweep = {"start_hz": 1e3, "stop_hz": 1e11}
+    variant = "pmos_current_mirror_load_nmos_differential_pair_with_tail_device"
+
+    positive = _differential_pair_testbench_deck(
+        profile,
+        parameters,
+        "/data/xum/virtuoso_bridge_smoke/vda_diffpair/netlist",
+        analysis="ac",
+        ac_sweep=sweep,
+        ac_mode="positive_supply",
+        topology_variant=variant,
+    )
+    negative = _differential_pair_testbench_deck(
+        profile,
+        parameters,
+        "/data/xum/virtuoso_bridge_smoke/vda_diffpair/netlist",
+        analysis="ac",
+        ac_sweep=sweep,
+        ac_mode="negative_supply",
+        topology_variant=variant,
+    )
+
+    assert "VDD_SRC (VDD 0) vsource dc=vdd mag=1 phase=0 type=dc" in positive
+    assert "VSS_SRC (VSS 0) vsource dc=0 mag=1 phase=0 type=dc" not in positive
+    assert "VINP_SRC (INP 0) vsource dc=vcm\n" in positive
+    assert "VINN_SRC (INN 0) vsource dc=vcm\n" in positive
+    assert "VSS_SRC (VSS 0) vsource dc=0 mag=1 phase=0 type=dc" in negative
+    assert "VDD_SRC (VDD 0) vsource dc=vdd mag=1 phase=0 type=dc" not in negative
+
+    frequency_hz = [10.0 ** (2.0 + index / 10.0) for index in range(71)]
+    differential = [
+        -10.0 / (1.0 + 1j * frequency / 1e6)
+        for frequency in frequency_hz
+    ]
+    positive_transfer = [
+        -0.1 / (1.0 + 1j * frequency / 1e7)
+        for frequency in frequency_hz
+    ]
+    negative_transfer = [
+        0.01 / (1.0 + 1j * frequency / 1e7)
+        for frequency in frequency_hz
+    ]
+    metrics, diagnostics = _differential_pair_psrr_metrics_from_results(
+        {
+            "ac_freq": frequency_hz,
+            "ac_INP": [0.5 + 0.0j] * len(frequency_hz),
+            "ac_INN": [-0.5 + 0.0j] * len(frequency_hz),
+            "ac_OUTP": [0.0j] * len(frequency_hz),
+            "ac_OUTN": differential,
+        },
+        {
+            "ac_freq": frequency_hz,
+            "ac_VDD": [1.0 + 0.0j] * len(frequency_hz),
+            "ac_OUTP": [0.0j] * len(frequency_hz),
+            "ac_OUTN": positive_transfer,
+        },
+        {
+            "ac_freq": frequency_hz,
+            "ac_VSS": [1.0 + 0.0j] * len(frequency_hz),
+            "ac_OUTP": [0.0j] * len(frequency_hz),
+            "ac_OUTN": negative_transfer,
+        },
+        {**sweep, "reference_points": 5, "max_reference_variation_db": 0.5},
+        variant,
+    )
+    assert metrics["positive_low_frequency_psrr_db"] == pytest.approx(40.0, abs=0.01)
+    assert metrics["negative_low_frequency_psrr_db"] == pytest.approx(60.0, abs=0.01)
+    assert diagnostics["analysis_complete"] is True
+
+
 def test_differential_pair_transient_deck_and_linearity_parser_use_differences() -> None:
     profile = load_pdk_profile("nics4304_tsmc28").model_dump(mode="json")
     sweep = {
@@ -7400,6 +7485,42 @@ def test_differential_pair_subprocess_adapter_routes_real_operations(
     assert observed["payload"]["circuit"] == "differential_pair"
     assert observed["payload"]["analysis"] == "dc"
     assert result.evidence_source is EvidenceSource.EDA_RESULT
+
+
+def test_differential_pair_subprocess_adapter_routes_psrr_sweep_and_budget(
+    tmp_path, monkeypatch
+) -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "diffpair-psrr-route",
+            "operation": "simulation.run",
+            "circuit": "differential_pair",
+            "target": {"library": "vda_test", "cell": "vda_diffpair_active"},
+            "analysis": "psrr",
+            "ac_sweep": {"start_hz": 1e3, "stop_hz": 1e10},
+            "parameters": {
+                "tail_bias_v": 0.30,
+                "common_mode_v": 0.55,
+                "vdd_v": 0.9,
+            },
+            "limits": {"timeout_seconds": 60},
+        }
+    )
+    adapter = SubprocessBridgeAdapter(tmp_path / "bridge-python.exe")
+    observed = {}
+
+    def fake_request(action, payload, *, timeout):
+        observed.update(action=action, payload=payload, timeout=timeout)
+        return {"metrics": {"minimum_low_frequency_psrr_db": 40.0}}
+
+    monkeypatch.setattr(adapter, "_request", fake_request)
+    adapter.simulate(task, task.parameters)
+
+    assert observed["action"] == "simulate_differential_pair"
+    assert observed["payload"]["analysis"] == "psrr"
+    assert observed["payload"]["ac_sweep"]["start_hz"] == 1e3
+    assert observed["payload"]["ac_sweep_user_fields"] == ["start_hz", "stop_hz"]
+    assert observed["timeout"] == 420
 
 
 def test_differential_pair_live_worker_returns_bound_oa_netlist_and_ac_evidence(
@@ -7698,3 +7819,171 @@ def test_current_mirror_load_dc_binds_pm_regions_mirror_and_kcl() -> None:
     bad_data, bad_parameters = _current_mirror_dc_fixture(pm1_current_a=-20e-6)
     with pytest.raises(RuntimeError, match="max_load_current_mismatch_percent"):
         _differential_pair_metrics_from_result(bad_data, bad_parameters, variant)
+
+
+def test_differential_pair_live_worker_psrr_binds_three_runs_to_one_netlist(
+    monkeypatch,
+) -> None:
+    runner_module = ModuleType("virtuoso_bridge.spectre.runner")
+    frequency_hz = [10.0 ** (3.0 + index / 10.0) for index in range(71)]
+    differential_transfer = [
+        -10.0 / (1.0 + 1j * frequency / 1e7)
+        for frequency in frequency_hz
+    ]
+    positive_supply_transfer = [-0.1 + 0.0j] * len(frequency_hz)
+    negative_supply_transfer = [0.01 + 0.0j] * len(frequency_hz)
+    base_dc_data, _ = _current_mirror_dc_fixture()
+    differential_data = {
+        **base_dc_data,
+        "ac_freq": frequency_hz,
+        "ac_INP": [0.5 + 0.0j] * len(frequency_hz),
+        "ac_INN": [-0.5 + 0.0j] * len(frequency_hz),
+        "ac_OUTP": [0.0j] * len(frequency_hz),
+        "ac_OUTN": differential_transfer,
+    }
+    positive_supply_data = {
+        **base_dc_data,
+        "ac_freq": frequency_hz,
+        "ac_VDD": [1.0 + 0.0j] * len(frequency_hz),
+        "ac_OUTP": [0.0j] * len(frequency_hz),
+        "ac_OUTN": positive_supply_transfer,
+    }
+    negative_supply_data = {
+        **base_dc_data,
+        "ac_freq": frequency_hz,
+        "ac_VSS": [1.0 + 0.0j] * len(frequency_hz),
+        "ac_OUTP": [0.0j] * len(frequency_hz),
+        "ac_OUTN": negative_supply_transfer,
+    }
+    run_modes: list[str] = []
+
+    class Simulator:
+        _ssh_runner = None
+
+        @classmethod
+        def from_env(cls, **kwargs):
+            return cls()
+
+        def run_simulation(self, netlist, parameters):
+            text = netlist.read_text(encoding="utf-8")
+            assert "MNTAIL (" not in text
+            assert "VBIAS_SRC (BIAS 0) vsource dc=vbias" in text
+            if "VDD_SRC (VDD 0) vsource dc=vdd mag=1" in text:
+                mode = "positive"
+                data = positive_supply_data
+            elif "VSS_SRC (VSS 0) vsource dc=0 mag=1" in text:
+                mode = "negative"
+                data = negative_supply_data
+            else:
+                mode = "differential"
+                data = differential_data
+            run_modes.append(mode)
+            return SimpleNamespace(
+                ok=True,
+                data=data,
+                metadata={},
+                tool_version="test-spectre-psrr",
+                warnings=[f"{mode}-warning"],
+            )
+
+    runner_module.SpectreSimulator = Simulator
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.spectre.runner", runner_module)
+    monkeypatch.setattr(
+        bridge_worker, "_client", lambda: SimpleNamespace(ssh_runner=None)
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_read_schematic",
+        lambda *args: _differential_pair_current_mirror_readback(),
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_common_source_dc_data_from_result",
+        lambda result: (result.data, {"selection": "test fixture"}),
+    )
+    monkeypatch.setattr(bridge_worker, "_upload_file", lambda *args, **kwargs: None)
+    parsed = _parse_differential_pair_netlist(
+        """
+MN0 (OUTP INP TAIL VSS) nch_lvt_mac l=30n w=2u nf=2 multi=1
+MN1 (OUTN INN TAIL VSS) nch_lvt_mac l=30n w=2u nf=2 multi=1
+MNTAIL (TAIL BIAS VSS VSS) nch_lvt_mac l=30n w=500n nf=1 multi=1
+MP0 (OUTP OUTP VDD VDD) pch_lvt_mac l=30n w=4u nf=2 multi=1
+MP1 (OUTN OUTP VDD VDD) pch_lvt_mac l=30n w=4u nf=2 multi=1
+""",
+        load_pdk_profile("nics4304_tsmc28").model_dump(mode="json"),
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_generate_oa_netlist",
+        lambda *args, **kwargs: {
+            "remote_run_dir": "/data/xum/virtuoso_bridge_smoke/vda_psrr",
+            "remote_netlist_path": (
+                "/data/xum/virtuoso_bridge_smoke/vda_psrr/netlist"
+            ),
+            "netlist_sha256": "e" * 64,
+            "parsed": parsed,
+            "si_log_tail": ["End netlisting"],
+        },
+    )
+
+    result = simulate_differential_pair(
+        {
+            "task_id": "diffpair-psrr-worker",
+            "target": {
+                "library": "vda_test",
+                "cell": "vda_diffpair_active",
+                "view": "schematic",
+            },
+            "circuit": "differential_pair",
+            "profile": load_pdk_profile("nics4304_tsmc28").model_dump(
+                mode="json"
+            ),
+            "analysis": "psrr",
+            "analysis_source": "user_input",
+            "ac_sweep": {
+                "start_hz": 1e3,
+                "stop_hz": 1e10,
+                "points_per_decade": 10,
+                "reference_points": 5,
+                "max_reference_variation_db": 0.5,
+            },
+            "ac_sweep_user_fields": ["start_hz", "stop_hz"],
+            "parameters": {
+                "tail_bias_v": 0.30,
+                "common_mode_v": 0.55,
+                "vdd_v": 0.9,
+                "load_ff": 1.0,
+            },
+            "timeout_seconds": 60,
+        }
+    )
+
+    assert run_modes == ["differential", "positive", "negative"]
+    assert result["analysis_complete"] is True
+    assert result["metrics"]["positive_low_frequency_psrr_db"] == pytest.approx(
+        40.0, abs=0.01
+    )
+    assert result["metrics"]["negative_low_frequency_psrr_db"] == pytest.approx(
+        60.0, abs=0.01
+    )
+    assert result["metrics"]["positive_psrr_bandwidth_3db_hz"] == pytest.approx(
+        1e7, rel=0.02
+    )
+    assert result["metric_sources"]["minimum_psrr_db_over_sweep"] == (
+        "software_inference"
+    )
+    assert result["evidence"]["testbench"]["psrr_pair"]["positive"][
+        "netlist_binding"
+    ] == "same_si_netlist_sha256"
+    assert result["evidence"]["testbench"]["psrr_pair"]["negative"][
+        "netlist_binding"
+    ] == "same_si_netlist_sha256"
+    assert result["evidence"]["psrr"]["frequency_grid_consistency"] == "matched"
+    assert result["evidence"]["psrr_supply_operating_points"][
+        "consistency_with_differential_run"
+    ] == "matched"
+    assert result["warnings"] == [
+        "differential-warning",
+        "positive-warning",
+        "negative-warning",
+    ]

@@ -316,7 +316,8 @@ class SubprocessBridgeAdapter:
             payload,
             timeout=(
                 task.limits.timeout_seconds * 3 + 240
-                if task.resolved_analysis() is AnalysisKind.QUALITY
+                if task.resolved_analysis()
+                in {AnalysisKind.QUALITY, AnalysisKind.PSRR}
                 else task.limits.timeout_seconds + 240
             ),
         )

@@ -1574,6 +1574,285 @@ def extract_differential_pair_cmrr_response_metrics(
     return metrics, diagnostics
 
 
+def extract_differential_pair_psrr_metrics(
+    differential_frequency_hz: Sequence[float],
+    differential_inp_v: Sequence[complex | float],
+    differential_inn_v: Sequence[complex | float],
+    differential_outp_v: Sequence[complex | float],
+    differential_outn_v: Sequence[complex | float],
+    positive_frequency_hz: Sequence[float],
+    positive_supply_v: Sequence[complex | float],
+    positive_outp_v: Sequence[complex | float],
+    positive_outn_v: Sequence[complex | float],
+    negative_frequency_hz: Sequence[float],
+    negative_supply_v: Sequence[complex | float],
+    negative_outp_v: Sequence[complex | float],
+    negative_outn_v: Sequence[complex | float],
+    *,
+    reference_points: int = 5,
+    max_reference_variation_db: float = 0.5,
+    output_mode: str = "differential",
+) -> tuple[dict[str, float], dict[str, object]]:
+    """Extract PSRR+ and PSRR- from one differential and two supply AC runs."""
+    if output_mode not in {"differential", "single_ended_outn"}:
+        raise MetricExtractionError(
+            f"unsupported differential-pair output mode: {output_mode}"
+        )
+    run_lengths = {
+        "differential": {
+            len(differential_frequency_hz),
+            len(differential_inp_v),
+            len(differential_inn_v),
+            len(differential_outp_v),
+            len(differential_outn_v),
+        },
+        "positive_supply": {
+            len(positive_frequency_hz),
+            len(positive_supply_v),
+            len(positive_outp_v),
+            len(positive_outn_v),
+        },
+        "negative_supply": {
+            len(negative_frequency_hz),
+            len(negative_supply_v),
+            len(negative_outp_v),
+            len(negative_outn_v),
+        },
+    }
+    for label, lengths in run_lengths.items():
+        if len(lengths) != 1:
+            raise MetricExtractionError(
+                f"PSRR {label} frequency and node vectors must have equal lengths"
+            )
+    point_count = len(differential_frequency_hz)
+    if point_count != len(positive_frequency_hz) or point_count != len(
+        negative_frequency_hz
+    ):
+        raise MetricExtractionError("PSRR AC runs have different sweep lengths")
+
+    try:
+        frequencies = [float(value) for value in differential_frequency_hz]
+        positive_frequencies = [float(value) for value in positive_frequency_hz]
+        negative_frequencies = [float(value) for value in negative_frequency_hz]
+    except (TypeError, ValueError) as exc:
+        raise MetricExtractionError(
+            "PSRR AC frequencies must be numeric"
+        ) from exc
+    for label, values in (
+        ("differential", frequencies),
+        ("positive_supply", positive_frequencies),
+        ("negative_supply", negative_frequencies),
+    ):
+        if any(not math.isfinite(value) or value <= 0.0 for value in values):
+            raise MetricExtractionError(
+                f"PSRR {label} frequencies must be finite and positive"
+            )
+        if any(
+            values[index] <= values[index - 1]
+            for index in range(1, len(values))
+        ):
+            raise MetricExtractionError(
+                f"PSRR {label} frequencies must be strictly increasing"
+            )
+    for index, frequency in enumerate(frequencies):
+        tolerance = max(abs(frequency) * 1e-12, 1e-9)
+        if (
+            abs(frequency - positive_frequencies[index]) > tolerance
+            or abs(frequency - negative_frequencies[index]) > tolerance
+        ):
+            raise MetricExtractionError("PSRR AC frequency grids differ")
+
+    def complex_values(
+        label: str, values: Sequence[complex | float]
+    ) -> list[complex]:
+        try:
+            parsed = [complex(value) for value in values]
+        except (TypeError, ValueError) as exc:
+            raise MetricExtractionError(
+                f"PSRR {label} values must be numeric"
+            ) from exc
+        if any(
+            not math.isfinite(value.real) or not math.isfinite(value.imag)
+            for value in parsed
+        ):
+            raise MetricExtractionError(
+                f"PSRR {label} values must be finite"
+            )
+        return parsed
+
+    differential_inp = complex_values("differential INP", differential_inp_v)
+    differential_inn = complex_values("differential INN", differential_inn_v)
+    differential_outp = complex_values("differential OUTP", differential_outp_v)
+    differential_outn = complex_values("differential OUTN", differential_outn_v)
+    differential_input = [
+        inp - inn
+        for inp, inn in zip(differential_inp, differential_inn, strict=True)
+    ]
+    if any(abs(value) <= 1e-30 for value in differential_input):
+        raise MetricExtractionError("PSRR differential run contains zero input")
+    differential_output = (
+        differential_outn
+        if output_mode == "single_ended_outn"
+        else [
+            outp - outn
+            for outp, outn in zip(
+                differential_outp, differential_outn, strict=True
+            )
+        ]
+    )
+    differential_transfer = [
+        output / input_value
+        for input_value, output in zip(
+            differential_input, differential_output, strict=True
+        )
+    ]
+
+    def supply_response(
+        label: str,
+        supply_v: Sequence[complex | float],
+        outp_v: Sequence[complex | float],
+        outn_v: Sequence[complex | float],
+    ) -> tuple[dict[str, float], dict[str, object]]:
+        supplies = complex_values(f"{label} supply", supply_v)
+        if any(abs(value) <= 1e-30 for value in supplies):
+            raise MetricExtractionError(f"PSRR {label} run contains zero supply input")
+        parsed_outp = complex_values(f"{label} OUTP", outp_v)
+        parsed_outn = complex_values(f"{label} OUTN", outn_v)
+        outputs = (
+            parsed_outn
+            if output_mode == "single_ended_outn"
+            else [
+                outp - outn
+                for outp, outn in zip(parsed_outp, parsed_outn, strict=True)
+            ]
+        )
+        supply_transfer = [
+            output / supply
+            for supply, output in zip(supplies, outputs, strict=True)
+        ]
+        if any(abs(value) <= 1e-30 for value in supply_transfer):
+            raise MetricExtractionError(
+                f"PSRR {label} supply-to-output transfer is zero"
+            )
+        rejection_transfer = [
+            differential / supply
+            for differential, supply in zip(
+                differential_transfer, supply_transfer, strict=True
+            )
+        ]
+        raw_metrics, raw_diagnostics = extract_common_source_ac_metrics(
+            frequencies,
+            [1.0 + 0.0j] * point_count,
+            rejection_transfer,
+            reference_points=reference_points,
+            max_reference_variation_db=max_reference_variation_db,
+        )
+        supply_reference = sum(
+            supply_transfer[:reference_points], 0.0j
+        ) / reference_points
+        supply_reference_gain = abs(supply_reference)
+        psrr_db = [
+            20.0 * math.log10(max(abs(value), 1e-300))
+            for value in rejection_transfer
+        ]
+        metric_mapping = {
+            "low_frequency_gain_v_per_v": f"{label}_low_frequency_psrr_v_per_v",
+            "low_frequency_gain_db": f"{label}_low_frequency_psrr_db",
+            "low_frequency_phase_deg": f"{label}_low_frequency_psrr_phase_deg",
+            "peak_gain_db": f"{label}_peak_psrr_db",
+            "peak_gain_frequency_hz": f"{label}_peak_psrr_frequency_hz",
+            "gain_peaking_db": f"{label}_psrr_peaking_db",
+            "bandwidth_3db_hz": f"{label}_psrr_bandwidth_3db_hz",
+            "phase_at_bandwidth_deg": f"{label}_psrr_phase_at_bandwidth_deg",
+        }
+        metrics = {
+            renamed: raw_metrics[name]
+            for name, renamed in metric_mapping.items()
+            if name in raw_metrics
+        }
+        metrics.update(
+            {
+                f"{label}_supply_low_frequency_gain_v_per_v": supply_reference_gain,
+                f"{label}_supply_low_frequency_gain_db": 20.0
+                * math.log10(max(supply_reference_gain, 1e-300)),
+                f"{label}_minimum_psrr_db_over_sweep": min(psrr_db),
+                f"{label}_psrr_at_sweep_stop_db": psrr_db[-1],
+            }
+        )
+        diagnostics = dict(raw_diagnostics)
+        diagnostics["psrr_bandwidth"] = diagnostics.pop("bandwidth")
+        diagnostics.pop("gbw", None)
+        diagnostics.pop("unity_gain", None)
+        diagnostics["issues"] = [
+            str(value).replace("bandwidth_3db_hz", f"{label}_psrr_bandwidth_3db_hz")
+            for value in diagnostics.get("issues", [])
+        ]
+        diagnostics["warnings"] = [
+            value
+            for value in diagnostics.get("warnings", [])
+            if not str(value).startswith("unity_gain_frequency_hz unresolved")
+        ]
+        diagnostics.update(
+            {
+                "supply": "VDD" if label == "positive" else "VSS",
+                "supply_to_output_transfer": (
+                    "OUTN/supply"
+                    if output_mode == "single_ended_outn"
+                    else "(OUTP-OUTN)/supply"
+                ),
+                "definition": "PSRR = |differential gain / supply-to-output gain|",
+            }
+        )
+        return metrics, diagnostics
+
+    positive_metrics, positive_diagnostics = supply_response(
+        "positive", positive_supply_v, positive_outp_v, positive_outn_v
+    )
+    negative_metrics, negative_diagnostics = supply_response(
+        "negative", negative_supply_v, negative_outp_v, negative_outn_v
+    )
+    metrics = {**positive_metrics, **negative_metrics}
+    metrics.update(
+        {
+            "minimum_low_frequency_psrr_db": min(
+                metrics["positive_low_frequency_psrr_db"],
+                metrics["negative_low_frequency_psrr_db"],
+            ),
+            "minimum_psrr_db_over_sweep": min(
+                metrics["positive_minimum_psrr_db_over_sweep"],
+                metrics["negative_minimum_psrr_db_over_sweep"],
+            ),
+        }
+    )
+    issues = [
+        *(f"PSRR+: {value}" for value in positive_diagnostics.get("issues", [])),
+        *(f"PSRR-: {value}" for value in negative_diagnostics.get("issues", [])),
+    ]
+    warnings = [
+        *(f"PSRR+: {value}" for value in positive_diagnostics.get("warnings", [])),
+        *(f"PSRR-: {value}" for value in negative_diagnostics.get("warnings", [])),
+    ]
+    return metrics, {
+        "analysis_complete": (
+            bool(positive_diagnostics.get("analysis_complete", False))
+            and bool(negative_diagnostics.get("analysis_complete", False))
+            and not issues
+        ),
+        "issues": issues,
+        "warnings": warnings,
+        "frequency_grid_consistency": "matched",
+        "netlist_requirement": "all three AC runs must share one si netlist",
+        "output_mode": output_mode,
+        "definition": "PSRR+ = |Ad/Avdd| and PSRR- = |Ad/Avss|",
+        "bias_reference_contract": (
+            "INP, INN, and BIAS remain ideal ground-referenced DC sources during "
+            "each supply injection"
+        ),
+        "positive_supply": positive_diagnostics,
+        "negative_supply": negative_diagnostics,
+    }
+
+
 def evaluate_constraints(
     metrics: dict[str, float], constraints: Sequence[MetricConstraint]
 ) -> list[ConstraintEvaluation]:

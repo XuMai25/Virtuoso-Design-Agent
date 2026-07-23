@@ -73,6 +73,7 @@ class AnalysisKind(str, Enum):
     DC = "dc"
     AC = "ac"
     NOISE = "noise"
+    PSRR = "psrr"
     QUALITY = "quality"
 
 
@@ -1529,12 +1530,20 @@ class TaskSpec(StrictModel):
                     AnalysisKind.AC,
                     AnalysisKind.TRANSIENT,
                     AnalysisKind.NOISE,
+                    AnalysisKind.PSRR,
                 }:
                     raise ValueError(
-                        "differential_pair supports dc, ac, transient, or noise analysis"
+                        "differential_pair supports dc, ac, transient, noise, or "
+                        "psrr analysis"
                     )
-                if resolved_analysis is AnalysisKind.AC and self.ac_sweep is None:
-                    raise ValueError("differential-pair AC analysis requires ac_sweep")
+                if (
+                    resolved_analysis in {AnalysisKind.AC, AnalysisKind.PSRR}
+                    and self.ac_sweep is None
+                ):
+                    raise ValueError(
+                        f"differential-pair {resolved_analysis.value.upper()} "
+                        "analysis requires ac_sweep"
+                    )
                 if (
                     resolved_analysis is AnalysisKind.TRANSIENT
                     and self.linearity_sweep is None
@@ -1558,14 +1567,15 @@ class TaskSpec(StrictModel):
                         "differential-pair DC does not accept dynamic sweep settings"
                     )
                 if (
-                    resolved_analysis is AnalysisKind.AC
+                    resolved_analysis in {AnalysisKind.AC, AnalysisKind.PSRR}
                     and (
                         self.linearity_sweep is not None
                         or self.noise_sweep is not None
                     )
                 ):
                     raise ValueError(
-                        "differential-pair AC accepts only ac_sweep"
+                        f"differential-pair {resolved_analysis.value.upper()} "
+                        "accepts only ac_sweep"
                     )
                 if (
                     resolved_analysis is AnalysisKind.TRANSIENT

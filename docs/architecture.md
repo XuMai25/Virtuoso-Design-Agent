@@ -58,7 +58,7 @@ VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PD
 
 因此上层 agent 可以只要求“建原理图”“把这组参数应用进去”“微调 ADE analysis/output”“接收人工 ADE 结果”“后台运行已有 ADE setup”或“只跑仿真”，无需伪装成完整设计任务。
 
-`analysis` 与电路参数分离。反相器省略时解析为 `transient`，共源级省略时解析为 `dc`；共源 AC 必须显式声明 `analysis: "ac"` 以及 `ac_sweep.start_hz/stop_hz`。固定多 analysis 质量门使用 `analysis: "quality"`，并要求 `ac_sweep`、`linearity_sweep`、`noise_sweep` 同时存在。扫频点密度、低频参考点数、参考窗变化、线性度窗口和噪声频带都属于任务与 plan token。这样换 analysis 或改变指标定义不会复用旧 token，也不会把默认设置伪装成 `user_input`。
+`analysis` 与电路参数分离。反相器省略时解析为 `transient`，共源级和差分对省略时解析为 `dc`；AC 必须显式声明 `analysis: "ac"` 以及 `ac_sweep.start_hz/stop_hz`。差分对电源抑制使用独立的 `analysis: "psrr"`，复用 AC sweep 契约但运行差模、VDD 注入和 VSS 注入三条路径。固定多 analysis 质量门使用 `analysis: "quality"`，并要求 `ac_sweep`、`linearity_sweep`、`noise_sweep` 同时存在。扫频点密度、低频参考点数、参考窗变化、线性度窗口和噪声频带都属于任务与 plan token。这样换 analysis 或改变指标定义不会复用旧 token，也不会把默认设置伪装成 `user_input`。
 
 `operating_conditions` 是独立于设计参数的显式可选有限验证集合。省略时 common-source `simulation.run`、`design.tune` 和 `design.close_loop` 保持原有单条件行为与旧 token；声明时每项给出唯一名称、PDK profile 已映射的 `process_corner`、温度和可选 VDD，同一任务最多五项。对调优任务，每个候选只暂存一次 OA 并生成、核对一份 `si` 网表，再为每个条件生成 AC/transient/noise wrapper；完整候选 bundle 才能写入 checkpoint。executor 保留逐条件原始指标和判定，要求全部完整且全部满足约束；maximize objective 取各条件最小值，minimize objective 取最大值。跨条件聚合是 `software_inference`，不能覆盖各条件 `eda_result`。逐条件 VDD 存在时拒绝 task/搜索空间中的 `vdd_v`；全部条件省略 VDD 时则共同继承当前候选的 VDD，避免同一个供电出现两套真源。
 
@@ -257,6 +257,8 @@ Gate 6 仍是固定 exact-template delta，不是任意拓扑综合。前向 act
 
 DC 除 MN0/MN1/MNTAIL OP 外还保存 MP0/MP1 的 IDS/VGS/VDS/VDSAT/GM/GDS。软件层分别核对 PMOS 节点与器件 OP、每只 PMOS 电流与对应 NMOS 支路、两只 PMOS 的镜像误差、VDD 源电流、PMOS 饱和余量，以及上下管联合输出摆幅余量；KCL residual 超过 1% 是证据失败，工作区或设计规格不通过则是完整但不可行的候选。2026-07-23 已在全新 `vda_diffpair_active_gate6_001` 上完成真实 create→tail→active-load、OA/`si` 一致性、DC、AC/CMRR、ICMR、transient、noise、bias/load 搜索、Wn/Wp 搜索、预算、全不可行、transport resume、最佳写回、精确 restore 和最终 active-load 重建。最终同一网表 SHA 得到 `3.7421 V/V` 增益、`2.9756 GHz` 带宽、`11.1351 GHz` GBW 和 `34.8451 dB` CMRR；该结论只覆盖 nominal `top_tt` 与声明的有限网格。详见[本地契约记录](validation/2026-07-23-differential-pair-current-mirror-gate6-local.md)和[真实验证记录](validation/2026-07-23-differential-pair-current-mirror-gate6-live.md)。
 
+PSRR 作为正交 analysis 接在同一 Gate 6 输出契约上，而不是另建 netlist 模板。一次候选先生成并核对唯一 OA/`si` 网表，随后运行平衡差模、VDD 1 V AC 注入、VSS 1 V AC 注入三份 wrapper；注入供电时 INP、INN 与 BIAS 都保持理想对地 DC 参考。三次运行必须具有相同 DC 工作点和频率网格。对 active-load 的 `OUTN` 单端输出定义 `Ad=OUTN/(INP-INN)`、`Avdd=OUTN/VDD`、`Avss=OUTN/VSS`，再计算 `PSRR+=|Ad/Avdd|` 和 `PSRR-=|Ad/Avss|`。run record 同时保留两种 supply gain、低频 PSRR、扫频最差值和首次下降 3 dB 频点；零 supply transfer、网格漂移、DC 漂移、空波形或未包围 3 dB 交点均不静默降级。只有 `tail_bias_v/common_mode_v/vdd_v/load_ff` 的搜索仍是纯 testbench 搜索，不写 OA。该契约先通过本地 synthetic worker/demo，2026-07-24 又在现有 Gate 6 cell 上完成 nominal 单点 live：三组各 181 点，DC/网格一致，低频 PSRR+=`11.5156 dB`、PSRR−=`13.4535 dB`。这些数值只证明真实执行和当前点的强供电耦合，不代表 PSRR 规格合格；详见[本地记录](validation/2026-07-23-differential-pair-psrr-local.md)和[live 记录](validation/2026-07-24-differential-pair-psrr-live.md)。
+
 live 首版曾把 PMOS 实例命名为 `PM0/PM1`；OA 和 `si` 一致，但 Spectre 将 `P` 前缀解析为 port primitive 并报 `SFE-1703`。VDA 先精确恢复 RD 基线，再将该固定模板统一改为 Spectre 安全的 `MP0/MP1`。worker 同时增加 Spectre 失败详情提取，把 `spectre.out` 错误上下文写入 run record；这类失败属于执行/网表错误，不能被分类为电路规格不可行。
 
 ## 证据链
@@ -265,6 +267,6 @@ live 首版曾把 PMOS 实例命名为 `PM0/PM1`；OA 和 `si` 一致，但 Spec
 
 有限 PVT 还保存每个原始 condition 的完整 `CandidateEvaluation`、同一 OA/netlist identity、每个 analysis 的 testbench/model manifest、独立 noise PSF，以及跨条件 `all_conditions_required`/worst-case 聚合。缺一个条件、条件顺序或值与任务不一致、任一 analysis 不完整、netlist 漂移或 model corner 未映射都直接失败，不会降级为 nominal 结果。
 
-timing、过冲/欠冲、`supply_energy_per_cycle_fj`、`average_supply_power_uw`、共源与差分对的 DC/供电/KCL 连续指标，以及从 AC、相干 transient 或 noise PSF 提取的连续量标为 `eda_result`；OA 结构和参数（包括 MNTAIL W/L、RS0/RS1 与 NSP/NSN 连接、MP0/MP1 W/L 与电流镜连接）标为 `bridge_readback`；任务显式给出的 VDD、负载、偏置、尾电流或尾管 BIAS、有限尾源输出电阻、对称源电阻值、PMOS 负载 W/L、analysis 或 sweep 字段标为 `user_input`；默认 analysis/sweep 字段、`gate_area_proxy_um2=(Wn+Wp)L`、电阻或 PMOS 电流与 KCL 重算、镜像误差、饱和区分类、CMRR/交点/压缩点规则和指标完整性判断是 `software_inference`。供电能量或功耗保留积分窗口和源电流方向，不能称为纯动态开关能量；AC、linearity 和 noise 指标也必须保存提取公式、范围、输出模式和 unresolved 诊断，不能只保存一个无来源标量。后续 Maestro、Calibre 和 PEX 沿用同一证据模型。
+timing、过冲/欠冲、`supply_energy_per_cycle_fj`、`average_supply_power_uw`、共源与差分对的 DC/供电/KCL 连续指标，以及从 AC、相干 transient、noise PSF 或 PSRR 三次 AC 中读取的原始波形/OP 标为 `eda_result`；OA 结构和参数（包括 MNTAIL W/L、RS0/RS1 与 NSP/NSN 连接、MP0/MP1 W/L 与电流镜连接）标为 `bridge_readback`；任务显式给出的 VDD、负载、偏置、尾电流或尾管 BIAS、有限尾源输出电阻、对称源电阻值、PMOS 负载 W/L、analysis 或 sweep 字段标为 `user_input`；默认 analysis/sweep 字段、`gate_area_proxy_um2=(Wn+Wp)L`、电阻或 PMOS 电流与 KCL 重算、镜像误差、饱和区分类、CMRR/PSRR 比值、交点/压缩点规则和指标完整性判断是 `software_inference`。供电能量或功耗保留积分窗口和源电流方向，不能称为纯动态开关能量；AC、linearity、noise 和 PSRR 指标也必须保存提取公式、范围、输出模式和 unresolved 诊断，不能只保存一个无来源标量。后续 Maestro、Calibre 和 PEX 沿用同一证据模型。
 
 PVT 中的角名、温度和逐角 VDD 是 `user_input`；profile include 映射来自 `pdk_profile`，映射选择及 manifest 组合标为 `software_inference`；每角 Spectre 标量/波形指标仍是 `eda_result`；跨角保守 constraint/objective 值全部标为 `software_inference`。因此聚合最坏值不能被误读为某个单独 Spectre analysis 直接输出的标量。

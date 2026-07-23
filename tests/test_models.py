@@ -309,6 +309,41 @@ def test_differential_pair_accepts_ac_with_an_explicit_sweep() -> None:
         TaskSpec.model_validate(data)
 
 
+def test_differential_pair_psrr_requires_only_an_ac_sweep() -> None:
+    data = {
+        "id": "diffpair-psrr",
+        "operation": "simulation.run",
+        "circuit": "differential_pair",
+        "target": {"library": "vda_test", "cell": "vda_diffpair_active"},
+        "analysis": "psrr",
+        "ac_sweep": {"start_hz": 1e3, "stop_hz": 1e10},
+        "parameters": {
+            "tail_bias_v": 0.32,
+            "common_mode_v": 0.55,
+            "vdd_v": 0.9,
+            "load_ff": 0.5,
+        },
+    }
+
+    task = TaskSpec.model_validate(data)
+
+    assert task.resolved_analysis() is AnalysisKind.PSRR
+    missing = dict(data)
+    missing.pop("ac_sweep")
+    with pytest.raises(ValidationError, match="PSRR analysis requires ac_sweep"):
+        TaskSpec.model_validate(missing)
+
+    unexpected = dict(data)
+    unexpected["noise_sweep"] = {"start_hz": 1e3, "stop_hz": 1e9}
+    with pytest.raises(ValidationError, match="PSRR accepts only ac_sweep"):
+        TaskSpec.model_validate(unexpected)
+
+    common_source = dict(data)
+    common_source["circuit"] = "common_source"
+    with pytest.raises(ValidationError, match="common_source supports"):
+        TaskSpec.model_validate(common_source)
+
+
 def test_differential_pair_accepts_balanced_transient_linearity_sweep() -> None:
     data = {
         "id": "diffpair-linearity",

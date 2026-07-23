@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-current-mirror-psrr-bias-load-tune-bridge",
+  "operation": "design.tune",
+  "circuit": "differential_pair",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_diffpair_active_gate6_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis": "psrr",
+  "ac_sweep": {
+    "start_hz": 1000.0,
+    "stop_hz": 1000000000000.0,
+    "points_per_decade": 20,
+    "reference_points": 5,
+    "max_reference_variation_db": 0.5
+  },
+  "parameters": {"common_mode_v": 0.55, "vdd_v": 0.9},
+  "parameter_space": {
+    "tail_bias_v": [0.3, 0.32],
+    "load_ff": [0.5, 2.0]
+  },
+  "constraints": [
+    {
+      "metric": "all_signal_devices_saturation_region",
+      "relation": ">=",
+      "value": 1.0
+    },
+    {
+      "metric": "minimum_output_swing_margin_v",
+      "relation": ">=",
+      "value": 0.1
+    },
+    {
+      "metric": "minimum_low_frequency_psrr_db",
+      "relation": ">=",
+      "value": 0.0
+    }
+  ],
+  "objective": {
+    "metric": "minimum_low_frequency_psrr_db",
+    "goal": "maximize"
+  },
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 4, "timeout_seconds": 1200}
+}

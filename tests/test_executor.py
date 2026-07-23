@@ -5509,6 +5509,69 @@ def test_differential_pair_demo_current_mirror_load_is_tunable_and_reversible() 
     assert ac.selected_metrics["differential_bandwidth_3db_hz"] > 0.0
     assert ac.selected_metrics["low_frequency_cmrr_db"] > 0.0
 
+    psrr = execute(
+        {
+            "id": "active-psrr",
+            "operation": "simulation.run",
+            "circuit": "differential_pair",
+            "target": target,
+            "analysis": "psrr",
+            "ac_sweep": {"start_hz": 1e3, "stop_hz": 1e12},
+            "parameters": {
+                "tail_bias_v": 0.30,
+                "common_mode_v": 0.55,
+                "vdd_v": 0.9,
+                "load_ff": 1.0,
+            },
+            "safety": {"allow_remote_compute": True},
+        }
+    )
+    assert psrr.status is RunStatus.SUCCEEDED
+    assert psrr.selected_metrics["positive_low_frequency_psrr_db"] == (
+        pytest.approx(40.0, abs=0.05)
+    )
+    assert psrr.selected_metrics["negative_low_frequency_psrr_db"] == (
+        pytest.approx(60.0, abs=0.05)
+    )
+    assert psrr.selected_metrics["minimum_psrr_db_over_sweep"] < 40.0
+
+    psrr_tune = execute(
+        {
+            "id": "active-psrr-tune",
+            "operation": "design.tune",
+            "circuit": "differential_pair",
+            "target": target,
+            "analysis": "psrr",
+            "ac_sweep": {"start_hz": 1e3, "stop_hz": 1e12},
+            "parameters": {
+                "common_mode_v": 0.55,
+                "vdd_v": 0.9,
+                "load_ff": 1.0,
+            },
+            "parameter_space": {"tail_bias_v": [0.30, 0.32]},
+            "constraints": [
+                {
+                    "metric": "minimum_low_frequency_psrr_db",
+                    "relation": ">=",
+                    "value": 0.0,
+                }
+            ],
+            "objective": {
+                "metric": "positive_psrr_bandwidth_3db_hz",
+                "goal": "maximize",
+            },
+            "limits": {"max_iterations": 2},
+            "safety": {"allow_remote_compute": True},
+        }
+    )
+    assert psrr_tune.status is RunStatus.SUCCEEDED
+    assert len(psrr_tune.candidates) == 2
+    assert psrr_tune.selected_parameters is not None
+    assert "tail_bias_v" in psrr_tune.selected_parameters
+    assert adapter.inspect_schematic(inspect_task).data["semantic_parameters"][
+        "pmos_load_width_um"
+    ] == pytest.approx(2.4)
+
     restored = execute(
         {
             "id": "active-restore",
