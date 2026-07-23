@@ -3,6 +3,8 @@
 日期：2026-07-24（run record 使用 UTC 文件时间 `20260723T...Z`）
 状态：**nominal TSMC N28 same-source PSRR execution verified at one operating point; PSRR design-quality acceptance and tuning pending**。
 
+后续状态：同日已增加声明频带最差值与三份根 AC 文件大小/SHA-256 绑定，并完成四点 `tail_bias_v × load_ff` 只读搜索和两次 transport 恢复；四点均未通过临时 `20 dB` 门，见 [`2026-07-24-differential-pair-psrr-search-live.md`](2026-07-24-differential-pair-psrr-search-live.md)。本文件保留首个 live 单点当时的真实契约和证据边界。
+
 ## 授权范围
 
 - 目标：`vb_pdk_smoke/vda_diffpair_active_gate6_001/schematic`
@@ -133,4 +135,4 @@ git diff --check passed
 - BIAS 随 VSS 跟随的另一种偏置参考定义已验证；
 - ADE/Maestro PSRR 人工交接已打通。
 
-下一步先根据用途给出明确的 PSRR+/PSRR− 规格和频带。若继续自动探索，可执行已准备的四点 `tail_bias_v=[0.30,0.32] V × load_ff=[0.5,2.0] fF` 只读搜索；但它只能判断这两个 testbench 条件是否改善现状，不应在没有规格的情况下把“最大 PSRR”包装成设计完成。之后再决定是否调整 OA W/L、偏置参考结构或拓扑。
+后续四点搜索已经执行，并证明这两个 testbench 条件不能在声明网格内带来数量级改善。下一步应调整 OA W/L、偏置参考或供电隔离结构，而不是继续加密 bias/load；任何产品 closure 仍需目标用途给出正式 PSRR+/PSRR− 频带与数值。

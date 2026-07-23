@@ -5516,7 +5516,11 @@ def test_differential_pair_demo_current_mirror_load_is_tunable_and_reversible() 
             "circuit": "differential_pair",
             "target": target,
             "analysis": "psrr",
-            "ac_sweep": {"start_hz": 1e3, "stop_hz": 1e12},
+            "ac_sweep": {
+                "start_hz": 1e3,
+                "stop_hz": 1e12,
+                "evaluation_stop_hz": 1e6,
+            },
             "parameters": {
                 "tail_bias_v": 0.30,
                 "common_mode_v": 0.55,
@@ -5534,6 +5538,7 @@ def test_differential_pair_demo_current_mirror_load_is_tunable_and_reversible() 
         pytest.approx(60.0, abs=0.05)
     )
     assert psrr.selected_metrics["minimum_psrr_db_over_sweep"] < 40.0
+    assert psrr.selected_metrics["minimum_psrr_db_in_band"] > 39.9
 
     psrr_tune = execute(
         {

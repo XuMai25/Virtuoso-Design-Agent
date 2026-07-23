@@ -1591,6 +1591,7 @@ def extract_differential_pair_psrr_metrics(
     *,
     reference_points: int = 5,
     max_reference_variation_db: float = 0.5,
+    evaluation_stop_hz: float | None = None,
     output_mode: str = "differential",
 ) -> tuple[dict[str, float], dict[str, object]]:
     """Extract PSRR+ and PSRR- from one differential and two supply AC runs."""
@@ -1625,6 +1626,8 @@ def extract_differential_pair_psrr_metrics(
                 f"PSRR {label} frequency and node vectors must have equal lengths"
             )
     point_count = len(differential_frequency_hz)
+    if point_count == 0:
+        raise MetricExtractionError("PSRR AC runs contain no samples")
     if point_count != len(positive_frequency_hz) or point_count != len(
         negative_frequency_hz
     ):
@@ -1661,6 +1664,52 @@ def extract_differential_pair_psrr_metrics(
             or abs(frequency - negative_frequencies[index]) > tolerance
         ):
             raise MetricExtractionError("PSRR AC frequency grids differ")
+
+    evaluation_indices: list[int] | None = None
+    evaluation_band: dict[str, object] = {"status": "not_requested"}
+    if evaluation_stop_hz is not None:
+        try:
+            requested_evaluation_stop_hz = float(evaluation_stop_hz)
+        except (TypeError, ValueError) as exc:
+            raise MetricExtractionError(
+                "PSRR evaluation_stop_hz must be numeric"
+            ) from exc
+        sweep_stop_tolerance = max(abs(frequencies[-1]) * 1e-12, 1e-9)
+        band_stop_tolerance = max(
+            abs(requested_evaluation_stop_hz) * 1e-12, 1e-9
+        )
+        if (
+            not math.isfinite(requested_evaluation_stop_hz)
+            or requested_evaluation_stop_hz <= frequencies[0]
+            or (
+                requested_evaluation_stop_hz
+                > frequencies[-1] + sweep_stop_tolerance
+            )
+        ):
+            raise MetricExtractionError(
+                "PSRR evaluation_stop_hz must be greater than the sweep start "
+                "and no greater than the sweep stop"
+            )
+        evaluation_indices = [
+            index
+            for index, frequency in enumerate(frequencies)
+            if frequency <= requested_evaluation_stop_hz + band_stop_tolerance
+        ]
+        if len(evaluation_indices) < 2:
+            raise MetricExtractionError(
+                "PSRR evaluation band must contain at least two AC samples"
+            )
+        evaluation_band = {
+            "status": "resolved",
+            "start_hz": frequencies[0],
+            "requested_stop_hz": requested_evaluation_stop_hz,
+            "effective_stop_hz": frequencies[evaluation_indices[-1]],
+            "point_count": len(evaluation_indices),
+            "definition": (
+                "inclusive sampled band from AC sweep start through the last "
+                "frequency no greater than evaluation_stop_hz"
+            ),
+        }
 
     def complex_values(
         label: str, values: Sequence[complex | float]
@@ -1779,6 +1828,10 @@ def extract_differential_pair_psrr_metrics(
                 f"{label}_psrr_at_sweep_stop_db": psrr_db[-1],
             }
         )
+        if evaluation_indices is not None:
+            metrics[f"{label}_minimum_psrr_db_in_band"] = min(
+                psrr_db[index] for index in evaluation_indices
+            )
         diagnostics = dict(raw_diagnostics)
         diagnostics["psrr_bandwidth"] = diagnostics.pop("bandwidth")
         diagnostics.pop("gbw", None)
@@ -1824,6 +1877,11 @@ def extract_differential_pair_psrr_metrics(
             ),
         }
     )
+    if evaluation_indices is not None:
+        metrics["minimum_psrr_db_in_band"] = min(
+            metrics["positive_minimum_psrr_db_in_band"],
+            metrics["negative_minimum_psrr_db_in_band"],
+        )
     issues = [
         *(f"PSRR+: {value}" for value in positive_diagnostics.get("issues", [])),
         *(f"PSRR-: {value}" for value in negative_diagnostics.get("issues", [])),
@@ -1844,6 +1902,7 @@ def extract_differential_pair_psrr_metrics(
         "netlist_requirement": "all three AC runs must share one si netlist",
         "output_mode": output_mode,
         "definition": "PSRR+ = |Ad/Avdd| and PSRR- = |Ad/Avss|",
+        "evaluation_band": evaluation_band,
         "bias_reference_contract": (
             "INP, INN, and BIAS remain ideal ground-referenced DC sources during "
             "each supply injection"

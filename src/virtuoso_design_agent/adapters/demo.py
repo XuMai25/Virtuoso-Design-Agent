@@ -1640,6 +1640,7 @@ class DeterministicDemoAdapter:
                             max_reference_variation_db=(
                                 sweep.max_reference_variation_db
                             ),
+                            evaluation_stop_hz=sweep.evaluation_stop_hz,
                             output_mode=output_mode,
                         )
                     )

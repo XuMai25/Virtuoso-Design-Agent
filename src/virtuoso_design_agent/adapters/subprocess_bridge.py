@@ -148,7 +148,9 @@ class SubprocessBridgeAdapter:
                 "user_input" if task.analysis is not None else "software_inference"
             )
         if task.ac_sweep is not None:
-            payload["ac_sweep"] = task.ac_sweep.model_dump(mode="json")
+            payload["ac_sweep"] = task.ac_sweep.model_dump(
+                mode="json", exclude_none=True
+            )
             payload["ac_sweep_user_fields"] = sorted(
                 task.ac_sweep.model_fields_set
             )

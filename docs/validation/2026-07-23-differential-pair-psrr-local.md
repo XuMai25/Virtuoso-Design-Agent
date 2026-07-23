@@ -3,7 +3,7 @@
 日期：2026-07-23
 状态：**PSRR same-source execution contract locally implemented; live Spectre/PSF evidence was pending at this snapshot**。
 
-后续状态：2026-07-24 已在 nominal TSMC N28 Gate 6 cell 上完成不写 OA 的真实三次 AC 单点，见 [`2026-07-24-differential-pair-psrr-live.md`](2026-07-24-differential-pair-psrr-live.md)。本文件保留为 live 前的本地契约与测试快照。
+后续状态：2026-07-24 已在 nominal TSMC N28 Gate 6 cell 上完成不写 OA 的真实三次 AC [单点](2026-07-24-differential-pair-psrr-live.md)，随后完成带限指标、raw AC 哈希和[四点搜索/transport 恢复](2026-07-24-differential-pair-psrr-search-live.md)。本文件保留为首个 live 前的本地契约与测试快照。
 
 ## 目标与边界
 

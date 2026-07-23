@@ -13,6 +13,7 @@
   "ac_sweep": {
     "start_hz": 1000.0,
     "stop_hz": 1000000000000.0,
+    "evaluation_stop_hz": 100000000.0,
     "points_per_decade": 20,
     "reference_points": 5,
     "max_reference_variation_db": 0.5
@@ -34,13 +35,28 @@
       "value": 0.1
     },
     {
-      "metric": "minimum_low_frequency_psrr_db",
+      "metric": "differential_low_frequency_gain_v_per_v",
       "relation": ">=",
-      "value": 0.0
+      "value": 3.0
+    },
+    {
+      "metric": "differential_bandwidth_3db_hz",
+      "relation": ">=",
+      "value": 100000000.0
+    },
+    {
+      "metric": "dc_supply_power_uw",
+      "relation": "<=",
+      "value": 20.0
+    },
+    {
+      "metric": "minimum_psrr_db_in_band",
+      "relation": ">=",
+      "value": 20.0
     }
   ],
   "objective": {
-    "metric": "minimum_low_frequency_psrr_db",
+    "metric": "minimum_psrr_db_in_band",
     "goal": "maximize"
   },
   "safety": {

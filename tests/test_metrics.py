@@ -518,6 +518,7 @@ def test_extract_active_load_psrr_from_three_matched_ac_runs() -> None:
         [1.0 + 0.0j] * len(frequency_hz),
         [100.0 + 0.0j] * len(frequency_hz),
         negative_supply_transfer,
+        evaluation_stop_hz=1e5,
         output_mode="single_ended_outn",
     )
 
@@ -531,9 +532,21 @@ def test_extract_active_load_psrr_from_three_matched_ac_runs() -> None:
         1.01e6, rel=0.03
     )
     assert metrics["minimum_psrr_db_over_sweep"] < 30.0
+    assert metrics["minimum_psrr_db_in_band"] == pytest.approx(39.96, abs=0.02)
     assert diagnostics["analysis_complete"] is True
     assert diagnostics["frequency_grid_consistency"] == "matched"
     assert diagnostics["output_mode"] == "single_ended_outn"
+    assert diagnostics["evaluation_band"] == {
+        "status": "resolved",
+        "start_hz": 100.0,
+        "requested_stop_hz": 1e5,
+        "effective_stop_hz": 1e5,
+        "point_count": 31,
+        "definition": (
+            "inclusive sampled band from AC sweep start through the last "
+            "frequency no greater than evaluation_stop_hz"
+        ),
+    }
 
 
 def test_psrr_rejects_mismatched_grids_and_zero_supply_stimulus() -> None:
@@ -574,6 +587,13 @@ def test_psrr_rejects_mismatched_grids_and_zero_supply_stimulus() -> None:
     with pytest.raises(MetricExtractionError, match="zero supply input"):
         extract_differential_pair_psrr_metrics(
             *zero_positive_supply, output_mode="single_ended_outn"
+        )
+
+    with pytest.raises(MetricExtractionError, match="evaluation_stop_hz"):
+        extract_differential_pair_psrr_metrics(
+            *arguments,
+            evaluation_stop_hz=1e9,
+            output_mode="single_ended_outn",
         )
 
 

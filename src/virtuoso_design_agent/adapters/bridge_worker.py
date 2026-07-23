@@ -9699,6 +9699,27 @@ def _common_source_dc_data_from_result(
     }
 
 
+def _spectre_ac_file_evidence_from_result(result: Any) -> dict[str, Any]:
+    raw_output_dir = getattr(result, "metadata", {}).get("output_dir")
+    if not raw_output_dir:
+        raise RuntimeError("Spectre result is missing its downloaded PSF path")
+    output_dir = Path(str(raw_output_dir))
+    ac_file = _select_shallow_psf_file(
+        output_dir,
+        ("ac.ac", "ac.ac.ac"),
+        label="AC",
+    )
+    ac_bytes = ac_file.read_bytes()
+    return {
+        "selection": "shallowest analysis-specific PSF file",
+        "ac": {
+            "relative_path": ac_file.relative_to(output_dir).as_posix(),
+            "size_bytes": len(ac_bytes),
+            "sha256": hashlib.sha256(ac_bytes).hexdigest(),
+        },
+    }
+
+
 def _common_source_metrics_from_result(
     data: dict[str, Any], parameters: dict[str, float]
 ) -> tuple[dict[str, float], dict[str, Any]]:
@@ -10285,6 +10306,11 @@ def _differential_pair_psrr_metrics_from_results(
         reference_points=int(ac_sweep.get("reference_points", 5)),
         max_reference_variation_db=float(
             ac_sweep.get("max_reference_variation_db", 0.5)
+        ),
+        evaluation_stop_hz=(
+            float(ac_sweep["evaluation_stop_hz"])
+            if ac_sweep.get("evaluation_stop_hz") is not None
+            else None
         ),
         output_mode=(
             "single_ended_outn"
@@ -11825,6 +11851,8 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
         psrr_decks: dict[str, str] = {}
         psrr_remote_wrappers: dict[str, str] = {}
         psrr_operating_points: dict[str, dict[str, Any]] = {}
+        ac_psf_evidence: dict[str, Any] | None = None
+        psrr_ac_psf_evidence: dict[str, dict[str, Any]] = {}
         simulation_warnings = list(result.warnings)
         if (
             _differential_pair_has_real_tail(topology_variant)
@@ -11846,6 +11874,8 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
             )
         if analysis in {"ac", "psrr"}:
             assert isinstance(ac_sweep, dict)
+            if analysis == "psrr":
+                ac_psf_evidence = _spectre_ac_file_evidence_from_result(result)
             ac_metrics, ac_diagnostics = _differential_pair_ac_metrics_from_result(
                 result.data, ac_sweep, topology_variant
             )
@@ -12099,6 +12129,9 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                         )
                     )
                     supply_operating_point["raw_files"] = supply_dc_psf_evidence
+                    psrr_ac_psf_evidence[label] = (
+                        _spectre_ac_file_evidence_from_result(supply_result)
+                    )
                     _assert_parameter_consistency(
                         {
                             name: metrics[name]
@@ -12500,6 +12533,11 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                         "source": "eda_result",
                         "extraction_source": "software_inference",
                         **ac_diagnostics,
+                        **(
+                            {"raw_files": ac_psf_evidence}
+                            if ac_psf_evidence is not None
+                            else {}
+                        ),
                     }
                     if ac_diagnostics is not None
                     else {"status": "not_requested"}
@@ -12566,6 +12604,19 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                     {
                         "source": "software_inference",
                         "netlist_binding": "same_si_netlist_sha256",
+                        "input_ac_results": {
+                            "differential": {
+                                "source": "eda_result",
+                                "raw_files": ac_psf_evidence,
+                            },
+                            **{
+                                f"{label}_supply": {
+                                    "source": "eda_result",
+                                    "raw_files": psrr_ac_psf_evidence[label],
+                                }
+                                for label in ("positive", "negative")
+                            },
+                        },
                         **psrr_diagnostics,
                     }
                     if psrr_diagnostics is not None

@@ -344,6 +344,41 @@ def test_differential_pair_psrr_requires_only_an_ac_sweep() -> None:
         TaskSpec.model_validate(common_source)
 
 
+def test_psrr_ac_sweep_accepts_only_an_in_sweep_evaluation_stop() -> None:
+    data = {
+        "id": "diffpair-psrr-band",
+        "operation": "simulation.run",
+        "circuit": "differential_pair",
+        "target": {"library": "vda_test", "cell": "vda_diffpair_active"},
+        "analysis": "psrr",
+        "ac_sweep": {
+            "start_hz": 1e3,
+            "stop_hz": 1e10,
+            "evaluation_stop_hz": 1e8,
+        },
+        "parameters": {
+            "tail_bias_v": 0.32,
+            "common_mode_v": 0.55,
+            "vdd_v": 0.9,
+        },
+    }
+
+    task = TaskSpec.model_validate(data)
+
+    assert task.ac_sweep is not None
+    assert task.ac_sweep.evaluation_stop_hz == 1e8
+    for invalid_stop in (1e3, 1e11):
+        invalid = json.loads(json.dumps(data))
+        invalid["ac_sweep"]["evaluation_stop_hz"] = invalid_stop
+        with pytest.raises(ValidationError, match="evaluation_stop_hz"):
+            TaskSpec.model_validate(invalid)
+
+    non_psrr = json.loads(json.dumps(data))
+    non_psrr["analysis"] = "ac"
+    with pytest.raises(ValidationError, match="supported only.*PSRR"):
+        TaskSpec.model_validate(non_psrr)
+
+
 def test_differential_pair_accepts_balanced_transient_linearity_sweep() -> None:
     data = {
         "id": "diffpair-linearity",

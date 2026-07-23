@@ -70,6 +70,7 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     _schematic_exists,
     _signal,
     _simulate_common_source_operating_conditions,
+    _spectre_ac_file_evidence_from_result,
     _spectre_failure_detail,
     _validate_si_log,
     _verify_instance_parameter_values,
@@ -4627,6 +4628,36 @@ def test_common_source_dc_reads_root_psf_instead_of_sweep_point(
     assert diagnostics["operating_point"]["relative_path"] == "dcOpInfo.info"
 
 
+def test_ac_evidence_hashes_the_shallow_analysis_file(tmp_path) -> None:
+    output_dir = tmp_path / "differential_pair_from_oa.raw"
+    nested_dir = output_dir / "nested"
+    nested_dir.mkdir(parents=True)
+    root_ac = output_dir / "ac.ac"
+    nested_ac = nested_dir / "ac.ac"
+    root_ac.write_bytes(b"root-ac-waveform")
+    nested_ac.write_bytes(b"nested-ac-waveform")
+
+    evidence = _spectre_ac_file_evidence_from_result(
+        SimpleNamespace(metadata={"output_dir": str(output_dir)})
+    )
+
+    assert evidence == {
+        "selection": "shallowest analysis-specific PSF file",
+        "ac": {
+            "relative_path": "ac.ac",
+            "size_bytes": len(b"root-ac-waveform"),
+            "sha256": hashlib.sha256(b"root-ac-waveform").hexdigest(),
+        },
+    }
+
+    missing_dir = tmp_path / "missing.raw"
+    missing_dir.mkdir()
+    with pytest.raises(RuntimeError, match="missing the root AC PSF file"):
+        _spectre_ac_file_evidence_from_result(
+            SimpleNamespace(metadata={"output_dir": str(missing_dir)})
+        )
+
+
 def test_si_env_completion_adds_verified_spectre_formatter_context_once() -> None:
     completed = _complete_si_env(
         'simLibName = "vb_pdk_smoke"\n'
@@ -7497,7 +7528,11 @@ def test_differential_pair_subprocess_adapter_routes_psrr_sweep_and_budget(
             "circuit": "differential_pair",
             "target": {"library": "vda_test", "cell": "vda_diffpair_active"},
             "analysis": "psrr",
-            "ac_sweep": {"start_hz": 1e3, "stop_hz": 1e10},
+            "ac_sweep": {
+                "start_hz": 1e3,
+                "stop_hz": 1e10,
+                "evaluation_stop_hz": 1e8,
+            },
             "parameters": {
                 "tail_bias_v": 0.30,
                 "common_mode_v": 0.55,
@@ -7519,7 +7554,12 @@ def test_differential_pair_subprocess_adapter_routes_psrr_sweep_and_budget(
     assert observed["action"] == "simulate_differential_pair"
     assert observed["payload"]["analysis"] == "psrr"
     assert observed["payload"]["ac_sweep"]["start_hz"] == 1e3
-    assert observed["payload"]["ac_sweep_user_fields"] == ["start_hz", "stop_hz"]
+    assert observed["payload"]["ac_sweep"]["evaluation_stop_hz"] == 1e8
+    assert observed["payload"]["ac_sweep_user_fields"] == [
+        "evaluation_stop_hz",
+        "start_hz",
+        "stop_hz",
+    ]
     assert observed["timeout"] == 420
 
 
@@ -7901,6 +7941,28 @@ def test_differential_pair_live_worker_psrr_binds_three_runs_to_one_netlist(
         "_common_source_dc_data_from_result",
         lambda result: (result.data, {"selection": "test fixture"}),
     )
+
+    def ac_evidence(result):
+        if result.data is differential_data:
+            label = "differential"
+        elif result.data is positive_supply_data:
+            label = "positive"
+        else:
+            label = "negative"
+        return {
+            "selection": "test fixture",
+            "ac": {
+                "relative_path": f"{label}.ac",
+                "size_bytes": 1,
+                "sha256": label[0] * 64,
+            },
+        }
+
+    monkeypatch.setattr(
+        bridge_worker,
+        "_spectre_ac_file_evidence_from_result",
+        ac_evidence,
+    )
     monkeypatch.setattr(bridge_worker, "_upload_file", lambda *args, **kwargs: None)
     parsed = _parse_differential_pair_netlist(
         """
@@ -7943,11 +8005,16 @@ MP1 (OUTN OUTP VDD VDD) pch_lvt_mac l=30n w=4u nf=2 multi=1
             "ac_sweep": {
                 "start_hz": 1e3,
                 "stop_hz": 1e10,
+                "evaluation_stop_hz": 1e6,
                 "points_per_decade": 10,
                 "reference_points": 5,
                 "max_reference_variation_db": 0.5,
             },
-            "ac_sweep_user_fields": ["start_hz", "stop_hz"],
+            "ac_sweep_user_fields": [
+                "start_hz",
+                "stop_hz",
+                "evaluation_stop_hz",
+            ],
             "parameters": {
                 "tail_bias_v": 0.30,
                 "common_mode_v": 0.55,
@@ -7966,6 +8033,9 @@ MP1 (OUTN OUTP VDD VDD) pch_lvt_mac l=30n w=4u nf=2 multi=1
     assert result["metrics"]["negative_low_frequency_psrr_db"] == pytest.approx(
         60.0, abs=0.01
     )
+    assert result["metrics"]["minimum_psrr_db_in_band"] == pytest.approx(
+        39.96, abs=0.02
+    )
     assert result["metrics"]["positive_psrr_bandwidth_3db_hz"] == pytest.approx(
         1e7, rel=0.02
     )
@@ -7979,6 +8049,16 @@ MP1 (OUTN OUTP VDD VDD) pch_lvt_mac l=30n w=4u nf=2 multi=1
         "netlist_binding"
     ] == "same_si_netlist_sha256"
     assert result["evidence"]["psrr"]["frequency_grid_consistency"] == "matched"
+    assert result["evidence"]["psrr"]["evaluation_band"]["point_count"] == 31
+    assert result["evidence"]["ac_response"]["raw_files"]["ac"][
+        "relative_path"
+    ] == "differential.ac"
+    assert result["evidence"]["psrr"]["input_ac_results"][
+        "positive_supply"
+    ]["raw_files"]["ac"]["relative_path"] == "positive.ac"
+    assert result["evidence"]["psrr"]["input_ac_results"][
+        "negative_supply"
+    ]["raw_files"]["ac"]["relative_path"] == "negative.ac"
     assert result["evidence"]["psrr_supply_operating_points"][
         "consistency_with_differential_run"
     ] == "matched"

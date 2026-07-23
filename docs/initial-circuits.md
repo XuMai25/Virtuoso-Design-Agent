@@ -94,9 +94,9 @@ Gate 4 的真实尾管能力继续保留；Gate 5 不替换它，而是在其上
 - live 先暴露 `PM0/PM1` 会被 Spectre 解释为 port primitive；失败日志被保留，RD 基线精确恢复，固定模板改用 `MP0/MP1` 后再继续，没有把执行错误包装成电路不可行。
 - 同一 OA/自动网表完成 DC、AC/CMRR、10 点 ICMR、transient 和 noise。最终 `Wn=Wp(load)=1.5 µm`、`L=30 nm` 得到增益 `3.7421 V/V`、带宽 `2.9756 GHz`、GBW `11.1351 GHz`、CMRR `34.8451 dB`、50 mVpeak THD `1.5089%` 和输入参考积分噪声 `699.24 µVrms`。
 - 6 点 bias/load 与 6 点 Wn/Wp 搜索、预算耗尽、两点全不可行、两次真实 transport timeout checkpoint/resume 均按既有状态机执行；最佳几何写回并独立回读。恢复 RD 后 placement SHA 精确等于基线，再重建最佳 active load 并以新 DC 复核最终状态。
-- PSRR+/PSRR− 已加入为独立 `analysis: psrr`：每个候选复用一份 OA/`si` 网表，依次运行差模、VDD 注入和 VSS 注入三次 AC，核对 DC 与频率网格后计算 supply gain、低频 PSRR、扫频最差值和首次下降 3 dB 频点。只改 `tail_bias_v/load_ff` 时不会写 OA。2026-07-24 nominal 单点三组各 181 点已 live，低频 PSRR+=`11.5156 dB`、PSRR−=`13.4535 dB`，独立 OA 回读无变化；该任务没有 PSRR 门，因此不是设计质量合格声明。
+- PSRR+/PSRR− 已加入为独立 `analysis: psrr`：每个候选复用一份 OA/`si` 网表，依次运行差模、VDD 注入和 VSS 注入三次 AC，核对 DC 与频率网格后计算 supply gain、低频 PSRR、扫频最差值、声明频带最差值和首次下降 3 dB 频点；三份根 `ac.ac` 各自记录大小与 SHA-256。只改 `tail_bias_v/load_ff` 时不会写 OA。2026-07-24 nominal 单点低频 PSRR+=`11.5156 dB`、PSRR−=`13.4535 dB`；后续四点只读搜索的 `1 kHz–100 MHz` 最差值为 `11.4275–11.5125 dB`，全部通过其他物理护栏却未通过临时 `20 dB` 门。两次 transport 中断均从 checkpoint 恢复，最终 OA 前后不变。
 
-下一步先明确目标应用的 PSRR+/PSRR− 数值与频带，再决定是否运行不写 OA 的四点 bias/load 搜索；当前结果已经说明不能仅把执行成功当成 PSRR 合格。之后再处理 OA W/L/偏置参考结构、slew/settling、输出驱动/摆幅边界，或按任务显式启用差分对 PVT；PVT 不默认附加。若继续拓扑能力，则把 `RS0/RS1 + MP0/MP1` 定义成独立组合 Gate。当前 P1dB 未在 5–50 mVpeak 范围内被包围，PMOS L 尚未进入 live 搜索；差分对 ADE/Maestro setup、人工打开/调整/重跑、mismatch/Monte Carlo 和多 test/multi-analysis 仍未闭合。
+下一步不再细扫 `tail_bias_v/load_ff`：CL 只改变高频带宽，BIAS 的带内改善约 `0.085 dB` 且增加功耗，无法解释距临时门的 `8.49 dB` 缺口。下一道 Gate 应在显式小网格内处理 OA `input/PMOS-load/tail` 的 W/L，并判断是否需要改变 BIAS 对 VSS 的参考或增加供电隔离结构；真实写入必须继续使用逐候选回读、checkpoint、无可行恢复和最终独立 OA 回读。产品 PSRR 数值与频带仍由目标应用定义，临时 `20 dB` 不得外推。之后再处理 slew/settling、输出驱动/摆幅边界，或按任务显式启用差分对 PVT；PVT 不默认附加。若继续拓扑能力，则把 `RS0/RS1 + MP0/MP1` 定义成独立组合 Gate。当前 P1dB 未在 5–50 mVpeak 范围内被包围，PMOS L 尚未进入 live 搜索；差分对 ADE/Maestro setup、人工打开/调整/重跑、mismatch/Monte Carlo 和多 test/multi-analysis 仍未闭合。
 
 ## 升级原则
 

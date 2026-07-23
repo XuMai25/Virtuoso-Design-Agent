@@ -211,6 +211,7 @@ class ExecutionLimits(StrictModel):
 class AcSweep(StrictModel):
     start_hz: float = Field(gt=0)
     stop_hz: float = Field(gt=0)
+    evaluation_stop_hz: float | None = Field(default=None, gt=0)
     points_per_decade: int = Field(default=20, ge=1, le=1000)
     reference_points: int = Field(default=5, ge=2, le=20)
     max_reference_variation_db: float = Field(default=0.5, gt=0, le=3.0)
@@ -219,6 +220,13 @@ class AcSweep(StrictModel):
     def stop_must_exceed_start(self) -> "AcSweep":
         if self.stop_hz <= self.start_hz:
             raise ValueError("AC sweep stop_hz must be greater than start_hz")
+        if self.evaluation_stop_hz is not None and not (
+            self.start_hz < self.evaluation_stop_hz <= self.stop_hz
+        ):
+            raise ValueError(
+                "AC sweep evaluation_stop_hz must be greater than start_hz "
+                "and no greater than stop_hz"
+            )
         return self
 
 
@@ -1498,6 +1506,15 @@ class TaskSpec(StrictModel):
                 )
         else:
             resolved_analysis = self.resolved_analysis()
+            if (
+                self.ac_sweep is not None
+                and self.ac_sweep.evaluation_stop_hz is not None
+                and resolved_analysis is not AnalysisKind.PSRR
+            ):
+                raise ValueError(
+                    "ac_sweep evaluation_stop_hz is currently supported only "
+                    "for differential-pair PSRR analysis"
+                )
             if self.circuit is CircuitKind.INVERTER:
                 if resolved_analysis is not AnalysisKind.TRANSIENT:
                     raise ValueError("inverter currently supports only transient analysis")
