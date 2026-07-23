@@ -422,8 +422,73 @@ class DeterministicDemoAdapter:
                 },
                 evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
             )
+        if task.circuit is CircuitKind.DIFFERENTIAL_PAIR:
+            variant = schematic.get("topology_variant")
+            supported = {
+                "resistive_load_nmos_differential_pair",
+                "resistive_load_nmos_differential_pair_with_tail_device",
+            }
+            if variant not in supported:
+                raise RuntimeError(f"unsupported demo topology variant: {variant}")
+            changed = variant == "resistive_load_nmos_differential_pair"
+            tail_width_um = float(task.parameters["tail_width_um"])
+            tail_length_um = float(task.parameters["tail_length_um"])
+            if changed:
+                schematic["instances"].append(
+                    {
+                        "name": "MNTAIL",
+                        "library": "demo_pdk",
+                        "cell": "nmos",
+                        "parameters": {},
+                        "terminals": {
+                            "D": "TAIL",
+                            "G": "BIAS",
+                            "S": "VSS",
+                            "B": "VSS",
+                        },
+                        "xy": [0.0, -1.6],
+                        "orient": "R0",
+                    }
+                )
+                schematic["nets"] = sorted(set(schematic["nets"]) | {"BIAS"})
+                schematic["pins"] = sorted(set(schematic["pins"]) | {"BIAS"})
+                schematic["topology_variant"] = (
+                    "resistive_load_nmos_differential_pair_with_tail_device"
+                )
+            tail_parameters = {
+                "Wfg": f"{tail_width_um:.12g}u",
+                "l": f"{tail_length_um:.12g}u",
+                "fingers": "1",
+                "m": "1",
+            }
+            schematic["instance_parameters"]["MNTAIL"] = tail_parameters
+            for item in schematic["instances"]:
+                if isinstance(item, dict) and item.get("name") == "MNTAIL":
+                    item["parameters"] = dict(tail_parameters)
+            semantic = {
+                "tail_width_um": tail_width_um,
+                "tail_length_um": tail_length_um,
+            }
+            schematic["semantic_parameters"].update(semantic)
+            schematic["parameters"].update(semantic)
+            return AdapterResult(
+                data={
+                    "transformed": changed,
+                    "already_transformed": not changed,
+                    "transform_action": task.resolved_schematic_transform_action().value,
+                    "topology_delta": {
+                        "added_instance": "MNTAIL" if changed else None,
+                        "added_pin": "BIAS" if changed else None,
+                        "added_net": "BIAS" if changed else None,
+                    },
+                    "readback": self.inspect_schematic(task).data,
+                },
+                evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+            )
         if task.circuit is not CircuitKind.COMMON_SOURCE:
-            raise RuntimeError("demo transform supports inverter or common_source")
+            raise RuntimeError(
+                "demo transform supports inverter, common_source, or differential_pair"
+            )
         variant = schematic.get("topology_variant")
         if variant not in {"common_source", "source_degenerated_common_source"}:
             raise RuntimeError(f"unsupported demo topology variant: {variant}")
@@ -543,6 +608,14 @@ class DeterministicDemoAdapter:
                 raise RuntimeError(
                     "source_resistance_ohm requires source-degenerated topology"
                 )
+            if (
+                task.circuit is CircuitKind.DIFFERENTIAL_PAIR
+                and {"tail_width_um", "tail_length_um"} & parameters.keys()
+                and "MNTAIL" not in schematic["instance_parameters"]
+            ):
+                raise RuntimeError(
+                    "tail_width_um/tail_length_um require the real-tail topology"
+                )
             schematic["parameters"].update(parameters)
             semantic_names = (
                 (
@@ -557,6 +630,8 @@ class DeterministicDemoAdapter:
                         "input_width_um",
                         "length_um",
                         "load_resistance_ohm",
+                        "tail_width_um",
+                        "tail_length_um",
                     )
                     if task.circuit is CircuitKind.DIFFERENTIAL_PAIR
                     else (
@@ -600,6 +675,14 @@ class DeterministicDemoAdapter:
                     resistance = f"{float(parameters['load_resistance_ohm']):.12g}"
                     for instance in ("RD0", "RD1"):
                         schematic["instance_parameters"][instance]["r"] = resistance
+                if "tail_width_um" in parameters:
+                    schematic["instance_parameters"]["MNTAIL"]["Wfg"] = (
+                        f"{float(parameters['tail_width_um']):.12g}u"
+                    )
+                if "tail_length_um" in parameters:
+                    schematic["instance_parameters"]["MNTAIL"]["l"] = (
+                        f"{float(parameters['tail_length_um']):.12g}u"
+                    )
             result_data.update(
                 {
                     "applied": dict(parameters),
@@ -767,17 +850,59 @@ class DeterministicDemoAdapter:
             width_um = effective_parameters["input_width_um"]
             length_um = effective_parameters["length_um"]
             resistance = effective_parameters["load_resistance_ohm"]
-            ideal_tail_current_a = (
-                effective_parameters.get("tail_current_ua", 50.0) * 1e-6
+            real_tail = schematic.get("topology_variant") == (
+                "resistive_load_nmos_differential_pair_with_tail_device"
             )
             common_mode_v = effective_parameters.get("common_mode_v", 0.45)
             vdd_v = effective_parameters.get("vdd_v", 0.9)
             beta_a_per_v2 = 200e-6 * width_um / length_um
-            tail_output_resistance = effective_parameters.get(
-                "tail_output_resistance_ohm"
-            )
-            total_tail_current_a = ideal_tail_current_a
-            if tail_output_resistance is not None:
+            tail_output_resistance: float | None
+            ideal_tail_current_a: float | None
+            tail_overdrive_v: float | None = None
+            tail_gm_s: float | None = None
+            tail_gds_s: float | None = None
+            if real_tail:
+                if "tail_bias_v" not in effective_parameters:
+                    raise RuntimeError("real-tail differential pair requires tail_bias_v")
+                if {
+                    "tail_current_ua",
+                    "tail_output_resistance_ohm",
+                } & effective_parameters.keys():
+                    raise RuntimeError(
+                        "real-tail differential pair rejects ideal-tail parameters"
+                    )
+                tail_width_um = effective_parameters["tail_width_um"]
+                tail_length_um = effective_parameters["tail_length_um"]
+                tail_overdrive_v = max(
+                    float(effective_parameters["tail_bias_v"]) - 0.25,
+                    0.0,
+                )
+                tail_beta_a_per_v2 = (
+                    200e-6 * tail_width_um / tail_length_um
+                )
+                total_tail_current_a = (
+                    0.5 * tail_beta_a_per_v2 * tail_overdrive_v**2
+                )
+                tail_gm_s = max(
+                    tail_beta_a_per_v2 * tail_overdrive_v,
+                    1e-12,
+                )
+                tail_gds_s = max(tail_gm_s / 20.0, 1e-9)
+                tail_output_resistance = 1.0 / tail_gds_s
+                ideal_tail_current_a = None
+            else:
+                if "tail_bias_v" in effective_parameters:
+                    raise RuntimeError(
+                        "ideal-tail differential pair rejects tail_bias_v"
+                    )
+                ideal_tail_current_a = (
+                    effective_parameters.get("tail_current_ua", 50.0) * 1e-6
+                )
+                tail_output_resistance = effective_parameters.get(
+                    "tail_output_resistance_ohm"
+                )
+                total_tail_current_a = ideal_tail_current_a
+            if not real_tail and tail_output_resistance is not None:
                 for _ in range(20):
                     trial_overdrive_v = math.sqrt(
                         max(total_tail_current_a / beta_a_per_v2, 1e-12)
@@ -812,10 +937,32 @@ class DeterministicDemoAdapter:
                 branch_n_gds_s=gds_s,
                 load_resistance_ohm=resistance,
             )
-            metrics["ideal_tail_source_current_ua"] = (
-                ideal_tail_current_a * 1e6
-            )
-            if tail_output_resistance is not None:
+            if real_tail:
+                assert tail_overdrive_v is not None
+                assert tail_gm_s is not None
+                assert tail_gds_s is not None
+                tail_saturation_margin_v = tail_v - tail_overdrive_v
+                metrics.update(
+                    {
+                        "tail_device_current_ua": total_tail_current_a * 1e6,
+                        "tail_device_vgs_v": float(effective_parameters["tail_bias_v"]),
+                        "tail_device_vds_v": tail_v,
+                        "tail_device_vdsat_v": tail_overdrive_v,
+                        "tail_device_gm_us": tail_gm_s * 1e6,
+                        "tail_device_gds_us": tail_gds_s * 1e6,
+                        "tail_device_saturation_margin_v": tail_saturation_margin_v,
+                        "tail_device_saturation_region": (
+                            1.0 if tail_saturation_margin_v >= 0.0 else 0.0
+                        ),
+                        "tail_device_branch_sum_mismatch_percent": 0.0,
+                    }
+                )
+            else:
+                assert ideal_tail_current_a is not None
+                metrics["ideal_tail_source_current_ua"] = (
+                    ideal_tail_current_a * 1e6
+                )
+            if not real_tail and tail_output_resistance is not None:
                 metrics.update(
                     {
                         "tail_output_resistance_ohm": tail_output_resistance,
@@ -830,8 +977,14 @@ class DeterministicDemoAdapter:
             analysis_warnings = [
                 "analytical differential-pair demo; not an EDA result"
             ]
+            if real_tail and metrics["tail_device_saturation_region"] != 1.0:
+                analysis_warnings.append(
+                    "operating-point constraint: MNTAIL is not in saturation; "
+                    "use tail_device_saturation_region to evaluate feasibility"
+                )
             output_resistance = 1.0 / (1.0 / resistance + gds_s)
             low_frequency_gain = gm_s * output_resistance
+            noise_diagnostics: dict[str, object] = {}
             if task.resolved_analysis() is AnalysisKind.AC:
                 if task.ac_sweep is None:
                     raise RuntimeError("demo differential AC analysis requires ac_sweep")
@@ -872,8 +1025,10 @@ class DeterministicDemoAdapter:
                     str(value) for value in diagnostics.get("warnings", [])
                 )
                 if metrics["both_saturation_region"] != 1.0:
-                    analysis_issues.append(
-                        "differential AC metrics require both branches in saturation"
+                    analysis_warnings.append(
+                        "operating-point constraint: differential AC branches are "
+                        "not both in saturation; use both_saturation_region to "
+                        "evaluate feasibility"
                     )
                 analysis_complete = (
                     bool(diagnostics.get("analysis_complete", False))
@@ -1005,9 +1160,53 @@ class DeterministicDemoAdapter:
                     for value in linearity_diagnostics.get("warnings", [])
                 )
                 if metrics["both_saturation_region"] != 1.0:
-                    analysis_issues.append(
-                        "differential linearity metrics require both branches in "
-                        "saturation at the DC operating point"
+                    analysis_warnings.append(
+                        "operating-point constraint: differential transient branches "
+                        "are not both in saturation; use both_saturation_region to "
+                        "evaluate feasibility"
+                    )
+                analysis_complete = not analysis_issues
+            elif task.resolved_analysis() is AnalysisKind.NOISE:
+                if task.noise_sweep is None:
+                    raise RuntimeError(
+                        "demo differential noise analysis requires noise_sweep"
+                    )
+                sweep = task.noise_sweep
+                decades = math.log10(sweep.stop_hz / sweep.start_hz)
+                steps = math.ceil(decades * sweep.points_per_decade)
+                frequency_hz = [
+                    sweep.start_hz * 10.0 ** (index / sweep.points_per_decade)
+                    for index in range(steps + 1)
+                    if sweep.start_hz
+                    * 10.0 ** (index / sweep.points_per_decade)
+                    <= sweep.stop_hz
+                ]
+                if not math.isclose(
+                    frequency_hz[-1], sweep.stop_hz, rel_tol=1e-12
+                ):
+                    frequency_hz.append(sweep.stop_hz)
+                boltzmann = 1.380649e-23
+                input_density = math.sqrt(
+                    4.0 * boltzmann * 300.0 * (4.0 / 3.0) / max(gm_s, 1e-12)
+                )
+                raw_noise_metrics, noise_diagnostics = (
+                    extract_common_source_noise_metrics(
+                        frequency_hz,
+                        [input_density * low_frequency_gain] * len(frequency_hz),
+                        [input_density] * len(frequency_hz),
+                    )
+                )
+                metrics.update(
+                    {
+                        f"differential_{name}": value
+                        for name, value in raw_noise_metrics.items()
+                    }
+                )
+                if metrics["both_saturation_region"] != 1.0:
+                    analysis_warnings.append(
+                        "operating-point constraint: differential noise branches are "
+                        "not both in saturation; use both_saturation_region to "
+                        "evaluate feasibility"
                     )
                 analysis_complete = not analysis_issues
             return AdapterResult(
@@ -1020,6 +1219,7 @@ class DeterministicDemoAdapter:
                     "analysis_complete": analysis_complete,
                     "analysis_issues": analysis_issues,
                     "analysis_warnings": analysis_warnings,
+                    "noise_diagnostics": noise_diagnostics,
                     "warning": "analytical demo only; not an EDA result",
                 },
                 evidence_source=EvidenceSource.SOFTWARE_INFERENCE,

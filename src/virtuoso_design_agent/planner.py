@@ -33,11 +33,12 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
     common_source = task.circuit is CircuitKind.COMMON_SOURCE
     differential_pair = task.circuit is CircuitKind.DIFFERENTIAL_PAIR
     analysis = task.resolved_analysis()
+    declared_parameters = task.parameters.keys() | task.parameter_space.keys()
+    differential_pair_real_tail = differential_pair and "tail_bias_v" in declared_parameters
     common_source_ac = common_source and analysis is AnalysisKind.AC
     differential_pair_ac = differential_pair and analysis is AnalysisKind.AC
     differential_pair_cmrr = differential_pair_ac and (
-        "tail_output_resistance_ohm"
-        in (task.parameters.keys() | task.parameter_space.keys())
+        differential_pair_real_tail or "tail_output_resistance_ohm" in declared_parameters
     )
     differential_pair_linearity = (
         differential_pair and analysis is AnalysisKind.TRANSIENT
@@ -46,6 +47,7 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         common_source and analysis is AnalysisKind.TRANSIENT
     )
     common_source_noise = common_source and analysis is AnalysisKind.NOISE
+    differential_pair_noise = differential_pair and analysis is AnalysisKind.NOISE
     common_source_quality = common_source and analysis is AnalysisKind.QUALITY
     candidate_oa_write = task_requests_oa_parameter_write(task)
     explicit_instance_search = bool(task.instance_parameter_space)
@@ -56,6 +58,11 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         if differential_pair
         else "反相器"
     )
+    differential_tail_description = (
+        "由 OA 中 MNTAIL 与外部 BIAS 电压形成真实尾电流"
+        if differential_pair_real_tail
+        else "由外部共模/尾电流 testbench 提供理想尾偏置"
+    )
     simulation_description = (
         "从同一次 OA/si 参数与拓扑核对生成的网表，分别运行 Spectre 复数 AC、"
         "相干 transient 线性度和 noise；三项均完整才接受候选"
@@ -63,17 +70,21 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         else "用 OA 导出网表，先核对 DC operating point，再运行 Spectre 复数 AC sweep"
         if common_source_ac
         else (
-            "用 OA 导出网表和外部共模/尾电流 testbench，先核对双支路 DC "
+            f"用 OA 导出网表，{differential_tail_description}，先核对双支路 DC "
             "operating point，再运行平衡差模 Spectre 复数 AC sweep"
         )
         if differential_pair_ac and not differential_pair_cmrr
         else (
             "用同一次 OA/si 网表分别运行平衡差模与同相共模 Spectre 复数 AC；"
-            "显式有限尾源输出电阻只存在于外部 testbench，并核对两次 DC 工作点一致"
+            + (
+                "尾管与 BIAS 来自同一 OA 拓扑，核对两次 DC 工作点一致"
+                if differential_pair_real_tail
+                else "显式有限尾源输出电阻只存在于外部 testbench，并核对两次 DC 工作点一致"
+            )
         )
         if differential_pair_cmrr
         else (
-            "用 OA 导出网表和外部共模/尾电流 testbench，先核对双支路 DC，"
+            f"用 OA 导出网表，{differential_tail_description}，先核对双支路 DC，"
             "再运行平衡差分正弦 Spectre transient 幅度 sweep"
         )
         if differential_pair_linearity
@@ -88,7 +99,12 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         )
         if common_source_noise
         else (
-            "用 OA 导出网表和外部共模/尾电流 testbench 运行 Spectre DC，"
+            f"用 OA 导出网表，{differential_tail_description}，先核对双支路 DC，"
+            "再用单一差模输入源运行 Spectre noise sweep"
+        )
+        if differential_pair_noise
+        else (
+            f"用 OA 导出网表，{differential_tail_description}运行 Spectre DC，"
             "核对双支路 operating point"
         )
         if differential_pair
@@ -117,6 +133,8 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         if common_source_linearity
         else "在 max_iterations 内运行 OA 同源 DC + noise 候选"
         if common_source_noise
+        else "在 max_iterations 内运行 OA 同源双支路 DC + 差分 noise 候选"
+        if differential_pair_noise
         else "在 max_iterations 内运行 OA 同源双支路 DC operating-point 候选"
         if differential_pair
         else "在 max_iterations 内运行 OA 同源 DC operating-point 候选"
@@ -155,6 +173,11 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             "工作区逐条判断规格"
         )
         if common_source_noise
+        else (
+            "积分差分输出与输入参考噪声密度，并结合真实尾管工作区、真实 VDD "
+            "功耗及双支路 DC/KCL 逐条判断规格"
+        )
+        if differential_pair_noise
         else (
             "联合判断双支路电流平衡、尾电流/供电/负载 KCL、两管饱和区、"
             "输出失调、摆幅余量和真实 DC 功耗"
@@ -655,6 +678,13 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 "在同一 cellview 内保留 MN0/MP0 与 pins，新增固定边界的 "
                 "VDD0/VIN0/CL0/GND0 testbench，把 MN0.S/B 接到 gnd!，并按 "
                 "vdd_v/load_ff 设置源和负载；不替换或另建 cellview"
+            )
+        elif task.circuit is CircuitKind.DIFFERENTIAL_PAIR:
+            capability = "schematic.transform.differential-pair-tail-device"
+            description = (
+                "在同一 cellview 内保留 MN0/MN1/RD0/RD1 与全部已有 pins，"
+                "新增 MNTAIL(D=TAIL,G=BIAS,S/B=VSS) 和 BIAS pin，并按 "
+                "tail_width_um/tail_length_um 设置尾管；不替换或另建 cellview"
             )
         else:
             transform_action = task.resolved_schematic_transform_action()

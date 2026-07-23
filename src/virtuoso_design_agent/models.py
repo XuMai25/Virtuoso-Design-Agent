@@ -53,6 +53,7 @@ class CircuitKind(str, Enum):
 class SchematicTransformAction(str, Enum):
     ADD_SOURCE_DEGENERATION = "add_source_degeneration"
     REMOVE_SOURCE_DEGENERATION = "remove_source_degeneration"
+    ADD_TAIL_DEVICE = "add_tail_device"
 
 
 class SchematicTransformSpec(StrictModel):
@@ -1523,14 +1524,10 @@ class TaskSpec(StrictModel):
                     AnalysisKind.DC,
                     AnalysisKind.AC,
                     AnalysisKind.TRANSIENT,
+                    AnalysisKind.NOISE,
                 }:
                     raise ValueError(
-                        "differential_pair currently supports dc, ac, or transient "
-                        "analysis"
-                    )
-                if self.noise_sweep is not None:
-                    raise ValueError(
-                        "differential_pair does not yet accept noise sweep settings"
+                        "differential_pair supports dc, ac, transient, or noise analysis"
                     )
                 if resolved_analysis is AnalysisKind.AC and self.ac_sweep is None:
                     raise ValueError("differential-pair AC analysis requires ac_sweep")
@@ -1541,30 +1538,55 @@ class TaskSpec(StrictModel):
                     raise ValueError(
                         "differential-pair transient analysis requires linearity_sweep"
                     )
+                if (
+                    resolved_analysis is AnalysisKind.NOISE
+                    and self.noise_sweep is None
+                ):
+                    raise ValueError(
+                        "differential-pair noise analysis requires noise_sweep"
+                    )
                 if resolved_analysis is AnalysisKind.DC and (
-                    self.ac_sweep is not None or self.linearity_sweep is not None
+                    self.ac_sweep is not None
+                    or self.linearity_sweep is not None
+                    or self.noise_sweep is not None
                 ):
                     raise ValueError(
                         "differential-pair DC does not accept dynamic sweep settings"
                     )
                 if (
                     resolved_analysis is AnalysisKind.AC
-                    and self.linearity_sweep is not None
+                    and (
+                        self.linearity_sweep is not None
+                        or self.noise_sweep is not None
+                    )
                 ):
                     raise ValueError(
-                        "differential-pair AC does not accept linearity_sweep"
+                        "differential-pair AC accepts only ac_sweep"
                     )
                 if (
                     resolved_analysis is AnalysisKind.TRANSIENT
-                    and self.ac_sweep is not None
+                    and (
+                        self.ac_sweep is not None or self.noise_sweep is not None
+                    )
                 ):
                     raise ValueError(
-                        "differential-pair transient does not accept ac_sweep"
+                        "differential-pair transient accepts only linearity_sweep"
+                    )
+                if resolved_analysis is AnalysisKind.NOISE and (
+                    self.ac_sweep is not None or self.linearity_sweep is not None
+                ):
+                    raise ValueError(
+                        "differential-pair noise accepts only noise_sweep"
                     )
                 if self.operation in _TUNING_OPERATIONS:
                     declared_parameters = self.parameters.keys() | self.parameter_space.keys()
+                    tail_parameter = (
+                        "tail_bias_v"
+                        if "tail_bias_v" in declared_parameters
+                        else "tail_current_ua"
+                    )
                     missing = sorted(
-                        {"tail_current_ua", "common_mode_v", "vdd_v"}
+                        {tail_parameter, "common_mode_v", "vdd_v"}
                         - declared_parameters
                     )
                     if missing:
@@ -1868,6 +1890,32 @@ class TaskSpec(StrictModel):
                     raise ValueError(
                         "remove_source_degeneration does not accept parameters"
                     )
+            elif self.circuit is CircuitKind.DIFFERENTIAL_PAIR:
+                if self.schematic_transform is None:
+                    raise ValueError(
+                        "differential-pair schematic.transform requires an explicit "
+                        "schematic_transform action"
+                    )
+                if (
+                    self.schematic_transform.action
+                    is not SchematicTransformAction.ADD_TAIL_DEVICE
+                ):
+                    raise ValueError(
+                        "differential-pair schematic.transform supports only "
+                        "add_tail_device"
+                    )
+                if (
+                    self.schematic_transform.expected_restored_placement_sha256
+                    is not None
+                ):
+                    raise ValueError(
+                        "expected_restored_placement_sha256 is valid only for "
+                        "remove_source_degeneration"
+                    )
+                if not self.parameters:
+                    raise ValueError(
+                        "add_tail_device requires tail_width_um and tail_length_um"
+                    )
             else:
                 if self.schematic_transform is not None:
                     raise ValueError(
@@ -1914,8 +1962,15 @@ class TaskSpec(StrictModel):
     ) -> SchematicTransformAction | None:
         if (
             self.operation is not Operation.SCHEMATIC_TRANSFORM
-            or self.circuit is not CircuitKind.COMMON_SOURCE
         ):
+            return None
+        if self.circuit is CircuitKind.DIFFERENTIAL_PAIR:
+            return (
+                self.schematic_transform.action
+                if self.schematic_transform is not None
+                else None
+            )
+        if self.circuit is not CircuitKind.COMMON_SOURCE:
             return None
         if self.schematic_transform is None:
             return SchematicTransformAction.ADD_SOURCE_DEGENERATION

@@ -56,7 +56,13 @@ OA_SEMANTIC_PARAMETER_NAMES: dict[CircuitKind, frozenset[str]] = {
         }
     ),
     CircuitKind.DIFFERENTIAL_PAIR: frozenset(
-        {"input_width_um", "length_um", "load_resistance_ohm"}
+        {
+            "input_width_um",
+            "length_um",
+            "load_resistance_ohm",
+            "tail_width_um",
+            "tail_length_um",
+        }
     ),
 }
 
@@ -154,7 +160,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     ),
     CircuitKind.DIFFERENTIAL_PAIR: CircuitCapability(
         circuit=CircuitKind.DIFFERENTIAL_PAIR,
-        stage="Gate 3 nominal same-source DC/AC/CMRR/linearity verified",
+        stage="Gate 4 real-tail multi-analysis same-source verified",
         executable=True,
         operations=(
             Operation.SCHEMATIC_CREATE,
@@ -163,25 +169,31 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             Operation.SIMULATION_RUN,
             Operation.DESIGN_TUNE,
             Operation.DESIGN_CLOSE_LOOP,
+            Operation.SCHEMATIC_TRANSFORM,
         ),
         parameters=(
             "input_width_um",
             "length_um",
             "load_resistance_ohm",
+            "tail_width_um",
+            "tail_length_um",
             "tail_current_ua",
             "tail_output_resistance_ohm",
+            "tail_bias_v",
             "common_mode_v",
             "vdd_v",
             "load_ff",
         ),
         explicit_instance_parameters=True,
         evidence_gate=(
-            "exact MN0/MN1/RD0/RD1 OA topology + symmetric W/L/R readback + "
+            "exact MN0/MN1/RD0/RD1 core and optional MNTAIL OA topology + "
+            "symmetric W/L/R plus tail W/L readback + "
             "si netlist consistency + Spectre DC branch balance/tail-current/KCL/"
             "dual-saturation metrics + bounded OA writeback/recovery + differential "
             "AC gain/bandwidth/GBW + finite-tail paired CMRR response/bandwidth + "
             "sampled input-common-mode range + coherent differential transient "
-            "THD/P1dB and read-only tail/load AC tuning live on TSMC N28"
+            "THD/P1dB + differential noise + real-tail bias/width tuning live on "
+            "TSMC N28"
         ),
     ),
 }
@@ -225,6 +237,8 @@ def validate_task_capability(task: TaskSpec) -> None:
         transform_action = task.resolved_schematic_transform_action()
         if task.circuit is CircuitKind.INVERTER:
             expected = {"vdd_v", "load_ff"}
+        elif task.circuit is CircuitKind.DIFFERENTIAL_PAIR:
+            expected = {"tail_width_um", "tail_length_um"}
         elif transform_action is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION:
             expected = set()
         else:
@@ -234,6 +248,11 @@ def validate_task_capability(task: TaskSpec) -> None:
                 raise UnsupportedCapability(
                     "schematic.transform for inverter requires exactly vdd_v and "
                     "load_ff"
+                )
+            if task.circuit is CircuitKind.DIFFERENTIAL_PAIR:
+                raise UnsupportedCapability(
+                    "add_tail_device requires exactly tail_width_um and "
+                    "tail_length_um"
                 )
             if transform_action is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION:
                 raise UnsupportedCapability(
@@ -261,6 +280,7 @@ def validate_task_capability(task: TaskSpec) -> None:
             & {
                 "tail_current_ua",
                 "tail_output_resistance_ohm",
+                "tail_bias_v",
                 "common_mode_v",
                 "vdd_v",
                 "load_ff",
@@ -271,6 +291,24 @@ def validate_task_capability(task: TaskSpec) -> None:
                 f"{task.operation.value} cannot persist testbench-only parameters: "
                 + ", ".join(testbench_only)
             )
+    if (
+        task.circuit is CircuitKind.DIFFERENTIAL_PAIR
+        and task.operation is Operation.SCHEMATIC_CREATE
+        and supplied & {"tail_width_um", "tail_length_um"}
+    ):
+        raise UnsupportedCapability(
+            "schematic.create builds the nominal differential-pair core; use "
+            "schematic.transform add_tail_device for tail_width_um/tail_length_um"
+        )
+    if (
+        task.circuit is CircuitKind.DIFFERENTIAL_PAIR
+        and "tail_bias_v" in supplied
+        and supplied & {"tail_current_ua", "tail_output_resistance_ohm"}
+    ):
+        raise UnsupportedCapability(
+            "tail_bias_v for an OA tail device is mutually exclusive with the "
+            "external ideal-tail current/resistance parameters"
+        )
     if (
         task.circuit is CircuitKind.COMMON_SOURCE
         and "load_ff" in supplied

@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-tail-width-checkpoint-bridge",
+  "operation": "design.tune",
+  "circuit": "differential_pair",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_diffpair_tail_gate4_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis": "dc",
+  "parameters": {
+    "tail_length_um": 0.03,
+    "tail_bias_v": 0.4,
+    "common_mode_v": 0.55,
+    "vdd_v": 0.9
+  },
+  "parameter_space": {"tail_width_um": [0.8, 1.0, 1.2]},
+  "constraints": [
+    {"metric": "tail_device_saturation_region", "relation": ">=", "value": 1.0},
+    {"metric": "both_saturation_region", "relation": ">=", "value": 1.0},
+    {"metric": "tail_current_ua", "relation": "target", "value": 50.0, "tolerance": 25.0},
+    {"metric": "tail_device_branch_sum_mismatch_percent", "relation": "<=", "value": 1.0},
+    {"metric": "minimum_output_swing_margin_v", "relation": ">=", "value": 0.05}
+  ],
+  "objective": {"metric": "dc_supply_power_uw", "goal": "minimize"},
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 3, "timeout_seconds": 900}
+}

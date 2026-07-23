@@ -227,12 +227,22 @@ CMRR 不能在理想尾源上直接宣称。任务只有显式提供 `tail_outpu
 
 受控 transient 使用 Spectre nested `vindiff` sweep，VINP/VINN 分别为声明差分峰值的 `+0.5/-0.5`，并逐点检查实际 `VINP-INN` 基波。指标从 `VOUTP-OUTN` 相干窗口提取差分增益、HD2/HD3、THD、P1dB；VDD 源积分给出全电路功耗。100 MHz/每端 1 fF 的 7 点 live sweep 解析到输入 P1dB `110.9 mV peak`、输出 P1dB `293.5 mV peak`。输入共模 12 点只读 DC 则得到采样通过区间 `0.30–0.875 V`，并在 `WinError 10054` 后从 9/10 checkpoint 恢复；这只是理想尾源和当前 50 mV 余量门下的采样结论。
 
+## 差分对 Gate 4 真实尾管路径
+
+Gate 4 不重建差分对模板，也不修改 Bridge。`schematic.transform` 的 `add_tail_device` 只接受已精确匹配 Gate 3 core 的 cellview，并以 append 模式新增 `MNTAIL(TAIL,BIAS,VSS,VSS)` 和输入 pin `BIAS`。保存前后都独立 inspect；delta 必须保持原 `MN0/MN1/RD0/RD1`、全部既有连接、pins 和 placement，只允许新增一个尾管、一个 pin 及其必要连接。创建仍只建立 nominal core，因此尾管是显式、可审计的拓扑小变更，而不是隐藏在另一个模板中。
+
+真实尾管拓扑把 `tail_width_um/tail_length_um` 加入 OA semantic/readback/`si` 一致性契约；`tail_bias_v` 仍是外部 BIAS 电压，不能写入 OA。它与理想尾源的 `tail_current_ua/tail_output_resistance_ohm` 互斥。参数应用和有限搜索可只改 MNTAIL W/L，也可以只扫 BIAS/VCM 等 testbench 条件；前者按候选暂存、回读、checkpoint 和最佳写回，后者保持 OA 只读。`si` parser 同时要求 MNTAIL master、节点顺序、W/L/fingers/multiplicity 与 OA 匹配。Spectre DC 从 MNTAIL 自身读取 `ids/vgs/vds/vdsat/gm/gds`，尾电流 KCL 必须匹配两支路和，不再用理想源设定值冒充实际电流。
+
+AC 在同一 `si` 网表上分别运行平衡差模和同相共模 wrapper，二者都只给 OA `BIAS` pin 提供电压，并要求 DC OP 与频率网格一致。CMRR 由两条复数传输函数相除；真实尾管小信号输出电阻自然进入结果，不再由 wrapper 并联人为 `rtail`。transient 继续使用平衡差分 nested sweep。noise 使用唯一独立 `VIN_DIFF(VDIFF,0)` 作为 `iprobe`，再由 `+0.5/-0.5` 理想 VCVS 把它叠加到精确 VCM；这避免两个独立输入源的输入参考歧义，也避免 1 TΩ 共模偏置在真实求解中产生数值漂移。
+
+`analysis_complete` 只表示所需 OP/波形/标量和解析是否齐全，不再把“MNTAIL 或输入支路不在饱和区”混成证据缺失。工作区状态保留为 `software_inference` metric 和明确 warning，并由任务 constraint 判可行性。2026-07-23 的真实 ICMR 首轮因此暴露了旧归类问题；修正后的 10 点重跑把 0.35 V 正确记录为“分析完整但规格不可行”，其余点不受放宽。完整结果和未验证边界见 [`validation/2026-07-23-differential-pair-real-tail-gate4-live.md`](validation/2026-07-23-differential-pair-real-tail-gate4-live.md)。
+
 ## 证据链
 
 每次运行至少保存任务和计划 token、adapter 与证据来源、动作状态、候选参数、仿真指标、逐条规格判定、最终选择、OA 回读摘要，以及错误和未验证边界。显式实例写入还保存请求、写入前目标字段、立即确认和独立 inspect 的完整参数表。ADE `prepare` 保存 design/test/simulator 请求、持久化 view/test 回读、未覆盖既有 view 以及没有设置 analysis/sweep 的范围；`capture` 保存焦点目标、是否已保存、setup/simulation 聚合指纹、逐文件 manifest、history 选择来源以及可用时的逐点 output/spec；变量/setup patch 保存声明目标、全部旧值、即时值、独立重开值、targeted 前后指纹及未覆盖范围，并明确记录没有运行仿真；严格 sweep run 还保存 setup 前后 scope 指纹、每个 point 的 Detail 参数/非空 output、逐 test input/result hash、OA/input comparison hash 和逐点绑定指纹。存在显式 legacy output evaluation-error 契约时，还保存任务期望、RDB 实际错误单元格、completion-log 数量、逐项匹配和零未解释错误；启用 result mapping 时再保存 output expression 前后状态/指纹、显式 scale、映射后的候选、逐条 constraint 与 selection。调优 checkpoint 保留历史失败 actions，但恢复后只有完成的候选证据参与选择；最终 run 可以在完整证据和最终回读成立时成功，同时仍显式留下已恢复的 transport 事件。自动 netlisting 还保存远端网表/wrapper 路径、SHA-256、解析后的实例参数和一致性结论。
 
 有限 PVT 还保存每个原始 condition 的完整 `CandidateEvaluation`、同一 OA/netlist identity、每个 analysis 的 testbench/model manifest、独立 noise PSF，以及跨条件 `all_conditions_required`/worst-case 聚合。缺一个条件、条件顺序或值与任务不一致、任一 analysis 不完整、netlist 漂移或 model corner 未映射都直接失败，不会降级为 nominal 结果。
 
-timing、过冲/欠冲、`supply_energy_per_cycle_fj`、`average_supply_power_uw`、共源与差分对的 DC/供电/KCL 连续指标，以及从 AC、相干 transient 或 noise PSF 提取的连续量标为 `eda_result`；OA 结构和参数标为 `bridge_readback`；任务显式给出的 VDD、负载、偏置、尾电流、有限尾源输出电阻、analysis 或 sweep 字段标为 `user_input`；默认 analysis/sweep 字段、`gate_area_proxy_um2=(Wn+Wp)L`、饱和区分类、CMRR/交点/压缩点规则和指标完整性判断是 `software_inference`。供电能量或功耗保留积分窗口和源电流方向，不能称为纯动态开关能量；AC、linearity 和 noise 指标也必须保存提取公式、范围和 unresolved 诊断，不能只保存一个无来源标量。后续 Maestro、Calibre 和 PEX 沿用同一证据模型。
+timing、过冲/欠冲、`supply_energy_per_cycle_fj`、`average_supply_power_uw`、共源与差分对的 DC/供电/KCL 连续指标，以及从 AC、相干 transient 或 noise PSF 提取的连续量标为 `eda_result`；OA 结构和参数（包括 MNTAIL W/L）标为 `bridge_readback`；任务显式给出的 VDD、负载、偏置、尾电流或尾管 BIAS、有限尾源输出电阻、analysis 或 sweep 字段标为 `user_input`；默认 analysis/sweep 字段、`gate_area_proxy_um2=(Wn+Wp)L`、饱和区分类、CMRR/交点/压缩点规则和指标完整性判断是 `software_inference`。供电能量或功耗保留积分窗口和源电流方向，不能称为纯动态开关能量；AC、linearity 和 noise 指标也必须保存提取公式、范围和 unresolved 诊断，不能只保存一个无来源标量。后续 Maestro、Calibre 和 PEX 沿用同一证据模型。
 
 PVT 中的角名、温度和逐角 VDD 是 `user_input`；profile include 映射来自 `pdk_profile`，映射选择及 manifest 组合标为 `software_inference`；每角 Spectre 标量/波形指标仍是 `eda_result`；跨角保守 constraint/objective 值全部标为 `software_inference`。因此聚合最坏值不能被误读为某个单独 Spectre analysis 直接输出的标量。

@@ -41,7 +41,9 @@ Gate 2A 又把相同执行语义扩展到电阻负载 NMOS 共源级：新 OA ce
 
 同日进入并真实闭合 Gate 3 nominal 主线。新建不覆盖的 `vb_pdk_smoke/vda_diffpair_gate3_001/schematic` 完成 `MN0/MN1/RD0/RD1` 精确回读、OA→`si` 双管/双负载 geometry、单点 DC、只读尾电流/共模搜索、18 点 W/RD/尾电流设计搜索、最佳写回、全不可行、预算和 transport checkpoint；最终 OA 为 `W=2 µm/L=30 nm/RD=8 kΩ`。18 点搜索在两个不同候选发生 transport reset，均经独立 OA 回读后续跑并最终完成。状态升级为 **bounded differential-pair nominal DC writeback and recovery verified**。
 
-同一最终 OA 随后完成差模 AC、有限尾源输出电阻下的差模/共模配对 AC、输入共模范围和相干 transient。无额外负载时差模增益 `2.992 V/V`、带宽 `29.18 GHz`、GBW `87.25 GHz`、unity `86.80 GHz`；显式 `1 MΩ` 外部尾源输出电阻得到低频 CMRR `58.59 dB` 和 CMRR 下降 3 dB 带宽 `306.38 MHz`。0.20–0.90 V 的 12 点共模采样在 transport reset 后从 9/10 checkpoint 恢复，当前 50 mV 余量门下通过点为 0.30–0.875 V。100 MHz/每端 1 fF 的 7 点差分 transient 得到输入 P1dB `110.9 mV peak` 和 250 mV 输入下 THD `16.54%`。四点尾电流×负载 AC 只读搜索也复用原有限搜索/选择状态机。所有动态任务的 `si` SHA 与最终 OA 一致。状态升级为 **differential-pair nominal same-source DC/AC/CMRR/linearity and read-only tuning verified**；真实尾管/偏置网络、differential noise、ADE 人工交接、mismatch 和可选 PVT 仍待独立 Gate。
+同一最终 OA 随后完成差模 AC、有限尾源输出电阻下的差模/共模配对 AC、输入共模范围和相干 transient。无额外负载时差模增益 `2.992 V/V`、带宽 `29.18 GHz`、GBW `87.25 GHz`、unity `86.80 GHz`；显式 `1 MΩ` 外部尾源输出电阻得到低频 CMRR `58.59 dB` 和 CMRR 下降 3 dB 带宽 `306.38 MHz`。0.20–0.90 V 的 12 点共模采样在 transport reset 后从 9/10 checkpoint 恢复，当前 50 mV 余量门下通过点为 0.30–0.875 V。100 MHz/每端 1 fF 的 7 点差分 transient 得到输入 P1dB `110.9 mV peak` 和 250 mV 输入下 THD `16.54%`。四点尾电流×负载 AC 只读搜索也复用原有限搜索/选择状态机。所有动态任务的 `si` SHA 与最终 OA 一致。状态升级为 **differential-pair nominal same-source DC/AC/CMRR/linearity and read-only tuning verified**；这是 Gate 3 的明确边界，理想尾源能力继续保留。
+
+Gate 4 随后在新 `vda_diffpair_tail_gate4_001` 上以 exact-delta transform 只增加 OA `MNTAIL/BIAS`。5 点 BIAS 搜索选中 0.40 V；三点尾管宽度 checkpoint 按最小功耗写回 0.8 µm。最终同一 OA/`si` 路径得到差模增益 `2.928 V/V`、带宽 `13.806 GHz`、GBW `40.418 GHz`、低频 CMRR `21.135 dB`、CMRR 带宽 `19.069 GHz`；10 点 ICMR、六点 transient 和 141 点 differential noise PSF 也全部完成。首轮 ICMR 状态误分类、transient 下载 timeout 和首版 noise 共模漂移均保留失败 record，并在修正/doctor 后成功重跑。状态升级为 **differential-pair real-tail multi-analysis same-source and bounded writeback verified**；ADE 人工交接、mismatch 和可选 PVT 仍待独立 Gate。
 
 Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发送前的 tunnel 自愈。新的 9 点压力任务仍在候选 8 发生一次本地端口拒绝，但 OA 恢复、候选前缀和续跑均正确，最终 9/9 与最佳写回成功；确定性同-client smoke 已覆盖 pre-send 自愈。payload 发送后的不确定错误仍不自动重放，这是保留的可靠性边界而不是跳过的工作。
 
@@ -111,11 +113,12 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> 可选 PVT-aware 候选调优（testbench bias 已 live；OA 设计变量写回待可选 live）
   -> 差分对 nominal DC + OA 写回/失败/预算/恢复（已 live）
   -> 差分对 AC/CMRR/输入共模范围/transient 线性度（已 live）
-  -> 差分对真实尾管/偏置网络 + noise；PVT 按任务可选
+  -> 差分对真实尾管/偏置网络 + DC/AC/CMRR/ICMR/transient/noise（已 live；PVT 按任务可选）
+  -> 差分对下一受控拓扑小变更 + 可逆性/失败恢复 Gate
   -> L5B 单模块闭环
   -> layout/DRC/LVS/PEX Gate
 ```
 
 每一级只有在真实 Bridge smoke、结构回读、指标解析和失败注入均通过后才升级状态。
 
-反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化可逆 transform/DC/AC、quality、W/RD/RS/L/VDD 写回、固定设计 TT/SS/FF、可选 PVT-aware bias 选优，以及差分对 nominal DC/AC/CMRR/输入共模采样/transient 与预算/不可行/transport 恢复均已有 live 证据。跨 PVT 不再是进入下一拓扑的强制默认门；需要加严时才显式启用。默认主线转为给差分对增加真实尾电流器件/偏置网络，并在保持现有 OA/`si`/checkpoint 证据链的条件下加入 differential noise；随后再决定是否进入差分对 PVT、mismatch 或更完整拓扑。ADE 的真实 PVT/multi-test、差分对 setup、已有 output 安全替换，以及人工打开/修改/重跑和旧 ADE L 迁移继续是独立 Gate；完成前仍不能升级为可重复的 L5B 单模块规格闭环。
+反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化可逆 transform/DC/AC、quality、W/RD/RS/L/VDD 写回、固定设计 TT/SS/FF、可选 PVT-aware bias 选优，以及差分对 nominal 与真实尾管两条路径均已有 live 证据。真实尾管 Gate 已覆盖严格增量 OA transform、bias/width 搜索与写回、DC/AC/CMRR/ICMR/transient/noise，并在 transport、证据状态误分类和 noise 共模偏置失败后留下记录、修正和重跑。跨 PVT 不再是进入下一拓扑的强制默认门；需要加严时才显式启用。默认主线转为下一个可逆、exact-delta 的差分对拓扑小变更，再以相同分析与失败恢复契约验证无缝迁移。差分对 PVT、mismatch/Monte Carlo、ADE 真实 PVT/multi-test、差分对 setup、已有 output 安全替换，以及人工打开/修改/重跑和旧 ADE L 迁移继续是独立 Gate；完成前仍不能升级为可重复的 L5B 单模块规格闭环。

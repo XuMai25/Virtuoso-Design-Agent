@@ -54,6 +54,10 @@ _OA_SEMANTIC_PARAMETERS = {
 }
 
 _COMMON_SOURCE_OPTIONAL_OA_PARAMETERS = ("source_resistance_ohm",)
+_DIFFERENTIAL_PAIR_OPTIONAL_OA_PARAMETERS = (
+    "tail_width_um",
+    "tail_length_um",
+)
 
 
 @dataclass(frozen=True)
@@ -479,6 +483,12 @@ class TaskExecutor:
                 for name in _COMMON_SOURCE_OPTIONAL_OA_PARAMETERS
                 if name in raw
             )
+        elif task.circuit is CircuitKind.DIFFERENTIAL_PAIR:
+            names.extend(
+                name
+                for name in _DIFFERENTIAL_PAIR_OPTIONAL_OA_PARAMETERS
+                if name in raw
+            )
         return {name: float(raw[name]) for name in names}
 
     @staticmethod
@@ -609,6 +619,122 @@ class TaskExecutor:
             raise RuntimeError(
                 "RS0 resistance does not match the requested source degeneration"
             )
+
+    @classmethod
+    def _assert_differential_pair_tail_device_delta(
+        cls,
+        before: AdapterResult,
+        after: AdapterResult,
+        tail_width_um: float,
+        tail_length_um: float,
+    ) -> None:
+        before_data = before.data
+        after_data = after.data
+        before_instances = cls._instances_by_name(before_data)
+        after_instances = cls._instances_by_name(after_data)
+        core_names = {"MN0", "MN1", "RD0", "RD1"}
+        tail_names = core_names | {"MNTAIL"}
+        if frozenset(before_instances) not in {
+            frozenset(core_names),
+            frozenset(tail_names),
+        }:
+            raise RuntimeError(
+                "tail-device transform requires the exact VDA differential-pair core "
+                "or real-tail instance set"
+            )
+        if set(after_instances) != tail_names:
+            raise RuntimeError(
+                "tail-device transform did not produce exactly "
+                "MN0/MN1/RD0/RD1/MNTAIL"
+            )
+
+        expected_core_terminals = {
+            "MN0": {"D": "OUTP", "G": "INP", "S": "TAIL", "B": "VSS"},
+            "MN1": {"D": "OUTN", "G": "INN", "S": "TAIL", "B": "VSS"},
+            "RD0": {"PLUS": "VDD", "MINUS": "OUTP"},
+            "RD1": {"PLUS": "VDD", "MINUS": "OUTN"},
+        }
+        for name, terminals in expected_core_terminals.items():
+            if before_instances[name].get("terminals") != terminals:
+                raise RuntimeError(
+                    f"tail-device transform found unexpected {name} terminals"
+                )
+            if after_instances[name].get("terminals") != terminals:
+                raise RuntimeError(
+                    f"tail-device transform changed {name} terminals"
+                )
+        if after_instances["MNTAIL"].get("terminals") != {
+            "D": "TAIL",
+            "G": "BIAS",
+            "S": "VSS",
+            "B": "VSS",
+        }:
+            raise RuntimeError("MNTAIL is not connected to TAIL/BIAS/VSS/VSS")
+        if (
+            after_instances["MNTAIL"].get("library"),
+            after_instances["MNTAIL"].get("cell"),
+        ) != (
+            after_instances["MN0"].get("library"),
+            after_instances["MN0"].get("cell"),
+        ):
+            raise RuntimeError("MNTAIL does not use the input NMOS master")
+
+        before_pins = set(before_data.get("pins", []))
+        after_pins = set(after_data.get("pins", []))
+        before_nets = set(before_data.get("nets", []))
+        after_nets = set(after_data.get("nets", []))
+        if after_pins != before_pins | {"BIAS"}:
+            raise RuntimeError("tail-device transform changed pins beyond adding BIAS")
+        if after_nets != before_nets | {"BIAS"}:
+            raise RuntimeError("tail-device transform changed nets beyond adding BIAS")
+
+        before_parameters = before_data.get("instance_parameters")
+        after_parameters = after_data.get("instance_parameters")
+        if not isinstance(before_parameters, dict) or not isinstance(
+            after_parameters, dict
+        ):
+            raise RuntimeError(
+                "tail-device transform is missing full instance parameter readback"
+            )
+        for name in sorted(core_names):
+            if before_parameters.get(name) != after_parameters.get(name):
+                raise RuntimeError(
+                    f"tail-device transform unexpectedly changed {name} parameters"
+                )
+
+        immutable_fields = (
+            "library",
+            "cell",
+            "xy",
+            "orient",
+            "bBox",
+            "numInst",
+            "view",
+        )
+        for name in sorted(core_names):
+            for field in immutable_fields:
+                if before_instances[name].get(field) != after_instances[name].get(field):
+                    raise RuntimeError(
+                        f"tail-device transform unexpectedly changed {name}.{field}"
+                    )
+
+        semantic = after_data.get("semantic_parameters")
+        if not isinstance(semantic, dict):
+            raise RuntimeError("tail-device transform is missing semantic OA readback")
+        for name, expected in (
+            ("tail_width_um", tail_width_um),
+            ("tail_length_um", tail_length_um),
+        ):
+            if name not in semantic:
+                raise RuntimeError(f"tail-device transform is missing {name}")
+            actual = float(semantic[name])
+            tolerance = max(abs(float(expected)) * 1e-6, 1e-9)
+            if abs(actual - float(expected)) > tolerance:
+                raise RuntimeError(f"MNTAIL {name} does not match the request")
+        if after_data.get("topology_variant") != (
+            "resistive_load_nmos_differential_pair_with_tail_device"
+        ):
+            raise RuntimeError("tail-device transform returned the wrong topology variant")
 
     @classmethod
     def _assert_source_degeneration_removal_delta(
@@ -2528,6 +2654,10 @@ class TaskExecutor:
                         is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION
                         else "schematic.transform.source-degeneration"
                     )
+                elif task.circuit is CircuitKind.DIFFERENTIAL_PAIR:
+                    transform_action = (
+                        "schematic.transform.differential-pair-tail-device"
+                    )
                 transformed = self._action(
                     transform_action,
                     lambda: self.adapter.transform_schematic(task),
@@ -2566,6 +2696,13 @@ class TaskExecutor:
                         after,
                         float(task.parameters["vdd_v"]),
                         float(task.parameters["load_ff"]),
+                    )
+                elif task.circuit is CircuitKind.DIFFERENTIAL_PAIR:
+                    self._assert_differential_pair_tail_device_delta(
+                        before,
+                        after,
+                        float(task.parameters["tail_width_um"]),
+                        float(task.parameters["tail_length_um"]),
                     )
                 elif (
                     resolved_transform

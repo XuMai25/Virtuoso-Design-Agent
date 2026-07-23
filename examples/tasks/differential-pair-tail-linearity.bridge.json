@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-tail-linearity-bridge",
+  "operation": "simulation.run",
+  "circuit": "differential_pair",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_diffpair_tail_gate4_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis": "transient",
+  "linearity_sweep": {
+    "frequency_hz": 100000000.0,
+    "amplitudes_v": [0.005, 0.02, 0.05, 0.1, 0.15, 0.2],
+    "settling_cycles": 4,
+    "measurement_cycles": 8,
+    "points_per_cycle": 128,
+    "max_harmonic": 5,
+    "compression_db": 1.0
+  },
+  "parameters": {
+    "tail_bias_v": 0.4,
+    "common_mode_v": 0.55,
+    "vdd_v": 0.9,
+    "load_ff": 1.0
+  },
+  "constraints": [
+    {"metric": "tail_device_saturation_region", "relation": ">=", "value": 1.0},
+    {"metric": "both_saturation_region", "relation": ">=", "value": 1.0},
+    {"metric": "differential_small_signal_gain_v_per_v", "relation": ">=", "value": 1.0},
+    {"metric": "differential_max_thd_percent", "relation": "<=", "value": 50.0},
+    {"metric": "transient_max_average_supply_power_uw", "relation": "<=", "value": 100.0}
+  ],
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 1200}
+}

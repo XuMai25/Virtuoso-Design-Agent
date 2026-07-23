@@ -379,6 +379,61 @@ def test_differential_pair_create_rejects_testbench_only_parameters() -> None:
         build_plan(finite_tail)
 
 
+def test_differential_pair_real_tail_transform_and_noise_are_explicit() -> None:
+    transform = TaskSpec.model_validate(
+        {
+            "id": "diffpair-add-tail",
+            "operation": "schematic.transform",
+            "circuit": "differential_pair",
+            "target": {"library": "vda_test", "cell": "vda_diffpair_tail"},
+            "schematic_transform": {"action": "add_tail_device"},
+            "parameters": {"tail_width_um": 2.0, "tail_length_um": 0.03},
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+    plan = build_plan(transform)
+
+    assert transform.resolved_schematic_transform_action().value == "add_tail_device"
+    assert any(
+        step.capability == "schematic.transform.differential-pair-tail-device"
+        for step in plan.steps
+    )
+
+    missing_action = transform.model_dump(mode="json", exclude_none=True)
+    missing_action.pop("schematic_transform")
+    with pytest.raises(ValidationError, match="explicit schematic_transform"):
+        TaskSpec.model_validate(missing_action)
+
+    noise = TaskSpec.model_validate(
+        {
+            "id": "diffpair-tail-noise",
+            "operation": "simulation.run",
+            "circuit": "differential_pair",
+            "target": {"library": "vda_test", "cell": "vda_diffpair_tail"},
+            "analysis": "noise",
+            "noise_sweep": {"start_hz": 1e3, "stop_hz": 1e9},
+            "parameters": {
+                "tail_bias_v": 0.35,
+                "common_mode_v": 0.55,
+                "vdd_v": 0.9,
+            },
+        }
+    )
+    noise_plan = build_plan(noise)
+    assert any("单一差模输入源" in step.description for step in noise_plan.steps)
+
+    conflict = noise.model_copy(
+        update={
+            "parameters": dict(noise.parameters) | {"tail_current_ua": 50.0}
+        }
+    )
+    with pytest.raises(UnsupportedCapability, match="mutually exclusive"):
+        build_plan(conflict)
+
+
 def test_common_source_gate_accepts_only_implemented_dc_parameters() -> None:
     task = TaskSpec.model_validate(
         {

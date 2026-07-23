@@ -3219,6 +3219,157 @@ def test_differential_pair_demo_transient_exposes_linearity_metrics() -> None:
     assert record.candidates[0].evidence_source.value == "software_inference"
 
 
+def test_differential_pair_demo_real_tail_transform_reuses_ac_and_noise_flow() -> None:
+    adapter = DeterministicDemoAdapter()
+    create = TaskSpec.model_validate(
+        {
+            "id": "diffpair-tail-create",
+            "operation": "schematic.create",
+            "circuit": "differential_pair",
+            "target": {"library": "vda_test", "cell": "vda_diffpair_tail"},
+            "parameters": {
+                "input_width_um": 2.0,
+                "length_um": 0.03,
+                "load_resistance_ohm": 8_000.0,
+            },
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+    create_plan = build_plan(create)
+    assert TaskExecutor(adapter).execute(
+        create, create_plan, token=create_plan.confirmation_token
+    ).status is RunStatus.SUCCEEDED
+
+    transform = TaskSpec.model_validate(
+        {
+            "id": "diffpair-tail-transform",
+            "operation": "schematic.transform",
+            "circuit": "differential_pair",
+            "target": {"library": "vda_test", "cell": "vda_diffpair_tail"},
+            "schematic_transform": {"action": "add_tail_device"},
+            "parameters": {"tail_width_um": 0.5, "tail_length_um": 0.03},
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+    transform_plan = build_plan(transform)
+    transformed = TaskExecutor(adapter).execute(
+        transform, transform_plan, token=transform_plan.confirmation_token
+    )
+    assert transformed.status is RunStatus.SUCCEEDED
+    readback = adapter.inspect_schematic(transform).data
+    assert readback["topology_variant"] == (
+        "resistive_load_nmos_differential_pair_with_tail_device"
+    )
+    assert readback["semantic_parameters"]["tail_width_um"] == pytest.approx(0.5)
+    assert {item["name"] for item in readback["instances"]} == {
+        "MN0",
+        "MN1",
+        "RD0",
+        "RD1",
+        "MNTAIL",
+    }
+    assert set(readback["pins"]) >= {"TAIL", "BIAS"}
+
+    ac = TaskSpec.model_validate(
+        {
+            "id": "diffpair-tail-ac",
+            "operation": "simulation.run",
+            "circuit": "differential_pair",
+            "target": {"library": "vda_test", "cell": "vda_diffpair_tail"},
+            "analysis": "ac",
+            "ac_sweep": {"start_hz": 1e3, "stop_hz": 1e12},
+            "parameters": {
+                "tail_bias_v": 0.30,
+                "common_mode_v": 0.55,
+                "vdd_v": 0.9,
+                "load_ff": 1.0,
+            },
+            "safety": {"allow_remote_compute": True},
+        }
+    )
+    ac_plan = build_plan(ac)
+    ac_record = TaskExecutor(adapter).execute(
+        ac, ac_plan, token=ac_plan.confirmation_token
+    )
+    assert ac_record.status is RunStatus.SUCCEEDED
+    assert ac_record.selected_metrics["tail_device_saturation_region"] == 1.0
+    assert ac_record.selected_metrics["differential_bandwidth_3db_hz"] > 0.0
+    assert ac_record.selected_metrics["differential_gain_bandwidth_product_hz"] > 0.0
+    assert ac_record.selected_metrics["low_frequency_cmrr_db"] > 0.0
+
+    noise = TaskSpec.model_validate(
+        {
+            "id": "diffpair-tail-noise",
+            "operation": "simulation.run",
+            "circuit": "differential_pair",
+            "target": {"library": "vda_test", "cell": "vda_diffpair_tail"},
+            "analysis": "noise",
+            "noise_sweep": {"start_hz": 1e3, "stop_hz": 1e9},
+            "parameters": {
+                "tail_bias_v": 0.30,
+                "common_mode_v": 0.55,
+                "vdd_v": 0.9,
+            },
+            "safety": {"allow_remote_compute": True},
+        }
+    )
+    noise_plan = build_plan(noise)
+    noise_record = TaskExecutor(adapter).execute(
+        noise, noise_plan, token=noise_plan.confirmation_token
+    )
+    assert noise_record.status is RunStatus.SUCCEEDED
+    assert (
+        noise_record.selected_metrics[
+            "differential_integrated_input_referred_noise_uv_rms"
+        ]
+        > 0.0
+    )
+
+    icmr = TaskSpec.model_validate(
+        {
+            "id": "diffpair-tail-icmr",
+            "operation": "design.tune",
+            "circuit": "differential_pair",
+            "target": {"library": "vda_test", "cell": "vda_diffpair_tail"},
+            "analysis": "dc",
+            "parameters": {"tail_bias_v": 0.30, "vdd_v": 0.9},
+            "parameter_space": {"common_mode_v": [0.25, 0.55]},
+            "constraints": [
+                {
+                    "metric": "tail_device_saturation_region",
+                    "relation": ">=",
+                    "value": 1.0,
+                }
+            ],
+            "objective": {
+                "metric": "minimum_output_swing_margin_v",
+                "goal": "maximize",
+            },
+            "safety": {"allow_remote_compute": True},
+            "limits": {"max_iterations": 2},
+        }
+    )
+    icmr_plan = build_plan(icmr)
+    icmr_record = TaskExecutor(adapter).execute(
+        icmr, icmr_plan, token=icmr_plan.confirmation_token
+    )
+    assert icmr_record.status is RunStatus.SUCCEEDED
+    assert icmr_record.candidates[0].analysis_complete is True
+    assert icmr_record.candidates[0].feasible is False
+    assert icmr_record.candidates[0].analysis_issues == []
+    assert any(
+        "MNTAIL is not in saturation" in warning
+        for warning in icmr_record.candidates[0].analysis_warnings
+    )
+    assert icmr_record.candidates[1].feasible is True
+
+
 def test_differential_pair_infeasible_search_restores_initial_oa() -> None:
     task = TaskSpec.model_validate(
         {

@@ -56,7 +56,21 @@ Gate 2 已分别覆盖 bias/load、W/RD/RS 和 L/VDD 网格，能对固定 OA �
 - 输入共模 0.20–0.90 V 的 12 个采样点表明：0.25 V 因尾节点低于 0 V 失败，0.30 V 通过；0.875 V 的最小余量为 62.29 mV 并通过，0.90 V 虽仍在饱和区但余量 40.44 mV，低于 50 mV 门限。故当前只称采样通过区间 `0.30–0.875 V`，低/高边界分别夹在 `0.25–0.30 V` 与 `0.875–0.90 V`，不外推为连续解析 ICMR。
 - 100 MHz、每端 1 fF 的 7 点平衡差分 transient sweep 得到小信号增益 `2.991 V/V`、输入 P1dB `110.9 mV peak`、输出 P1dB `293.5 mV peak`；最大 250 mV 输入时 THD `16.54%`、HD3 `-15.75 dBc`，HD2 接近数值底噪，平均 VDD 功耗约 `45.0 µW`。每点都验证实际 `VINP-INN` 基波与声明幅度一致。
 
-下一 Gate 聚焦真实尾电流器件/偏置网络与 differential noise；可选 PVT 只在任务显式启用时加严，不默认附加。差分对 ADE/Maestro setup、人工打开/调整/重跑、mismatch/Monte Carlo 和多 test/multi-analysis 仍未闭合。
+Gate 3 的理想尾源路径继续保留为独立、低成本的局部能力；它不会被 Gate 4 删除或静默替换。
+
+## Gate 4：差分对真实尾管
+
+状态：2026-07-23 已在全新且不覆盖的 `vb_pdk_smoke/vda_diffpair_tail_gate4_001/schematic` 上完成 **real-tail same-source multi-analysis live Gate**。这证明固定 `MNTAIL/BIAS` 小变更及其 DC/AC/CMRR/ICMR/transient/noise 可以无缝复用 Gate 3 流程；仍不等于任意拓扑综合、完整差分放大器或 L5B。
+
+- `schematic.create` 先建立原四器件 core；`schematic.transform/add_tail_device` 只新增 `MNTAIL(TAIL,BIAS,VSS,VSS)` 与 `BIAS` pin。前后独立 inspect 证明 core 实例、连接、pins 和 placement 保持，`replace_existing=false`。
+- 尾管 W/L 是 OA semantic 参数并进入定向回读与 `si` 网表；BIAS 电压是 testbench 条件。真实尾管模式拒绝理想尾源的 `tail_current_ua/tail_output_resistance_ohm`，因此不会把两种状态混成同一真源。
+- 5 点 `tail_bias_v` 只读搜索选择 `0.40 V`；随后 `MNTAIL.W=0.8/1.0/1.2 µm` 三点全部完成 OA 暂存→回读→自动网表→DC，按最小功耗写回并独立回读 `0.8 µm`。名义点实际尾电流 `49.368 µA`、DC 功耗 `44.432 µW`、尾管饱和余量 `131.6 mV`。
+- 每端 `1 fF` 的成对 AC 使用同一 `si` 网表，得到差模低频增益 `2.928 V/V`、−3 dB 带宽 `13.806 GHz`、GBW `40.418 GHz`、unity `38.453 GHz`；低频 CMRR `21.135 dB`、CMRR 带宽 `19.069 GHz`。这里的有限 CMRR 来自 OA MNTAIL 的真实小信号行为，不是 wrapper 的人为尾源电阻。
+- 10 点 VCM 扫描全部分析完整。0.35 V 因 MNTAIL 非饱和而规格失败，0.40–0.80 V 离散点通过；0.65 V 的摆幅余量最大，为 `222.2 mV`。0.80 V 仍通过，因此只报告已采样通过范围和低边界夹逼，不声称解析上边界。
+- 100 MHz 六点 transient 得到小信号增益 `2.927 V/V`、输入 P1dB `116.3 mV peak`；0.2 V peak 点 THD `10.17%`、最大平均功耗 `45.63 µW`。1 kHz–10 GHz 的 141 点 ordinary noise PSF 得到输入参考积分噪声 `921.8 µV RMS`、差分输出积分噪声 `2.584 mV RMS`。
+- 首轮 ICMR 曾把“尾管非饱和”误归为分析不完整；修正后工作区只由 metric/constraint 判可行性，完整性只描述数据与解析。首轮 noise 的 1 TΩ 共模偏置真实漂移到 0.4395 V；改为唯一差分 `iprobe` 加 `+0.5/-0.5` VCVS 后，DC 共模和 PSF 均通过。两次失败记录都保留。
+
+下一 Gate 聚焦另一个 exact-delta、可逆的差分对拓扑小变更，并要求现有 DC/AC/CMRR/ICMR/transient/noise 与 checkpoint/失败恢复无缝迁移。可选 PVT 只在任务显式启用时加严，不默认附加。差分对 ADE/Maestro setup、人工打开/调整/重跑、mismatch/Monte Carlo 和多 test/multi-analysis 仍未闭合。
 
 ## 升级原则
 

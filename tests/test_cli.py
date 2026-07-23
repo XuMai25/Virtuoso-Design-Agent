@@ -29,7 +29,7 @@ def test_catalog_marks_gate2a_common_source_executable(capsys) -> None:
         "explicit instance parameters: parameters.apply + OA readback"
     ) == 1
     assert (
-        "differential_pair: Gate 3 nominal same-source DC/AC/CMRR/linearity verified "
+        "differential_pair: Gate 4 real-tail multi-analysis same-source verified "
         "[executable]" in output
     )
 
