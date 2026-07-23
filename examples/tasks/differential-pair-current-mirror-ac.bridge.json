@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-current-mirror-ac-bridge",
+  "operation": "simulation.run",
+  "circuit": "differential_pair",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_diffpair_active_gate6_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis": "ac",
+  "ac_sweep": {
+    "start_hz": 1000.0,
+    "stop_hz": 1000000000000.0,
+    "points_per_decade": 20,
+    "reference_points": 5,
+    "max_reference_variation_db": 0.5
+  },
+  "parameters": {
+    "tail_bias_v": 0.3,
+    "common_mode_v": 0.55,
+    "vdd_v": 0.9,
+    "load_ff": 1.0
+  },
+  "constraints": [
+    {"metric": "tail_device_saturation_region", "relation": ">=", "value": 1.0},
+    {"metric": "all_signal_devices_saturation_region", "relation": ">=", "value": 1.0},
+    {"metric": "differential_low_frequency_gain_v_per_v", "relation": ">=", "value": 1.0},
+    {"metric": "differential_bandwidth_3db_hz", "relation": ">=", "value": 1000000.0},
+    {"metric": "differential_gain_bandwidth_product_hz", "relation": ">=", "value": 1000000.0},
+    {"metric": "low_frequency_cmrr_db", "relation": ">=", "value": 10.0}
+  ],
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 900}
+}

@@ -965,6 +965,38 @@ def test_existing_schematic_exposes_only_read_and_manual_parameter_write() -> No
         build_plan(invalid)
 
 
+@pytest.mark.parametrize(
+    ("action", "parameters", "message"),
+    [
+        (
+            "replace_resistive_load_with_current_mirror",
+            {"pmos_load_width_um": 2.0},
+            "requires exactly pmos_load_width_um and pmos_load_length_um",
+        ),
+        (
+            "restore_resistive_load",
+            {"load_resistance_ohm": 10_000.0, "pmos_load_width_um": 2.0},
+            "requires exactly load_resistance_ohm",
+        ),
+    ],
+)
+def test_current_mirror_load_transform_requires_exact_parameters(
+    action: str, parameters: dict[str, float], message: str
+) -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "invalid-active-load-transform",
+            "operation": "schematic.transform",
+            "circuit": "differential_pair",
+            "target": {"library": "vda_test", "cell": "vda_diffpair"},
+            "schematic_transform": {"action": action},
+            "parameters": parameters,
+        }
+    )
+    with pytest.raises(UnsupportedCapability, match=message):
+        build_plan(task)
+
+
 def test_ade_prepare_is_a_non_overwrite_persistent_handoff_contract() -> None:
     task = TaskSpec.model_validate(
         {

@@ -926,3 +926,55 @@ def test_inverter_testbench_plan_discloses_fixed_minimal_delta() -> None:
     assert "VDD0/VIN0/CL0/GND0" in transform.description
     assert "同一 cellview" in transform.description
     assert "不替换" in transform.description
+
+
+def test_current_mirror_load_plan_discloses_reversible_minimal_delta() -> None:
+    target = {"library": "vda_test", "cell": "vda_diffpair"}
+    forward = TaskSpec.model_validate(
+        {
+            "id": "diffpair-active-load",
+            "operation": "schematic.transform",
+            "circuit": "differential_pair",
+            "target": target,
+            "schematic_transform": {
+                "action": "replace_resistive_load_with_current_mirror"
+            },
+            "parameters": {
+                "pmos_load_width_um": 2.0,
+                "pmos_load_length_um": 0.03,
+            },
+        }
+    )
+    forward_plan = build_plan(forward)
+    transform = next(
+        step
+        for step in forward_plan.steps
+        if step.capability
+        == "schematic.transform.differential-pair-current-mirror-load"
+    )
+    assert "仅删除 RD0/RD1" in transform.description
+    assert "MP0 二极管" in transform.description
+    assert "OUTN" in transform.description
+
+    restore = TaskSpec.model_validate(
+        {
+            "id": "diffpair-restore-load",
+            "operation": "schematic.transform",
+            "circuit": "differential_pair",
+            "target": target,
+            "schematic_transform": {
+                "action": "restore_resistive_load",
+                "expected_restored_placement_sha256": "a" * 64,
+            },
+            "parameters": {"load_resistance_ohm": 10_000.0},
+        }
+    )
+    restore_plan = build_plan(restore)
+    restore_step = next(
+        step
+        for step in restore_plan.steps
+        if step.capability
+        == "schematic.transform.differential-pair-current-mirror-load.remove"
+    )
+    assert "恢复 RD0/RD1" in restore_step.description
+    assert "placement SHA-256" in restore_step.description

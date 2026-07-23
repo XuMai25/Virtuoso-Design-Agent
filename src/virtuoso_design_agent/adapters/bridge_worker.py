@@ -47,17 +47,25 @@ _DIFFERENTIAL_PAIR_TAIL_VARIANT = (
 _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT = (
     "resistive_load_nmos_differential_pair_with_tail_device_and_source_degeneration"
 )
+_DIFFERENTIAL_PAIR_CURRENT_MIRROR_LOAD_VARIANT = (
+    "pmos_current_mirror_load_nmos_differential_pair_with_tail_device"
+)
 
 
 def _differential_pair_has_real_tail(topology_variant: str) -> bool:
     return topology_variant in {
         _DIFFERENTIAL_PAIR_TAIL_VARIANT,
         _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT,
+        _DIFFERENTIAL_PAIR_CURRENT_MIRROR_LOAD_VARIANT,
     }
 
 
 def _differential_pair_has_source_degeneration(topology_variant: str) -> bool:
     return topology_variant == _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT
+
+
+def _differential_pair_has_current_mirror_load(topology_variant: str) -> bool:
+    return topology_variant == _DIFFERENTIAL_PAIR_CURRENT_MIRROR_LOAD_VARIANT
 
 
 def _client():
@@ -410,17 +418,21 @@ def _assert_differential_pair(
     core_names = {"MN0", "MN1", "RD0", "RD1"}
     tail_names = core_names | {"MNTAIL"}
     degenerated_tail_names = tail_names | {"RS0", "RS1"}
+    current_mirror_names = {"MN0", "MN1", "MNTAIL", "MP0", "MP1"}
     names = set(by_name)
     if frozenset(names) not in {
         frozenset(core_names),
         frozenset(tail_names),
         frozenset(degenerated_tail_names),
+        frozenset(current_mirror_names),
     }:
         raise RuntimeError(
             "existing schematic is not the VDA differential pair: "
             f"instances={sorted(by_name)}"
         )
-    if names == degenerated_tail_names:
+    if names == current_mirror_names:
+        variant = _DIFFERENTIAL_PAIR_CURRENT_MIRROR_LOAD_VARIANT
+    elif names == degenerated_tail_names:
         variant = _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT
     elif names == tail_names:
         variant = _DIFFERENTIAL_PAIR_TAIL_VARIANT
@@ -428,7 +440,7 @@ def _assert_differential_pair(
         variant = _DIFFERENTIAL_PAIR_BASE_VARIANT
     required_pins = {"INP", "INN", "OUTP", "OUTN", "TAIL", "VDD", "VSS"}
     required_nets = set(required_pins)
-    if names == tail_names or names == degenerated_tail_names:
+    if names in (tail_names, degenerated_tail_names, current_mirror_names):
         required_pins.add("BIAS")
         required_nets.add("BIAS")
     if names == degenerated_tail_names:
@@ -458,10 +470,22 @@ def _assert_differential_pair(
             "S": "NSN" if names == degenerated_tail_names else "TAIL",
             "B": "VSS",
         },
-        "RD0": {"PLUS": "VDD", "MINUS": "OUTP"},
-        "RD1": {"PLUS": "VDD", "MINUS": "OUTN"},
     }
-    if names == tail_names or names == degenerated_tail_names:
+    if names == current_mirror_names:
+        expected_terminals.update(
+            {
+                "MP0": {"D": "OUTP", "G": "OUTP", "S": "VDD", "B": "VDD"},
+                "MP1": {"D": "OUTN", "G": "OUTP", "S": "VDD", "B": "VDD"},
+            }
+        )
+    else:
+        expected_terminals.update(
+            {
+                "RD0": {"PLUS": "VDD", "MINUS": "OUTP"},
+                "RD1": {"PLUS": "VDD", "MINUS": "OUTN"},
+            }
+        )
+    if names in (tail_names, degenerated_tail_names, current_mirror_names):
         expected_terminals["MNTAIL"] = {
             "D": "TAIL",
             "G": "BIAS",
@@ -483,13 +507,22 @@ def _assert_differential_pair(
                 f"{name} terminals={actual!r}, expected={expected!r}"
             )
     if profile is not None:
-        expected_masters = {
+        expected_masters: dict[str, tuple[str, str]] = {
             "MN0": (profile["tech_library"], profile["nmos_cell"]),
             "MN1": (profile["tech_library"], profile["nmos_cell"]),
-            "RD0": ("analogLib", "res"),
-            "RD1": ("analogLib", "res"),
         }
-        if names == tail_names or names == degenerated_tail_names:
+        if names == current_mirror_names:
+            expected_masters.update(
+                {
+                    "MP0": (profile["tech_library"], profile["pmos_cell"]),
+                    "MP1": (profile["tech_library"], profile["pmos_cell"]),
+                }
+            )
+        else:
+            expected_masters.update(
+                {"RD0": ("analogLib", "res"), "RD1": ("analogLib", "res")}
+            )
+        if names in (tail_names, degenerated_tail_names, current_mirror_names):
             expected_masters["MNTAIL"] = (
                 profile["tech_library"],
                 profile["nmos_cell"],
@@ -700,9 +733,14 @@ def _differential_pair_semantic_parameters_from_schematic(
     data: dict[str, Any],
 ) -> dict[str, float]:
     by_name = {str(item.get("name")): item for item in data.get("instances", [])}
-    required = {"MN0", "MN1", "RD0", "RD1"}
-    if not required <= set(by_name):
-        raise RuntimeError("differential-pair readback is missing a core instance")
+    if not {"MN0", "MN1"} <= set(by_name):
+        raise RuntimeError("differential-pair readback is missing an input device")
+    has_resistive_load = {"RD0", "RD1"} <= set(by_name)
+    has_current_mirror_load = {"MP0", "MP1"} <= set(by_name)
+    if has_resistive_load == has_current_mirror_load:
+        raise RuntimeError(
+            "differential-pair readback must contain exactly one complete load pair"
+        )
     widths: list[float] = []
     lengths: list[float] = []
     resistances: list[float] = []
@@ -716,18 +754,20 @@ def _differential_pair_semantic_parameters_from_schematic(
             )
         widths.append(_length_um(width))
         lengths.append(_length_um(length))
-    for instance in ("RD0", "RD1"):
-        resistance = by_name[instance].get("params", {}).get("r")
-        if resistance is None:
-            raise RuntimeError(
-                f"differential-pair readback is missing {instance} resistance"
-            )
-        resistances.append(_resistance_ohm(resistance))
+    if has_resistive_load:
+        for instance in ("RD0", "RD1"):
+            resistance = by_name[instance].get("params", {}).get("r")
+            if resistance is None:
+                raise RuntimeError(
+                    f"differential-pair readback is missing {instance} resistance"
+                )
+            resistances.append(_resistance_ohm(resistance))
     comparisons = {
         "input widths": widths,
         "input lengths": lengths,
-        "load resistances": resistances,
     }
+    if resistances:
+        comparisons["load resistances"] = resistances
     for label, values in comparisons.items():
         tolerance = max(abs(values[0]) * 1e-6, 1e-9)
         if abs(values[0] - values[1]) > tolerance:
@@ -738,8 +778,38 @@ def _differential_pair_semantic_parameters_from_schematic(
     semantic = {
         "input_width_um": widths[0],
         "length_um": lengths[0],
-        "load_resistance_ohm": resistances[0],
     }
+    if has_resistive_load:
+        semantic["load_resistance_ohm"] = resistances[0]
+    else:
+        pmos_widths: list[float] = []
+        pmos_lengths: list[float] = []
+        for instance in ("MP0", "MP1"):
+            parameters = by_name[instance].get("params", {})
+            width = parameters.get("Wfg", parameters.get("w"))
+            length = parameters.get("l")
+            if width is None or length is None:
+                raise RuntimeError(
+                    f"differential-pair readback is missing {instance} width/length"
+                )
+            pmos_widths.append(_length_um(width))
+            pmos_lengths.append(_length_um(length))
+        for label, values in (
+            ("PMOS load widths", pmos_widths),
+            ("PMOS load lengths", pmos_lengths),
+        ):
+            tolerance = max(abs(values[0]) * 1e-6, 1e-9)
+            if abs(values[0] - values[1]) > tolerance:
+                raise RuntimeError(
+                    f"differential-pair {label} differ: {values[0]:.12g} vs "
+                    f"{values[1]:.12g}"
+                )
+        semantic.update(
+            {
+                "pmos_load_width_um": pmos_widths[0],
+                "pmos_load_length_um": pmos_lengths[0],
+            }
+        )
     if "MNTAIL" in by_name:
         tail_parameters = by_name["MNTAIL"].get("params", {})
         tail_width = tail_parameters.get("Wfg", tail_parameters.get("w"))
@@ -843,6 +913,48 @@ def _differential_pair_tail_device_geometry_from_schematic(
     }
 
 
+def _differential_pair_current_mirror_geometry_from_schematic(
+    data: dict[str, Any],
+) -> dict[str, float] | None:
+    by_name = {str(item.get("name")): item for item in data.get("instances", [])}
+    if "MP0" not in by_name and "MP1" not in by_name:
+        return None
+    if not {"MP0", "MP1"} <= set(by_name):
+        raise RuntimeError("differential-pair current mirror requires MP0 and MP1")
+    geometries: list[dict[str, float]] = []
+    for instance in ("MP0", "MP1"):
+        parameters = by_name[instance].get("params", {})
+        fingers = _positive_device_count(
+            parameters.get("fingers", 1), f"{instance}.fingers"
+        )
+        multiplicity = _positive_device_count(
+            parameters.get("m", 1), f"{instance}.m"
+        )
+        if parameters.get("Wfg") is not None:
+            finger_width_um = _length_um(parameters["Wfg"])
+        elif parameters.get("w") is not None:
+            finger_width_um = _length_um(parameters["w"]) / fingers
+        else:
+            raise RuntimeError(
+                f"differential-pair readback is missing {instance} Wfg/w"
+            )
+        geometries.append(
+            {
+                "finger_width_um": finger_width_um,
+                "fingers": fingers,
+                "multiplicity": multiplicity,
+                "total_width_um": finger_width_um * fingers * multiplicity,
+            }
+        )
+    _assert_parameter_consistency(
+        geometries[0],
+        geometries[1],
+        expected_label="MP0 OA geometry",
+        actual_label="MP1 OA geometry",
+    )
+    return geometries[0]
+
+
 def _differential_pair_summary(data: dict[str, Any]) -> dict[str, Any]:
     useful_params = {
         "Wfg",
@@ -890,6 +1002,11 @@ def _differential_pair_summary(data: dict[str, Any]) -> dict[str, Any]:
     tail_geometry = _differential_pair_tail_device_geometry_from_schematic(data)
     if tail_geometry is not None:
         summary["tail_device_geometry"] = tail_geometry
+    current_mirror_geometry = (
+        _differential_pair_current_mirror_geometry_from_schematic(data)
+    )
+    if current_mirror_geometry is not None:
+        summary["current_mirror_load_geometry"] = current_mirror_geometry
     return summary
 
 
@@ -1130,7 +1247,37 @@ def _resolved_differential_pair_parameters(
                 oa_parameters.get("length_um", profile["default_length_um"]),
             )
         ),
-        "load_resistance_ohm": float(
+        "common_mode_v": float(
+            supplied.get("common_mode_v", profile["default_common_source_bias_v"])
+        ),
+        "vdd_v": float(supplied.get("vdd_v", profile["default_vdd_v"])),
+    }
+    current_mirror_load = _differential_pair_has_current_mirror_load(
+        topology_variant
+    )
+    if current_mirror_load:
+        if "load_resistance_ohm" in supplied:
+            raise RuntimeError(
+                "current-mirror-load differential pair rejects load_resistance_ohm"
+            )
+        for name in ("pmos_load_width_um", "pmos_load_length_um"):
+            if name not in supplied and name not in oa_parameters:
+                raise RuntimeError(
+                    f"current-mirror-load OA readback is missing {name}"
+                )
+            parameters[name] = float(
+                supplied[name] if name in supplied else oa_parameters[name]
+            )
+    else:
+        conflicts = sorted(
+            {"pmos_load_width_um", "pmos_load_length_um"} & supplied.keys()
+        )
+        if conflicts:
+            raise RuntimeError(
+                "resistive-load differential pair rejects current-mirror "
+                "parameters: " + ", ".join(conflicts)
+            )
+        parameters["load_resistance_ohm"] = float(
             supplied.get(
                 "load_resistance_ohm",
                 oa_parameters.get(
@@ -1138,12 +1285,7 @@ def _resolved_differential_pair_parameters(
                     profile["default_common_source_load_resistance_ohm"],
                 ),
             )
-        ),
-        "common_mode_v": float(
-            supplied.get("common_mode_v", profile["default_common_source_bias_v"])
-        ),
-        "vdd_v": float(supplied.get("vdd_v", profile["default_vdd_v"])),
-    }
+        )
     real_tail = _differential_pair_has_real_tail(topology_variant)
     if real_tail:
         conflicts = sorted(
@@ -1335,6 +1477,14 @@ def _differential_pair_instance_parameter_updates(
         load = {"r": _ohm(parameters["load_resistance_ohm"])}
         updates["RD0"] = dict(load)
         updates["RD1"] = dict(load)
+    pmos_updates: dict[str, str] = {}
+    if "pmos_load_width_um" in parameters:
+        pmos_updates["wf"] = _um(parameters["pmos_load_width_um"])
+    if "pmos_load_length_um" in parameters:
+        pmos_updates["l"] = _um(parameters["pmos_load_length_um"])
+    if pmos_updates:
+        updates["MP0"] = dict(pmos_updates)
+        updates["MP1"] = dict(pmos_updates)
     tail_updates: dict[str, str] = {}
     if "tail_width_um" in parameters:
         tail_updates["wf"] = _um(parameters["tail_width_um"])
@@ -1365,6 +1515,8 @@ def _apply_differential_pair_parameters(
             "tail_width_um",
             "tail_length_um",
             "source_resistance_ohm",
+            "pmos_load_width_um",
+            "pmos_load_length_um",
         )
         if name in parameters
     }
@@ -1372,6 +1524,19 @@ def _apply_differential_pair_parameters(
         raise RuntimeError("differential-pair OA parameter write is empty")
     current = _read_schematic(client, library, cell)
     topology_variant = _assert_differential_pair(current, profile)
+    current_mirror_load = _differential_pair_has_current_mirror_load(
+        topology_variant
+    )
+    if current_mirror_load and "load_resistance_ohm" in persistable:
+        raise RuntimeError(
+            "load_resistance_ohm requires a resistive-load differential pair"
+        )
+    if not current_mirror_load and (
+        {"pmos_load_width_um", "pmos_load_length_um"} & persistable.keys()
+    ):
+        raise RuntimeError(
+            "PMOS load geometry requires the current-mirror-load topology"
+        )
     if (
         {"tail_width_um", "tail_length_um"} & persistable.keys()
         and not _differential_pair_has_real_tail(topology_variant)
@@ -5489,14 +5654,14 @@ def _restore_mn0_source_label_operation() -> str:
     )
 
 
-def _rs0_terminal_stub_selection_operation(
+def _instance_terminal_stub_selection_operation(
     terminal: str,
     net_name: str,
     *,
     delete: bool,
     instance_name: str = "RS0",
 ) -> str:
-    """Select one VDA-created RS0 terminal label and wire stub by geometry."""
+    """Select one VDA-created instance-terminal label and wire by geometry."""
     final_action = (
         "dbDeleteObject(rbLabel) dbDeleteObject(rbWire) t"
         if delete
@@ -5506,9 +5671,9 @@ def _rs0_terminal_stub_selection_operation(
         "let((rbInst rbTerm rbPin rbFig rbBBox rbCtr rbLabels rbLabel rbWires "
         "rbWire) "
         f'rbInst = car(setof(x cv~>instances x~>name == "{instance_name}")) '
-        f'unless(rbInst error("{instance_name} not found during source-degeneration removal")) '
+        f'unless(rbInst error("{instance_name} not found during topology transform")) '
         f'rbTerm = car(setof(x rbInst~>master~>terminals x~>name == "{terminal}")) '
-        'unless(rbTerm error("RS0 terminal not found during source-degeneration removal")) '
+        'unless(rbTerm error("instance terminal not found during topology transform")) '
         "rbPin = car(rbTerm~>pins) "
         "rbFig = when(rbPin car(rbPin~>figs)) "
         "rbBBox = when(rbFig dbTransformBBox(rbFig~>bBox rbInst~>transform)) "
@@ -5539,8 +5704,8 @@ def _delete_source_degeneration_operation() -> str:
     return " ".join(
         [
             _restore_mn0_source_label_operation(),
-            _rs0_terminal_stub_selection_operation("PLUS", "NSRC", delete=True),
-            _rs0_terminal_stub_selection_operation("MINUS", "VSS", delete=True),
+            _instance_terminal_stub_selection_operation("PLUS", "NSRC", delete=True),
+            _instance_terminal_stub_selection_operation("MINUS", "VSS", delete=True),
             "let((rbInst) "
             'rbInst = car(setof(x cv~>instances x~>name == "RS0")) '
             'unless(rbInst error("RS0 not found during source-degeneration removal")) '
@@ -5601,8 +5766,8 @@ def _preflight_source_degeneration_removal(
                 current_label="NSRC",
                 replacement_label="VSS",
             ),
-            _rs0_terminal_stub_selection_operation("PLUS", "NSRC", delete=False),
-            _rs0_terminal_stub_selection_operation("MINUS", "VSS", delete=False),
+            _instance_terminal_stub_selection_operation("PLUS", "NSRC", delete=False),
+            _instance_terminal_stub_selection_operation("MINUS", "VSS", delete=False),
             "if(rbLabel t nil))",
         ]
     )
@@ -5655,16 +5820,16 @@ def _preflight_differential_source_degeneration(
                     current_label="NSN",
                     replacement_label="TAIL",
                 ),
-                _rs0_terminal_stub_selection_operation(
+                _instance_terminal_stub_selection_operation(
                     "PLUS", "NSP", delete=False, instance_name="RS0"
                 ),
-                _rs0_terminal_stub_selection_operation(
+                _instance_terminal_stub_selection_operation(
                     "MINUS", "TAIL", delete=False, instance_name="RS0"
                 ),
-                _rs0_terminal_stub_selection_operation(
+                _instance_terminal_stub_selection_operation(
                     "PLUS", "NSN", delete=False, instance_name="RS1"
                 ),
-                _rs0_terminal_stub_selection_operation(
+                _instance_terminal_stub_selection_operation(
                     "MINUS", "TAIL", delete=False, instance_name="RS1"
                 ),
             ]
@@ -5732,10 +5897,10 @@ def _delete_differential_source_degeneration_operation() -> str:
     for instance_name, source_net in (("RS0", "NSP"), ("RS1", "NSN")):
         operations.extend(
             [
-                _rs0_terminal_stub_selection_operation(
+                _instance_terminal_stub_selection_operation(
                     "PLUS", source_net, delete=True, instance_name=instance_name
                 ),
-                _rs0_terminal_stub_selection_operation(
+                _instance_terminal_stub_selection_operation(
                     "MINUS", "TAIL", delete=True, instance_name=instance_name
                 ),
                 "let((rbInst) "
@@ -5745,6 +5910,69 @@ def _delete_differential_source_degeneration_operation() -> str:
             ]
         )
     return " ".join(operations)
+
+
+def _instance_terminal_stub_cleanup_operation(
+    instance_name: str, terminal_nets: tuple[tuple[str, str], ...]
+) -> str:
+    operations = [
+        _instance_terminal_stub_selection_operation(
+            terminal, net_name, delete=True, instance_name=instance_name
+        )
+        for terminal, net_name in terminal_nets
+    ]
+    operations.append(
+        "let((rbInst) "
+        f'rbInst = car(setof(x cv~>instances x~>name == "{instance_name}")) '
+        f'unless(rbInst error("{instance_name} not found during load transform")) '
+        "dbDeleteObject(rbInst) t)"
+    )
+    return " ".join(operations)
+
+
+def _preflight_differential_pair_load_transform(
+    client, library: str, cell: str, *, current_mirror_to_resistors: bool
+) -> None:
+    from virtuoso_bridge.virtuoso.ops import escape_skill_string
+
+    if current_mirror_to_resistors:
+        terminal_sets = (
+            ("MP0", (("D", "OUTP"), ("G", "OUTP"), ("S", "VDD"), ("B", "VDD"))),
+            ("MP1", (("D", "OUTN"), ("G", "OUTP"), ("S", "VDD"), ("B", "VDD"))),
+        )
+    else:
+        terminal_sets = (
+            ("RD0", (("PLUS", "VDD"), ("MINUS", "OUTP"))),
+            ("RD1", (("PLUS", "VDD"), ("MINUS", "OUTN"))),
+        )
+    selections = [
+        _instance_terminal_stub_selection_operation(
+            terminal, net_name, delete=False, instance_name=instance_name
+        )
+        for instance_name, terminal_nets in terminal_sets
+        for terminal, net_name in terminal_nets
+    ]
+    skill = " ".join(
+        [
+            "let((cv)",
+            "cv = dbOpenCellViewByType("
+            f'"{escape_skill_string(library)}" "{escape_skill_string(cell)}" '
+            '"schematic" "schematic" "r")',
+            'unless(cv error("target schematic not found during load preflight"))',
+            'when(cv~>modified error("target schematic has unsaved changes"))',
+            *selections,
+            "t)",
+        ]
+    )
+    result = client.execute_skill(skill, timeout=60)
+    errors = getattr(result, "errors", None) or []
+    if errors:
+        raise RuntimeError(f"differential load transform preflight failed: {errors[0]}")
+    output = str(getattr(result, "output", "")).strip().strip('"').lower()
+    if output != "t":
+        raise RuntimeError(
+            f"unexpected differential load preflight result: {output!r}"
+        )
 
 
 def _discard_failed_existing_schematic_edit(
@@ -6633,6 +6861,12 @@ def transform_differential_pair_tail_device(
     before = _read_schematic(client, library, cell)
     variant = _assert_differential_pair(before, payload["profile"])
     base_variant = "resistive_load_nmos_differential_pair"
+    if variant not in {base_variant, _DIFFERENTIAL_PAIR_TAIL_VARIANT}:
+        raise RuntimeError(
+            "add_tail_device supports only the nominal or already-real-tail "
+            "resistive-load differential pair; retarget an existing tail with "
+            "parameters.apply"
+        )
     topology_changed = variant == base_variant
     tail_width_um = float(payload["parameters"]["tail_width_um"])
     tail_length_um = float(payload["parameters"]["tail_length_um"])
@@ -7021,6 +7255,336 @@ def _remove_differential_pair_source_degeneration(
     }
 
 
+def _assert_differential_pair_current_mirror_load_preserved(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    pmos_load_width_um: float,
+    pmos_load_length_um: float,
+) -> None:
+    before_variant = _assert_differential_pair(before)
+    after_variant = _assert_differential_pair(after)
+    if before_variant not in {
+        _DIFFERENTIAL_PAIR_TAIL_VARIANT,
+        _DIFFERENTIAL_PAIR_CURRENT_MIRROR_LOAD_VARIANT,
+    }:
+        raise RuntimeError(
+            "current-mirror-load transform requires an undegenerated real-tail "
+            "differential pair"
+        )
+    if after_variant != _DIFFERENTIAL_PAIR_CURRENT_MIRROR_LOAD_VARIANT:
+        raise RuntimeError(
+            "current-mirror-load transform did not produce MP0/MP1"
+        )
+    if set((before.get("pins") or {}).keys()) != set(
+        (after.get("pins") or {}).keys()
+    ):
+        raise RuntimeError("current-mirror-load transform changed top-level pins")
+    if set((before.get("nets") or {}).keys()) != set(
+        (after.get("nets") or {}).keys()
+    ):
+        raise RuntimeError("current-mirror-load transform changed top-level nets")
+    before_by_name = {
+        str(item.get("name")): item for item in before.get("instances", [])
+    }
+    after_by_name = {
+        str(item.get("name")): item for item in after.get("instances", [])
+    }
+    for name in ("MN0", "MN1", "MNTAIL"):
+        if before_by_name[name] != after_by_name[name]:
+            raise RuntimeError(
+                f"current-mirror-load transform changed preserved {name}"
+            )
+    if before_variant == _DIFFERENTIAL_PAIR_CURRENT_MIRROR_LOAD_VARIANT:
+        for name in ("MP0", "MP1"):
+            before_without_params = {
+                key: value
+                for key, value in before_by_name[name].items()
+                if key != "params"
+            }
+            after_without_params = {
+                key: value
+                for key, value in after_by_name[name].items()
+                if key != "params"
+            }
+            if before_without_params != after_without_params:
+                raise RuntimeError(
+                    f"repeated current-mirror-load transform changed {name}"
+                )
+    _assert_parameter_consistency(
+        {
+            "pmos_load_width_um": pmos_load_width_um,
+            "pmos_load_length_um": pmos_load_length_um,
+        },
+        _differential_pair_semantic_parameters_from_schematic(after),
+        expected_label="requested PMOS load geometry",
+        actual_label="OA readback",
+    )
+
+
+def _replace_differential_pair_resistive_load_with_current_mirror(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    from virtuoso_bridge.virtuoso.schematic.ops import (
+        schematic_create_inst_by_master_name as inst,
+    )
+
+    client = _client()
+    library, cell = _target(payload)
+    before = _read_schematic(client, library, cell)
+    placement_before = _schematic_placement_snapshot(client, library, cell)
+    variant = _assert_differential_pair(before, payload["profile"])
+    if variant not in {
+        _DIFFERENTIAL_PAIR_TAIL_VARIANT,
+        _DIFFERENTIAL_PAIR_CURRENT_MIRROR_LOAD_VARIANT,
+    }:
+        raise RuntimeError(
+            "replace_resistive_load_with_current_mirror requires a real-tail "
+            "differential pair without source degeneration"
+        )
+    pmos_load_width_um = float(payload["parameters"]["pmos_load_width_um"])
+    pmos_load_length_um = float(payload["parameters"]["pmos_load_length_um"])
+    topology_changed = variant == _DIFFERENTIAL_PAIR_TAIL_VARIANT
+    if topology_changed:
+        _preflight_differential_pair_load_transform(
+            client, library, cell, current_mirror_to_resistors=False
+        )
+        profile = payload["profile"]
+        try:
+            with _edit_existing_schematic(
+                client, library, cell, timeout=90
+            ) as schematic:
+                schematic.add(
+                    _instance_terminal_stub_cleanup_operation(
+                        "RD0", (("PLUS", "VDD"), ("MINUS", "OUTP"))
+                    )
+                )
+                schematic.add(
+                    _instance_terminal_stub_cleanup_operation(
+                        "RD1", (("PLUS", "VDD"), ("MINUS", "OUTN"))
+                    )
+                )
+                schematic.add(
+                    inst(
+                        profile["tech_library"],
+                        profile["pmos_cell"],
+                        "symbol",
+                        "MP0",
+                        -0.8,
+                        1.3,
+                        "R0",
+                    )
+                )
+                schematic.add(
+                    inst(
+                        profile["tech_library"],
+                        profile["pmos_cell"],
+                        "symbol",
+                        "MP1",
+                        0.8,
+                        1.3,
+                        "R0",
+                    )
+                )
+                schematic.add_net_label_to_transistor(
+                    "MP0",
+                    drain_net="OUTP",
+                    gate_net="OUTP",
+                    source_net="VDD",
+                    body_net="VDD",
+                )
+                schematic.add_net_label_to_transistor(
+                    "MP1",
+                    drain_net="OUTN",
+                    gate_net="OUTP",
+                    source_net="VDD",
+                    body_net="VDD",
+                )
+        except Exception as edit_error:
+            try:
+                _discard_failed_existing_schematic_edit(client, library, cell)
+            except Exception as cleanup_error:
+                raise RuntimeError(
+                    "current-mirror-load edit failed and unsaved-edit cleanup also "
+                    f"failed: {cleanup_error}"
+                ) from edit_error
+            raise
+    summary = _apply_differential_pair_parameters(
+        client,
+        library,
+        cell,
+        {
+            "pmos_load_width_um": pmos_load_width_um,
+            "pmos_load_length_um": pmos_load_length_um,
+        },
+        payload["profile"],
+    )
+    after = summary["bridge_schematic"]
+    _assert_differential_pair_current_mirror_load_preserved(
+        before, after, pmos_load_width_um, pmos_load_length_um
+    )
+    return {
+        "transformed": topology_changed,
+        "already_transformed": not topology_changed,
+        "transform_action": "replace_resistive_load_with_current_mirror",
+        "placement_before": placement_before,
+        "placement_after": _schematic_placement_snapshot(client, library, cell),
+        "topology_delta": {
+            "removed_instances": ["RD0", "RD1"] if topology_changed else [],
+            "added_instances": ["MP0", "MP1"] if topology_changed else [],
+            "preserved_instances": ["MN0", "MN1", "MNTAIL"],
+            "preserved_pins": sorted((before.get("pins") or {}).keys()),
+            "preserved_nets": sorted((before.get("nets") or {}).keys()),
+        },
+        "output_contract": {
+            "input": "INP-INN",
+            "primary_output": "OUTN",
+            "mirror_reference": "OUTP",
+        },
+        "readback": summary,
+    }
+
+
+def _assert_differential_pair_resistive_load_restored(
+    before: dict[str, Any], after: dict[str, Any], load_resistance_ohm: float
+) -> None:
+    before_variant = _assert_differential_pair(before)
+    after_variant = _assert_differential_pair(after)
+    if before_variant not in {
+        _DIFFERENTIAL_PAIR_CURRENT_MIRROR_LOAD_VARIANT,
+        _DIFFERENTIAL_PAIR_TAIL_VARIANT,
+    }:
+        raise RuntimeError(
+            "restore_resistive_load requires a current-mirror-load or restored "
+            "real-tail differential pair"
+        )
+    if after_variant != _DIFFERENTIAL_PAIR_TAIL_VARIANT:
+        raise RuntimeError("restore_resistive_load did not produce RD0/RD1")
+    if set((before.get("pins") or {}).keys()) != set(
+        (after.get("pins") or {}).keys()
+    ) or set((before.get("nets") or {}).keys()) != set(
+        (after.get("nets") or {}).keys()
+    ):
+        raise RuntimeError("restore_resistive_load changed top-level pins or nets")
+    before_by_name = {
+        str(item.get("name")): item for item in before.get("instances", [])
+    }
+    after_by_name = {
+        str(item.get("name")): item for item in after.get("instances", [])
+    }
+    for name in ("MN0", "MN1", "MNTAIL"):
+        if before_by_name[name] != after_by_name[name]:
+            raise RuntimeError(f"restore_resistive_load changed preserved {name}")
+    _assert_parameter_consistency(
+        {"load_resistance_ohm": load_resistance_ohm},
+        _differential_pair_semantic_parameters_from_schematic(after),
+        expected_label="requested restored load",
+        actual_label="OA readback",
+    )
+
+
+def _restore_differential_pair_resistive_load(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    from virtuoso_bridge.virtuoso.schematic.ops import (
+        schematic_create_inst_by_master_name as inst,
+        schematic_label_instance_term as label_term,
+    )
+
+    client = _client()
+    library, cell = _target(payload)
+    before = _read_schematic(client, library, cell)
+    placement_before = _schematic_placement_snapshot(client, library, cell)
+    variant = _assert_differential_pair(before, payload["profile"])
+    if variant not in {
+        _DIFFERENTIAL_PAIR_CURRENT_MIRROR_LOAD_VARIANT,
+        _DIFFERENTIAL_PAIR_TAIL_VARIANT,
+    }:
+        raise RuntimeError(
+            "restore_resistive_load requires a current-mirror-load differential pair"
+        )
+    load_resistance_ohm = float(payload["parameters"]["load_resistance_ohm"])
+    topology_changed = variant == _DIFFERENTIAL_PAIR_CURRENT_MIRROR_LOAD_VARIANT
+    if topology_changed:
+        _preflight_differential_pair_load_transform(
+            client, library, cell, current_mirror_to_resistors=True
+        )
+        try:
+            with _edit_existing_schematic(
+                client, library, cell, timeout=90
+            ) as schematic:
+                schematic.add(
+                    _instance_terminal_stub_cleanup_operation(
+                        "MP0",
+                        (("D", "OUTP"), ("G", "OUTP"), ("S", "VDD"), ("B", "VDD")),
+                    )
+                )
+                schematic.add(
+                    _instance_terminal_stub_cleanup_operation(
+                        "MP1",
+                        (("D", "OUTN"), ("G", "OUTP"), ("S", "VDD"), ("B", "VDD")),
+                    )
+                )
+                schematic.add(
+                    inst("analogLib", "res", "symbol", "RD0", -0.8, 1.3, "R0")
+                )
+                schematic.add(
+                    inst("analogLib", "res", "symbol", "RD1", 0.8, 1.3, "R0")
+                )
+                schematic.add(label_term("RD0", "PLUS", "VDD"))
+                schematic.add(label_term("RD0", "MINUS", "OUTP"))
+                schematic.add(label_term("RD1", "PLUS", "VDD"))
+                schematic.add(label_term("RD1", "MINUS", "OUTN"))
+        except Exception as edit_error:
+            try:
+                _discard_failed_existing_schematic_edit(client, library, cell)
+            except Exception as cleanup_error:
+                raise RuntimeError(
+                    "resistive-load restore failed and unsaved-edit cleanup also "
+                    f"failed: {cleanup_error}"
+                ) from edit_error
+            raise
+    summary = _apply_differential_pair_parameters(
+        client,
+        library,
+        cell,
+        {"load_resistance_ohm": load_resistance_ohm},
+        payload["profile"],
+    )
+    after = summary["bridge_schematic"]
+    _assert_differential_pair_resistive_load_restored(
+        before, after, load_resistance_ohm
+    )
+    placement_after = _schematic_placement_snapshot(client, library, cell)
+    transform_spec = payload.get("schematic_transform") or {}
+    expected_placement = transform_spec.get("expected_restored_placement_sha256")
+    if expected_placement is not None and placement_after["sha256"] != expected_placement:
+        raise RuntimeError(
+            "resistive-load restore did not restore the declared placement "
+            f"fingerprint: expected {expected_placement}, got "
+            f"{placement_after['sha256']}"
+        )
+    return {
+        "transformed": topology_changed,
+        "already_restored": not topology_changed,
+        "transform_action": "restore_resistive_load",
+        "placement_before": placement_before,
+        "placement_after": placement_after,
+        "restored_placement_match": (
+            placement_after["sha256"] == expected_placement
+            if expected_placement is not None
+            else None
+        ),
+        "topology_delta": {
+            "removed_instances": ["MP0", "MP1"] if topology_changed else [],
+            "added_instances": ["RD0", "RD1"] if topology_changed else [],
+            "preserved_instances": ["MN0", "MN1", "MNTAIL"],
+            "preserved_pins": sorted((before.get("pins") or {}).keys()),
+            "preserved_nets": sorted((before.get("nets") or {}).keys()),
+        },
+        "readback": summary,
+    }
+
+
 def transform_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
     transform_spec = payload.get("schematic_transform") or {}
     action = transform_spec.get("action")
@@ -7030,6 +7594,10 @@ def transform_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
         return _add_differential_pair_source_degeneration(payload)
     if action == "remove_source_degeneration":
         return _remove_differential_pair_source_degeneration(payload)
+    if action == "replace_resistive_load_with_current_mirror":
+        return _replace_differential_pair_resistive_load_with_current_mirror(payload)
+    if action == "restore_resistive_load":
+        return _restore_differential_pair_resistive_load(payload)
     raise RuntimeError(f"unsupported differential-pair transform action: {action!r}")
 
 
@@ -7059,6 +7627,8 @@ def apply_differential_pair_parameters(payload: dict[str, Any]) -> dict[str, Any
                 "tail_width_um",
                 "tail_length_um",
                 "source_resistance_ohm",
+                "pmos_load_width_um",
+                "pmos_load_length_um",
             )
             if name in payload["parameters"]
         }
@@ -7089,6 +7659,8 @@ def apply_differential_pair_parameters(payload: dict[str, Any]) -> dict[str, Any
                 "tail_width_um",
                 "tail_length_um",
                 "source_resistance_ohm",
+                "pmos_load_width_um",
+                "pmos_load_length_um",
             )
             if name in payload.get("parameters", {})
         }
@@ -8562,6 +9134,28 @@ def _parse_differential_pair_netlist(
 ) -> dict[str, Any]:
     records = _logical_netlist_records(text)
     has_tail_device = any(re.match(r"^MNTAIL\s*\(", item) for item in records)
+    has_rd0 = any(re.match(r"^RD0\s*\(", item) for item in records)
+    has_rd1 = any(re.match(r"^RD1\s*\(", item) for item in records)
+    has_pm0 = any(re.match(r"^MP0\s*\(", item) for item in records)
+    has_pm1 = any(re.match(r"^MP1\s*\(", item) for item in records)
+    if has_rd0 != has_rd1:
+        raise RuntimeError(
+            "si netlist differential resistive load requires both RD0 and RD1"
+        )
+    if has_pm0 != has_pm1:
+        raise RuntimeError(
+            "si netlist differential current mirror requires both MP0 and MP1"
+        )
+    has_resistive_load = has_rd0 and has_rd1
+    has_current_mirror_load = has_pm0 and has_pm1
+    if has_resistive_load == has_current_mirror_load:
+        raise RuntimeError(
+            "si netlist differential pair must contain exactly one complete load pair"
+        )
+    if has_current_mirror_load and not has_tail_device:
+        raise RuntimeError(
+            "si netlist current-mirror-load differential pair is missing MNTAIL"
+        )
     has_rs0 = any(re.match(r"^RS0\s*\(", item) for item in records)
     has_rs1 = any(re.match(r"^RS1\s*\(", item) for item in records)
     if has_rs0 != has_rs1:
@@ -8572,6 +9166,10 @@ def _parse_differential_pair_netlist(
     if has_source_degeneration and not has_tail_device:
         raise RuntimeError(
             "si netlist source-degenerated differential pair is missing MNTAIL"
+        )
+    if has_current_mirror_load and has_source_degeneration:
+        raise RuntimeError(
+            "Gate 6 current-mirror load does not compose with source degeneration"
         )
     source_p = "NSP" if has_source_degeneration else "TAIL"
     source_n = "NSN" if has_source_degeneration else "TAIL"
@@ -8584,9 +9182,27 @@ def _parse_differential_pair_netlist(
             "model": profile["nmos_cell"],
             "nodes": ["OUTN", "INN", source_n, "VSS"],
         },
-        "RD0": {"model": "resistor", "nodes": ["VDD", "OUTP"]},
-        "RD1": {"model": "resistor", "nodes": ["VDD", "OUTN"]},
     }
+    if has_current_mirror_load:
+        expected.update(
+            {
+                "MP0": {
+                    "model": profile["pmos_cell"],
+                    "nodes": ["OUTP", "OUTP", "VDD", "VDD"],
+                },
+                "MP1": {
+                    "model": profile["pmos_cell"],
+                    "nodes": ["OUTN", "OUTP", "VDD", "VDD"],
+                },
+            }
+        )
+    else:
+        expected.update(
+            {
+                "RD0": {"model": "resistor", "nodes": ["VDD", "OUTP"]},
+                "RD1": {"model": "resistor", "nodes": ["VDD", "OUTN"]},
+            }
+        )
     if has_tail_device:
         expected["MNTAIL"] = {
             "model": profile["nmos_cell"],
@@ -8630,7 +9246,7 @@ def _parse_differential_pair_netlist(
                 f"{expected_item['model']!r}"
             )
         instances[name] = {"nodes": nodes, "model": model}
-        if name.startswith("MN"):
+        if name in {"MN0", "MN1", "MNTAIL", "MP0", "MP1"}:
             width_match = re.search(r"(?:^|\s)w=([^\s\\]+)", parameter_text)
             length_match = re.search(r"(?:^|\s)l=([^\s\\]+)", parameter_text)
             if width_match is None or length_match is None:
@@ -8679,17 +9295,33 @@ def _parse_differential_pair_netlist(
         expected_label="MN0 si geometry",
         actual_label="MN1 si geometry",
     )
-    _assert_parameter_consistency(
-        {"load_resistance_ohm": float(instances["RD0"]["resistance_ohm"])},
-        {"load_resistance_ohm": float(instances["RD1"]["resistance_ohm"])},
-        expected_label="RD0 si resistance",
-        actual_label="RD1 si resistance",
-    )
     semantic_parameters = {
         "input_width_um": instances["MN0"]["finger_width_um"],
         "length_um": instances["MN0"]["length_um"],
-        "load_resistance_ohm": instances["RD0"]["resistance_ohm"],
     }
+    if has_resistive_load:
+        _assert_parameter_consistency(
+            {"load_resistance_ohm": float(instances["RD0"]["resistance_ohm"])},
+            {"load_resistance_ohm": float(instances["RD1"]["resistance_ohm"])},
+            expected_label="RD0 si resistance",
+            actual_label="RD1 si resistance",
+        )
+        semantic_parameters["load_resistance_ohm"] = instances["RD0"][
+            "resistance_ohm"
+        ]
+    else:
+        _assert_parameter_consistency(
+            {name: float(instances["MP0"][name]) for name in mos_geometry_fields},
+            {name: float(instances["MP1"][name]) for name in mos_geometry_fields},
+            expected_label="MP0 si geometry",
+            actual_label="MP1 si geometry",
+        )
+        semantic_parameters.update(
+            {
+                "pmos_load_width_um": instances["MP0"]["finger_width_um"],
+                "pmos_load_length_um": instances["MP0"]["length_um"],
+            }
+        )
     if has_tail_device:
         semantic_parameters.update(
             {
@@ -8728,7 +9360,9 @@ def _parse_differential_pair_netlist(
             )
         },
         "topology_variant": (
-            _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT
+            _DIFFERENTIAL_PAIR_CURRENT_MIRROR_LOAD_VARIANT
+            if has_current_mirror_load
+            else _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT
             if has_source_degeneration
             else _DIFFERENTIAL_PAIR_TAIL_VARIANT
             if has_tail_device
@@ -8738,6 +9372,16 @@ def _parse_differential_pair_netlist(
     if has_tail_device:
         parsed["tail_device_geometry"] = {
             name: instances["MNTAIL"][name]
+            for name in (
+                "finger_width_um",
+                "fingers",
+                "multiplicity",
+                "total_width_um",
+            )
+        }
+    if has_current_mirror_load:
+        parsed["current_mirror_load_geometry"] = {
+            name: instances["MP0"][name]
             for name in (
                 "finger_width_um",
                 "fingers",
@@ -8768,6 +9412,40 @@ def _bridge_result_error(result: Any) -> str:
 def _require_bridge_result(result: Any, action: str) -> None:
     if not bool(getattr(result, "ok", False)):
         raise RuntimeError(f"{action} failed: {_bridge_result_error(result)}")
+
+
+def _spectre_failure_detail(result: Any, work_dir: Path) -> str:
+    errors = [str(item) for item in (getattr(result, "errors", None) or [])]
+    if errors:
+        detail = "; ".join(errors[:20])
+    else:
+        status = getattr(result, "status", "unknown failure")
+        detail = str(getattr(status, "value", status))
+
+    log_path = work_dir / "spectre.out"
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return detail
+
+    error_indexes = [
+        index
+        for index, line in enumerate(lines)
+        if "error" in line.lower() or "fatal" in line.lower()
+    ]
+    selected_indexes: set[int] = set()
+    for index in error_indexes:
+        selected_indexes.update(range(max(0, index - 2), min(len(lines), index + 4)))
+    if selected_indexes:
+        excerpt_lines = [lines[index] for index in sorted(selected_indexes)]
+    else:
+        excerpt_lines = lines[-30:]
+    excerpt = "\n".join(excerpt_lines).strip()
+    if not excerpt:
+        return detail
+    if len(excerpt) > 6000:
+        excerpt = excerpt[-6000:]
+    return f"{detail}; spectre.out excerpt:\n{excerpt}"
 
 
 def _download_text(
@@ -9144,6 +9822,9 @@ def _differential_pair_metrics_from_result(
     source_degenerated = _differential_pair_has_source_degeneration(
         topology_variant
     )
+    current_mirror_load = _differential_pair_has_current_mirror_load(
+        topology_variant
+    )
     saved_node_names = ["INP", "INN", "OUTP", "OUTN", "TAIL", "VDD", "VSS"]
     if source_degenerated:
         saved_node_names.extend(["NSP", "NSN"])
@@ -9164,6 +9845,17 @@ def _differential_pair_metrics_from_result(
             "gm_s": _operating_point_scalar(data, instance, "gm"),
             "gds_s": _operating_point_scalar(data, instance, "gds"),
         }
+    load_values: dict[str, dict[str, float]] = {}
+    if current_mirror_load:
+        for instance in ("MP0", "MP1"):
+            load_values[instance] = {
+                "ids_a": _operating_point_scalar(data, instance, "ids", "id"),
+                "vgs_v": _operating_point_scalar(data, instance, "vgs"),
+                "vds_v": _operating_point_scalar(data, instance, "vds"),
+                "vdsat_v": _operating_point_scalar(data, instance, "vdsat"),
+                "gm_s": _operating_point_scalar(data, instance, "gm"),
+                "gds_s": _operating_point_scalar(data, instance, "gds"),
+            }
     tail_device_values: dict[str, float] | None = None
     tail_output_resistance = parameters.get("tail_output_resistance_ohm")
     if real_tail:
@@ -9251,6 +9943,20 @@ def _differential_pair_metrics_from_result(
                     f"node={expected:.12g}, device={actual:.12g}"
                 )
 
+    if current_mirror_load:
+        for instance, drain_node in (("MP0", "OUTP"), ("MP1", "OUTN")):
+            for quantity, expected in (
+                ("vgs_v", node_values["OUTP"] - node_values["VDD"]),
+                ("vds_v", node_values[drain_node] - node_values["VDD"]),
+            ):
+                actual = load_values[instance][quantity]
+                tolerance = max(abs(expected) * 1e-4, 1e-5)
+                if abs(abs(actual) - abs(expected)) > tolerance:
+                    raise RuntimeError(
+                        f"DC node/device mismatch for {instance}.{quantity}: "
+                        f"node={expected:.12g}, device={actual:.12g}"
+                    )
+
     metrics = extract_differential_pair_dc_metrics(
         vdd_v=node_values["VDD"],
         common_mode_v=0.5 * (node_values["INP"] + node_values["INN"]),
@@ -9267,9 +9973,29 @@ def _differential_pair_metrics_from_result(
         branch_n_gm_s=branch_values["MN1"]["gm_s"],
         branch_p_gds_s=branch_values["MN0"]["gds_s"],
         branch_n_gds_s=branch_values["MN1"]["gds_s"],
-        load_resistance_ohm=parameters["load_resistance_ohm"],
+        load_resistance_ohm=parameters.get("load_resistance_ohm"),
         branch_p_source_v=branch_nodes["MN0"][2],
         branch_n_source_v=branch_nodes["MN1"][2],
+        load_p_current_a=(
+            load_values["MP0"]["ids_a"] if current_mirror_load else None
+        ),
+        load_n_current_a=(
+            load_values["MP1"]["ids_a"] if current_mirror_load else None
+        ),
+        load_p_vdsat_v=(
+            load_values["MP0"]["vdsat_v"] if current_mirror_load else None
+        ),
+        load_n_vdsat_v=(
+            load_values["MP1"]["vdsat_v"] if current_mirror_load else None
+        ),
+        load_p_gm_s=(load_values["MP0"]["gm_s"] if current_mirror_load else None),
+        load_n_gm_s=(load_values["MP1"]["gm_s"] if current_mirror_load else None),
+        load_p_gds_s=(
+            load_values["MP0"]["gds_s"] if current_mirror_load else None
+        ),
+        load_n_gds_s=(
+            load_values["MP1"]["gds_s"] if current_mirror_load else None
+        ),
     )
     if source_degenerated:
         source_resistance = float(parameters["source_resistance_ohm"])
@@ -9385,9 +10111,27 @@ def _differential_pair_metrics_from_result(
             if metrics["tail_device_saturation_region"] == 1.0
             else "non_saturation"
         )
+    if current_mirror_load:
+        operating_regions.update(
+            {
+                "MP0": (
+                    "saturation"
+                    if abs(load_values["MP0"]["ids_a"]) > 0.0
+                    and metrics["load_p_saturation_margin_v"] >= 0.0
+                    else "non_saturation"
+                ),
+                "MP1": (
+                    "saturation"
+                    if abs(load_values["MP1"]["ids_a"]) > 0.0
+                    and metrics["load_n_saturation_margin_v"] >= 0.0
+                    else "non_saturation"
+                ),
+            }
+        )
     device_values: dict[str, Any] = dict(branch_values)
     if tail_device_values is not None:
         device_values["MNTAIL"] = tail_device_values
+    device_values.update(load_values)
     return metrics, {
         "node_values_v": node_values,
         "device_values": device_values,
@@ -9413,6 +10157,11 @@ def _differential_pair_metrics_from_result(
         "source_degeneration_consistency": (
             "matched" if source_degenerated else "not_applicable"
         ),
+        "load_consistency": (
+            "MN0/MN1 branch currents match MP0/MP1 currents and VDD source"
+            if current_mirror_load
+            else "MN0/MN1 branch currents match RD0/RD1 voltage-derived currents"
+        ),
     }
 
 
@@ -9437,7 +10186,9 @@ def _common_source_ac_metrics_from_result(
 
 
 def _differential_pair_ac_metrics_from_result(
-    data: dict[str, Any], ac_sweep: dict[str, Any]
+    data: dict[str, Any],
+    ac_sweep: dict[str, Any],
+    topology_variant: str = _DIFFERENTIAL_PAIR_BASE_VARIANT,
 ) -> tuple[dict[str, float], dict[str, Any]]:
     return extract_differential_pair_ac_metrics(
         _signal(data, "ac_freq"),
@@ -9449,11 +10200,18 @@ def _differential_pair_ac_metrics_from_result(
         max_reference_variation_db=float(
             ac_sweep.get("max_reference_variation_db", 0.5)
         ),
+        output_mode=(
+            "single_ended_outn"
+            if _differential_pair_has_current_mirror_load(topology_variant)
+            else "differential"
+        ),
     )
 
 
 def _differential_pair_common_mode_ac_metrics_from_result(
-    data: dict[str, Any], ac_sweep: dict[str, Any]
+    data: dict[str, Any],
+    ac_sweep: dict[str, Any],
+    topology_variant: str = _DIFFERENTIAL_PAIR_BASE_VARIANT,
 ) -> tuple[dict[str, float], dict[str, Any]]:
     return extract_differential_pair_common_mode_ac_metrics(
         _signal(data, "ac_freq"),
@@ -9465,6 +10223,11 @@ def _differential_pair_common_mode_ac_metrics_from_result(
         max_reference_variation_db=float(
             ac_sweep.get("max_reference_variation_db", 0.5)
         ),
+        output_mode=(
+            "single_ended_outn"
+            if _differential_pair_has_current_mirror_load(topology_variant)
+            else "differential"
+        ),
     )
 
 
@@ -9472,6 +10235,7 @@ def _differential_pair_cmrr_metrics_from_results(
     differential_data: dict[str, Any],
     common_mode_data: dict[str, Any],
     ac_sweep: dict[str, Any],
+    topology_variant: str = _DIFFERENTIAL_PAIR_BASE_VARIANT,
 ) -> tuple[dict[str, float], dict[str, Any]]:
     return extract_differential_pair_cmrr_response_metrics(
         _signal(differential_data, "ac_freq"),
@@ -9487,6 +10251,11 @@ def _differential_pair_cmrr_metrics_from_results(
         reference_points=int(ac_sweep.get("reference_points", 5)),
         max_reference_variation_db=float(
             ac_sweep.get("max_reference_variation_db", 0.5)
+        ),
+        output_mode=(
+            "single_ended_outn"
+            if _differential_pair_has_current_mirror_load(topology_variant)
+            else "differential"
         ),
     )
 
@@ -9554,6 +10323,7 @@ def _differential_pair_linearity_metrics_from_result(
     linearity_sweep: dict[str, Any],
     *,
     vdd_v: float,
+    topology_variant: str = _DIFFERENTIAL_PAIR_BASE_VARIANT,
 ) -> tuple[dict[str, float], dict[str, Any]]:
     raw_points = metadata.get("sweep_points")
     if not isinstance(raw_points, dict) or not raw_points:
@@ -9582,10 +10352,17 @@ def _differential_pair_linearity_metrics_from_result(
             positive - negative
             for positive, negative in zip(inp, inn, strict=True)
         ]
-        differential_output = [
-            positive - negative
-            for positive, negative in zip(outp, outn, strict=True)
-        ]
+        single_ended_output = _differential_pair_has_current_mirror_load(
+            topology_variant
+        )
+        differential_output = (
+            list(outn)
+            if single_ended_output
+            else [
+                positive - negative
+                for positive, negative in zip(outp, outn, strict=True)
+            ]
+        )
         metrics, diagnostics = extract_common_source_linearity_point_metrics(
             _signal(raw_point, "time"),
             differential_input,
@@ -9617,7 +10394,9 @@ def _differential_pair_linearity_metrics_from_result(
                     "VDD_SRC:p",
                 ],
                 "input_expression": "INP-INN",
-                "output_expression": "OUTP-OUTN",
+                "output_expression": (
+                    "OUTN" if single_ended_output else "OUTP-OUTN"
+                ),
                 "metrics": metrics,
                 **diagnostics,
             }
@@ -9626,6 +10405,11 @@ def _differential_pair_linearity_metrics_from_result(
         amplitudes,
         point_metrics,
         compression_db=float(linearity_sweep.get("compression_db", 1.0)),
+        output_mode=(
+            "single_ended_outn"
+            if _differential_pair_has_current_mirror_load(topology_variant)
+            else "differential"
+        ),
     )
     diagnostics["point_details"] = point_diagnostics
     diagnostics["sweep_point_count"] = len(point_metrics)
@@ -9688,7 +10472,9 @@ def _common_source_noise_metrics_from_result(
 
 
 def _differential_pair_noise_metrics_from_result(
-    result: Any, noise_sweep: dict[str, Any]
+    result: Any,
+    noise_sweep: dict[str, Any],
+    topology_variant: str = _DIFFERENTIAL_PAIR_BASE_VARIANT,
 ) -> tuple[dict[str, float], dict[str, Any]]:
     metrics, diagnostics = _common_source_noise_metrics_from_result(
         result, noise_sweep
@@ -9697,7 +10483,16 @@ def _differential_pair_noise_metrics_from_result(
         {
             "input_source": "VIN_DIFF from VDIFF to ground",
             "input_expression": "INP-INN = VIN_DIFF",
-            "output_expression": "OUTP-OUTN",
+            "output_expression": (
+                "OUTN"
+                if _differential_pair_has_current_mirror_load(topology_variant)
+                else "OUTP-OUTN"
+            ),
+            "output_mode": (
+                "single_ended_outn"
+                if _differential_pair_has_current_mirror_load(topology_variant)
+                else "differential"
+            ),
             "dc_common_mode_bias": (
                 "VCM_SRC plus ideal +0.5/-0.5 VCVS input drivers"
             ),
@@ -9915,6 +10710,9 @@ def _differential_pair_testbench_deck(
         raise ValueError(f"unsupported differential-pair analysis: {analysis}")
     if ac_mode not in {"differential", "common_mode"}:
         raise ValueError(f"unsupported differential-pair AC mode: {ac_mode}")
+    current_mirror_load = _differential_pair_has_current_mirror_load(
+        topology_variant
+    )
     inp_ac = ""
     inn_ac = ""
     extra_parameters = ""
@@ -9976,16 +10774,21 @@ def _differential_pair_testbench_deck(
             "EINP (INP VCM VDIFF 0) vcvs gain=0.5\n"
             "EINN (INN VCM VDIFF 0) vcvs gain=-0.5"
         )
+        noise_output = "(OUTN 0)" if current_mirror_load else "(OUTP OUTN)"
         analysis_statement = (
-            f'noise (OUTP OUTN) noise start={float(noise_sweep["start_hz"]):.12g} '
+            f'noise {noise_output} noise start={float(noise_sweep["start_hz"]):.12g} '
             f'stop={float(noise_sweep["stop_hz"]):.12g} '
             f'dec={int(noise_sweep.get("points_per_decade", 20))} '
             "iprobe=VIN_DIFF annotate=status\n"
         )
     if "load_ff" in parameters:
         load = (
-            f'CLP (OUTP 0) capacitor c={parameters["load_ff"]:.12g}f\n'
             f'CLN (OUTN 0) capacitor c={parameters["load_ff"]:.12g}f\n'
+            if current_mirror_load
+            else (
+                f'CLP (OUTP 0) capacitor c={parameters["load_ff"]:.12g}f\n'
+                f'CLN (OUTN 0) capacitor c={parameters["load_ff"]:.12g}f\n'
+            )
         )
     real_tail = _differential_pair_has_real_tail(topology_variant)
     tail_output_resistance = parameters.get("tail_output_resistance_ohm")
@@ -10025,6 +10828,12 @@ def _differential_pair_testbench_deck(
             "save MNTAIL:ids MNTAIL:vgs MNTAIL:vds MNTAIL:vdsat "
             "MNTAIL:gm MNTAIL:gds\n"
         )
+    load_save = ""
+    if current_mirror_load:
+        load_save = (
+            "save MP0:ids MP0:vgs MP0:vds MP0:vdsat MP0:gm MP0:gds\n"
+            "save MP1:ids MP1:vgs MP1:vds MP1:vdsat MP1:gm MP1:gds\n"
+        )
     model_configuration, _ = _common_source_model_configuration(profile, None)
     return f'''simulator lang=spectre
 {model_configuration}
@@ -10045,7 +10854,7 @@ dcOpInfo info what=oppoint where=rawfile
 {analysis_statement}save {saved_nodes} VDD_SRC:p
 save MN0:ids MN0:vgs MN0:vds MN0:vdsat MN0:gm MN0:gds
 save MN1:ids MN1:vgs MN1:vds MN1:vdsat MN1:gm MN1:gds
-{tail_save}saveOptions options save=allpub
+{tail_save}{load_save}saveOptions options save=allpub
 '''
 
 
@@ -10107,7 +10916,7 @@ def simulate_inverter(payload: dict[str, Any]) -> dict[str, Any]:
             ssh_runner._persistent_shell_enabled = False
         result = simulator.run_simulation(netlist, {})
         if not result.ok:
-            detail = result.errors[0] if result.errors else result.status.value
+            detail = _spectre_failure_detail(result, work_dir)
             raise RuntimeError(f"Spectre simulation failed: {detail}")
         time_s = _signal(result.data, "time")
         vin_v = _signal(result.data, "IN")
@@ -10550,7 +11359,7 @@ def simulate_common_source(
             ssh_runner._persistent_shell_enabled = False
         result = simulator.run_simulation(netlist, {})
         if not result.ok:
-            detail = result.errors[0] if result.errors else result.status.value
+            detail = _spectre_failure_detail(result, work_dir)
             raise RuntimeError(f"Spectre simulation failed: {detail}")
         dc_data, dc_psf_evidence = _common_source_dc_data_from_result(result)
         metrics, operating_point = _common_source_metrics_from_result(
@@ -10820,6 +11629,9 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
     oa_tail_geometry = _differential_pair_tail_device_geometry_from_schematic(
         schematic
     )
+    oa_current_mirror_geometry = (
+        _differential_pair_current_mirror_geometry_from_schematic(schematic)
+    )
     requested_oa_parameters = {
         name: float(payload.get("parameters", {})[name])
         for name in (
@@ -10829,6 +11641,8 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
             "tail_width_um",
             "tail_length_um",
             "source_resistance_ohm",
+            "pmos_load_width_um",
+            "pmos_load_length_um",
         )
         if name in payload.get("parameters", {})
     }
@@ -10851,6 +11665,9 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
         netlist_geometry = netlist_evidence["parsed"]["device_geometry"]
         netlist_tail_geometry = netlist_evidence["parsed"].get(
             "tail_device_geometry"
+        )
+        netlist_current_mirror_geometry = netlist_evidence["parsed"].get(
+            "current_mirror_load_geometry"
         )
         try:
             if netlist_evidence["parsed"]["topology_variant"] != topology_variant:
@@ -10880,6 +11697,20 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                     netlist_tail_geometry,
                     expected_label="OA tail-device geometry",
                     actual_label="si netlist tail-device geometry",
+                )
+            if (oa_current_mirror_geometry is None) != (
+                netlist_current_mirror_geometry is None
+            ):
+                raise RuntimeError(
+                    "OA schematic and si netlist disagree on PMOS mirror geometry"
+                )
+            if oa_current_mirror_geometry is not None:
+                assert isinstance(netlist_current_mirror_geometry, dict)
+                _assert_parameter_consistency(
+                    oa_current_mirror_geometry,
+                    netlist_current_mirror_geometry,
+                    expected_label="OA current-mirror-load geometry",
+                    actual_label="si current-mirror-load geometry",
                 )
         except RuntimeError as consistency_error:
             raise RuntimeError(
@@ -10916,7 +11747,7 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
             ssh_runner._persistent_shell_enabled = False
         result = simulator.run_simulation(wrapper, {})
         if not result.ok:
-            detail = result.errors[0] if result.errors else result.status.value
+            detail = _spectre_failure_detail(result, work_dir)
             raise RuntimeError(f"Spectre simulation failed: {detail}")
         dc_data, dc_psf_evidence = _common_source_dc_data_from_result(result)
         metrics, operating_point = _differential_pair_metrics_from_result(
@@ -10944,10 +11775,19 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                 "the DC point; use tail_device_saturation_region to evaluate "
                 "feasibility"
             )
+        if (
+            _differential_pair_has_current_mirror_load(topology_variant)
+            and metrics["both_load_saturation_region"] != 1.0
+        ):
+            analysis_warnings.append(
+                "operating-point constraint: MP0/MP1 are not both in saturation; "
+                "use both_load_saturation_region or "
+                "all_signal_devices_saturation_region to evaluate feasibility"
+            )
         if analysis == "ac":
             assert isinstance(ac_sweep, dict)
             ac_metrics, ac_diagnostics = _differential_pair_ac_metrics_from_result(
-                result.data, ac_sweep
+                result.data, ac_sweep, topology_variant
             )
             metrics.update(ac_metrics)
             analysis_issues.extend(
@@ -11014,10 +11854,8 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                     common_mode_wrapper, {}
                 )
                 if not common_mode_result.ok:
-                    detail = (
-                        common_mode_result.errors[0]
-                        if common_mode_result.errors
-                        else common_mode_result.status.value
+                    detail = _spectre_failure_detail(
+                        common_mode_result, common_mode_dir
                     )
                     raise RuntimeError(
                         f"Spectre common-mode simulation failed: {detail}"
@@ -11048,6 +11886,11 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                         "source_n_voltage_v",
                         "max_source_current_mismatch_percent",
                     )
+                if _differential_pair_has_current_mirror_load(topology_variant):
+                    dc_consistency_names += (
+                        "current_mirror_current_mismatch_percent",
+                        "minimum_load_saturation_margin_v",
+                    )
                 _assert_parameter_consistency(
                     {name: metrics[name] for name in dc_consistency_names},
                     {
@@ -11061,11 +11904,14 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                     common_mode_metrics,
                     common_mode_ac_diagnostics,
                 ) = _differential_pair_common_mode_ac_metrics_from_result(
-                    common_mode_result.data, ac_sweep
+                    common_mode_result.data, ac_sweep, topology_variant
                 )
                 cmrr_metrics, cmrr_diagnostics = (
                     _differential_pair_cmrr_metrics_from_results(
-                        result.data, common_mode_result.data, ac_sweep
+                        result.data,
+                        common_mode_result.data,
+                        ac_sweep,
+                        topology_variant,
                     )
                 )
                 metrics.update(common_mode_metrics)
@@ -11118,6 +11964,7 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                     getattr(result, "metadata", {}),
                     linearity_sweep,
                     vdd_v=parameters["vdd_v"],
+                    topology_variant=topology_variant,
                 )
             )
             metrics.update(linearity_metrics)
@@ -11140,7 +11987,9 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
         elif analysis == "noise":
             assert isinstance(noise_sweep, dict)
             noise_metrics, noise_diagnostics = (
-                _differential_pair_noise_metrics_from_result(result, noise_sweep)
+                _differential_pair_noise_metrics_from_result(
+                    result, noise_sweep, topology_variant
+                )
             )
             metrics.update(noise_metrics)
             if metrics["both_saturation_region"] != 1.0:
@@ -11155,6 +12004,16 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
             )
         metric_sources = {name: "eda_result" for name in metrics}
         metric_sources["both_saturation_region"] = "software_inference"
+        metric_sources["all_signal_devices_saturation_region"] = (
+            "software_inference"
+        )
+        for name in (
+            "both_load_saturation_region",
+            "current_mirror_current_mismatch_percent",
+            "minimum_load_saturation_margin_v",
+        ):
+            if name in metric_sources:
+                metric_sources[name] = "software_inference"
         for name in (
             "source_p_current_mismatch_percent",
             "source_n_current_mismatch_percent",
@@ -11344,6 +12203,7 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                     "semantic_parameters": oa_parameters,
                     "device_geometry": oa_geometry,
                     "tail_device_geometry": oa_tail_geometry,
+                    "current_mirror_load_geometry": oa_current_mirror_geometry,
                     "topology_variant": topology_variant,
                 },
                 "netlist": {
@@ -11354,6 +12214,9 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                     "semantic_parameters": netlist_parameters,
                     "device_geometry": netlist_geometry,
                     "tail_device_geometry": netlist_tail_geometry,
+                    "current_mirror_load_geometry": (
+                        netlist_current_mirror_geometry
+                    ),
                     "topology_variant": netlist_evidence["parsed"][
                         "topology_variant"
                     ],
@@ -11371,6 +12234,22 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                         "OA schematic MNTAIL; external wrapper supplies BIAS only"
                         if real_tail
                         else "external_wrapper_only"
+                    ),
+                    "output_contract": (
+                        {
+                            "input": "INP-INN",
+                            "primary_output": "OUTN",
+                            "mirror_reference": "OUTP",
+                            "mode": "single_ended_outn",
+                        }
+                        if _differential_pair_has_current_mirror_load(
+                            topology_variant
+                        )
+                        else {
+                            "input": "INP-INN",
+                            "primary_output": "OUTP-OUTN",
+                            "mode": "differential",
+                        }
                     ),
                     "model_resolution_source": "pdk_profile",
                     "model_configuration": _common_source_model_manifest(

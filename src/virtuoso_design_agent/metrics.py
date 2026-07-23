@@ -545,8 +545,13 @@ def aggregate_differential_pair_linearity_metrics(
     point_metrics: Sequence[dict[str, float]],
     *,
     compression_db: float = 1.0,
+    output_mode: str = "differential",
 ) -> tuple[dict[str, float], dict[str, object]]:
-    """Namespace a differential-input/differential-output linearity sweep."""
+    """Namespace a differential-input linearity sweep."""
+    if output_mode not in {"differential", "single_ended_outn"}:
+        raise MetricExtractionError(
+            f"unsupported differential-pair output mode: {output_mode}"
+        )
     raw_metrics, diagnostics = aggregate_common_source_linearity_metrics(
         amplitudes_v,
         point_metrics,
@@ -563,7 +568,11 @@ def aggregate_differential_pair_linearity_metrics(
     diagnostics.update(
         {
             "input_definition": "VINP-VINN differential peak amplitude",
-            "output_definition": "VOUTP-VOUTN differential waveform",
+            "output_definition": (
+                "OUTN single-ended waveform"
+                if output_mode == "single_ended_outn"
+                else "VOUTP-VOUTN differential waveform"
+            ),
             "metric_namespace": (
                 "differential_* for transfer/linearity and transient_* for "
                 "whole-circuit supply power"
@@ -719,11 +728,19 @@ def extract_differential_pair_dc_metrics(
     branch_n_gm_s: float,
     branch_p_gds_s: float,
     branch_n_gds_s: float,
-    load_resistance_ohm: float,
+    load_resistance_ohm: float | None = None,
     branch_p_source_v: float | None = None,
     branch_n_source_v: float | None = None,
+    load_p_current_a: float | None = None,
+    load_n_current_a: float | None = None,
+    load_p_vdsat_v: float | None = None,
+    load_n_vdsat_v: float | None = None,
+    load_p_gm_s: float | None = None,
+    load_n_gm_s: float | None = None,
+    load_p_gds_s: float | None = None,
+    load_n_gds_s: float | None = None,
 ) -> dict[str, float]:
-    """Derive symmetric resistive-load NMOS differential-pair DC metrics.
+    """Derive matched resistive- or PMOS-current-mirror-load DC metrics.
 
     Branch ``p`` is MN0/INP/OUTP and branch ``n`` is MN1/INN/OUTN.  Current
     arguments retain their raw simulator polarity at the worker boundary; this
@@ -746,8 +763,35 @@ def extract_differential_pair_dc_metrics(
         "branch_n_gm_s": branch_n_gm_s,
         "branch_p_gds_s": branch_p_gds_s,
         "branch_n_gds_s": branch_n_gds_s,
-        "load_resistance_ohm": load_resistance_ohm,
     }
+    if load_resistance_ohm is not None:
+        values["load_resistance_ohm"] = load_resistance_ohm
+    active_load_values = {
+        "load_p_current_a": load_p_current_a,
+        "load_n_current_a": load_n_current_a,
+        "load_p_vdsat_v": load_p_vdsat_v,
+        "load_n_vdsat_v": load_n_vdsat_v,
+        "load_p_gm_s": load_p_gm_s,
+        "load_n_gm_s": load_n_gm_s,
+        "load_p_gds_s": load_p_gds_s,
+        "load_n_gds_s": load_n_gds_s,
+    }
+    active_load = all(value is not None for value in active_load_values.values())
+    any_active_load_value = any(
+        value is not None for value in active_load_values.values()
+    )
+    if (load_resistance_ohm is None) == (not active_load):
+        raise MetricExtractionError(
+            "differential-pair DC metrics require exactly one complete load model"
+        )
+    if any_active_load_value and not active_load:
+        raise MetricExtractionError(
+            "current-mirror-load DC metrics require all PMOS operating-point values"
+        )
+    if active_load:
+        values.update(
+            {name: float(value) for name, value in active_load_values.items()}
+        )
     if branch_p_source_v is not None:
         values["branch_p_source_v"] = branch_p_source_v
     if branch_n_source_v is not None:
@@ -756,10 +800,10 @@ def extract_differential_pair_dc_metrics(
         raise MetricExtractionError(
             "differential-pair operating-point values must be finite"
         )
-    if vdd_v <= 0 or load_resistance_ohm <= 0:
-        raise MetricExtractionError(
-            "differential-pair supply and load resistance must be positive"
-        )
+    if vdd_v <= 0:
+        raise MetricExtractionError("differential-pair supply must be positive")
+    if load_resistance_ohm is not None and load_resistance_ohm <= 0:
+        raise MetricExtractionError("differential-pair load resistance must be positive")
     if branch_p_gds_s <= 0 or branch_n_gds_s <= 0:
         raise MetricExtractionError(
             "differential-pair branch gds values must be positive"
@@ -791,15 +835,26 @@ def extract_differential_pair_dc_metrics(
     branch_n_margin = branch_n_vds - branch_n_vdsat
     upper_p_headroom = float(vdd_v) - float(outp_v)
     upper_n_headroom = float(vdd_v) - float(outn_v)
-    resistor_p_current = abs(upper_p_headroom / float(load_resistance_ohm))
-    resistor_n_current = abs(upper_n_headroom / float(load_resistance_ohm))
-    load_p_scale = max(branch_p_current, resistor_p_current, 1e-18)
-    load_n_scale = max(branch_n_current, resistor_n_current, 1e-18)
+    if active_load:
+        assert load_p_current_a is not None
+        assert load_n_current_a is not None
+        resolved_load_p_current = abs(float(load_p_current_a))
+        resolved_load_n_current = abs(float(load_n_current_a))
+    else:
+        assert load_resistance_ohm is not None
+        resolved_load_p_current = abs(
+            upper_p_headroom / float(load_resistance_ohm)
+        )
+        resolved_load_n_current = abs(
+            upper_n_headroom / float(load_resistance_ohm)
+        )
+    load_p_scale = max(branch_p_current, resolved_load_p_current, 1e-18)
+    load_n_scale = max(branch_n_current, resolved_load_n_current, 1e-18)
     load_p_mismatch = (
-        abs(branch_p_current - resistor_p_current) / load_p_scale * 100.0
+        abs(branch_p_current - resolved_load_p_current) / load_p_scale * 100.0
     )
     load_n_mismatch = (
-        abs(branch_n_current - resistor_n_current) / load_n_scale * 100.0
+        abs(branch_n_current - resolved_load_n_current) / load_n_scale * 100.0
     )
 
     gm_p = abs(float(branch_p_gm_s))
@@ -809,7 +864,7 @@ def extract_differential_pair_dc_metrics(
     output_offset = float(outp_v) - float(outn_v)
     minimum_saturation_margin = min(branch_p_margin, branch_n_margin)
     minimum_upper_headroom = min(upper_p_headroom, upper_n_headroom)
-    return {
+    metrics = {
         "branch_p_current_ua": branch_p_current * 1e6,
         "branch_n_current_ua": branch_n_current * 1e6,
         "branch_current_sum_ua": branch_sum * 1e6,
@@ -824,8 +879,8 @@ def extract_differential_pair_dc_metrics(
         "supply_current_mismatch_percent": (
             abs(branch_sum - supply_current) / total_scale * 100.0
         ),
-        "load_p_current_ua": resistor_p_current * 1e6,
-        "load_n_current_ua": resistor_n_current * 1e6,
+        "load_p_current_ua": resolved_load_p_current * 1e6,
+        "load_n_current_ua": resolved_load_n_current * 1e6,
         "load_p_current_mismatch_percent": load_p_mismatch,
         "load_n_current_mismatch_percent": load_n_mismatch,
         "max_load_current_mismatch_percent": max(
@@ -864,6 +919,70 @@ def extract_differential_pair_dc_metrics(
         "minimum_intrinsic_gain_v_per_v": min(gm_p / gds_p, gm_n / gds_n),
         "dc_supply_power_uw": supply_current * float(vdd_v) * 1e6,
     }
+    if active_load:
+        assert load_p_vdsat_v is not None
+        assert load_n_vdsat_v is not None
+        assert load_p_gm_s is not None
+        assert load_n_gm_s is not None
+        assert load_p_gds_s is not None
+        assert load_n_gds_s is not None
+        if load_p_gds_s <= 0 or load_n_gds_s <= 0:
+            raise MetricExtractionError(
+                "current-mirror-load PMOS gds values must be positive"
+            )
+        load_p_vdsat = abs(float(load_p_vdsat_v))
+        load_n_vdsat = abs(float(load_n_vdsat_v))
+        load_p_margin = upper_p_headroom - load_p_vdsat
+        load_n_margin = upper_n_headroom - load_n_vdsat
+        minimum_load_margin = min(load_p_margin, load_n_margin)
+        mirror_scale = max(
+            resolved_load_p_current, resolved_load_n_current, 1e-18
+        )
+        mirror_mismatch = (
+            abs(resolved_load_p_current - resolved_load_n_current)
+            / mirror_scale
+            * 100.0
+        )
+        load_p_gm = abs(float(load_p_gm_s))
+        load_n_gm = abs(float(load_n_gm_s))
+        load_p_gds = float(load_p_gds_s)
+        load_n_gds = float(load_n_gds_s)
+        metrics.update(
+            {
+                "current_mirror_current_mismatch_percent": mirror_mismatch,
+                "load_p_vsd_v": upper_p_headroom,
+                "load_n_vsd_v": upper_n_headroom,
+                "load_p_vdsat_v": load_p_vdsat,
+                "load_n_vdsat_v": load_n_vdsat,
+                "load_p_saturation_margin_v": load_p_margin,
+                "load_n_saturation_margin_v": load_n_margin,
+                "minimum_load_saturation_margin_v": minimum_load_margin,
+                "both_load_saturation_region": float(
+                    resolved_load_p_current > 0.0
+                    and resolved_load_n_current > 0.0
+                    and minimum_load_margin >= 0.0
+                ),
+                "load_p_gm_us": load_p_gm * 1e6,
+                "load_n_gm_us": load_n_gm * 1e6,
+                "load_p_gds_us": load_p_gds * 1e6,
+                "load_n_gds_us": load_n_gds * 1e6,
+                "minimum_load_intrinsic_gain_v_per_v": min(
+                    load_p_gm / load_p_gds, load_n_gm / load_n_gds
+                ),
+                "minimum_output_swing_margin_v": min(
+                    minimum_load_margin, minimum_saturation_margin
+                ),
+                "all_signal_devices_saturation_region": float(
+                    metrics["both_saturation_region"] == 1.0
+                    and minimum_load_margin >= 0.0
+                ),
+            }
+        )
+    else:
+        metrics["all_signal_devices_saturation_region"] = metrics[
+            "both_saturation_region"
+        ]
+    return metrics
 
 
 def _log_frequency_crossing(
@@ -1137,8 +1256,13 @@ def extract_differential_pair_ac_metrics(
     *,
     reference_points: int = 5,
     max_reference_variation_db: float = 0.5,
+    output_mode: str = "differential",
 ) -> tuple[dict[str, float], dict[str, object]]:
-    """Extract differential gain and bandwidth from balanced complex AC data."""
+    """Extract differential-input gain and bandwidth from complex AC data."""
+    if output_mode not in {"differential", "single_ended_outn"}:
+        raise MetricExtractionError(
+            f"unsupported differential-pair output mode: {output_mode}"
+        )
     lengths = {
         len(frequency_hz),
         len(inp_v),
@@ -1153,10 +1277,14 @@ def extract_differential_pair_ac_metrics(
     differential_input = [
         complex(inp) - complex(inn) for inp, inn in zip(inp_v, inn_v, strict=True)
     ]
-    differential_output = [
-        complex(outp) - complex(outn)
-        for outp, outn in zip(outp_v, outn_v, strict=True)
-    ]
+    differential_output = (
+        [complex(value) for value in outn_v]
+        if output_mode == "single_ended_outn"
+        else [
+            complex(outp) - complex(outn)
+            for outp, outn in zip(outp_v, outn_v, strict=True)
+        ]
+    )
     metrics, diagnostics = extract_common_source_ac_metrics(
         frequency_hz,
         differential_input,
@@ -1169,8 +1297,13 @@ def extract_differential_pair_ac_metrics(
         {
             **diagnostics,
             "signals": ["ac_freq", "ac_INP", "ac_INN", "ac_OUTP", "ac_OUTN"],
-            "transfer": "(OUTP-OUTN)/(INP-INN) complex ratio",
+            "transfer": (
+                "OUTN/(INP-INN) complex ratio"
+                if output_mode == "single_ended_outn"
+                else "(OUTP-OUTN)/(INP-INN) complex ratio"
+            ),
             "stimulus": "balanced +0.5/-0.5 AC sources; differential input is 1 V",
+            "output_mode": output_mode,
         },
     )
 
@@ -1184,8 +1317,13 @@ def extract_differential_pair_common_mode_ac_metrics(
     *,
     reference_points: int = 5,
     max_reference_variation_db: float = 0.5,
+    output_mode: str = "differential",
 ) -> tuple[dict[str, float], dict[str, object]]:
     """Extract common-mode gain from a matched in-phase AC stimulus."""
+    if output_mode not in {"differential", "single_ended_outn"}:
+        raise MetricExtractionError(
+            f"unsupported differential-pair output mode: {output_mode}"
+        )
     lengths = {
         len(frequency_hz),
         len(inp_v),
@@ -1201,10 +1339,14 @@ def extract_differential_pair_common_mode_ac_metrics(
         0.5 * (complex(inp) + complex(inn))
         for inp, inn in zip(inp_v, inn_v, strict=True)
     ]
-    common_output = [
-        0.5 * (complex(outp) + complex(outn))
-        for outp, outn in zip(outp_v, outn_v, strict=True)
-    ]
+    common_output = (
+        [complex(value) for value in outn_v]
+        if output_mode == "single_ended_outn"
+        else [
+            0.5 * (complex(outp) + complex(outn))
+            for outp, outn in zip(outp_v, outn_v, strict=True)
+        ]
+    )
     metrics, diagnostics = extract_common_source_ac_metrics(
         frequency_hz,
         common_input,
@@ -1217,8 +1359,13 @@ def extract_differential_pair_common_mode_ac_metrics(
         {
             **diagnostics,
             "signals": ["ac_freq", "ac_INP", "ac_INN", "ac_OUTP", "ac_OUTN"],
-            "transfer": "((OUTP+OUTN)/2)/((INP+INN)/2) complex ratio",
+            "transfer": (
+                "OUTN/((INP+INN)/2) complex ratio"
+                if output_mode == "single_ended_outn"
+                else "((OUTP+OUTN)/2)/((INP+INN)/2) complex ratio"
+            ),
             "stimulus": "matched 1 V in-phase AC sources",
+            "output_mode": output_mode,
         },
     )
 
@@ -1263,8 +1410,13 @@ def extract_differential_pair_cmrr_response_metrics(
     *,
     reference_points: int = 5,
     max_reference_variation_db: float = 0.5,
+    output_mode: str = "differential",
 ) -> tuple[dict[str, float], dict[str, object]]:
     """Extract frequency-dependent CMRR from paired differential/common AC runs."""
+    if output_mode not in {"differential", "single_ended_outn"}:
+        raise MetricExtractionError(
+            f"unsupported differential-pair output mode: {output_mode}"
+        )
     differential_lengths = {
         len(differential_frequency_hz),
         len(differential_inp_v),
@@ -1312,9 +1464,12 @@ def extract_differential_pair_cmrr_response_metrics(
             raise MetricExtractionError(
                 "paired CMRR differential run contains zero differential input"
             )
-        differential_transfer.append(
-            (complex(outp) - complex(outn)) / differential_input
+        differential_output = (
+            complex(outn)
+            if output_mode == "single_ended_outn"
+            else complex(outp) - complex(outn)
         )
+        differential_transfer.append(differential_output / differential_input)
     for inp, inn, outp, outn in zip(
         common_mode_inp_v,
         common_mode_inn_v,
@@ -1327,9 +1482,12 @@ def extract_differential_pair_cmrr_response_metrics(
             raise MetricExtractionError(
                 "paired CMRR common-mode run contains zero common-mode input"
             )
-        common_mode_transfer.append(
-            0.5 * (complex(outp) + complex(outn)) / common_mode_input
+        common_output = (
+            complex(outn)
+            if output_mode == "single_ended_outn"
+            else 0.5 * (complex(outp) + complex(outn))
         )
+        common_mode_transfer.append(common_output / common_mode_input)
     if any(abs(value) <= 1e-30 for value in common_mode_transfer):
         raise MetricExtractionError(
             "paired CMRR requires non-zero common-mode transfer; use an explicit "
@@ -1400,9 +1558,12 @@ def extract_differential_pair_cmrr_response_metrics(
                 "ac_OUTN",
             ],
             "transfer": (
-                "((OUTP-OUTN)/(INP-INN)) divided by "
+                "(OUTN/(INP-INN)) divided by (OUTN/((INP+INN)/2))"
+                if output_mode == "single_ended_outn"
+                else "((OUTP-OUTN)/(INP-INN)) divided by "
                 "(((OUTP+OUTN)/2)/((INP+INN)/2))"
             ),
+            "output_mode": output_mode,
             "frequency_grid_consistency": "matched",
             "definition": (
                 "CMRR bandwidth is the first 3 dB decline from the low-frequency "

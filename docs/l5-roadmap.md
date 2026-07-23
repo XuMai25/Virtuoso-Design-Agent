@@ -47,6 +47,8 @@ Gate 4 随后在新 `vda_diffpair_tail_gate4_001` 上以 exact-delta transform �
 
 Gate 5 随后在新 `vda_diffpair_deg_gate5_001` 上验证对称源极退化。exact-delta add 只把 `MN0.S/MN1.S` 分到 `NSP/NSN` 并加入 `RS0/RS1` 后汇回 TAIL；500 Ω 的 OA 回读、`si` 网表、两支路电阻电流和 KCL 完全绑定。既有 DC/差模与共模 AC/10 点 ICMR/六点 transient/noise 全部无缝复用；相对同参数无退化基线，输入 P1dB 提升 29.19%、200 mV THD 降低 30.11%，代价是低频增益降低 17.89%、GBW 降低 22.22%、输入参考积分噪声增加 17.82%。250/500 Ω 两点有限搜索按 P1dB 选择并独立回读 500 Ω。两次 remove 都把 placement SHA 精确恢复到 add 前值，恢复网表和 DC metrics 逐项相同。状态升级为 **differential-pair reversible symmetric source-degeneration, full-analysis migration, and bounded RS writeback verified**；PVT 仍按任务可选，未作为默认成本。
 
+同日继续完成 Gate 6 live。新 action 在全新 `vda_diffpair_active_gate6_001` 上把 `RD0/RD1` 精确替换为 `MP0/MP1` 电流镜，并按显式电阻值反向恢复；PMOS W/L 进入 semantic apply/search 面。OA/`si` parser 拒绝混合负载、单边缺失、错误 master/node 和几何不匹配；DC 增加 PMOS OP、支路 KCL、镜像误差、上下管工作区与联合摆幅；AC/CMRR/transient/noise 使用显式 `OUTN` 单端输出。真实 Gate 覆盖 10 点 ICMR、6 点 bias/load、6 点 Wn/Wp、预算耗尽、全不可行恢复、两次 transport timeout checkpoint/resume、最佳 OA 写回、精确 RD restore 和最终 active-load 重建。首版 `PM0/PM1` 因 Spectre `P` 前缀被解释为 port 而失败，保存日志、恢复基线并统一更名为 `MP0/MP1` 后闭合。状态升级为 **Gate 6 current-mirror-load same-source bounded closure verified at nominal TSMC N28**；可选 PVT、P1dB 包围、PSRR、slew/settling、mismatch 和 ADE handoff 仍待后续 Gate。
+
 Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发送前的 tunnel 自愈。新的 9 点压力任务仍在候选 8 发生一次本地端口拒绝，但 OA 恢复、候选前缀和续跑均正确，最终 9/9 与最佳写回成功；确定性同-client smoke 已覆盖 pre-send 自愈。payload 发送后的不确定错误仍不自动重放，这是保留的可靠性边界而不是跳过的工作。
 
 2026-07-21 又完成 `ade.prepare` + `ade.capture` 的本地纵向实现。`prepare` 只在已有 design schematic 且目标 Maestro view 不存在时新建持久化 Spectre test，保存后重新打开核对；已有 view 一律拒绝，不配置 analysis/stimulus/sweep/output。人工补全并运行后，`capture` 只读核对聚焦的 `library/cell/maestro`，默认要求 setup 已保存，捕获 setup、指定/最新 history、Spectre netlist、PSF/log 和 ADE 逐 sweep 点 output/spec，并生成逐文件及聚合 SHA-256。两者都不把准备或捕获成功算作 VDA 规格 closure。Bridge 当前公开的持久化后端是 Maestro；旧 ADE L state 非破坏迁移、VDA-managed variable sweep/corner 和 live nics4304 prepare/capture 仍待 Gate，因此此项当前只能称为 **local bidirectional human-operated ADE handoff contract implemented**。
@@ -117,11 +119,11 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> 差分对 AC/CMRR/输入共模范围/transient 线性度（已 live）
   -> 差分对真实尾管/偏置网络 + DC/AC/CMRR/ICMR/transient/noise（已 live；PVT 按任务可选）
   -> 差分对对称源极退化 + 全分析迁移 + RS 写回 + 精确 remove/restore（已 live）
-  -> 差分对 active-load/current-mirror exact-template Gate（下一默认 Gate；先 DC/KCL/工作区）
+  -> 差分对 active-load/current-mirror exact-template Gate（nominal OA/si/DC/AC/CMRR/ICMR/transient/noise/有限搜索/恢复已 live）
   -> L5B 单模块闭环
   -> layout/DRC/LVS/PEX Gate
 ```
 
 每一级只有在真实 Bridge smoke、结构回读、指标解析和失败注入均通过后才升级状态。
 
-反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化可逆 transform/DC/AC、quality、W/RD/RS/L/VDD 写回、固定设计 TT/SS/FF、可选 PVT-aware bias 选优，以及差分对 nominal、真实尾管和对称源极退化三条路径均已有 live 证据。Gate 5 已证明源极退化不是一次性脚本：它支持严格增量 add、对称 RS semantic 参数、全分析迁移、有限搜索/最佳写回、checkpoint 与两次精确 remove/restore。跨 PVT 不再是进入下一拓扑的强制默认门；需要加严时才显式启用。默认主线转为 active-load/current-mirror 的固定 exact-template Gate，先闭合 OA delta、DC 匹配/KCL/偏置和工作区，再迁移 AC/CMRR/ICMR/transient/noise。差分对 PVT、mismatch/Monte Carlo、ADE 真实 PVT/multi-test、差分对 setup、已有 output 安全替换，以及人工打开/修改/重跑和旧 ADE L 迁移继续是独立 Gate；完成前仍不能升级为可重复的 L5B 单模块规格闭环。
+反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化可逆 transform/DC/AC、quality、W/RD/RS/L/VDD 写回、固定设计 TT/SS/FF、可选 PVT-aware bias 选优，以及差分对 nominal、真实尾管、对称源极退化和 PMOS 电流镜有源负载四条路径均已有 live 证据。Gate 5 已证明源极退化支持严格增量 add、全分析迁移、有限搜索、最佳写回、checkpoint 与精确 remove/restore；Gate 6 又证明 active-load delta 能无缝进入同一 DC/AC/CMRR/ICMR/transient/noise、搜索、失败、预算和恢复状态机。跨 PVT 不再是进入下一拓扑的强制默认门；需要加严时才显式启用。当前下一道设计质量 Gate 应优先补 PSRR、slew/settling、输出驱动/摆幅边界或显式可选 PVT；若继续拓扑能力，则为 `RS0/RS1 + MP0/MP1` 单独定义组合 Gate。差分对 PVT、mismatch/Monte Carlo、ADE 真实 PVT/multi-test、差分对 setup、已有 output 安全替换，以及人工打开/修改/重跑和旧 ADE L 迁移继续是独立 Gate；完成前仍不能升级为可重复的 L5B 单模块规格闭环。

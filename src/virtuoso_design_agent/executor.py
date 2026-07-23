@@ -49,7 +49,6 @@ _OA_SEMANTIC_PARAMETERS = {
     CircuitKind.DIFFERENTIAL_PAIR: (
         "input_width_um",
         "length_um",
-        "load_resistance_ohm",
     ),
 }
 
@@ -58,6 +57,9 @@ _DIFFERENTIAL_PAIR_OPTIONAL_OA_PARAMETERS = (
     "tail_width_um",
     "tail_length_um",
     "source_resistance_ohm",
+    "load_resistance_ohm",
+    "pmos_load_width_um",
+    "pmos_load_length_um",
 )
 
 
@@ -485,6 +487,16 @@ class TaskExecutor:
                 if name in raw
             )
         elif task.circuit is CircuitKind.DIFFERENTIAL_PAIR:
+            has_resistive_load = "load_resistance_ohm" in raw
+            has_active_load = all(
+                name in raw
+                for name in ("pmos_load_width_um", "pmos_load_length_um")
+            )
+            if has_resistive_load == has_active_load:
+                raise RuntimeError(
+                    "differential-pair inspection must return exactly one load "
+                    "parameterization"
+                )
             names.extend(
                 name
                 for name in _DIFFERENTIAL_PAIR_OPTIONAL_OA_PARAMETERS
@@ -1038,6 +1050,153 @@ class TaskExecutor:
             raise RuntimeError(
                 "differential source-degeneration removal returned the wrong variant"
             )
+
+    @classmethod
+    def _assert_differential_pair_current_mirror_load_delta(
+        cls,
+        before: AdapterResult,
+        after: AdapterResult,
+        pmos_load_width_um: float,
+        pmos_load_length_um: float,
+    ) -> None:
+        before_data = before.data
+        after_data = after.data
+        before_instances = cls._instances_by_name(before_data)
+        after_instances = cls._instances_by_name(after_data)
+        preserved = {"MN0", "MN1", "MNTAIL"}
+        resistive = preserved | {"RD0", "RD1"}
+        active = preserved | {"MP0", "MP1"}
+        if set(before_instances) not in (resistive, active):
+            raise RuntimeError(
+                "current-mirror-load transform requires the exact undegenerated "
+                "real-tail differential-pair instance set"
+            )
+        if set(after_instances) != active:
+            raise RuntimeError(
+                "current-mirror-load transform did not produce exactly "
+                "MN0/MN1/MNTAIL/MP0/MP1"
+            )
+        if before_data.get("pins") != after_data.get("pins"):
+            raise RuntimeError("current-mirror-load transform changed pins")
+        if before_data.get("nets") != after_data.get("nets"):
+            raise RuntimeError("current-mirror-load transform changed nets")
+        before_parameters = before_data.get("instance_parameters")
+        after_parameters = after_data.get("instance_parameters")
+        if not isinstance(before_parameters, dict) or not isinstance(
+            after_parameters, dict
+        ):
+            raise RuntimeError(
+                "current-mirror-load transform is missing instance parameter readback"
+            )
+        for name in sorted(preserved):
+            if before_instances[name] != after_instances[name]:
+                raise RuntimeError(
+                    f"current-mirror-load transform changed preserved {name}"
+                )
+            if before_parameters.get(name) != after_parameters.get(name):
+                raise RuntimeError(
+                    f"current-mirror-load transform changed {name} parameters"
+                )
+        expected_terminals = {
+            "MP0": {"D": "OUTP", "G": "OUTP", "S": "VDD", "B": "VDD"},
+            "MP1": {"D": "OUTN", "G": "OUTP", "S": "VDD", "B": "VDD"},
+        }
+        for name, terminals in expected_terminals.items():
+            if after_instances[name].get("terminals") != terminals:
+                raise RuntimeError(f"{name} has unexpected current-mirror wiring")
+        if set(before_instances) == active:
+            immutable_fields = (
+                "library",
+                "cell",
+                "xy",
+                "orient",
+                "bBox",
+                "numInst",
+                "view",
+            )
+            for name in ("MP0", "MP1"):
+                for field in immutable_fields:
+                    if before_instances[name].get(field) != after_instances[name].get(
+                        field
+                    ):
+                        raise RuntimeError(
+                            f"repeated current-mirror-load transform changed "
+                            f"{name}.{field}"
+                        )
+        semantic = after_data.get("semantic_parameters")
+        if not isinstance(semantic, dict) or "load_resistance_ohm" in semantic:
+            raise RuntimeError(
+                "current-mirror-load transform returned invalid load semantics"
+            )
+        for name, expected in (
+            ("pmos_load_width_um", pmos_load_width_um),
+            ("pmos_load_length_um", pmos_load_length_um),
+        ):
+            if name not in semantic:
+                raise RuntimeError(f"current-mirror-load readback is missing {name}")
+            tolerance = max(abs(expected) * 1e-6, 1e-9)
+            if abs(float(semantic[name]) - expected) > tolerance:
+                raise RuntimeError(f"current-mirror-load {name} does not match")
+        if after_data.get("topology_variant") != (
+            "pmos_current_mirror_load_nmos_differential_pair_with_tail_device"
+        ):
+            raise RuntimeError("current-mirror-load transform returned wrong variant")
+
+    @classmethod
+    def _assert_differential_pair_resistive_load_restore_delta(
+        cls,
+        before: AdapterResult,
+        after: AdapterResult,
+        load_resistance_ohm: float,
+    ) -> None:
+        before_data = before.data
+        after_data = after.data
+        before_instances = cls._instances_by_name(before_data)
+        after_instances = cls._instances_by_name(after_data)
+        preserved = {"MN0", "MN1", "MNTAIL"}
+        active = preserved | {"MP0", "MP1"}
+        resistive = preserved | {"RD0", "RD1"}
+        if set(before_instances) not in (active, resistive):
+            raise RuntimeError(
+                "resistive-load restore requires the exact active- or "
+                "resistive-load real-tail instance set"
+            )
+        if set(after_instances) != resistive:
+            raise RuntimeError(
+                "resistive-load restore did not produce exactly "
+                "MN0/MN1/MNTAIL/RD0/RD1"
+            )
+        if before_data.get("pins") != after_data.get("pins"):
+            raise RuntimeError("resistive-load restore changed pins")
+        if before_data.get("nets") != after_data.get("nets"):
+            raise RuntimeError("resistive-load restore changed nets")
+        for name in sorted(preserved):
+            if before_instances[name] != after_instances[name]:
+                raise RuntimeError(f"resistive-load restore changed {name}")
+        for name, terminals in {
+            "RD0": {"PLUS": "VDD", "MINUS": "OUTP"},
+            "RD1": {"PLUS": "VDD", "MINUS": "OUTN"},
+        }.items():
+            if after_instances[name].get("terminals") != terminals:
+                raise RuntimeError(f"{name} has unexpected restored wiring")
+        semantic = after_data.get("semantic_parameters")
+        if (
+            not isinstance(semantic, dict)
+            or "load_resistance_ohm" not in semantic
+            or "pmos_load_width_um" in semantic
+            or "pmos_load_length_um" in semantic
+        ):
+            raise RuntimeError("resistive-load restore returned invalid semantics")
+        tolerance = max(abs(load_resistance_ohm) * 1e-6, 1e-9)
+        if (
+            abs(float(semantic["load_resistance_ohm"]) - load_resistance_ohm)
+            > tolerance
+        ):
+            raise RuntimeError("restored RD0/RD1 resistance does not match")
+        if after_data.get("topology_variant") != (
+            "resistive_load_nmos_differential_pair_with_tail_device"
+        ):
+            raise RuntimeError("resistive-load restore returned wrong variant")
 
     @classmethod
     def _assert_source_degeneration_removal_delta(
@@ -2970,6 +3129,22 @@ class TaskExecutor:
                             "schematic.transform.differential-pair-source-"
                             "degeneration.remove"
                         )
+                    elif (
+                        resolved_transform
+                        is SchematicTransformAction.REPLACE_RESISTIVE_LOAD_WITH_CURRENT_MIRROR
+                    ):
+                        transform_action = (
+                            "schematic.transform.differential-pair-current-"
+                            "mirror-load"
+                        )
+                    elif (
+                        resolved_transform
+                        is SchematicTransformAction.RESTORE_RESISTIVE_LOAD
+                    ):
+                        transform_action = (
+                            "schematic.transform.differential-pair-current-"
+                            "mirror-load.remove"
+                        )
                     else:
                         transform_action = (
                             "schematic.transform.differential-pair-source-"
@@ -2981,7 +3156,10 @@ class TaskExecutor:
                 )
                 if (
                     resolved_transform
-                    is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION
+                    in {
+                        SchematicTransformAction.REMOVE_SOURCE_DEGENERATION,
+                        SchematicTransformAction.RESTORE_RESISTIVE_LOAD,
+                    }
                     and task.schematic_transform is not None
                     and task.schematic_transform.expected_restored_placement_sha256
                     is not None
@@ -3000,7 +3178,7 @@ class TaskExecutor:
                         or actual_placement != expected_placement
                     ):
                         raise RuntimeError(
-                            "source-degeneration removal did not confirm the "
+                            "restoring transform did not confirm the "
                             "declared restored placement fingerprint"
                         )
                 after = self._action(
@@ -3028,6 +3206,25 @@ class TaskExecutor:
                     ):
                         self._assert_differential_pair_source_degeneration_removal_delta(
                             before, after
+                        )
+                    elif (
+                        resolved_transform
+                        is SchematicTransformAction.REPLACE_RESISTIVE_LOAD_WITH_CURRENT_MIRROR
+                    ):
+                        self._assert_differential_pair_current_mirror_load_delta(
+                            before,
+                            after,
+                            float(task.parameters["pmos_load_width_um"]),
+                            float(task.parameters["pmos_load_length_um"]),
+                        )
+                    elif (
+                        resolved_transform
+                        is SchematicTransformAction.RESTORE_RESISTIVE_LOAD
+                    ):
+                        self._assert_differential_pair_resistive_load_restore_delta(
+                            before,
+                            after,
+                            float(task.parameters["load_resistance_ohm"]),
                         )
                     else:
                         self._assert_differential_pair_source_degeneration_delta(

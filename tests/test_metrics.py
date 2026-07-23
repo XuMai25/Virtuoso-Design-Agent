@@ -468,6 +468,26 @@ def test_extract_frequency_dependent_cmrr_bandwidth_from_paired_runs() -> None:
     assert diagnostics["frequency_grid_consistency"] == "matched"
 
 
+def test_active_load_differential_pair_ac_uses_outn_single_ended_output() -> None:
+    frequency_hz = [1e3, 1e4, 1e5, 1e6, 1e7, 1e8]
+    transfer = [-10.0 / (1.0 + 1j * frequency / 1e6) for frequency in frequency_hz]
+    metrics, diagnostics = extract_differential_pair_ac_metrics(
+        frequency_hz,
+        [0.5 + 0.0j] * len(frequency_hz),
+        [-0.5 + 0.0j] * len(frequency_hz),
+        [100.0 + 0.0j] * len(frequency_hz),
+        transfer,
+        reference_points=2,
+        output_mode="single_ended_outn",
+    )
+
+    assert metrics["differential_low_frequency_gain_v_per_v"] == pytest.approx(
+        10.0, rel=0.01
+    )
+    assert diagnostics["transfer"] == "OUTN/(INP-INN) complex ratio"
+    assert diagnostics["output_mode"] == "single_ended_outn"
+
+
 def test_namespace_differential_pair_linearity_metrics() -> None:
     metrics, diagnostics = aggregate_differential_pair_linearity_metrics(
         [0.01, 0.1],

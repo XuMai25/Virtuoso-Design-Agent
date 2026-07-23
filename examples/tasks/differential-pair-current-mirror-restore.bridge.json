@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-current-mirror-restore-bridge",
+  "operation": "schematic.transform",
+  "circuit": "differential_pair",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_diffpair_active_gate6_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "schematic_transform": {
+    "action": "restore_resistive_load",
+    "expected_restored_placement_sha256": "d18e638165fcb2fa5fce24b7499ba982d0c145afad2198ef887d4e85d58d1f07"
+  },
+  "parameters": {"load_resistance_ohm": 8000.0},
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}

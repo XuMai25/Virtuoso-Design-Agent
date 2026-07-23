@@ -83,7 +83,19 @@ Gate 4 的真实尾管能力继续保留；Gate 5 不替换它，而是在其上
 - `source_resistance_ohm=[250,500]` 的两点搜索都完成真实 OA 暂存→回读→自动网表→transient；按 P1dB 选择 500 Ω并独立回读 `RS0=RS1=500 Ω`。这证明 RS 是可重复使用的有限调参维度，而不只是本次固定值 smoke。
 - remove 绑定 add 前 placement SHA，只删除 VDA 创建的两只 R 和四条 terminal stub/label，恢复两管源极到 TAIL。完整 add/remove/restore 序列重复两次；两次恢复 placement 相同，两份恢复网表 SHA 相同，semantic 参数和全部所选 DC metrics 也逐项相同。最终 cell 保持 Gate 4 真实尾管状态，不残留 RS0/RS1/NSP/NSN。
 
-下一默认 Gate 是固定 active-load/current-mirror 差分对模板；先闭合 exact OA delta、匹配、DC KCL、偏置和工作区，再迁移已有动态分析。可选 PVT 只在任务显式启用时加严，不默认附加。差分对 ADE/Maestro setup、人工打开/调整/重跑、mismatch/Monte Carlo 和多 test/multi-analysis 仍未闭合。
+## Gate 6：PMOS 电流镜有源负载差分对
+
+状态：2026-07-23 已在全新且不覆盖的 `vb_pdk_smoke/vda_diffpair_active_gate6_001/schematic` 上完成 **current-mirror-load same-source bounded closure live Gate**。固定拓扑从 Gate 4 未退化真实尾管版本出发，只把 `RD0/RD1` 替换为 `MP0(OUTP,OUTP,VDD,VDD)` 与 `MP1(OUTN,OUTP,VDD,VDD)`；反向 action 可按显式电阻值恢复 RD0/RD1，并可绑定恢复 placement SHA。该路径不与 Gate 5 的 RS 同时启用，避免一次引入两种拓扑变量。
+
+- `pmos_load_width_um/pmos_load_length_um` 已是匹配 MP0/MP1 的 OA semantic 参数，可用于直接 apply 或有限搜索；显式原始实例参数面仍保留。
+- OA 与 `si` 双边都会拒绝 PM 单边缺失、W/L 不同、错误 master/node、RD/PM 混合，以及 active load 与 source degeneration 混合。
+- DC 已定义 MP0/MP1 IDS/VGS/VDS/VDSAT/GM/GDS、两支路负载 KCL、镜像误差、PMOS 饱和余量和上下管联合输出摆幅；KCL 超过 1% 是证据失败。
+- 动态输出为差分输入、OUTN 单端输出：AC/CMRR 用 `OUTN/(INP-INN)`，transient 从 OUTN 提取 THD/P1dB，noise 用 `noise (OUTN 0)`，`load_ff` 只加在 OUTN。指标证据显式保存 `output_mode=single_ended_outn`。
+- live 先暴露 `PM0/PM1` 会被 Spectre 解释为 port primitive；失败日志被保留，RD 基线精确恢复，固定模板改用 `MP0/MP1` 后再继续，没有把执行错误包装成电路不可行。
+- 同一 OA/自动网表完成 DC、AC/CMRR、10 点 ICMR、transient 和 noise。最终 `Wn=Wp(load)=1.5 µm`、`L=30 nm` 得到增益 `3.7421 V/V`、带宽 `2.9756 GHz`、GBW `11.1351 GHz`、CMRR `34.8451 dB`、50 mVpeak THD `1.5089%` 和输入参考积分噪声 `699.24 µVrms`。
+- 6 点 bias/load 与 6 点 Wn/Wp 搜索、预算耗尽、两点全不可行、两次真实 transport timeout checkpoint/resume 均按既有状态机执行；最佳几何写回并独立回读。恢复 RD 后 placement SHA 精确等于基线，再重建最佳 active load 并以新 DC 复核最终状态。
+
+下一步优先补单模块设计质量指标：PSRR、slew/settling、输出驱动/摆幅边界，或按任务显式启用差分对 PVT；PVT 不默认附加。若继续拓扑能力，则把 `RS0/RS1 + MP0/MP1` 定义成独立组合 Gate。当前 P1dB 未在 5–50 mVpeak 范围内被包围，PMOS L 尚未进入 live 搜索；差分对 ADE/Maestro setup、人工打开/调整/重跑、mismatch/Monte Carlo 和多 test/multi-analysis 仍未闭合。
 
 ## 升级原则
 

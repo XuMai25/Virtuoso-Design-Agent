@@ -54,6 +54,10 @@ class SchematicTransformAction(str, Enum):
     ADD_SOURCE_DEGENERATION = "add_source_degeneration"
     REMOVE_SOURCE_DEGENERATION = "remove_source_degeneration"
     ADD_TAIL_DEVICE = "add_tail_device"
+    REPLACE_RESISTIVE_LOAD_WITH_CURRENT_MIRROR = (
+        "replace_resistive_load_with_current_mirror"
+    )
+    RESTORE_RESISTIVE_LOAD = "restore_resistive_load"
 
 
 class SchematicTransformSpec(StrictModel):
@@ -1901,6 +1905,8 @@ class TaskSpec(StrictModel):
                     SchematicTransformAction.ADD_TAIL_DEVICE,
                     SchematicTransformAction.ADD_SOURCE_DEGENERATION,
                     SchematicTransformAction.REMOVE_SOURCE_DEGENERATION,
+                    SchematicTransformAction.REPLACE_RESISTIVE_LOAD_WITH_CURRENT_MIRROR,
+                    SchematicTransformAction.RESTORE_RESISTIVE_LOAD,
                 }
                 if action not in supported_actions:
                     raise ValueError(
@@ -1910,11 +1916,14 @@ class TaskSpec(StrictModel):
                     self.schematic_transform.expected_restored_placement_sha256
                     is not None
                     and action
-                    is not SchematicTransformAction.REMOVE_SOURCE_DEGENERATION
+                    not in {
+                        SchematicTransformAction.REMOVE_SOURCE_DEGENERATION,
+                        SchematicTransformAction.RESTORE_RESISTIVE_LOAD,
+                    }
                 ):
                     raise ValueError(
-                        "expected_restored_placement_sha256 is valid only for "
-                        "remove_source_degeneration"
+                        "expected_restored_placement_sha256 is valid only for a "
+                        "restoring transform"
                     )
                 if action is SchematicTransformAction.ADD_TAIL_DEVICE and not self.parameters:
                     raise ValueError(
@@ -1933,6 +1942,22 @@ class TaskSpec(StrictModel):
                 ):
                     raise ValueError(
                         "remove_source_degeneration does not accept parameters"
+                    )
+                if (
+                    action
+                    is SchematicTransformAction.REPLACE_RESISTIVE_LOAD_WITH_CURRENT_MIRROR
+                    and not self.parameters
+                ):
+                    raise ValueError(
+                        "replace_resistive_load_with_current_mirror requires "
+                        "pmos_load_width_um and pmos_load_length_um"
+                    )
+                if (
+                    action is SchematicTransformAction.RESTORE_RESISTIVE_LOAD
+                    and not self.parameters
+                ):
+                    raise ValueError(
+                        "restore_resistive_load requires load_resistance_ohm"
                     )
             else:
                 if self.schematic_transform is not None:

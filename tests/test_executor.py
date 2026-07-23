@@ -5394,3 +5394,136 @@ def test_source_resistance_uses_the_existing_dc_tuning_path() -> None:
     assert all(
         "source_voltage_v" in candidate.metrics for candidate in record.candidates
     )
+
+
+def test_differential_pair_demo_current_mirror_load_is_tunable_and_reversible() -> None:
+    adapter = DeterministicDemoAdapter()
+    executor = TaskExecutor(adapter)
+    target = {"library": "vda_test", "cell": "vda_diffpair_active"}
+
+    def execute(payload: dict):
+        task = TaskSpec.model_validate(payload)
+        plan = build_plan(task)
+        return executor.execute(task, plan, token=plan.confirmation_token)
+
+    write_safety = {
+        "allow_remote_write": True,
+        "allowed_library": "vda_test",
+    }
+    assert execute(
+        {
+            "id": "active-create",
+            "operation": "schematic.create",
+            "circuit": "differential_pair",
+            "target": target,
+            "parameters": {
+                "input_width_um": 1.0,
+                "length_um": 0.03,
+                "load_resistance_ohm": 10_000.0,
+            },
+            "safety": write_safety,
+        }
+    ).status is RunStatus.SUCCEEDED
+    assert execute(
+        {
+            "id": "active-tail",
+            "operation": "schematic.transform",
+            "circuit": "differential_pair",
+            "target": target,
+            "schematic_transform": {"action": "add_tail_device"},
+            "parameters": {"tail_width_um": 0.8, "tail_length_um": 0.03},
+            "safety": write_safety,
+        }
+    ).status is RunStatus.SUCCEEDED
+    forward = execute(
+        {
+            "id": "active-forward",
+            "operation": "schematic.transform",
+            "circuit": "differential_pair",
+            "target": target,
+            "schematic_transform": {
+                "action": "replace_resistive_load_with_current_mirror"
+            },
+            "parameters": {
+                "pmos_load_width_um": 2.0,
+                "pmos_load_length_um": 0.03,
+            },
+            "safety": write_safety,
+        }
+    )
+    assert forward.status is RunStatus.SUCCEEDED
+    inspect_task = TaskSpec.model_validate(
+        {
+            "id": "active-inspect",
+            "operation": "schematic.inspect",
+            "circuit": "differential_pair",
+            "target": target,
+        }
+    )
+    forward_readback = adapter.inspect_schematic(inspect_task).data
+    assert forward_readback["topology_variant"] == (
+        "pmos_current_mirror_load_nmos_differential_pair_with_tail_device"
+    )
+    assert {item["name"] for item in forward_readback["instances"]} == {
+        "MN0",
+        "MN1",
+        "MNTAIL",
+        "MP0",
+        "MP1",
+    }
+
+    applied = execute(
+        {
+            "id": "active-retarget",
+            "operation": "parameters.apply",
+            "circuit": "differential_pair",
+            "target": target,
+            "parameters": {"pmos_load_width_um": 2.4},
+            "safety": write_safety,
+        }
+    )
+    assert applied.status is RunStatus.SUCCEEDED
+    assert adapter.inspect_schematic(inspect_task).data["semantic_parameters"][
+        "pmos_load_width_um"
+    ] == pytest.approx(2.4)
+
+    ac = execute(
+        {
+            "id": "active-ac",
+            "operation": "simulation.run",
+            "circuit": "differential_pair",
+            "target": target,
+            "analysis": "ac",
+            "ac_sweep": {"start_hz": 1e3, "stop_hz": 1e12},
+            "parameters": {
+                "tail_bias_v": 0.30,
+                "common_mode_v": 0.55,
+                "vdd_v": 0.9,
+                "load_ff": 1.0,
+            },
+            "safety": {"allow_remote_compute": True},
+        }
+    )
+    assert ac.status is RunStatus.SUCCEEDED
+    assert ac.selected_metrics["both_load_saturation_region"] == 1.0
+    assert ac.selected_metrics["differential_bandwidth_3db_hz"] > 0.0
+    assert ac.selected_metrics["low_frequency_cmrr_db"] > 0.0
+
+    restored = execute(
+        {
+            "id": "active-restore",
+            "operation": "schematic.transform",
+            "circuit": "differential_pair",
+            "target": target,
+            "schematic_transform": {"action": "restore_resistive_load"},
+            "parameters": {"load_resistance_ohm": 10_000.0},
+            "safety": write_safety,
+        }
+    )
+    assert restored.status is RunStatus.SUCCEEDED
+    final_readback = adapter.inspect_schematic(inspect_task).data
+    assert final_readback["topology_variant"] == (
+        "resistive_load_nmos_differential_pair_with_tail_device"
+    )
+    assert final_readback["semantic_parameters"]["load_resistance_ohm"] == 10_000.0
+    assert "pmos_load_width_um" not in final_readback["semantic_parameters"]

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-current-mirror-inspect-bridge",
+  "operation": "schematic.inspect",
+  "circuit": "differential_pair",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_diffpair_active_gate6_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": false,
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}

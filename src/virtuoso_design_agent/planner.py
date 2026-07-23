@@ -159,8 +159,9 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         )
         if differential_pair_cmrr
         else (
-            "从 VINP-INN 与 VOUTP-OUTN 的相干稳态窗口提取差分增益、"
-            "HD2/HD3、THD、P1dB 和真实 VDD 功耗，并结合双支路 DC/KCL 判定规格"
+            "从 VINP-INN 与拓扑定义输出（电阻负载为 OUTP-OUTN，电流镜负载为 "
+            "OUTN）的相干稳态窗口提取增益、HD2/HD3、THD、P1dB 和真实 VDD "
+            "功耗，并结合双支路 DC/KCL 判定规格"
         )
         if differential_pair_linearity
         else (
@@ -174,8 +175,9 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         )
         if common_source_noise
         else (
-            "积分差分输出与输入参考噪声密度，并结合真实尾管工作区、真实 VDD "
-            "功耗及双支路 DC/KCL 逐条判断规格"
+            "积分拓扑定义输出（电阻负载为 OUTP-OUTN，电流镜负载为 OUTN）与"
+            "输入参考噪声密度，并结合真实尾管工作区、真实 VDD 功耗及双支路 "
+            "DC/KCL 逐条判断规格"
         )
         if differential_pair_noise
         else (
@@ -696,6 +698,34 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                     "在同一真实尾管差分对 cellview 内仅删除 RS0/RS1 及各自的 "
                     "VDA 端子 stub，把 MN0.S/MN1.S 从 NSP/NSN 恢复到 TAIL，"
                     "并移除两个内部网；保留核心、MNTAIL、pins 与实例参数"
+                )
+                if (
+                    task.schematic_transform is not None
+                    and task.schematic_transform.expected_restored_placement_sha256
+                    is not None
+                ):
+                    description += "；恢复后 placement SHA-256 必须与声明基线一致"
+            elif (
+                transform_action
+                is SchematicTransformAction.REPLACE_RESISTIVE_LOAD_WITH_CURRENT_MIRROR
+            ):
+                capability = (
+                    "schematic.transform.differential-pair-current-mirror-load"
+                )
+                description = (
+                    "在同一真实尾管、无源退化的差分对 cellview 内仅删除 "
+                    "RD0/RD1 及其 VDA 端子 stub，新增匹配 MP0/MP1；MP0 二极管"
+                    "连接到 OUTP，MP1 镜像到 OUTN，并按 pmos_load_width_um/"
+                    "pmos_load_length_um 设置；保留 MN0/MN1/MNTAIL、pins 与 nets"
+                )
+            elif transform_action is SchematicTransformAction.RESTORE_RESISTIVE_LOAD:
+                capability = (
+                    "schematic.transform.differential-pair-current-mirror-load.remove"
+                )
+                description = (
+                    "在同一 PMOS 电流镜负载差分对 cellview 内仅删除 MP0/MP1 "
+                    "及其 VDA 端子 stub，按 load_resistance_ohm 恢复 RD0/RD1；"
+                    "保留 MN0/MN1/MNTAIL、pins 与 nets"
                 )
                 if (
                     task.schematic_transform is not None

@@ -63,6 +63,8 @@ OA_SEMANTIC_PARAMETER_NAMES: dict[CircuitKind, frozenset[str]] = {
             "source_resistance_ohm",
             "tail_width_um",
             "tail_length_um",
+            "pmos_load_width_um",
+            "pmos_load_length_um",
         }
     ),
 }
@@ -161,7 +163,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     ),
     CircuitKind.DIFFERENTIAL_PAIR: CircuitCapability(
         circuit=CircuitKind.DIFFERENTIAL_PAIR,
-        stage="Gate 5 reversible symmetric source-degeneration verified",
+        stage="Gate 6 current-mirror load verified at nominal TSMC N28",
         executable=True,
         operations=(
             Operation.SCHEMATIC_CREATE,
@@ -179,6 +181,8 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "source_resistance_ohm",
             "tail_width_um",
             "tail_length_um",
+            "pmos_load_width_um",
+            "pmos_load_length_um",
             "tail_current_ua",
             "tail_output_resistance_ohm",
             "tail_bias_v",
@@ -197,7 +201,12 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "AC gain/bandwidth/GBW + finite-tail paired CMRR response/bandwidth + "
             "sampled input-common-mode range + coherent differential transient "
             "THD/P1dB + differential noise + real-tail bias/width and source-R "
-            "tuning live on TSMC N28"
+            "tuning live on TSMC N28; reversible PMOS current-mirror-load delta, "
+            "matched W/L surface, DC mirror/KCL/region metrics, explicit "
+            "single-ended OUTN AC/CMRR/transient/noise semantics, ICMR, bounded "
+            "bias/load and geometry search, budget/infeasible paths, exact "
+            "restore, and checkpoint recovery are live at nominal TSMC N28; "
+            "PVT/mismatch/PSRR/slew/ADE handoff remain pending"
         ),
     ),
 }
@@ -246,6 +255,13 @@ def validate_task_capability(task: TaskSpec) -> None:
                 expected = {"tail_width_um", "tail_length_um"}
             elif transform_action is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION:
                 expected = set()
+            elif (
+                transform_action
+                is SchematicTransformAction.REPLACE_RESISTIVE_LOAD_WITH_CURRENT_MIRROR
+            ):
+                expected = {"pmos_load_width_um", "pmos_load_length_um"}
+            elif transform_action is SchematicTransformAction.RESTORE_RESISTIVE_LOAD:
+                expected = {"load_resistance_ohm"}
             else:
                 expected = {"source_resistance_ohm"}
         elif transform_action is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION:
@@ -267,6 +283,18 @@ def validate_task_capability(task: TaskSpec) -> None:
                 if transform_action is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION:
                     raise UnsupportedCapability(
                         "remove_source_degeneration does not accept parameters"
+                    )
+                if (
+                    transform_action
+                    is SchematicTransformAction.REPLACE_RESISTIVE_LOAD_WITH_CURRENT_MIRROR
+                ):
+                    raise UnsupportedCapability(
+                        "replace_resistive_load_with_current_mirror requires exactly "
+                        "pmos_load_width_um and pmos_load_length_um"
+                    )
+                if transform_action is SchematicTransformAction.RESTORE_RESISTIVE_LOAD:
+                    raise UnsupportedCapability(
+                        "restore_resistive_load requires exactly load_resistance_ohm"
                     )
                 raise UnsupportedCapability(
                     "add_source_degeneration requires exactly source_resistance_ohm"
@@ -311,11 +339,17 @@ def validate_task_capability(task: TaskSpec) -> None:
     if (
         task.circuit is CircuitKind.DIFFERENTIAL_PAIR
         and task.operation is Operation.SCHEMATIC_CREATE
-        and supplied & {"tail_width_um", "tail_length_um"}
+        and supplied
+        & {
+            "tail_width_um",
+            "tail_length_um",
+            "pmos_load_width_um",
+            "pmos_load_length_um",
+        }
     ):
         raise UnsupportedCapability(
             "schematic.create builds the nominal differential-pair core; use "
-            "schematic.transform add_tail_device for tail_width_um/tail_length_um"
+            "schematic.transform for tail-device or active-load geometry"
         )
     if (
         task.circuit is CircuitKind.DIFFERENTIAL_PAIR

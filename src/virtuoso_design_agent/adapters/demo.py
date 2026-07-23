@@ -428,14 +428,19 @@ class DeterministicDemoAdapter:
                 "resistive_load_nmos_differential_pair",
                 "resistive_load_nmos_differential_pair_with_tail_device",
                 "resistive_load_nmos_differential_pair_with_tail_device_and_source_degeneration",
+                "pmos_current_mirror_load_nmos_differential_pair_with_tail_device",
             }
             if variant not in supported:
                 raise RuntimeError(f"unsupported demo topology variant: {variant}")
             transform_action = task.resolved_schematic_transform_action()
             if transform_action is SchematicTransformAction.ADD_TAIL_DEVICE:
-                if variant.endswith("source_degeneration"):
+                if variant not in {
+                    "resistive_load_nmos_differential_pair",
+                    "resistive_load_nmos_differential_pair_with_tail_device",
+                }:
                     raise RuntimeError(
-                        "add_tail_device is not valid after source degeneration"
+                        "add_tail_device supports only the nominal or already-real-tail "
+                        "resistive-load differential pair"
                     )
                 changed = variant == "resistive_load_nmos_differential_pair"
                 tail_width_um = float(task.parameters["tail_width_um"])
@@ -497,9 +502,177 @@ class DeterministicDemoAdapter:
                     evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
                 )
 
+            active_load_variant = (
+                "pmos_current_mirror_load_nmos_differential_pair_with_tail_device"
+            )
             real_tail_variant = (
                 "resistive_load_nmos_differential_pair_with_tail_device"
             )
+            if (
+                transform_action
+                is SchematicTransformAction.REPLACE_RESISTIVE_LOAD_WITH_CURRENT_MIRROR
+            ):
+                if variant not in {real_tail_variant, active_load_variant}:
+                    raise RuntimeError(
+                        "current-mirror-load transform requires an undegenerated "
+                        "real-tail differential pair"
+                    )
+                changed = variant == real_tail_variant
+                width = float(task.parameters["pmos_load_width_um"])
+                length = float(task.parameters["pmos_load_length_um"])
+                if changed:
+                    schematic["instances"] = [
+                        item
+                        for item in schematic["instances"]
+                        if item.get("name") not in {"RD0", "RD1"}
+                    ]
+                    schematic["instance_parameters"].pop("RD0", None)
+                    schematic["instance_parameters"].pop("RD1", None)
+                    schematic["instances"].extend(
+                        [
+                            {
+                                "name": "MP0",
+                                "library": "demo_pdk",
+                                "cell": "pmos",
+                                "parameters": {},
+                                "terminals": {
+                                    "D": "OUTP",
+                                    "G": "OUTP",
+                                    "S": "VDD",
+                                    "B": "VDD",
+                                },
+                                "xy": [-0.8, 1.3],
+                                "orient": "R0",
+                            },
+                            {
+                                "name": "MP1",
+                                "library": "demo_pdk",
+                                "cell": "pmos",
+                                "parameters": {},
+                                "terminals": {
+                                    "D": "OUTN",
+                                    "G": "OUTP",
+                                    "S": "VDD",
+                                    "B": "VDD",
+                                },
+                                "xy": [0.8, 1.3],
+                                "orient": "R0",
+                            },
+                        ]
+                    )
+                    schematic["semantic_parameters"].pop(
+                        "load_resistance_ohm", None
+                    )
+                    schematic["parameters"].pop("load_resistance_ohm", None)
+                    schematic["topology_variant"] = active_load_variant
+                pmos_parameters = {
+                    "Wfg": f"{width:.12g}u",
+                    "l": f"{length:.12g}u",
+                    "fingers": "1",
+                    "m": "1",
+                }
+                for name in ("MP0", "MP1"):
+                    schematic["instance_parameters"][name] = dict(pmos_parameters)
+                    for item in schematic["instances"]:
+                        if item.get("name") == name:
+                            item["parameters"] = dict(pmos_parameters)
+                semantic = {
+                    "pmos_load_width_um": width,
+                    "pmos_load_length_um": length,
+                }
+                schematic["semantic_parameters"].update(semantic)
+                schematic["parameters"].update(semantic)
+                return AdapterResult(
+                    data={
+                        "transformed": changed,
+                        "already_transformed": not changed,
+                        "transform_action": transform_action.value,
+                        "topology_delta": {
+                            "removed_instances": ["RD0", "RD1"] if changed else [],
+                            "added_instances": ["MP0", "MP1"] if changed else [],
+                            "preserved_instances": ["MN0", "MN1", "MNTAIL"],
+                        },
+                        "output_contract": {
+                            "input": "INP-INN",
+                            "primary_output": "OUTN",
+                            "mirror_reference": "OUTP",
+                        },
+                        "readback": self.inspect_schematic(task).data,
+                    },
+                    evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+                )
+            if transform_action is SchematicTransformAction.RESTORE_RESISTIVE_LOAD:
+                if variant not in {active_load_variant, real_tail_variant}:
+                    raise RuntimeError(
+                        "restore_resistive_load requires a current-mirror-load "
+                        "differential pair"
+                    )
+                changed = variant == active_load_variant
+                resistance = float(task.parameters["load_resistance_ohm"])
+                if changed:
+                    schematic["instances"] = [
+                        item
+                        for item in schematic["instances"]
+                        if item.get("name") not in {"MP0", "MP1"}
+                    ]
+                    schematic["instance_parameters"].pop("MP0", None)
+                    schematic["instance_parameters"].pop("MP1", None)
+                    schematic["instances"].extend(
+                        [
+                            {
+                                "name": "RD0",
+                                "library": "analogLib",
+                                "cell": "res",
+                                "parameters": {},
+                                "terminals": {"PLUS": "VDD", "MINUS": "OUTP"},
+                                "xy": [-0.8, 1.3],
+                                "orient": "R0",
+                            },
+                            {
+                                "name": "RD1",
+                                "library": "analogLib",
+                                "cell": "res",
+                                "parameters": {},
+                                "terminals": {"PLUS": "VDD", "MINUS": "OUTN"},
+                                "xy": [0.8, 1.3],
+                                "orient": "R0",
+                            },
+                        ]
+                    )
+                    schematic["semantic_parameters"].pop(
+                        "pmos_load_width_um", None
+                    )
+                    schematic["semantic_parameters"].pop(
+                        "pmos_load_length_um", None
+                    )
+                    schematic["parameters"].pop("pmos_load_width_um", None)
+                    schematic["parameters"].pop("pmos_load_length_um", None)
+                    schematic["topology_variant"] = real_tail_variant
+                resistor_parameters = {"r": f"{resistance:.12g}"}
+                for name in ("RD0", "RD1"):
+                    schematic["instance_parameters"][name] = dict(
+                        resistor_parameters
+                    )
+                    for item in schematic["instances"]:
+                        if item.get("name") == name:
+                            item["parameters"] = dict(resistor_parameters)
+                schematic["semantic_parameters"]["load_resistance_ohm"] = resistance
+                schematic["parameters"]["load_resistance_ohm"] = resistance
+                return AdapterResult(
+                    data={
+                        "transformed": changed,
+                        "already_restored": not changed,
+                        "transform_action": transform_action.value,
+                        "topology_delta": {
+                            "removed_instances": ["MP0", "MP1"] if changed else [],
+                            "added_instances": ["RD0", "RD1"] if changed else [],
+                            "preserved_instances": ["MN0", "MN1", "MNTAIL"],
+                        },
+                        "readback": self.inspect_schematic(task).data,
+                    },
+                    evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+                )
+
             degenerated_variant = (
                 "resistive_load_nmos_differential_pair_with_tail_device_and_source_degeneration"
             )
@@ -760,6 +933,23 @@ class DeterministicDemoAdapter:
                 raise RuntimeError(
                     "source_resistance_ohm requires the degenerated real-tail topology"
                 )
+            if (
+                task.circuit is CircuitKind.DIFFERENTIAL_PAIR
+                and "load_resistance_ohm" in parameters
+                and not {"RD0", "RD1"} <= set(schematic["instance_parameters"])
+            ):
+                raise RuntimeError(
+                    "load_resistance_ohm requires the resistive-load topology"
+                )
+            if (
+                task.circuit is CircuitKind.DIFFERENTIAL_PAIR
+                and {"pmos_load_width_um", "pmos_load_length_um"}
+                & parameters.keys()
+                and not {"MP0", "MP1"} <= set(schematic["instance_parameters"])
+            ):
+                raise RuntimeError(
+                    "PMOS load geometry requires the current-mirror-load topology"
+                )
             schematic["parameters"].update(parameters)
             semantic_names = (
                 (
@@ -777,6 +967,8 @@ class DeterministicDemoAdapter:
                         "tail_width_um",
                         "tail_length_um",
                         "source_resistance_ohm",
+                        "pmos_load_width_um",
+                        "pmos_load_length_um",
                     )
                     if task.circuit is CircuitKind.DIFFERENTIAL_PAIR
                     else (
@@ -834,6 +1026,14 @@ class DeterministicDemoAdapter:
                     )
                     for instance in ("RS0", "RS1"):
                         schematic["instance_parameters"][instance]["r"] = resistance
+                if "pmos_load_width_um" in parameters:
+                    width = f"{float(parameters['pmos_load_width_um']):.12g}u"
+                    for instance in ("MP0", "MP1"):
+                        schematic["instance_parameters"][instance]["Wfg"] = width
+                if "pmos_load_length_um" in parameters:
+                    length = f"{float(parameters['pmos_load_length_um']):.12g}u"
+                    for instance in ("MP0", "MP1"):
+                        schematic["instance_parameters"][instance]["l"] = length
             result_data.update(
                 {
                     "applied": dict(parameters),
@@ -1000,14 +1200,22 @@ class DeterministicDemoAdapter:
         if task.circuit is CircuitKind.DIFFERENTIAL_PAIR:
             width_um = effective_parameters["input_width_um"]
             length_um = effective_parameters["length_um"]
-            resistance = effective_parameters["load_resistance_ohm"]
             topology_variant = str(schematic.get("topology_variant"))
+            current_mirror_load = topology_variant == (
+                "pmos_current_mirror_load_nmos_differential_pair_with_tail_device"
+            )
+            resistance = (
+                None
+                if current_mirror_load
+                else float(effective_parameters["load_resistance_ohm"])
+            )
             source_degenerated = topology_variant.endswith(
                 "with_tail_device_and_source_degeneration"
             )
             real_tail = topology_variant in {
                 "resistive_load_nmos_differential_pair_with_tail_device",
                 "resistive_load_nmos_differential_pair_with_tail_device_and_source_degeneration",
+                "pmos_current_mirror_load_nmos_differential_pair_with_tail_device",
             }
             source_resistance = (
                 float(effective_parameters["source_resistance_ohm"])
@@ -1078,9 +1286,24 @@ class DeterministicDemoAdapter:
             )
             branch_source_v = common_mode_v - 0.25 - overdrive_v
             tail_v = branch_source_v - branch_current_a * source_resistance
-            output_v = vdd_v - branch_current_a * resistance
             gm_s = 2.0 * branch_current_a / overdrive_v
             gds_s = max(gm_s / 20.0, 1e-9)
+            pmos_overdrive_v: float | None = None
+            pmos_gm_s: float | None = None
+            pmos_gds_s: float | None = None
+            if current_mirror_load:
+                pmos_width_um = effective_parameters["pmos_load_width_um"]
+                pmos_length_um = effective_parameters["pmos_load_length_um"]
+                pmos_beta_a_per_v2 = 100e-6 * pmos_width_um / pmos_length_um
+                pmos_overdrive_v = math.sqrt(
+                    max(2.0 * branch_current_a / pmos_beta_a_per_v2, 1e-12)
+                )
+                pmos_gm_s = 2.0 * branch_current_a / pmos_overdrive_v
+                pmos_gds_s = max(pmos_gm_s / 20.0, 1e-9)
+                output_v = vdd_v - 0.25 - pmos_overdrive_v
+            else:
+                assert resistance is not None
+                output_v = vdd_v - branch_current_a * resistance
             metrics = extract_differential_pair_dc_metrics(
                 vdd_v=vdd_v,
                 common_mode_v=common_mode_v,
@@ -1100,6 +1323,14 @@ class DeterministicDemoAdapter:
                 load_resistance_ohm=resistance,
                 branch_p_source_v=branch_source_v,
                 branch_n_source_v=branch_source_v,
+                load_p_current_a=(branch_current_a if current_mirror_load else None),
+                load_n_current_a=(branch_current_a if current_mirror_load else None),
+                load_p_vdsat_v=pmos_overdrive_v,
+                load_n_vdsat_v=pmos_overdrive_v,
+                load_p_gm_s=pmos_gm_s,
+                load_n_gm_s=pmos_gm_s,
+                load_p_gds_s=pmos_gds_s,
+                load_n_gds_s=pmos_gds_s,
             )
             if source_degenerated:
                 metrics.update(
@@ -1165,7 +1396,20 @@ class DeterministicDemoAdapter:
                     "operating-point constraint: MNTAIL is not in saturation; "
                     "use tail_device_saturation_region to evaluate feasibility"
                 )
-            output_resistance = 1.0 / (1.0 / resistance + gds_s)
+            if (
+                current_mirror_load
+                and metrics["both_load_saturation_region"] != 1.0
+            ):
+                analysis_warnings.append(
+                    "operating-point constraint: MP0/MP1 are not both in "
+                    "saturation; use both_load_saturation_region to evaluate "
+                    "feasibility"
+                )
+            output_resistance = (
+                1.0 / (gds_s + float(pmos_gds_s))
+                if current_mirror_load
+                else 1.0 / (1.0 / float(resistance) + gds_s)
+            )
             effective_gm_s = gm_s / (1.0 + gm_s * source_resistance)
             low_frequency_gain = effective_gm_s * output_resistance
             noise_diagnostics: dict[str, object] = {}
@@ -1192,14 +1436,30 @@ class DeterministicDemoAdapter:
                     -low_frequency_gain / (1.0 + 1j * frequency / pole_hz)
                     for frequency in frequency_hz
                 ]
+                differential_outp = (
+                    [0.0j] * len(frequency_hz)
+                    if current_mirror_load
+                    else [0.5 * value for value in transfer]
+                )
+                differential_outn = (
+                    transfer
+                    if current_mirror_load
+                    else [-0.5 * value for value in transfer]
+                )
+                output_mode = (
+                    "single_ended_outn"
+                    if current_mirror_load
+                    else "differential"
+                )
                 ac_metrics, diagnostics = extract_differential_pair_ac_metrics(
                     frequency_hz,
                     [0.5 + 0.0j] * len(frequency_hz),
                     [-0.5 + 0.0j] * len(frequency_hz),
-                    [0.5 * value for value in transfer],
-                    [-0.5 * value for value in transfer],
+                    differential_outp,
+                    differential_outn,
                     reference_points=sweep.reference_points,
                     max_reference_variation_db=sweep.max_reference_variation_db,
+                    output_mode=output_mode,
                 )
                 metrics.update(ac_metrics)
                 analysis_issues.extend(
@@ -1247,6 +1507,7 @@ class DeterministicDemoAdapter:
                         max_reference_variation_db=(
                             sweep.max_reference_variation_db
                         ),
+                        output_mode=output_mode,
                     )
                     metrics.update(common_mode_metrics)
                     cmrr_metrics, cmrr_diagnostics = (
@@ -1254,8 +1515,8 @@ class DeterministicDemoAdapter:
                             frequency_hz,
                             [0.5 + 0.0j] * len(frequency_hz),
                             [-0.5 + 0.0j] * len(frequency_hz),
-                            [0.5 * value for value in transfer],
-                            [-0.5 * value for value in transfer],
+                            differential_outp,
+                            differential_outn,
                             frequency_hz,
                             [1.0 + 0.0j] * len(frequency_hz),
                             [1.0 + 0.0j] * len(frequency_hz),
@@ -1265,6 +1526,7 @@ class DeterministicDemoAdapter:
                             max_reference_variation_db=(
                                 sweep.max_reference_variation_db
                             ),
+                            output_mode=output_mode,
                         )
                     )
                     metrics.update(cmrr_metrics)
@@ -1344,6 +1606,11 @@ class DeterministicDemoAdapter:
                         amplitudes,
                         point_metrics,
                         compression_db=task.linearity_sweep.compression_db,
+                        output_mode=(
+                            "single_ended_outn"
+                            if current_mirror_load
+                            else "differential"
+                        ),
                     )
                 )
                 metrics.update(linearity_metrics)
