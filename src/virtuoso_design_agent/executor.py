@@ -57,6 +57,7 @@ _COMMON_SOURCE_OPTIONAL_OA_PARAMETERS = ("source_resistance_ohm",)
 _DIFFERENTIAL_PAIR_OPTIONAL_OA_PARAMETERS = (
     "tail_width_um",
     "tail_length_um",
+    "source_resistance_ohm",
 )
 
 
@@ -735,6 +736,308 @@ class TaskExecutor:
             "resistive_load_nmos_differential_pair_with_tail_device"
         ):
             raise RuntimeError("tail-device transform returned the wrong topology variant")
+
+    @classmethod
+    def _assert_differential_pair_source_degeneration_delta(
+        cls,
+        before: AdapterResult,
+        after: AdapterResult,
+        source_resistance_ohm: float,
+    ) -> None:
+        before_data = before.data
+        after_data = after.data
+        before_instances = cls._instances_by_name(before_data)
+        after_instances = cls._instances_by_name(after_data)
+        preserved_names = {"MN0", "MN1", "RD0", "RD1", "MNTAIL"}
+        degenerated_names = preserved_names | {"RS0", "RS1"}
+        before_names = set(before_instances)
+        if frozenset(before_names) not in {
+            frozenset(preserved_names),
+            frozenset(degenerated_names),
+        }:
+            raise RuntimeError(
+                "differential source-degeneration transform requires the exact "
+                "real-tail differential-pair instance set"
+            )
+        if set(after_instances) != degenerated_names:
+            raise RuntimeError(
+                "differential source-degeneration transform did not produce exactly "
+                "MN0/MN1/RD0/RD1/MNTAIL/RS0/RS1"
+            )
+
+        expected_static_terminals = {
+            "RD0": {"PLUS": "VDD", "MINUS": "OUTP"},
+            "RD1": {"PLUS": "VDD", "MINUS": "OUTN"},
+            "MNTAIL": {"D": "TAIL", "G": "BIAS", "S": "VSS", "B": "VSS"},
+        }
+        for name, terminals in expected_static_terminals.items():
+            if before_instances[name].get("terminals") != terminals:
+                raise RuntimeError(
+                    f"differential source-degeneration transform found unexpected "
+                    f"{name} terminals"
+                )
+            if after_instances[name].get("terminals") != terminals:
+                raise RuntimeError(
+                    f"differential source-degeneration transform changed {name}"
+                )
+        before_sources = (
+            {"MN0": "NSP", "MN1": "NSN"}
+            if before_names == degenerated_names
+            else {"MN0": "TAIL", "MN1": "TAIL"}
+        )
+        for name, drain, gate in (
+            ("MN0", "OUTP", "INP"),
+            ("MN1", "OUTN", "INN"),
+        ):
+            if before_instances[name].get("terminals") != {
+                "D": drain,
+                "G": gate,
+                "S": before_sources[name],
+                "B": "VSS",
+            }:
+                raise RuntimeError(
+                    f"differential source-degeneration transform found unexpected "
+                    f"{name} topology"
+                )
+            if after_instances[name].get("terminals") != {
+                "D": drain,
+                "G": gate,
+                "S": "NSP" if name == "MN0" else "NSN",
+                "B": "VSS",
+            }:
+                raise RuntimeError(
+                    f"differential source-degeneration transform did not reconnect "
+                    f"{name}.S"
+                )
+        expected_resistors = {
+            "RS0": {"PLUS": "NSP", "MINUS": "TAIL"},
+            "RS1": {"PLUS": "NSN", "MINUS": "TAIL"},
+        }
+        for name, terminals in expected_resistors.items():
+            if after_instances[name].get("terminals") != terminals:
+                raise RuntimeError(f"{name} has unexpected differential degeneration wiring")
+            if (
+                after_instances[name].get("library"),
+                after_instances[name].get("cell"),
+            ) != ("analogLib", "res"):
+                raise RuntimeError(f"{name} is not an analogLib resistor")
+
+        if before_data.get("pins") != after_data.get("pins"):
+            raise RuntimeError(
+                "differential source-degeneration transform changed top-level pins"
+            )
+        before_nets = set(before_data.get("nets", []))
+        after_nets = set(after_data.get("nets", []))
+        if after_nets != before_nets | {"NSP", "NSN"}:
+            raise RuntimeError(
+                "differential source-degeneration transform changed nets beyond "
+                "adding NSP/NSN"
+            )
+
+        before_parameters = before_data.get("instance_parameters")
+        after_parameters = after_data.get("instance_parameters")
+        if not isinstance(before_parameters, dict) or not isinstance(
+            after_parameters, dict
+        ):
+            raise RuntimeError(
+                "differential source-degeneration transform is missing complete "
+                "instance parameter readback"
+            )
+        for name in sorted(preserved_names):
+            if before_parameters.get(name) != after_parameters.get(name):
+                raise RuntimeError(
+                    "differential source-degeneration transform unexpectedly changed "
+                    f"{name} parameters"
+                )
+
+        immutable_fields = (
+            "library",
+            "cell",
+            "xy",
+            "orient",
+            "bBox",
+            "numInst",
+            "view",
+            "parameters",
+        )
+        for name in sorted(preserved_names):
+            for field in immutable_fields:
+                if before_instances[name].get(field) != after_instances[name].get(field):
+                    raise RuntimeError(
+                        "differential source-degeneration transform unexpectedly "
+                        f"changed {name}.{field}"
+                    )
+        if before_names == degenerated_names:
+            for name in ("RS0", "RS1"):
+                for field in immutable_fields[:-1]:
+                    if before_instances[name].get(field) != after_instances[name].get(field):
+                        raise RuntimeError(
+                            "repeated differential source-degeneration transform "
+                            f"changed {name}.{field}"
+                        )
+
+        semantic = after_data.get("semantic_parameters")
+        if not isinstance(semantic, dict) or "source_resistance_ohm" not in semantic:
+            raise RuntimeError(
+                "differential source resistance is missing from semantic OA readback"
+            )
+        actual = float(semantic["source_resistance_ohm"])
+        tolerance = max(abs(float(source_resistance_ohm)) * 1e-6, 1e-9)
+        if abs(actual - float(source_resistance_ohm)) > tolerance:
+            raise RuntimeError(
+                "RS0/RS1 resistance does not match the requested source degeneration"
+            )
+        if after_data.get("topology_variant") != (
+            "resistive_load_nmos_differential_pair_with_tail_device_and_source_degeneration"
+        ):
+            raise RuntimeError(
+                "differential source-degeneration transform returned the wrong variant"
+            )
+
+    @classmethod
+    def _assert_differential_pair_source_degeneration_removal_delta(
+        cls,
+        before: AdapterResult,
+        after: AdapterResult,
+    ) -> None:
+        before_data = before.data
+        after_data = after.data
+        before_instances = cls._instances_by_name(before_data)
+        after_instances = cls._instances_by_name(after_data)
+        restored_names = {"MN0", "MN1", "RD0", "RD1", "MNTAIL"}
+        degenerated_names = restored_names | {"RS0", "RS1"}
+        before_names = set(before_instances)
+        if frozenset(before_names) not in {
+            frozenset(restored_names),
+            frozenset(degenerated_names),
+        }:
+            raise RuntimeError(
+                "differential source-degeneration removal requires the exact "
+                "real-tail or degenerated real-tail instance set"
+            )
+        if set(after_instances) != restored_names:
+            raise RuntimeError(
+                "differential source-degeneration removal did not restore exactly "
+                "MN0/MN1/RD0/RD1/MNTAIL"
+            )
+
+        expected_static_terminals = {
+            "RD0": {"PLUS": "VDD", "MINUS": "OUTP"},
+            "RD1": {"PLUS": "VDD", "MINUS": "OUTN"},
+            "MNTAIL": {"D": "TAIL", "G": "BIAS", "S": "VSS", "B": "VSS"},
+        }
+        for name, terminals in expected_static_terminals.items():
+            if before_instances[name].get("terminals") != terminals:
+                raise RuntimeError(
+                    f"differential source-degeneration removal found unexpected "
+                    f"{name} terminals"
+                )
+            if after_instances[name].get("terminals") != terminals:
+                raise RuntimeError(
+                    f"differential source-degeneration removal changed {name}"
+                )
+        for name, drain, gate, degenerated_source in (
+            ("MN0", "OUTP", "INP", "NSP"),
+            ("MN1", "OUTN", "INN", "NSN"),
+        ):
+            before_source = (
+                degenerated_source
+                if before_names == degenerated_names
+                else "TAIL"
+            )
+            if before_instances[name].get("terminals") != {
+                "D": drain,
+                "G": gate,
+                "S": before_source,
+                "B": "VSS",
+            }:
+                raise RuntimeError(
+                    f"differential source-degeneration removal found unexpected "
+                    f"{name} topology"
+                )
+            if after_instances[name].get("terminals") != {
+                "D": drain,
+                "G": gate,
+                "S": "TAIL",
+                "B": "VSS",
+            }:
+                raise RuntimeError(
+                    f"differential source-degeneration removal did not restore "
+                    f"{name}.S to TAIL"
+                )
+        if before_names == degenerated_names:
+            if before_instances["RS0"].get("terminals") != {
+                "PLUS": "NSP",
+                "MINUS": "TAIL",
+            } or before_instances["RS1"].get("terminals") != {
+                "PLUS": "NSN",
+                "MINUS": "TAIL",
+            }:
+                raise RuntimeError(
+                    "differential source-degeneration removal found unexpected "
+                    "RS0/RS1 wiring"
+                )
+
+        if before_data.get("pins") != after_data.get("pins"):
+            raise RuntimeError(
+                "differential source-degeneration removal changed top-level pins"
+            )
+        expected_nets = set(before_data.get("nets", [])) - (
+            {"NSP", "NSN"} if before_names == degenerated_names else set()
+        )
+        if set(after_data.get("nets", [])) != expected_nets:
+            raise RuntimeError(
+                "differential source-degeneration removal changed nets beyond "
+                "removing NSP/NSN"
+            )
+
+        before_parameters = before_data.get("instance_parameters")
+        after_parameters = after_data.get("instance_parameters")
+        if not isinstance(before_parameters, dict) or not isinstance(
+            after_parameters, dict
+        ):
+            raise RuntimeError(
+                "differential source-degeneration removal is missing complete "
+                "instance parameter readback"
+            )
+        for name in sorted(restored_names):
+            if before_parameters.get(name) != after_parameters.get(name):
+                raise RuntimeError(
+                    "differential source-degeneration removal unexpectedly changed "
+                    f"{name} parameters"
+                )
+        immutable_fields = (
+            "library",
+            "cell",
+            "xy",
+            "orient",
+            "bBox",
+            "numInst",
+            "view",
+            "parameters",
+        )
+        for name in sorted(restored_names):
+            for field in immutable_fields:
+                if before_instances[name].get(field) != after_instances[name].get(field):
+                    raise RuntimeError(
+                        "differential source-degeneration removal unexpectedly "
+                        f"changed {name}.{field}"
+                    )
+        semantic = after_data.get("semantic_parameters")
+        if not isinstance(semantic, dict):
+            raise RuntimeError(
+                "differential source-degeneration removal is missing semantic readback"
+            )
+        if "source_resistance_ohm" in semantic:
+            raise RuntimeError(
+                "differential source-degeneration removal left source resistance"
+            )
+        if after_data.get("topology_variant") != (
+            "resistive_load_nmos_differential_pair_with_tail_device"
+        ):
+            raise RuntimeError(
+                "differential source-degeneration removal returned the wrong variant"
+            )
 
     @classmethod
     def _assert_source_degeneration_removal_delta(
@@ -2655,9 +2958,23 @@ class TaskExecutor:
                         else "schematic.transform.source-degeneration"
                     )
                 elif task.circuit is CircuitKind.DIFFERENTIAL_PAIR:
-                    transform_action = (
-                        "schematic.transform.differential-pair-tail-device"
-                    )
+                    if resolved_transform is SchematicTransformAction.ADD_TAIL_DEVICE:
+                        transform_action = (
+                            "schematic.transform.differential-pair-tail-device"
+                        )
+                    elif (
+                        resolved_transform
+                        is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION
+                    ):
+                        transform_action = (
+                            "schematic.transform.differential-pair-source-"
+                            "degeneration.remove"
+                        )
+                    else:
+                        transform_action = (
+                            "schematic.transform.differential-pair-source-"
+                            "degeneration"
+                        )
                 transformed = self._action(
                     transform_action,
                     lambda: self.adapter.transform_schematic(task),
@@ -2698,12 +3015,26 @@ class TaskExecutor:
                         float(task.parameters["load_ff"]),
                     )
                 elif task.circuit is CircuitKind.DIFFERENTIAL_PAIR:
-                    self._assert_differential_pair_tail_device_delta(
-                        before,
-                        after,
-                        float(task.parameters["tail_width_um"]),
-                        float(task.parameters["tail_length_um"]),
-                    )
+                    if resolved_transform is SchematicTransformAction.ADD_TAIL_DEVICE:
+                        self._assert_differential_pair_tail_device_delta(
+                            before,
+                            after,
+                            float(task.parameters["tail_width_um"]),
+                            float(task.parameters["tail_length_um"]),
+                        )
+                    elif (
+                        resolved_transform
+                        is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION
+                    ):
+                        self._assert_differential_pair_source_degeneration_removal_delta(
+                            before, after
+                        )
+                    else:
+                        self._assert_differential_pair_source_degeneration_delta(
+                            before,
+                            after,
+                            float(task.parameters["source_resistance_ohm"]),
+                        )
                 elif (
                     resolved_transform
                     is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION

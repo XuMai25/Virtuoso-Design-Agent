@@ -434,6 +434,65 @@ def test_differential_pair_real_tail_transform_and_noise_are_explicit() -> None:
         build_plan(conflict)
 
 
+def test_differential_pair_source_degeneration_transform_is_explicit_and_reversible() -> None:
+    add = TaskSpec.model_validate(
+        {
+            "id": "diffpair-add-source-degeneration",
+            "operation": "schematic.transform",
+            "circuit": "differential_pair",
+            "target": {"library": "vda_test", "cell": "vda_diffpair_deg"},
+            "schematic_transform": {"action": "add_source_degeneration"},
+            "parameters": {"source_resistance_ohm": 500.0},
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+    add_plan = build_plan(add)
+
+    assert any(
+        step.capability
+        == "schematic.transform.differential-pair-source-degeneration"
+        for step in add_plan.steps
+    )
+    assert any("RS0(NSP,TAIL)/RS1(NSN,TAIL)" in step.description for step in add_plan.steps)
+
+    remove = TaskSpec.model_validate(
+        {
+            "id": "diffpair-remove-source-degeneration",
+            "operation": "schematic.transform",
+            "circuit": "differential_pair",
+            "target": {"library": "vda_test", "cell": "vda_diffpair_deg"},
+            "schematic_transform": {
+                "action": "remove_source_degeneration",
+                "expected_restored_placement_sha256": "a" * 64,
+            },
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+    remove_plan = build_plan(remove)
+    assert any(
+        step.capability
+        == "schematic.transform.differential-pair-source-degeneration.remove"
+        for step in remove_plan.steps
+    )
+    assert any("placement SHA-256" in step.description for step in remove_plan.steps)
+
+    wrong_add = add.model_dump(mode="json", exclude_none=True)
+    wrong_add["parameters"] = {"source_resistance_ohm": 500.0, "tail_width_um": 1.0}
+    with pytest.raises(UnsupportedCapability, match="exactly source_resistance_ohm"):
+        build_plan(TaskSpec.model_validate(wrong_add))
+
+    wrong_remove = remove.model_dump(mode="json", exclude_none=True)
+    wrong_remove["parameters"] = {"source_resistance_ohm": 500.0}
+    with pytest.raises(ValidationError, match="does not accept parameters"):
+        TaskSpec.model_validate(wrong_remove)
+
+
 def test_common_source_gate_accepts_only_implemented_dc_parameters() -> None:
     task = TaskSpec.model_validate(
         {

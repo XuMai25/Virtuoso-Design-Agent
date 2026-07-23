@@ -40,6 +40,25 @@ from virtuoso_design_agent.calculator_expressions import calculator_expressions_
 
 _MARKER = "VDA_RESULT="
 
+_DIFFERENTIAL_PAIR_BASE_VARIANT = "resistive_load_nmos_differential_pair"
+_DIFFERENTIAL_PAIR_TAIL_VARIANT = (
+    "resistive_load_nmos_differential_pair_with_tail_device"
+)
+_DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT = (
+    "resistive_load_nmos_differential_pair_with_tail_device_and_source_degeneration"
+)
+
+
+def _differential_pair_has_real_tail(topology_variant: str) -> bool:
+    return topology_variant in {
+        _DIFFERENTIAL_PAIR_TAIL_VARIANT,
+        _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT,
+    }
+
+
+def _differential_pair_has_source_degeneration(topology_variant: str) -> bool:
+    return topology_variant == _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT
+
 
 def _client():
     from virtuoso_bridge import VirtuosoClient
@@ -390,21 +409,31 @@ def _assert_differential_pair(
     by_name = {str(item.get("name")): item for item in data.get("instances", [])}
     core_names = {"MN0", "MN1", "RD0", "RD1"}
     tail_names = core_names | {"MNTAIL"}
+    degenerated_tail_names = tail_names | {"RS0", "RS1"}
     names = set(by_name)
-    if frozenset(names) not in {frozenset(core_names), frozenset(tail_names)}:
+    if frozenset(names) not in {
+        frozenset(core_names),
+        frozenset(tail_names),
+        frozenset(degenerated_tail_names),
+    }:
         raise RuntimeError(
             "existing schematic is not the VDA differential pair: "
             f"instances={sorted(by_name)}"
         )
-    variant = (
-        "resistive_load_nmos_differential_pair_with_tail_device"
-        if names == tail_names
-        else "resistive_load_nmos_differential_pair"
-    )
-    required_nets = {"INP", "INN", "OUTP", "OUTN", "TAIL", "VDD", "VSS"}
-    if names == tail_names:
+    if names == degenerated_tail_names:
+        variant = _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT
+    elif names == tail_names:
+        variant = _DIFFERENTIAL_PAIR_TAIL_VARIANT
+    else:
+        variant = _DIFFERENTIAL_PAIR_BASE_VARIANT
+    required_pins = {"INP", "INN", "OUTP", "OUTN", "TAIL", "VDD", "VSS"}
+    required_nets = set(required_pins)
+    if names == tail_names or names == degenerated_tail_names:
+        required_pins.add("BIAS")
         required_nets.add("BIAS")
-    missing_pins = required_nets - set(data.get("pins", {}).keys())
+    if names == degenerated_tail_names:
+        required_nets.update({"NSP", "NSN"})
+    missing_pins = required_pins - set(data.get("pins", {}).keys())
     if missing_pins:
         raise RuntimeError(
             "existing schematic is not the VDA differential pair: "
@@ -417,18 +446,35 @@ def _assert_differential_pair(
             f"missing nets={sorted(missing_nets)}"
         )
     expected_terminals = {
-        "MN0": {"D": "OUTP", "G": "INP", "S": "TAIL", "B": "VSS"},
-        "MN1": {"D": "OUTN", "G": "INN", "S": "TAIL", "B": "VSS"},
+        "MN0": {
+            "D": "OUTP",
+            "G": "INP",
+            "S": "NSP" if names == degenerated_tail_names else "TAIL",
+            "B": "VSS",
+        },
+        "MN1": {
+            "D": "OUTN",
+            "G": "INN",
+            "S": "NSN" if names == degenerated_tail_names else "TAIL",
+            "B": "VSS",
+        },
         "RD0": {"PLUS": "VDD", "MINUS": "OUTP"},
         "RD1": {"PLUS": "VDD", "MINUS": "OUTN"},
     }
-    if names == tail_names:
+    if names == tail_names or names == degenerated_tail_names:
         expected_terminals["MNTAIL"] = {
             "D": "TAIL",
             "G": "BIAS",
             "S": "VSS",
             "B": "VSS",
         }
+    if names == degenerated_tail_names:
+        expected_terminals.update(
+            {
+                "RS0": {"PLUS": "NSP", "MINUS": "TAIL"},
+                "RS1": {"PLUS": "NSN", "MINUS": "TAIL"},
+            }
+        )
     for name, expected in expected_terminals.items():
         actual = by_name[name].get("terms", {})
         if actual != expected:
@@ -443,10 +489,14 @@ def _assert_differential_pair(
             "RD0": ("analogLib", "res"),
             "RD1": ("analogLib", "res"),
         }
-        if names == tail_names:
+        if names == tail_names or names == degenerated_tail_names:
             expected_masters["MNTAIL"] = (
                 profile["tech_library"],
                 profile["nmos_cell"],
+            )
+        if names == degenerated_tail_names:
+            expected_masters.update(
+                {"RS0": ("analogLib", "res"), "RS1": ("analogLib", "res")}
             )
         for name, expected in expected_masters.items():
             actual = (by_name[name].get("lib"), by_name[name].get("cell"))
@@ -704,6 +754,27 @@ def _differential_pair_semantic_parameters_from_schematic(
                 "tail_length_um": _length_um(tail_length),
             }
         )
+    source_resistances: list[float] = []
+    for instance in ("RS0", "RS1"):
+        if instance in by_name:
+            resistance = by_name[instance].get("params", {}).get("r")
+            if resistance is None:
+                raise RuntimeError(
+                    f"differential-pair readback is missing {instance} resistance"
+                )
+            source_resistances.append(_resistance_ohm(resistance))
+    if source_resistances:
+        if len(source_resistances) != 2:
+            raise RuntimeError(
+                "differential-pair source degeneration requires both RS0 and RS1"
+            )
+        tolerance = max(abs(source_resistances[0]) * 1e-6, 1e-9)
+        if abs(source_resistances[0] - source_resistances[1]) > tolerance:
+            raise RuntimeError(
+                "differential-pair source resistances differ: "
+                f"{source_resistances[0]:.12g} vs {source_resistances[1]:.12g}"
+            )
+        semantic["source_resistance_ohm"] = source_resistances[0]
     return semantic
 
 
@@ -1073,9 +1144,7 @@ def _resolved_differential_pair_parameters(
         ),
         "vdd_v": float(supplied.get("vdd_v", profile["default_vdd_v"])),
     }
-    real_tail = topology_variant == (
-        "resistive_load_nmos_differential_pair_with_tail_device"
-    )
+    real_tail = _differential_pair_has_real_tail(topology_variant)
     if real_tail:
         conflicts = sorted(
             {"tail_current_ua", "tail_output_resistance_ohm"} & supplied.keys()
@@ -1102,6 +1171,18 @@ def _resolved_differential_pair_parameters(
             parameters["tail_output_resistance_ohm"] = float(
                 supplied["tail_output_resistance_ohm"]
             )
+    if _differential_pair_has_source_degeneration(topology_variant):
+        if "source_resistance_ohm" not in oa_parameters:
+            raise RuntimeError(
+                "degenerated real-tail OA readback is missing source_resistance_ohm"
+            )
+        parameters["source_resistance_ohm"] = float(
+            oa_parameters["source_resistance_ohm"]
+        )
+    elif "source_resistance_ohm" in supplied:
+        raise RuntimeError(
+            "source_resistance_ohm requires the degenerated real-tail topology"
+        )
     if "load_ff" in supplied:
         parameters["load_ff"] = float(supplied["load_ff"])
     return parameters
@@ -1261,6 +1342,10 @@ def _differential_pair_instance_parameter_updates(
         tail_updates["l"] = _um(parameters["tail_length_um"])
     if tail_updates:
         updates["MNTAIL"] = tail_updates
+    if "source_resistance_ohm" in parameters:
+        source_resistance = {"r": _ohm(parameters["source_resistance_ohm"])}
+        updates["RS0"] = dict(source_resistance)
+        updates["RS1"] = dict(source_resistance)
     return updates
 
 
@@ -1279,6 +1364,7 @@ def _apply_differential_pair_parameters(
             "load_resistance_ohm",
             "tail_width_um",
             "tail_length_um",
+            "source_resistance_ohm",
         )
         if name in parameters
     }
@@ -1288,11 +1374,17 @@ def _apply_differential_pair_parameters(
     topology_variant = _assert_differential_pair(current, profile)
     if (
         {"tail_width_um", "tail_length_um"} & persistable.keys()
-        and topology_variant
-        != "resistive_load_nmos_differential_pair_with_tail_device"
+        and not _differential_pair_has_real_tail(topology_variant)
     ):
         raise RuntimeError(
             "tail_width_um/tail_length_um require the real-tail topology"
+        )
+    if (
+        "source_resistance_ohm" in persistable
+        and not _differential_pair_has_source_degeneration(topology_variant)
+    ):
+        raise RuntimeError(
+            "source_resistance_ohm requires the degenerated real-tail topology"
         )
     for instance, update in _differential_pair_instance_parameter_updates(
         persistable
@@ -5352,6 +5444,7 @@ def _mn0_source_label_selection_operation(
     rename: bool,
     current_label: str = "VSS",
     replacement_label: str = "NSRC",
+    instance_name: str = "MN0",
 ) -> str:
     final_action = (
         f'rbLabel~>theLabel = "{replacement_label}" rbLabel'
@@ -5360,23 +5453,23 @@ def _mn0_source_label_selection_operation(
     )
     return (
         "let((rbInst rbTerm rbPin rbFig rbBBox rbCtr rbLabels rbLabel rbDx rbDy) "
-        'rbInst = car(setof(x cv~>instances x~>name == "MN0")) '
-        'unless(rbInst error("MN0 not found during source-degeneration transform")) '
+        f'rbInst = car(setof(x cv~>instances x~>name == "{instance_name}")) '
+        f'unless(rbInst error("{instance_name} not found during source-degeneration transform")) '
         'rbTerm = car(setof(x rbInst~>master~>terminals x~>name == "S")) '
-        'unless(rbTerm error("MN0.S not found during source-degeneration transform")) '
+        f'unless(rbTerm error("{instance_name}.S not found during source-degeneration transform")) '
         "rbPin = car(rbTerm~>pins) "
         "rbFig = when(rbPin car(rbPin~>figs)) "
         "rbBBox = when(rbFig dbTransformBBox(rbFig~>bBox rbInst~>transform)) "
         "rbCtr = when(rbBBox list("
         "(xCoord(car(rbBBox)) + xCoord(cadr(rbBBox))) / 2.0 "
         "(yCoord(car(rbBBox)) + yCoord(cadr(rbBBox))) / 2.0)) "
-        'unless(rbCtr error("MN0.S center could not be resolved")) '
+        f'unless(rbCtr error("{instance_name}.S center could not be resolved")) '
         "rbLabels = setof(x cv~>shapes "
         f'x~>objType == "label" && x~>theLabel == "{current_label}" && x~>xy && '
         "let((dx dy) dx = xCoord(x~>xy) - xCoord(rbCtr) "
         "dy = yCoord(x~>xy) - yCoord(rbCtr) "
         "dx * dx + dy * dy <= 0.02)) "
-        f'unless(length(rbLabels) == 1 error("MN0.S {current_label} label selection was not unique")) '
+        f'unless(length(rbLabels) == 1 error("{instance_name}.S {current_label} label selection was not unique")) '
         "rbLabel = car(rbLabels) "
         f"{final_action})"
     )
@@ -5401,6 +5494,7 @@ def _rs0_terminal_stub_selection_operation(
     net_name: str,
     *,
     delete: bool,
+    instance_name: str = "RS0",
 ) -> str:
     """Select one VDA-created RS0 terminal label and wire stub by geometry."""
     final_action = (
@@ -5411,8 +5505,8 @@ def _rs0_terminal_stub_selection_operation(
     return (
         "let((rbInst rbTerm rbPin rbFig rbBBox rbCtr rbLabels rbLabel rbWires "
         "rbWire) "
-        'rbInst = car(setof(x cv~>instances x~>name == "RS0")) '
-        'unless(rbInst error("RS0 not found during source-degeneration removal")) '
+        f'rbInst = car(setof(x cv~>instances x~>name == "{instance_name}")) '
+        f'unless(rbInst error("{instance_name} not found during source-degeneration removal")) '
         f'rbTerm = car(setof(x rbInst~>master~>terminals x~>name == "{terminal}")) '
         'unless(rbTerm error("RS0 terminal not found during source-degeneration removal")) '
         "rbPin = car(rbTerm~>pins) "
@@ -5421,13 +5515,13 @@ def _rs0_terminal_stub_selection_operation(
         "rbCtr = when(rbBBox list("
         "(xCoord(car(rbBBox)) + xCoord(cadr(rbBBox))) / 2.0 "
         "(yCoord(car(rbBBox)) + yCoord(cadr(rbBBox))) / 2.0)) "
-        'unless(rbCtr error("RS0 terminal center could not be resolved")) '
+        f'unless(rbCtr error("{instance_name} terminal center could not be resolved")) '
         "rbLabels = setof(x cv~>shapes "
         f'x~>objType == "label" && x~>theLabel == "{net_name}" && x~>xy && '
         "let((dx dy) dx = xCoord(x~>xy) - xCoord(rbCtr) "
         "dy = yCoord(x~>xy) - yCoord(rbCtr) "
         "dx * dx + dy * dy <= 0.02)) "
-        'unless(length(rbLabels) == 1 error("RS0 terminal label selection was not unique")) '
+        f'unless(length(rbLabels) == 1 error("{instance_name} terminal label selection was not unique")) '
         "rbLabel = car(rbLabels) "
         "rbWires = setof(x cv~>shapes "
         'x~>objType == "line" && x~>points && '
@@ -5435,7 +5529,7 @@ def _rs0_terminal_stub_selection_operation(
         "dx = xCoord(rbPoint) - xCoord(rbCtr) "
         "dy = yCoord(rbPoint) - yCoord(rbCtr) "
         "dx * dx + dy * dy <= 1e-8))) "
-        'unless(length(rbWires) == 1 error("RS0 terminal wire selection was not unique")) '
+        f'unless(length(rbWires) == 1 error("{instance_name} terminal wire selection was not unique")) '
         "rbWire = car(rbWires) "
         f"{final_action})"
     )
@@ -5523,6 +5617,134 @@ def _preflight_source_degeneration_removal(
         raise RuntimeError(
             f"unexpected source-degeneration removal preflight result: {output!r}"
         )
+
+
+def _differential_source_label_operation(
+    instance_name: str,
+    *,
+    rename: bool,
+    current_label: str,
+    replacement_label: str,
+) -> str:
+    return _mn0_source_label_selection_operation(
+        rename=rename,
+        current_label=current_label,
+        replacement_label=replacement_label,
+        instance_name=instance_name,
+    )
+
+
+def _preflight_differential_source_degeneration(
+    client, library: str, cell: str, *, remove: bool
+) -> None:
+    from virtuoso_bridge.virtuoso.ops import escape_skill_string
+
+    selections: list[str] = []
+    if remove:
+        selections.extend(
+            [
+                _differential_source_label_operation(
+                    "MN0",
+                    rename=False,
+                    current_label="NSP",
+                    replacement_label="TAIL",
+                ),
+                _differential_source_label_operation(
+                    "MN1",
+                    rename=False,
+                    current_label="NSN",
+                    replacement_label="TAIL",
+                ),
+                _rs0_terminal_stub_selection_operation(
+                    "PLUS", "NSP", delete=False, instance_name="RS0"
+                ),
+                _rs0_terminal_stub_selection_operation(
+                    "MINUS", "TAIL", delete=False, instance_name="RS0"
+                ),
+                _rs0_terminal_stub_selection_operation(
+                    "PLUS", "NSN", delete=False, instance_name="RS1"
+                ),
+                _rs0_terminal_stub_selection_operation(
+                    "MINUS", "TAIL", delete=False, instance_name="RS1"
+                ),
+            ]
+        )
+    else:
+        selections.extend(
+            [
+                _differential_source_label_operation(
+                    "MN0",
+                    rename=False,
+                    current_label="TAIL",
+                    replacement_label="NSP",
+                ),
+                _differential_source_label_operation(
+                    "MN1",
+                    rename=False,
+                    current_label="TAIL",
+                    replacement_label="NSN",
+                ),
+            ]
+        )
+    skill = " ".join(
+        [
+            "let((cv)",
+            "cv = dbOpenCellViewByType("
+            f'"{escape_skill_string(library)}" "{escape_skill_string(cell)}" '
+            '"schematic" "schematic" "r")',
+            'unless(cv error("target schematic not found during transform preflight"))',
+            'when(cv~>modified error("target schematic has unsaved changes"))',
+            *selections,
+            "t)",
+        ]
+    )
+    result = client.execute_skill(skill, timeout=60)
+    errors = getattr(result, "errors", None) or []
+    if errors:
+        label = "removal" if remove else "addition"
+        raise RuntimeError(
+            f"differential source-degeneration {label} preflight failed: "
+            f"{errors[0]}"
+        )
+    output = str(getattr(result, "output", "")).strip().strip('"').lower()
+    if output != "t":
+        raise RuntimeError(
+            "unexpected differential source-degeneration preflight result: "
+            f"{output!r}"
+        )
+
+
+def _delete_differential_source_degeneration_operation() -> str:
+    operations = [
+        _differential_source_label_operation(
+            "MN0",
+            rename=True,
+            current_label="NSP",
+            replacement_label="TAIL",
+        ),
+        _differential_source_label_operation(
+            "MN1",
+            rename=True,
+            current_label="NSN",
+            replacement_label="TAIL",
+        ),
+    ]
+    for instance_name, source_net in (("RS0", "NSP"), ("RS1", "NSN")):
+        operations.extend(
+            [
+                _rs0_terminal_stub_selection_operation(
+                    "PLUS", source_net, delete=True, instance_name=instance_name
+                ),
+                _rs0_terminal_stub_selection_operation(
+                    "MINUS", "TAIL", delete=True, instance_name=instance_name
+                ),
+                "let((rbInst) "
+                f'rbInst = car(setof(x cv~>instances x~>name == "{instance_name}")) '
+                f'unless(rbInst error("{instance_name} not found during source-degeneration removal")) '
+                "dbDeleteObject(rbInst) t)",
+            ]
+        )
+    return " ".join(operations)
 
 
 def _discard_failed_existing_schematic_edit(
@@ -6479,6 +6701,338 @@ def transform_differential_pair_tail_device(
     }
 
 
+def _assert_differential_pair_source_degeneration_preserved(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    source_resistance_ohm: float,
+) -> None:
+    before_variant = _assert_differential_pair(before)
+    after_variant = _assert_differential_pair(after)
+    if before_variant not in {
+        _DIFFERENTIAL_PAIR_TAIL_VARIANT,
+        _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT,
+    }:
+        raise RuntimeError(
+            "differential source degeneration requires a real-tail differential pair"
+        )
+    if after_variant != _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT:
+        raise RuntimeError(
+            "differential source-degeneration transform did not produce RS0/RS1"
+        )
+    if before.get("pins") != after.get("pins"):
+        raise RuntimeError(
+            "differential source-degeneration transform changed top-level pins"
+        )
+    before_nets = set((before.get("nets") or {}).keys())
+    after_nets = set((after.get("nets") or {}).keys())
+    if after_nets != before_nets | {"NSP", "NSN"}:
+        raise RuntimeError(
+            "differential source-degeneration transform changed nets beyond NSP/NSN"
+        )
+
+    before_by_name = {
+        str(item.get("name")): item for item in before.get("instances", [])
+    }
+    after_by_name = {
+        str(item.get("name")): item for item in after.get("instances", [])
+    }
+    for name in ("MN0", "MN1"):
+        before_without_terms = {
+            key: value for key, value in before_by_name[name].items() if key != "terms"
+        }
+        after_without_terms = {
+            key: value for key, value in after_by_name[name].items() if key != "terms"
+        }
+        if before_without_terms != after_without_terms:
+            raise RuntimeError(
+                f"differential source-degeneration transform changed {name} "
+                "beyond its source net"
+            )
+    for name in ("RD0", "RD1", "MNTAIL"):
+        if before_by_name[name] != after_by_name[name]:
+            raise RuntimeError(
+                f"differential source-degeneration transform changed preserved {name}"
+            )
+    if before_variant == _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT:
+        for name in ("RS0", "RS1"):
+            before_without_params = {
+                key: value
+                for key, value in before_by_name[name].items()
+                if key != "params"
+            }
+            after_without_params = {
+                key: value
+                for key, value in after_by_name[name].items()
+                if key != "params"
+            }
+            if before_without_params != after_without_params:
+                raise RuntimeError(
+                    f"repeated differential source-degeneration transform changed {name}"
+                )
+    _assert_parameter_consistency(
+        {"source_resistance_ohm": float(source_resistance_ohm)},
+        _differential_pair_semantic_parameters_from_schematic(after),
+        expected_label="requested differential source degeneration",
+        actual_label="OA readback",
+    )
+
+
+def _assert_differential_pair_source_degeneration_removal_preserved(
+    before: dict[str, Any], after: dict[str, Any]
+) -> None:
+    before_variant = _assert_differential_pair(before)
+    after_variant = _assert_differential_pair(after)
+    if before_variant not in {
+        _DIFFERENTIAL_PAIR_TAIL_VARIANT,
+        _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT,
+    }:
+        raise RuntimeError(
+            "differential source-degeneration removal requires a real-tail topology"
+        )
+    if after_variant != _DIFFERENTIAL_PAIR_TAIL_VARIANT:
+        raise RuntimeError(
+            "differential source-degeneration removal did not restore real-tail topology"
+        )
+    if before.get("pins") != after.get("pins"):
+        raise RuntimeError(
+            "differential source-degeneration removal changed top-level pins"
+        )
+    before_nets = set((before.get("nets") or {}).keys())
+    after_nets = set((after.get("nets") or {}).keys())
+    expected_nets = before_nets - (
+        {"NSP", "NSN"}
+        if before_variant == _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT
+        else set()
+    )
+    if after_nets != expected_nets:
+        raise RuntimeError(
+            "differential source-degeneration removal changed nets beyond NSP/NSN"
+        )
+    before_by_name = {
+        str(item.get("name")): item for item in before.get("instances", [])
+    }
+    after_by_name = {
+        str(item.get("name")): item for item in after.get("instances", [])
+    }
+    for name in ("MN0", "MN1"):
+        before_without_terms = {
+            key: value for key, value in before_by_name[name].items() if key != "terms"
+        }
+        after_without_terms = {
+            key: value for key, value in after_by_name[name].items() if key != "terms"
+        }
+        if before_without_terms != after_without_terms:
+            raise RuntimeError(
+                f"differential source-degeneration removal changed {name} "
+                "beyond its source net"
+            )
+    for name in ("RD0", "RD1", "MNTAIL"):
+        if before_by_name[name] != after_by_name[name]:
+            raise RuntimeError(
+                f"differential source-degeneration removal changed preserved {name}"
+            )
+    semantic = _differential_pair_semantic_parameters_from_schematic(after)
+    if "source_resistance_ohm" in semantic:
+        raise RuntimeError(
+            "differential source-degeneration removal left source resistance"
+        )
+
+
+def _add_differential_pair_source_degeneration(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    from virtuoso_bridge.virtuoso.schematic.ops import (
+        schematic_create_inst_by_master_name as inst,
+        schematic_label_instance_term as label_term,
+    )
+
+    client = _client()
+    library, cell = _target(payload)
+    before = _read_schematic(client, library, cell)
+    placement_before = _schematic_placement_snapshot(client, library, cell)
+    variant = _assert_differential_pair(before, payload["profile"])
+    if variant not in {
+        _DIFFERENTIAL_PAIR_TAIL_VARIANT,
+        _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT,
+    }:
+        raise RuntimeError(
+            "add_source_degeneration requires add_tail_device to be completed first"
+        )
+    resistance = float(payload["parameters"]["source_resistance_ohm"])
+    before_semantic = _differential_pair_semantic_parameters_from_schematic(before)
+    topology_changed = variant == _DIFFERENTIAL_PAIR_TAIL_VARIANT
+    if topology_changed:
+        _preflight_differential_source_degeneration(
+            client, library, cell, remove=False
+        )
+        try:
+            with _edit_existing_schematic(
+                client, library, cell, timeout=90
+            ) as schematic:
+                schematic.add(
+                    _differential_source_label_operation(
+                        "MN0",
+                        rename=True,
+                        current_label="TAIL",
+                        replacement_label="NSP",
+                    )
+                )
+                schematic.add(
+                    _differential_source_label_operation(
+                        "MN1",
+                        rename=True,
+                        current_label="TAIL",
+                        replacement_label="NSN",
+                    )
+                )
+                schematic.add(
+                    inst("analogLib", "res", "symbol", "RS0", -0.8, -0.9, "R0")
+                )
+                schematic.add(
+                    inst("analogLib", "res", "symbol", "RS1", 0.8, -0.9, "R0")
+                )
+                schematic.add(label_term("RS0", "PLUS", "NSP"))
+                schematic.add(label_term("RS0", "MINUS", "TAIL"))
+                schematic.add(label_term("RS1", "PLUS", "NSN"))
+                schematic.add(label_term("RS1", "MINUS", "TAIL"))
+        except Exception as edit_error:
+            try:
+                _discard_failed_existing_schematic_edit(client, library, cell)
+            except Exception as cleanup_error:
+                raise RuntimeError(
+                    "differential source-degeneration edit failed and unsaved-edit "
+                    f"cleanup also failed: {cleanup_error}"
+                ) from edit_error
+            raise
+
+    previous_resistance = before_semantic.get("source_resistance_ohm")
+    resistance_changed = previous_resistance is None or abs(
+        previous_resistance - resistance
+    ) > max(abs(resistance) * 1e-6, 1e-9)
+    if resistance_changed:
+        summary = _apply_differential_pair_parameters(
+            client,
+            library,
+            cell,
+            {"source_resistance_ohm": resistance},
+            payload["profile"],
+        )
+        after = summary["bridge_schematic"]
+    else:
+        after = _read_schematic(client, library, cell)
+        summary = _differential_pair_summary(after)
+    _assert_differential_pair_source_degeneration_preserved(
+        before, after, resistance
+    )
+    placement_after = _schematic_placement_snapshot(client, library, cell)
+    return {
+        "transformed": topology_changed,
+        "already_transformed": not topology_changed,
+        "transform_action": "add_source_degeneration",
+        "placement_before": placement_before,
+        "placement_after": placement_after,
+        "resistance_changed": resistance_changed,
+        "topology_delta": {
+            "renamed_terminal_nets": (
+                ["MN0.S: TAIL -> NSP", "MN1.S: TAIL -> NSN"]
+                if topology_changed
+                else []
+            ),
+            "added_instances": ["RS0", "RS1"] if topology_changed else [],
+            "added_nets": ["NSP", "NSN"] if topology_changed else [],
+            "preserved_instances": ["MN0", "MN1", "RD0", "RD1", "MNTAIL"],
+            "preserved_pins": sorted((before.get("pins") or {}).keys()),
+        },
+        "readback": summary,
+    }
+
+
+def _remove_differential_pair_source_degeneration(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    client = _client()
+    library, cell = _target(payload)
+    before = _read_schematic(client, library, cell)
+    placement_before = _schematic_placement_snapshot(client, library, cell)
+    variant = _assert_differential_pair(before, payload["profile"])
+    if variant not in {
+        _DIFFERENTIAL_PAIR_TAIL_VARIANT,
+        _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT,
+    }:
+        raise RuntimeError(
+            "remove_source_degeneration requires a real-tail differential pair"
+        )
+    topology_changed = variant == _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT
+    if topology_changed:
+        _preflight_differential_source_degeneration(
+            client, library, cell, remove=True
+        )
+        try:
+            with _edit_existing_schematic(
+                client, library, cell, timeout=90
+            ) as schematic:
+                schematic.add(_delete_differential_source_degeneration_operation())
+        except Exception as edit_error:
+            try:
+                _discard_failed_existing_schematic_edit(client, library, cell)
+            except Exception as cleanup_error:
+                raise RuntimeError(
+                    "differential source-degeneration removal failed and unsaved-edit "
+                    f"cleanup also failed: {cleanup_error}"
+                ) from edit_error
+            raise
+    after = _read_schematic(client, library, cell)
+    placement_after = _schematic_placement_snapshot(client, library, cell)
+    _assert_differential_pair_source_degeneration_removal_preserved(before, after)
+    transform_spec = payload.get("schematic_transform") or {}
+    expected_placement = transform_spec.get("expected_restored_placement_sha256")
+    if (
+        expected_placement is not None
+        and placement_after["sha256"] != expected_placement
+    ):
+        raise RuntimeError(
+            "differential source-degeneration removal did not restore the declared "
+            f"placement fingerprint: expected {expected_placement}, got "
+            f"{placement_after['sha256']}"
+        )
+    return {
+        "transformed": topology_changed,
+        "already_removed": not topology_changed,
+        "transform_action": "remove_source_degeneration",
+        "placement_before": placement_before,
+        "placement_after": placement_after,
+        "restored_placement_match": (
+            placement_after["sha256"] == expected_placement
+            if expected_placement is not None
+            else None
+        ),
+        "topology_delta": {
+            "renamed_terminal_nets": (
+                ["MN0.S: NSP -> TAIL", "MN1.S: NSN -> TAIL"]
+                if topology_changed
+                else []
+            ),
+            "removed_instances": ["RS0", "RS1"] if topology_changed else [],
+            "removed_nets": ["NSP", "NSN"] if topology_changed else [],
+            "preserved_instances": ["MN0", "MN1", "RD0", "RD1", "MNTAIL"],
+            "preserved_pins": sorted((before.get("pins") or {}).keys()),
+        },
+        "readback": _differential_pair_summary(after),
+    }
+
+
+def transform_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
+    transform_spec = payload.get("schematic_transform") or {}
+    action = transform_spec.get("action")
+    if action == "add_tail_device":
+        return transform_differential_pair_tail_device(payload)
+    if action == "add_source_degeneration":
+        return _add_differential_pair_source_degeneration(payload)
+    if action == "remove_source_degeneration":
+        return _remove_differential_pair_source_degeneration(payload)
+    raise RuntimeError(f"unsupported differential-pair transform action: {action!r}")
+
+
 def inspect_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
     client = _client()
     library, cell = _target(payload)
@@ -6504,6 +7058,7 @@ def apply_differential_pair_parameters(payload: dict[str, Any]) -> dict[str, Any
                 "load_resistance_ohm",
                 "tail_width_um",
                 "tail_length_um",
+                "source_resistance_ohm",
             )
             if name in payload["parameters"]
         }
@@ -6533,6 +7088,7 @@ def apply_differential_pair_parameters(payload: dict[str, Any]) -> dict[str, Any
                 "load_resistance_ohm",
                 "tail_width_um",
                 "tail_length_um",
+                "source_resistance_ohm",
             )
             if name in payload.get("parameters", {})
         }
@@ -8005,24 +8561,44 @@ def _parse_differential_pair_netlist(
     text: str, profile: dict[str, Any]
 ) -> dict[str, Any]:
     records = _logical_netlist_records(text)
+    has_tail_device = any(re.match(r"^MNTAIL\s*\(", item) for item in records)
+    has_rs0 = any(re.match(r"^RS0\s*\(", item) for item in records)
+    has_rs1 = any(re.match(r"^RS1\s*\(", item) for item in records)
+    if has_rs0 != has_rs1:
+        raise RuntimeError(
+            "si netlist differential source degeneration requires both RS0 and RS1"
+        )
+    has_source_degeneration = has_rs0 and has_rs1
+    if has_source_degeneration and not has_tail_device:
+        raise RuntimeError(
+            "si netlist source-degenerated differential pair is missing MNTAIL"
+        )
+    source_p = "NSP" if has_source_degeneration else "TAIL"
+    source_n = "NSN" if has_source_degeneration else "TAIL"
     expected = {
         "MN0": {
             "model": profile["nmos_cell"],
-            "nodes": ["OUTP", "INP", "TAIL", "VSS"],
+            "nodes": ["OUTP", "INP", source_p, "VSS"],
         },
         "MN1": {
             "model": profile["nmos_cell"],
-            "nodes": ["OUTN", "INN", "TAIL", "VSS"],
+            "nodes": ["OUTN", "INN", source_n, "VSS"],
         },
         "RD0": {"model": "resistor", "nodes": ["VDD", "OUTP"]},
         "RD1": {"model": "resistor", "nodes": ["VDD", "OUTN"]},
     }
-    has_tail_device = any(re.match(r"^MNTAIL\s*\(", item) for item in records)
     if has_tail_device:
         expected["MNTAIL"] = {
             "model": profile["nmos_cell"],
             "nodes": ["TAIL", "BIAS", "VSS", "VSS"],
         }
+    if has_source_degeneration:
+        expected.update(
+            {
+                "RS0": {"model": "resistor", "nodes": ["NSP", "TAIL"]},
+                "RS1": {"model": "resistor", "nodes": ["NSN", "TAIL"]},
+            }
+        )
     instances: dict[str, dict[str, Any]] = {}
     for name, expected_item in expected.items():
         record = next(
@@ -8121,6 +8697,24 @@ def _parse_differential_pair_netlist(
                 "tail_length_um": instances["MNTAIL"]["length_um"],
             }
         )
+    if has_source_degeneration:
+        _assert_parameter_consistency(
+            {
+                "source_resistance_ohm": float(
+                    instances["RS0"]["resistance_ohm"]
+                )
+            },
+            {
+                "source_resistance_ohm": float(
+                    instances["RS1"]["resistance_ohm"]
+                )
+            },
+            expected_label="RS0 si resistance",
+            actual_label="RS1 si resistance",
+        )
+        semantic_parameters["source_resistance_ohm"] = instances["RS0"][
+            "resistance_ohm"
+        ]
     parsed = {
         "instances": instances,
         "semantic_parameters": semantic_parameters,
@@ -8134,9 +8728,11 @@ def _parse_differential_pair_netlist(
             )
         },
         "topology_variant": (
-            "resistive_load_nmos_differential_pair_with_tail_device"
+            _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT
+            if has_source_degeneration
+            else _DIFFERENTIAL_PAIR_TAIL_VARIANT
             if has_tail_device
-            else "resistive_load_nmos_differential_pair"
+            else _DIFFERENTIAL_PAIR_BASE_VARIANT
         ),
     }
     if has_tail_device:
@@ -8545,13 +9141,17 @@ def _differential_pair_metrics_from_result(
     parameters: dict[str, float],
     topology_variant: str = "resistive_load_nmos_differential_pair",
 ) -> tuple[dict[str, float], dict[str, Any]]:
+    source_degenerated = _differential_pair_has_source_degeneration(
+        topology_variant
+    )
+    saved_node_names = ["INP", "INN", "OUTP", "OUTN", "TAIL", "VDD", "VSS"]
+    if source_degenerated:
+        saved_node_names.extend(["NSP", "NSN"])
     node_values = {
         name: _scalar(data, f"dc_{name}")
-        for name in ("INP", "INN", "OUTP", "OUTN", "TAIL", "VDD", "VSS")
+        for name in saved_node_names
     }
-    real_tail = topology_variant == (
-        "resistive_load_nmos_differential_pair_with_tail_device"
-    )
+    real_tail = _differential_pair_has_real_tail(topology_variant)
     if real_tail:
         node_values["BIAS"] = _scalar(data, "dc_BIAS")
     branch_values: dict[str, dict[str, float]] = {}
@@ -8615,12 +9215,20 @@ def _differential_pair_metrics_from_result(
             )
 
     branch_nodes = {
-        "MN0": (node_values["INP"], node_values["OUTP"]),
-        "MN1": (node_values["INN"], node_values["OUTN"]),
+        "MN0": (
+            node_values["INP"],
+            node_values["OUTP"],
+            node_values["NSP"] if source_degenerated else node_values["TAIL"],
+        ),
+        "MN1": (
+            node_values["INN"],
+            node_values["OUTN"],
+            node_values["NSN"] if source_degenerated else node_values["TAIL"],
+        ),
     }
-    for instance, (gate_v, drain_v) in branch_nodes.items():
-        expected_vgs = gate_v - node_values["TAIL"]
-        expected_vds = drain_v - node_values["TAIL"]
+    for instance, (gate_v, drain_v, source_v) in branch_nodes.items():
+        expected_vgs = gate_v - source_v
+        expected_vds = drain_v - source_v
         for quantity, expected in (("vgs_v", expected_vgs), ("vds_v", expected_vds)):
             actual = branch_values[instance][quantity]
             tolerance = max(abs(expected) * 1e-4, 1e-5)
@@ -8660,7 +9268,56 @@ def _differential_pair_metrics_from_result(
         branch_p_gds_s=branch_values["MN0"]["gds_s"],
         branch_n_gds_s=branch_values["MN1"]["gds_s"],
         load_resistance_ohm=parameters["load_resistance_ohm"],
+        branch_p_source_v=branch_nodes["MN0"][2],
+        branch_n_source_v=branch_nodes["MN1"][2],
     )
+    if source_degenerated:
+        source_resistance = float(parameters["source_resistance_ohm"])
+        source_p_drop_v = node_values["NSP"] - node_values["TAIL"]
+        source_n_drop_v = node_values["NSN"] - node_values["TAIL"]
+        source_p_current_a = source_p_drop_v / source_resistance
+        source_n_current_a = source_n_drop_v / source_resistance
+        source_p_scale_a = max(
+            abs(branch_values["MN0"]["ids_a"]),
+            abs(source_p_current_a),
+            1e-18,
+        )
+        source_n_scale_a = max(
+            abs(branch_values["MN1"]["ids_a"]),
+            abs(source_n_current_a),
+            1e-18,
+        )
+        source_p_mismatch = (
+            abs(abs(branch_values["MN0"]["ids_a"]) - abs(source_p_current_a))
+            / source_p_scale_a
+            * 100.0
+        )
+        source_n_mismatch = (
+            abs(abs(branch_values["MN1"]["ids_a"]) - abs(source_n_current_a))
+            / source_n_scale_a
+            * 100.0
+        )
+        metrics.update(
+            {
+                "source_resistance_ohm": source_resistance,
+                "source_p_voltage_v": node_values["NSP"],
+                "source_n_voltage_v": node_values["NSN"],
+                "source_p_degeneration_drop_v": source_p_drop_v,
+                "source_n_degeneration_drop_v": source_n_drop_v,
+                "source_p_resistor_current_ua": abs(source_p_current_a) * 1e6,
+                "source_n_resistor_current_ua": abs(source_n_current_a) * 1e6,
+                "source_p_current_mismatch_percent": source_p_mismatch,
+                "source_n_current_mismatch_percent": source_n_mismatch,
+                "max_source_current_mismatch_percent": max(
+                    source_p_mismatch, source_n_mismatch
+                ),
+            }
+        )
+        if metrics["max_source_current_mismatch_percent"] > 1.0:
+            raise RuntimeError(
+                "differential-pair DC KCL mismatch across RS0/RS1: "
+                f"{metrics['max_source_current_mismatch_percent']:.6g}%"
+            )
     if tail_device_values is not None:
         tail_margin_v = abs(tail_device_values["vds_v"]) - abs(
             tail_device_values["vdsat_v"]
@@ -8753,6 +9410,9 @@ def _differential_pair_metrics_from_result(
             else "branch_sum_matches_declared_ideal_source"
         ),
         "kcl_consistency": "matched",
+        "source_degeneration_consistency": (
+            "matched" if source_degenerated else "not_applicable"
+        ),
     }
 
 
@@ -9327,9 +9987,7 @@ def _differential_pair_testbench_deck(
             f'CLP (OUTP 0) capacitor c={parameters["load_ff"]:.12g}f\n'
             f'CLN (OUTN 0) capacitor c={parameters["load_ff"]:.12g}f\n'
         )
-    real_tail = topology_variant == (
-        "resistive_load_nmos_differential_pair_with_tail_device"
-    )
+    real_tail = _differential_pair_has_real_tail(topology_variant)
     tail_output_resistance = parameters.get("tail_output_resistance_ohm")
     if real_tail and (
         "tail_current_ua" in parameters or tail_output_resistance is not None
@@ -9359,6 +10017,8 @@ def _differential_pair_testbench_deck(
     )
     saved_nodes = "INP INN OUTP OUTN TAIL VDD VSS"
     tail_save = ""
+    if _differential_pair_has_source_degeneration(topology_variant):
+        saved_nodes += " NSP NSN"
     if real_tail:
         saved_nodes += " BIAS"
         tail_save = (
@@ -10168,6 +10828,7 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
             "load_resistance_ohm",
             "tail_width_um",
             "tail_length_um",
+            "source_resistance_ohm",
         )
         if name in payload.get("parameters", {})
     }
@@ -10275,8 +10936,7 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
         common_mode_remote_wrapper: str | None = None
         common_mode_result = None
         if (
-            topology_variant
-            == "resistive_load_nmos_differential_pair_with_tail_device"
+            _differential_pair_has_real_tail(topology_variant)
             and metrics["tail_device_saturation_region"] != 1.0
         ):
             analysis_warnings.append(
@@ -10309,8 +10969,7 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
             analysis_complete = differential_ac_complete
             if (
                 "tail_output_resistance_ohm" in parameters
-                or topology_variant
-                == "resistive_load_nmos_differential_pair_with_tail_device"
+                or _differential_pair_has_real_tail(topology_variant)
             ):
                 common_mode_dir = work_dir / "common_mode"
                 common_mode_dir.mkdir()
@@ -10383,6 +11042,12 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                     "output_common_mode_v",
                     "minimum_saturation_margin_v",
                 )
+                if _differential_pair_has_source_degeneration(topology_variant):
+                    dc_consistency_names += (
+                        "source_p_voltage_v",
+                        "source_n_voltage_v",
+                        "max_source_current_mismatch_percent",
+                    )
                 _assert_parameter_consistency(
                     {name: metrics[name] for name in dc_consistency_names},
                     {
@@ -10490,9 +11155,14 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
             )
         metric_sources = {name: "eda_result" for name in metrics}
         metric_sources["both_saturation_region"] = "software_inference"
-        real_tail = topology_variant == (
-            "resistive_load_nmos_differential_pair_with_tail_device"
-        )
+        for name in (
+            "source_p_current_mismatch_percent",
+            "source_n_current_mismatch_percent",
+            "max_source_current_mismatch_percent",
+        ):
+            if name in metric_sources:
+                metric_sources[name] = "software_inference"
+        real_tail = _differential_pair_has_real_tail(topology_variant)
         tail_testbench_name = "tail_bias_v" if real_tail else "tail_current_ua"
         testbench_values = {
             "analysis": analysis,
@@ -10834,6 +11504,7 @@ _ACTIONS = {
     "transform_differential_pair_tail_device": (
         transform_differential_pair_tail_device
     ),
+    "transform_differential_pair": transform_differential_pair,
     "apply_differential_pair_parameters": apply_differential_pair_parameters,
     "simulate_differential_pair": simulate_differential_pair,
 }

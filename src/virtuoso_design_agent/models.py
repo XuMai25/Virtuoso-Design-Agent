@@ -1896,31 +1896,49 @@ class TaskSpec(StrictModel):
                         "differential-pair schematic.transform requires an explicit "
                         "schematic_transform action"
                     )
-                if (
-                    self.schematic_transform.action
-                    is not SchematicTransformAction.ADD_TAIL_DEVICE
-                ):
+                action = self.schematic_transform.action
+                supported_actions = {
+                    SchematicTransformAction.ADD_TAIL_DEVICE,
+                    SchematicTransformAction.ADD_SOURCE_DEGENERATION,
+                    SchematicTransformAction.REMOVE_SOURCE_DEGENERATION,
+                }
+                if action not in supported_actions:
                     raise ValueError(
-                        "differential-pair schematic.transform supports only "
-                        "add_tail_device"
+                        "unsupported differential-pair schematic.transform action"
                     )
                 if (
                     self.schematic_transform.expected_restored_placement_sha256
                     is not None
+                    and action
+                    is not SchematicTransformAction.REMOVE_SOURCE_DEGENERATION
                 ):
                     raise ValueError(
                         "expected_restored_placement_sha256 is valid only for "
                         "remove_source_degeneration"
                     )
-                if not self.parameters:
+                if action is SchematicTransformAction.ADD_TAIL_DEVICE and not self.parameters:
                     raise ValueError(
                         "add_tail_device requires tail_width_um and tail_length_um"
+                    )
+                if (
+                    action is SchematicTransformAction.ADD_SOURCE_DEGENERATION
+                    and not self.parameters
+                ):
+                    raise ValueError(
+                        "add_source_degeneration requires source_resistance_ohm"
+                    )
+                if (
+                    action is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION
+                    and self.parameters
+                ):
+                    raise ValueError(
+                        "remove_source_degeneration does not accept parameters"
                     )
             else:
                 if self.schematic_transform is not None:
                     raise ValueError(
                         "schematic_transform settings currently support only "
-                        "common_source"
+                        "common_source or differential_pair"
                     )
                 if not self.parameters:
                     raise ValueError("schematic.transform requires parameters")

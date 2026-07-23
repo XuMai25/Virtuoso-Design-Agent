@@ -41,7 +41,7 @@ _WORKER_ACTIONS = {
     CircuitKind.DIFFERENTIAL_PAIR: {
         "create": "create_differential_pair",
         "inspect": "inspect_differential_pair",
-        "transform": "transform_differential_pair_tail_device",
+        "transform": "transform_differential_pair",
         "apply": "apply_differential_pair_parameters",
         "simulate": "simulate_differential_pair",
     },

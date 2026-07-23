@@ -3370,6 +3370,158 @@ def test_differential_pair_demo_real_tail_transform_reuses_ac_and_noise_flow() -
     assert icmr_record.candidates[1].feasible is True
 
 
+def test_differential_pair_demo_source_degeneration_is_tunable_and_reversible() -> None:
+    adapter = DeterministicDemoAdapter()
+    target = {"library": "vda_test", "cell": "vda_diffpair_deg"}
+
+    create = TaskSpec.model_validate(
+        {
+            "id": "diffpair-deg-create",
+            "operation": "schematic.create",
+            "circuit": "differential_pair",
+            "target": target,
+            "parameters": {
+                "input_width_um": 2.0,
+                "length_um": 0.03,
+                "load_resistance_ohm": 8_000.0,
+            },
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+    create_plan = build_plan(create)
+    assert TaskExecutor(adapter).execute(
+        create, create_plan, token=create_plan.confirmation_token
+    ).status is RunStatus.SUCCEEDED
+
+    tail = TaskSpec.model_validate(
+        {
+            "id": "diffpair-deg-tail",
+            "operation": "schematic.transform",
+            "circuit": "differential_pair",
+            "target": target,
+            "schematic_transform": {"action": "add_tail_device"},
+            "parameters": {"tail_width_um": 0.8, "tail_length_um": 0.03},
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+    tail_plan = build_plan(tail)
+    assert TaskExecutor(adapter).execute(
+        tail, tail_plan, token=tail_plan.confirmation_token
+    ).status is RunStatus.SUCCEEDED
+
+    add = TaskSpec.model_validate(
+        {
+            "id": "diffpair-deg-add",
+            "operation": "schematic.transform",
+            "circuit": "differential_pair",
+            "target": target,
+            "schematic_transform": {"action": "add_source_degeneration"},
+            "parameters": {"source_resistance_ohm": 500.0},
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+    add_plan = build_plan(add)
+    assert TaskExecutor(adapter).execute(
+        add, add_plan, token=add_plan.confirmation_token
+    ).status is RunStatus.SUCCEEDED
+    readback = adapter.inspect_schematic(add).data
+    assert readback["topology_variant"] == (
+        "resistive_load_nmos_differential_pair_with_tail_device_and_source_degeneration"
+    )
+    assert readback["semantic_parameters"]["source_resistance_ohm"] == 500.0
+    assert readback["instance_parameters"]["RS0"] == {"r": "500"}
+    assert readback["instance_parameters"]["RS1"] == {"r": "500"}
+
+    tune = TaskSpec.model_validate(
+        {
+            "id": "diffpair-deg-ac-tune",
+            "operation": "design.tune",
+            "circuit": "differential_pair",
+            "target": target,
+            "analysis": "ac",
+            "ac_sweep": {"start_hz": 1e3, "stop_hz": 1e12},
+            "parameters": {
+                "tail_bias_v": 0.30,
+                "common_mode_v": 0.55,
+                "vdd_v": 0.9,
+                "load_ff": 1.0,
+            },
+            "parameter_space": {"source_resistance_ohm": [250.0, 1000.0]},
+            "constraints": [
+                {
+                    "metric": "tail_device_saturation_region",
+                    "relation": ">=",
+                    "value": 1.0,
+                },
+                {
+                    "metric": "differential_low_frequency_gain_v_per_v",
+                    "relation": ">=",
+                    "value": 0.1,
+                },
+            ],
+            "objective": {
+                "metric": "differential_gain_bandwidth_product_hz",
+                "goal": "maximize",
+            },
+            "safety": {
+                "allow_remote_compute": True,
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+            "limits": {"max_iterations": 2},
+        }
+    )
+    tune_plan = build_plan(tune)
+    tuned = TaskExecutor(adapter).execute(
+        tune, tune_plan, token=tune_plan.confirmation_token
+    )
+    assert tuned.status is RunStatus.SUCCEEDED
+    assert len(tuned.candidates) == 2
+    assert tuned.selected_parameters["source_resistance_ohm"] == 250.0
+    tuned_readback = adapter.inspect_schematic(tune).data
+    assert tuned_readback["semantic_parameters"]["source_resistance_ohm"] == 250.0
+    assert tuned.selected_metrics["max_source_current_mismatch_percent"] == 0.0
+
+    remove = TaskSpec.model_validate(
+        {
+            "id": "diffpair-deg-remove",
+            "operation": "schematic.transform",
+            "circuit": "differential_pair",
+            "target": target,
+            "schematic_transform": {"action": "remove_source_degeneration"},
+            "safety": {
+                "allow_remote_write": True,
+                "allowed_library": "vda_test",
+            },
+        }
+    )
+    remove_plan = build_plan(remove)
+    assert TaskExecutor(adapter).execute(
+        remove, remove_plan, token=remove_plan.confirmation_token
+    ).status is RunStatus.SUCCEEDED
+    restored = adapter.inspect_schematic(remove).data
+    assert restored["topology_variant"] == (
+        "resistive_load_nmos_differential_pair_with_tail_device"
+    )
+    assert "source_resistance_ohm" not in restored["semantic_parameters"]
+    assert {item["name"] for item in restored["instances"]} == {
+        "MN0",
+        "MN1",
+        "RD0",
+        "RD1",
+        "MNTAIL",
+    }
+
+
 def test_differential_pair_infeasible_search_restores_initial_oa() -> None:
     task = TaskSpec.model_validate(
         {

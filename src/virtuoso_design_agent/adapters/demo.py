@@ -427,59 +427,195 @@ class DeterministicDemoAdapter:
             supported = {
                 "resistive_load_nmos_differential_pair",
                 "resistive_load_nmos_differential_pair_with_tail_device",
+                "resistive_load_nmos_differential_pair_with_tail_device_and_source_degeneration",
             }
             if variant not in supported:
                 raise RuntimeError(f"unsupported demo topology variant: {variant}")
-            changed = variant == "resistive_load_nmos_differential_pair"
-            tail_width_um = float(task.parameters["tail_width_um"])
-            tail_length_um = float(task.parameters["tail_length_um"])
-            if changed:
-                schematic["instances"].append(
-                    {
-                        "name": "MNTAIL",
-                        "library": "demo_pdk",
-                        "cell": "nmos",
-                        "parameters": {},
-                        "terminals": {
-                            "D": "TAIL",
-                            "G": "BIAS",
-                            "S": "VSS",
-                            "B": "VSS",
+            transform_action = task.resolved_schematic_transform_action()
+            if transform_action is SchematicTransformAction.ADD_TAIL_DEVICE:
+                if variant.endswith("source_degeneration"):
+                    raise RuntimeError(
+                        "add_tail_device is not valid after source degeneration"
+                    )
+                changed = variant == "resistive_load_nmos_differential_pair"
+                tail_width_um = float(task.parameters["tail_width_um"])
+                tail_length_um = float(task.parameters["tail_length_um"])
+                if changed:
+                    schematic["instances"].append(
+                        {
+                            "name": "MNTAIL",
+                            "library": "demo_pdk",
+                            "cell": "nmos",
+                            "parameters": {},
+                            "terminals": {
+                                "D": "TAIL",
+                                "G": "BIAS",
+                                "S": "VSS",
+                                "B": "VSS",
+                            },
+                            "xy": [0.0, -1.6],
+                            "orient": "R0",
+                        }
+                    )
+                    schematic["nets"] = sorted(
+                        set(schematic["nets"]) | {"BIAS"}
+                    )
+                    schematic["pins"] = sorted(
+                        set(schematic["pins"]) | {"BIAS"}
+                    )
+                    schematic["topology_variant"] = (
+                        "resistive_load_nmos_differential_pair_with_tail_device"
+                    )
+                tail_parameters = {
+                    "Wfg": f"{tail_width_um:.12g}u",
+                    "l": f"{tail_length_um:.12g}u",
+                    "fingers": "1",
+                    "m": "1",
+                }
+                schematic["instance_parameters"]["MNTAIL"] = tail_parameters
+                for item in schematic["instances"]:
+                    if isinstance(item, dict) and item.get("name") == "MNTAIL":
+                        item["parameters"] = dict(tail_parameters)
+                semantic = {
+                    "tail_width_um": tail_width_um,
+                    "tail_length_um": tail_length_um,
+                }
+                schematic["semantic_parameters"].update(semantic)
+                schematic["parameters"].update(semantic)
+                return AdapterResult(
+                    data={
+                        "transformed": changed,
+                        "already_transformed": not changed,
+                        "transform_action": transform_action.value,
+                        "topology_delta": {
+                            "added_instance": "MNTAIL" if changed else None,
+                            "added_pin": "BIAS" if changed else None,
+                            "added_net": "BIAS" if changed else None,
                         },
-                        "xy": [0.0, -1.6],
-                        "orient": "R0",
-                    }
+                        "readback": self.inspect_schematic(task).data,
+                    },
+                    evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
                 )
-                schematic["nets"] = sorted(set(schematic["nets"]) | {"BIAS"})
-                schematic["pins"] = sorted(set(schematic["pins"]) | {"BIAS"})
-                schematic["topology_variant"] = (
-                    "resistive_load_nmos_differential_pair_with_tail_device"
+
+            real_tail_variant = (
+                "resistive_load_nmos_differential_pair_with_tail_device"
+            )
+            degenerated_variant = (
+                "resistive_load_nmos_differential_pair_with_tail_device_and_source_degeneration"
+            )
+            if variant not in {real_tail_variant, degenerated_variant}:
+                raise RuntimeError(
+                    "differential source degeneration requires add_tail_device first"
                 )
-            tail_parameters = {
-                "Wfg": f"{tail_width_um:.12g}u",
-                "l": f"{tail_length_um:.12g}u",
-                "fingers": "1",
-                "m": "1",
-            }
-            schematic["instance_parameters"]["MNTAIL"] = tail_parameters
-            for item in schematic["instances"]:
-                if isinstance(item, dict) and item.get("name") == "MNTAIL":
-                    item["parameters"] = dict(tail_parameters)
-            semantic = {
-                "tail_width_um": tail_width_um,
-                "tail_length_um": tail_length_um,
-            }
-            schematic["semantic_parameters"].update(semantic)
-            schematic["parameters"].update(semantic)
+            if transform_action is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION:
+                changed = variant == degenerated_variant
+                if changed:
+                    for item in schematic["instances"]:
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get("name") in {"MN0", "MN1"}:
+                            item["terminals"]["S"] = "TAIL"
+                    schematic["instances"] = [
+                        item
+                        for item in schematic["instances"]
+                        if not isinstance(item, dict)
+                        or item.get("name") not in {"RS0", "RS1"}
+                    ]
+                    schematic["nets"] = sorted(
+                        set(schematic["nets"]) - {"NSP", "NSN"}
+                    )
+                    schematic["topology_variant"] = real_tail_variant
+                    schematic["semantic_parameters"].pop(
+                        "source_resistance_ohm", None
+                    )
+                    schematic["parameters"].pop("source_resistance_ohm", None)
+                    schematic["instance_parameters"].pop("RS0", None)
+                    schematic["instance_parameters"].pop("RS1", None)
+                return AdapterResult(
+                    data={
+                        "transformed": changed,
+                        "already_removed": not changed,
+                        "transform_action": transform_action.value,
+                        "topology_delta": {
+                            "renamed_terminal_nets": (
+                                ["MN0.S: NSP -> TAIL", "MN1.S: NSN -> TAIL"]
+                                if changed
+                                else []
+                            ),
+                            "removed_instances": ["RS0", "RS1"] if changed else [],
+                            "removed_nets": ["NSP", "NSN"] if changed else [],
+                        },
+                        "readback": self.inspect_schematic(task).data,
+                    },
+                    evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+                )
+            if transform_action is not SchematicTransformAction.ADD_SOURCE_DEGENERATION:
+                raise RuntimeError(
+                    f"unsupported differential-pair transform: {transform_action}"
+                )
+            resistance = float(task.parameters["source_resistance_ohm"])
+            changed = variant == real_tail_variant
+            if changed:
+                for item in schematic["instances"]:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("name") == "MN0":
+                        item["terminals"]["S"] = "NSP"
+                    elif item.get("name") == "MN1":
+                        item["terminals"]["S"] = "NSN"
+                schematic["instances"].extend(
+                    [
+                        {
+                            "name": "RS0",
+                            "library": "analogLib",
+                            "cell": "res",
+                            "parameters": {},
+                            "terminals": {"PLUS": "NSP", "MINUS": "TAIL"},
+                            "xy": [-0.8, -0.9],
+                            "orient": "R0",
+                        },
+                        {
+                            "name": "RS1",
+                            "library": "analogLib",
+                            "cell": "res",
+                            "parameters": {},
+                            "terminals": {"PLUS": "NSN", "MINUS": "TAIL"},
+                            "xy": [0.8, -0.9],
+                            "orient": "R0",
+                        },
+                    ]
+                )
+                schematic["nets"] = sorted(
+                    set(schematic["nets"]) | {"NSP", "NSN"}
+                )
+                schematic["topology_variant"] = degenerated_variant
+            previous = schematic["semantic_parameters"].get(
+                "source_resistance_ohm"
+            )
+            resistor_parameters = {"r": f"{resistance:.12g}"}
+            for instance in ("RS0", "RS1"):
+                schematic["instance_parameters"][instance] = dict(
+                    resistor_parameters
+                )
+                for item in schematic["instances"]:
+                    if isinstance(item, dict) and item.get("name") == instance:
+                        item["parameters"] = dict(resistor_parameters)
+            schematic["semantic_parameters"]["source_resistance_ohm"] = resistance
+            schematic["parameters"]["source_resistance_ohm"] = resistance
             return AdapterResult(
                 data={
                     "transformed": changed,
                     "already_transformed": not changed,
-                    "transform_action": task.resolved_schematic_transform_action().value,
+                    "transform_action": transform_action.value,
+                    "resistance_changed": previous is None or previous != resistance,
                     "topology_delta": {
-                        "added_instance": "MNTAIL" if changed else None,
-                        "added_pin": "BIAS" if changed else None,
-                        "added_net": "BIAS" if changed else None,
+                        "renamed_terminal_nets": (
+                            ["MN0.S: TAIL -> NSP", "MN1.S: TAIL -> NSN"]
+                            if changed
+                            else []
+                        ),
+                        "added_instances": ["RS0", "RS1"] if changed else [],
+                        "added_nets": ["NSP", "NSN"] if changed else [],
                     },
                     "readback": self.inspect_schematic(task).data,
                 },
@@ -616,6 +752,14 @@ class DeterministicDemoAdapter:
                 raise RuntimeError(
                     "tail_width_um/tail_length_um require the real-tail topology"
                 )
+            if (
+                task.circuit is CircuitKind.DIFFERENTIAL_PAIR
+                and "source_resistance_ohm" in parameters
+                and not {"RS0", "RS1"} <= set(schematic["instance_parameters"])
+            ):
+                raise RuntimeError(
+                    "source_resistance_ohm requires the degenerated real-tail topology"
+                )
             schematic["parameters"].update(parameters)
             semantic_names = (
                 (
@@ -632,6 +776,7 @@ class DeterministicDemoAdapter:
                         "load_resistance_ohm",
                         "tail_width_um",
                         "tail_length_um",
+                        "source_resistance_ohm",
                     )
                     if task.circuit is CircuitKind.DIFFERENTIAL_PAIR
                     else (
@@ -683,6 +828,12 @@ class DeterministicDemoAdapter:
                     schematic["instance_parameters"]["MNTAIL"]["l"] = (
                         f"{float(parameters['tail_length_um']):.12g}u"
                     )
+                if "source_resistance_ohm" in parameters:
+                    resistance = (
+                        f"{float(parameters['source_resistance_ohm']):.12g}"
+                    )
+                    for instance in ("RS0", "RS1"):
+                        schematic["instance_parameters"][instance]["r"] = resistance
             result_data.update(
                 {
                     "applied": dict(parameters),
@@ -850,8 +1001,18 @@ class DeterministicDemoAdapter:
             width_um = effective_parameters["input_width_um"]
             length_um = effective_parameters["length_um"]
             resistance = effective_parameters["load_resistance_ohm"]
-            real_tail = schematic.get("topology_variant") == (
-                "resistive_load_nmos_differential_pair_with_tail_device"
+            topology_variant = str(schematic.get("topology_variant"))
+            source_degenerated = topology_variant.endswith(
+                "with_tail_device_and_source_degeneration"
+            )
+            real_tail = topology_variant in {
+                "resistive_load_nmos_differential_pair_with_tail_device",
+                "resistive_load_nmos_differential_pair_with_tail_device_and_source_degeneration",
+            }
+            source_resistance = (
+                float(effective_parameters["source_resistance_ohm"])
+                if source_degenerated
+                else 0.0
             )
             common_mode_v = effective_parameters.get("common_mode_v", 0.45)
             vdd_v = effective_parameters.get("vdd_v", 0.9)
@@ -915,7 +1076,8 @@ class DeterministicDemoAdapter:
             overdrive_v = math.sqrt(
                 max(2.0 * branch_current_a / beta_a_per_v2, 1e-12)
             )
-            tail_v = common_mode_v - 0.25 - overdrive_v
+            branch_source_v = common_mode_v - 0.25 - overdrive_v
+            tail_v = branch_source_v - branch_current_a * source_resistance
             output_v = vdd_v - branch_current_a * resistance
             gm_s = 2.0 * branch_current_a / overdrive_v
             gds_s = max(gm_s / 20.0, 1e-9)
@@ -936,7 +1098,28 @@ class DeterministicDemoAdapter:
                 branch_p_gds_s=gds_s,
                 branch_n_gds_s=gds_s,
                 load_resistance_ohm=resistance,
+                branch_p_source_v=branch_source_v,
+                branch_n_source_v=branch_source_v,
             )
+            if source_degenerated:
+                metrics.update(
+                    {
+                        "source_resistance_ohm": source_resistance,
+                        "source_p_voltage_v": branch_source_v,
+                        "source_n_voltage_v": branch_source_v,
+                        "source_p_degeneration_drop_v": (
+                            branch_current_a * source_resistance
+                        ),
+                        "source_n_degeneration_drop_v": (
+                            branch_current_a * source_resistance
+                        ),
+                        "source_p_resistor_current_ua": branch_current_a * 1e6,
+                        "source_n_resistor_current_ua": branch_current_a * 1e6,
+                        "source_p_current_mismatch_percent": 0.0,
+                        "source_n_current_mismatch_percent": 0.0,
+                        "max_source_current_mismatch_percent": 0.0,
+                    }
+                )
             if real_tail:
                 assert tail_overdrive_v is not None
                 assert tail_gm_s is not None
@@ -983,7 +1166,8 @@ class DeterministicDemoAdapter:
                     "use tail_device_saturation_region to evaluate feasibility"
                 )
             output_resistance = 1.0 / (1.0 / resistance + gds_s)
-            low_frequency_gain = gm_s * output_resistance
+            effective_gm_s = gm_s / (1.0 + gm_s * source_resistance)
+            low_frequency_gain = effective_gm_s * output_resistance
             noise_diagnostics: dict[str, object] = {}
             if task.resolved_analysis() is AnalysisKind.AC:
                 if task.ac_sweep is None:
@@ -1036,9 +1220,14 @@ class DeterministicDemoAdapter:
                 )
                 if tail_output_resistance is not None:
                     common_mode_gain = (
-                        gm_s
+                        effective_gm_s
                         * output_resistance
-                        / (1.0 + 2.0 * gm_s * tail_output_resistance)
+                        / (
+                            1.0
+                            + 2.0
+                            * effective_gm_s
+                            * tail_output_resistance
+                        )
                     )
                     common_mode_transfer = [
                         -common_mode_gain
@@ -1123,7 +1312,10 @@ class DeterministicDemoAdapter:
                         "demo differential transient analysis requires linearity_sweep"
                     )
                 amplitudes = task.linearity_sweep.amplitudes_v
-                compression_scale_v = max(0.12, amplitudes[0] * 2.0)
+                compression_scale_v = max(
+                    0.12 * (1.0 + gm_s * source_resistance),
+                    amplitudes[0] * 2.0,
+                )
                 point_metrics: list[dict[str, float]] = []
                 for amplitude in amplitudes:
                     normalized = amplitude / compression_scale_v
@@ -1186,9 +1378,18 @@ class DeterministicDemoAdapter:
                 ):
                     frequency_hz.append(sweep.stop_hz)
                 boltzmann = 1.380649e-23
-                input_density = math.sqrt(
-                    4.0 * boltzmann * 300.0 * (4.0 / 3.0) / max(gm_s, 1e-12)
+                input_noise_power = (
+                    4.0
+                    * boltzmann
+                    * 300.0
+                    * (4.0 / 3.0)
+                    / max(gm_s, 1e-12)
                 )
+                if source_degenerated:
+                    input_noise_power += (
+                        8.0 * boltzmann * 300.0 * source_resistance
+                    )
+                input_density = math.sqrt(input_noise_power)
                 raw_noise_metrics, noise_diagnostics = (
                     extract_common_source_noise_metrics(
                         frequency_hz,

@@ -720,6 +720,8 @@ def extract_differential_pair_dc_metrics(
     branch_p_gds_s: float,
     branch_n_gds_s: float,
     load_resistance_ohm: float,
+    branch_p_source_v: float | None = None,
+    branch_n_source_v: float | None = None,
 ) -> dict[str, float]:
     """Derive symmetric resistive-load NMOS differential-pair DC metrics.
 
@@ -746,6 +748,10 @@ def extract_differential_pair_dc_metrics(
         "branch_n_gds_s": branch_n_gds_s,
         "load_resistance_ohm": load_resistance_ohm,
     }
+    if branch_p_source_v is not None:
+        values["branch_p_source_v"] = branch_p_source_v
+    if branch_n_source_v is not None:
+        values["branch_n_source_v"] = branch_n_source_v
     if any(not math.isfinite(float(value)) for value in values.values()):
         raise MetricExtractionError(
             "differential-pair operating-point values must be finite"
@@ -769,8 +775,18 @@ def extract_differential_pair_dc_metrics(
 
     branch_p_vdsat = abs(float(branch_p_vdsat_v))
     branch_n_vdsat = abs(float(branch_n_vdsat_v))
-    branch_p_vds = float(outp_v) - float(tail_v)
-    branch_n_vds = float(outn_v) - float(tail_v)
+    source_p_v = (
+        float(tail_v)
+        if branch_p_source_v is None
+        else float(branch_p_source_v)
+    )
+    source_n_v = (
+        float(tail_v)
+        if branch_n_source_v is None
+        else float(branch_n_source_v)
+    )
+    branch_p_vds = float(outp_v) - source_p_v
+    branch_n_vds = float(outn_v) - source_n_v
     branch_p_margin = branch_p_vds - branch_p_vdsat
     branch_n_margin = branch_n_vds - branch_n_vdsat
     upper_p_headroom = float(vdd_v) - float(outp_v)
@@ -817,8 +833,10 @@ def extract_differential_pair_dc_metrics(
         ),
         "common_mode_input_v": float(common_mode_v),
         "tail_voltage_v": float(tail_v),
-        "branch_p_vgs_v": float(common_mode_v) - float(tail_v),
-        "branch_n_vgs_v": float(common_mode_v) - float(tail_v),
+        "branch_p_source_v": source_p_v,
+        "branch_n_source_v": source_n_v,
+        "branch_p_vgs_v": float(common_mode_v) - source_p_v,
+        "branch_n_vgs_v": float(common_mode_v) - source_n_v,
         "branch_p_vds_v": branch_p_vds,
         "branch_n_vds_v": branch_n_vds,
         "branch_p_vdsat_v": branch_p_vdsat,

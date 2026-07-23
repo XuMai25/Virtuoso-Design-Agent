@@ -4994,6 +4994,21 @@ def test_source_label_edit_is_strict_and_parameter_updates_are_partial() -> None
     assert "m" not in mos_updates["MN0"]
 
 
+def test_differential_source_degeneration_edit_is_symmetric_and_owned() -> None:
+    deletion = bridge_worker._delete_differential_source_degeneration_operation()
+
+    assert 'x~>name == "MN0"' in deletion
+    assert 'x~>name == "MN1"' in deletion
+    assert 'x~>theLabel == "NSP"' in deletion
+    assert 'x~>theLabel == "NSN"' in deletion
+    assert deletion.count('x~>theLabel == "TAIL"') == 2
+    assert deletion.count("dbDeleteObject(rbLabel)") == 4
+    assert deletion.count("dbDeleteObject(rbWire)") == 4
+    assert deletion.count("dbDeleteObject(rbInst)") == 2
+    assert 'x~>name == "RS0"' in deletion
+    assert 'x~>name == "RS1"' in deletion
+
+
 def test_existing_schematic_transform_is_forced_to_append_mode() -> None:
     captured = {}
 
@@ -6547,6 +6562,35 @@ def _differential_pair_tail_readback() -> dict:
     return readback
 
 
+def _differential_pair_degenerated_tail_readback() -> dict:
+    readback = _differential_pair_tail_readback()
+    for item in readback["instances"]:
+        if item["name"] == "MN0":
+            item["terms"]["S"] = "NSP"
+        elif item["name"] == "MN1":
+            item["terms"]["S"] = "NSN"
+    readback["instances"].extend(
+        [
+            {
+                "name": "RS0",
+                "lib": "analogLib",
+                "cell": "res",
+                "params": {"r": "500"},
+                "terms": {"PLUS": "NSP", "MINUS": "TAIL"},
+            },
+            {
+                "name": "RS1",
+                "lib": "analogLib",
+                "cell": "res",
+                "params": {"r": "500"},
+                "terms": {"PLUS": "NSN", "MINUS": "TAIL"},
+            },
+        ]
+    )
+    readback["nets"].update({"NSP": {}, "NSN": {}})
+    return readback
+
+
 def test_differential_pair_oa_contract_requires_exact_symmetric_topology() -> None:
     profile = load_pdk_profile("nics4304_tsmc28").model_dump(mode="json")
     readback = _differential_pair_readback()
@@ -6613,6 +6657,62 @@ MNTAIL (TAIL BIAS VSS VSS) nch_lvt_mac l=30n w=500n nf=1 multi=1
     assert parsed["tail_device_geometry"]["total_width_um"] == pytest.approx(0.5)
 
 
+def test_differential_pair_degenerated_tail_oa_and_si_contract_is_symmetric() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump(mode="json")
+    readback = _differential_pair_degenerated_tail_readback()
+
+    assert _assert_differential_pair(readback, profile) == (
+        "resistive_load_nmos_differential_pair_with_tail_device_and_source_degeneration"
+    )
+    assert _differential_pair_semantic_parameters_from_schematic(readback) == {
+        "input_width_um": pytest.approx(1.0),
+        "length_um": pytest.approx(0.03),
+        "load_resistance_ohm": pytest.approx(10_000.0),
+        "tail_width_um": pytest.approx(0.5),
+        "tail_length_um": pytest.approx(0.03),
+        "source_resistance_ohm": pytest.approx(500.0),
+    }
+    assert set(readback["pins"]) == {
+        "INP",
+        "INN",
+        "OUTP",
+        "OUTN",
+        "TAIL",
+        "VDD",
+        "VSS",
+        "BIAS",
+    }
+
+    text = """
+MN0 (OUTP INP NSP VSS) nch_lvt_mac l=30n w=2u nf=2 multi=1
+MN1 (OUTN INN NSN VSS) nch_lvt_mac l=30n w=2u nf=2 multi=1
+RD0 (VDD OUTP) resistor r=10k
+RD1 (VDD OUTN) resistor r=10k
+MNTAIL (TAIL BIAS VSS VSS) nch_lvt_mac l=30n w=500n nf=1 multi=1
+RS0 (NSP TAIL) resistor r=500
+RS1 (NSN TAIL) resistor r=500
+"""
+    parsed = _parse_differential_pair_netlist(text, profile)
+    assert parsed["topology_variant"] == (
+        "resistive_load_nmos_differential_pair_with_tail_device_and_source_degeneration"
+    )
+    assert parsed["semantic_parameters"]["source_resistance_ohm"] == pytest.approx(
+        500.0
+    )
+    assert parsed["instances"]["MN0"]["nodes"] == ["OUTP", "INP", "NSP", "VSS"]
+    assert parsed["instances"]["RS1"]["nodes"] == ["NSN", "TAIL"]
+
+    asymmetric_oa = deepcopy(readback)
+    next(
+        item for item in asymmetric_oa["instances"] if item["name"] == "RS1"
+    )["params"]["r"] = "600"
+    with pytest.raises(RuntimeError, match="source resistances differ"):
+        _differential_pair_semantic_parameters_from_schematic(asymmetric_oa)
+
+    with pytest.raises(RuntimeError, match="RS0 si resistance"):
+        _parse_differential_pair_netlist(text.replace("RS1 (NSN TAIL) resistor r=500", "RS1 (NSN TAIL) resistor r=600"), profile)
+
+
 def test_differential_pair_semantic_write_updates_both_branches() -> None:
     assert _differential_pair_instance_parameter_updates(
         {
@@ -6629,6 +6729,9 @@ def test_differential_pair_semantic_write_updates_both_branches() -> None:
     assert _differential_pair_instance_parameter_updates(
         {"tail_width_um": 0.8, "tail_length_um": 0.04}
     ) == {"MNTAIL": {"wf": "0.8u", "l": "0.04u"}}
+    assert _differential_pair_instance_parameter_updates(
+        {"source_resistance_ohm": 500.0}
+    ) == {"RS0": {"r": "500"}, "RS1": {"r": "500"}}
 
 
 def test_differential_pair_si_netlist_proves_topology_and_matched_geometry() -> None:
@@ -6718,6 +6821,34 @@ def test_differential_pair_real_tail_decks_use_bias_and_true_differential_noise(
     assert "RBIASN" not in noise_deck
 
 
+def test_differential_pair_degenerated_tail_deck_saves_internal_source_nodes() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump(mode="json")
+    parameters = {
+        "input_width_um": 2.0,
+        "length_um": 0.03,
+        "load_resistance_ohm": 8_000.0,
+        "tail_width_um": 0.8,
+        "tail_length_um": 0.03,
+        "source_resistance_ohm": 500.0,
+        "tail_bias_v": 0.4,
+        "common_mode_v": 0.55,
+        "vdd_v": 0.9,
+    }
+    variant = (
+        "resistive_load_nmos_differential_pair_with_tail_device_and_source_degeneration"
+    )
+    deck = _differential_pair_testbench_deck(
+        profile,
+        parameters,
+        "/data/xum/virtuoso_bridge_smoke/vda_diffpair_deg/netlist",
+        topology_variant=variant,
+    )
+
+    assert "VBIAS_SRC (BIAS 0) vsource dc=vbias" in deck
+    assert "save INP INN OUTP OUTN TAIL VDD VSS NSP NSN BIAS VDD_SRC:p" in deck
+    assert "ITAIL_SRC" not in deck
+
+
 def test_differential_pair_real_tail_dc_uses_mntail_ids_and_region_evidence() -> None:
     parameters = {
         "input_width_um": 2.0,
@@ -6771,6 +6902,76 @@ def test_differential_pair_real_tail_dc_uses_mntail_ids_and_region_evidence() ->
     assert metrics["tail_device_saturation_region"] == 1.0
     assert evidence["tail_source_binding"] == "oa_mntail_with_external_bias_voltage"
     assert evidence["operating_regions"]["MNTAIL"] == "saturation"
+
+
+def test_differential_pair_degenerated_tail_dc_binds_source_nodes_and_resistor_kcl() -> None:
+    parameters = {
+        "input_width_um": 2.0,
+        "length_um": 0.03,
+        "load_resistance_ohm": 8_000.0,
+        "tail_width_um": 0.8,
+        "tail_length_um": 0.03,
+        "source_resistance_ohm": 500.0,
+        "tail_bias_v": 0.4,
+        "common_mode_v": 0.55,
+        "vdd_v": 0.9,
+    }
+    data = {
+        "dc_INP": 0.55,
+        "dc_INN": 0.55,
+        "dc_OUTP": 0.82,
+        "dc_OUTN": 0.82,
+        "dc_NSP": 0.205,
+        "dc_NSN": 0.205,
+        "dc_TAIL": 0.20,
+        "dc_BIAS": 0.40,
+        "dc_VDD": 0.9,
+        "dc_VSS": 0.0,
+        "dc_VDD_SRC:p": -20e-6,
+        "dcOpInfo_MN0:ids": 10e-6,
+        "dcOpInfo_MN0:vgs": 0.345,
+        "dcOpInfo_MN0:vds": 0.615,
+        "dcOpInfo_MN0:vdsat": 0.10,
+        "dcOpInfo_MN0:gm": 100e-6,
+        "dcOpInfo_MN0:gds": 2e-6,
+        "dcOpInfo_MN1:ids": 10e-6,
+        "dcOpInfo_MN1:vgs": 0.345,
+        "dcOpInfo_MN1:vds": 0.615,
+        "dcOpInfo_MN1:vdsat": 0.10,
+        "dcOpInfo_MN1:gm": 100e-6,
+        "dcOpInfo_MN1:gds": 2e-6,
+        "dcOpInfo_MNTAIL:ids": 20e-6,
+        "dcOpInfo_MNTAIL:vgs": 0.40,
+        "dcOpInfo_MNTAIL:vds": 0.20,
+        "dcOpInfo_MNTAIL:vdsat": 0.08,
+        "dcOpInfo_MNTAIL:gm": 200e-6,
+        "dcOpInfo_MNTAIL:gds": 4e-6,
+    }
+    variant = (
+        "resistive_load_nmos_differential_pair_with_tail_device_and_source_degeneration"
+    )
+
+    metrics, evidence = _differential_pair_metrics_from_result(
+        data, parameters, variant
+    )
+
+    assert metrics["branch_p_source_v"] == pytest.approx(0.205)
+    assert metrics["branch_p_vds_v"] == pytest.approx(0.615)
+    assert metrics["source_p_degeneration_drop_v"] == pytest.approx(0.005)
+    assert metrics["source_p_resistor_current_ua"] == pytest.approx(10.0)
+    assert metrics["max_source_current_mismatch_percent"] == pytest.approx(0.0)
+    assert evidence["source_degeneration_consistency"] == "matched"
+
+    broken = dict(
+        data,
+        dc_NSN=0.203,
+        **{
+            "dcOpInfo_MN1:vgs": 0.347,
+            "dcOpInfo_MN1:vds": 0.617,
+        },
+    )
+    with pytest.raises(RuntimeError, match="RS0/RS1"):
+        _differential_pair_metrics_from_result(broken, parameters, variant)
 
 
 def test_differential_pair_ac_deck_and_parser_use_balanced_complex_nodes() -> None:

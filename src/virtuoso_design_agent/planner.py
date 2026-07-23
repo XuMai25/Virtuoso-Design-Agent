@@ -680,12 +680,38 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 "vdd_v/load_ff 设置源和负载；不替换或另建 cellview"
             )
         elif task.circuit is CircuitKind.DIFFERENTIAL_PAIR:
-            capability = "schematic.transform.differential-pair-tail-device"
-            description = (
-                "在同一 cellview 内保留 MN0/MN1/RD0/RD1 与全部已有 pins，"
-                "新增 MNTAIL(D=TAIL,G=BIAS,S/B=VSS) 和 BIAS pin，并按 "
-                "tail_width_um/tail_length_um 设置尾管；不替换或另建 cellview"
-            )
+            transform_action = task.resolved_schematic_transform_action()
+            if transform_action is SchematicTransformAction.ADD_TAIL_DEVICE:
+                capability = "schematic.transform.differential-pair-tail-device"
+                description = (
+                    "在同一 cellview 内保留 MN0/MN1/RD0/RD1 与全部已有 pins，"
+                    "新增 MNTAIL(D=TAIL,G=BIAS,S/B=VSS) 和 BIAS pin，并按 "
+                    "tail_width_um/tail_length_um 设置尾管；不替换或另建 cellview"
+                )
+            elif transform_action is SchematicTransformAction.REMOVE_SOURCE_DEGENERATION:
+                capability = (
+                    "schematic.transform.differential-pair-source-degeneration.remove"
+                )
+                description = (
+                    "在同一真实尾管差分对 cellview 内仅删除 RS0/RS1 及各自的 "
+                    "VDA 端子 stub，把 MN0.S/MN1.S 从 NSP/NSN 恢复到 TAIL，"
+                    "并移除两个内部网；保留核心、MNTAIL、pins 与实例参数"
+                )
+                if (
+                    task.schematic_transform is not None
+                    and task.schematic_transform.expected_restored_placement_sha256
+                    is not None
+                ):
+                    description += "；恢复后 placement SHA-256 必须与声明基线一致"
+            else:
+                capability = (
+                    "schematic.transform.differential-pair-source-degeneration"
+                )
+                description = (
+                    "在同一真实尾管差分对 cellview 内把 MN0.S/MN1.S 分别改接 "
+                    "NSP/NSN，新增匹配的 RS0(NSP,TAIL)/RS1(NSN,TAIL) 并设置 "
+                    "同一个 source_resistance_ohm；保留核心、MNTAIL 与全部 pins"
+                )
         else:
             transform_action = task.resolved_schematic_transform_action()
             if (

@@ -44,7 +44,7 @@ VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PD
 | --- | --- | --- |
 | `schematic.create` | 建图并结构回读 | OA 写入 |
 | `schematic.inspect` | 读取拓扑、参数、pins | 只读 |
-| `schematic.transform` | 对已知拓扑应用可审计的小变更；当前覆盖共源源极退化和反相器 core→ADE testbench | OA 写入 |
+| `schematic.transform` | 对已知拓扑应用可审计的小变更；当前覆盖共源源极退化、反相器 core→ADE testbench、差分对真实尾管与对称源极退化 | OA 写入 |
 | `parameters.apply` | 应用指定参数并回读 | OA 写入 |
 | `ade.prepare` | 为已有 design 新建持久化 Spectre-backed Maestro view/test；拒绝已有 view | Maestro OA 写入 |
 | `ade.capture` | 捕获人工聚焦并已保存的 Maestro setup、history 和已有真实结果 | 远端只读 + 本地证据写入 |
@@ -62,7 +62,9 @@ VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PD
 
 `operating_conditions` 是独立于设计参数的显式可选有限验证集合。省略时 common-source `simulation.run`、`design.tune` 和 `design.close_loop` 保持原有单条件行为与旧 token；声明时每项给出唯一名称、PDK profile 已映射的 `process_corner`、温度和可选 VDD，同一任务最多五项。对调优任务，每个候选只暂存一次 OA 并生成、核对一份 `si` 网表，再为每个条件生成 AC/transient/noise wrapper；完整候选 bundle 才能写入 checkpoint。executor 保留逐条件原始指标和判定，要求全部完整且全部满足约束；maximize objective 取各条件最小值，minimize objective 取最大值。跨条件聚合是 `software_inference`，不能覆盖各条件 `eda_result`。逐条件 VDD 存在时拒绝 task/搜索空间中的 `vdd_v`；全部条件省略 VDD 时则共同继承当前候选的 VDD，避免同一个供电出现两套真源。
 
-`schematic.transform` 不等同于重建模板。共源 transform 有两个显式动作：`add_source_degeneration` 要求 nominal VDA common-source，在同一 cellview 中把 MN0 源极标签从 VSS 改为内部网 `NSRC`，新增 `analogLib/RS0(NSRC,VSS)` 并设置 `source_resistance_ohm`；`remove_source_degeneration` 不接受参数，只在退化变体上唯一选择 MN0.S 的 NSRC 标签和 RS0 两条由 VDA 创建的 wire/label stub，删除 RS0 后恢复 VSS。remove 可带 `expected_restored_placement_sha256`，把 add 前 Bridge placement 回读中的实例、pin、标签和导线完整绑定进 plan token，并在保存后强制相等。反相器 testbench transform 则要求现有 cell 是 MN0/MP0 core 或已经完成同一变更；它保留 MOS/pins，只把地归一到 `gnd!` 并增加固定的 `VDD0/VIN0/CL0/GND0`。所有已有对象编辑都强制 Bridge editor append mode；preflight 拒绝未保存改动，编辑 batch 失败时只 purge 未保存缓存且不保存。前后回读必须证明未点名器件的完整参数、master、位置和顶层 pins 保持，重复调用幂等。为了避免把任意图编辑伪装成安全能力，当前仍没有通用图重写 DSL；若保存已成功而后置审计失败，会保留失败和真实 OA 状态，尚没有通用 snapshot 回滚。
+`schematic.transform` 不等同于重建模板。共源 transform 的 `add_source_degeneration` 把 `MN0.S: VSS -> NSRC` 并新增 `RS0(NSRC,VSS)`；remove 只删除 VDA 创建的 RS0 两条端子 stub/标签并恢复 VSS。差分对先由 `add_tail_device` 在精确 nominal core 上增加 `MNTAIL(TAIL,BIAS,VSS,VSS)` 与 `BIAS` pin；只有该真实尾管变体可以继续执行对称 `add_source_degeneration`：`MN0.S/MN1.S: TAIL -> NSP/NSN`，并新增等值 `RS0(NSP,TAIL)`、`RS1(NSN,TAIL)`。差分对 remove 不接受参数，只删除这四条 VDA 自有 wire/label stub 与两只电阻并恢复两管源极到 TAIL；非对称 R、缺失任一支路或额外连接都会拒绝。
+
+两种 remove 都可带 `expected_restored_placement_sha256`，把 add 前 Bridge placement 回读中的实例、pin、标签和导线完整绑定进 plan token，并在保存后强制相等。反相器 testbench transform 则要求现有 cell 是 MN0/MP0 core 或已经完成同一变更；它保留 MOS/pins，只把地归一到 `gnd!` 并增加固定的 `VDD0/VIN0/CL0/GND0`。所有已有对象编辑都强制 Bridge editor append mode；preflight 拒绝未保存改动，编辑 batch 失败时只 purge 未保存缓存且不保存。前后回读必须证明未点名器件的完整参数、master、位置和顶层 pins 保持，重复调用幂等。为了避免把任意图编辑伪装成安全能力，当前仍没有通用图重写 DSL；若保存已成功而后置审计失败，会保留失败和真实 OA 状态，尚没有通用 snapshot 回滚。
 
 ## 两层参数契约
 
@@ -237,12 +239,20 @@ AC 在同一 `si` 网表上分别运行平衡差模和同相共模 wrapper，二
 
 `analysis_complete` 只表示所需 OP/波形/标量和解析是否齐全，不再把“MNTAIL 或输入支路不在饱和区”混成证据缺失。工作区状态保留为 `software_inference` metric 和明确 warning，并由任务 constraint 判可行性。2026-07-23 的真实 ICMR 首轮因此暴露了旧归类问题；修正后的 10 点重跑把 0.35 V 正确记录为“分析完整但规格不可行”，其余点不受放宽。完整结果和未验证边界见 [`validation/2026-07-23-differential-pair-real-tail-gate4-live.md`](validation/2026-07-23-differential-pair-real-tail-gate4-live.md)。
 
+## 差分对 Gate 5 对称源极退化路径
+
+Gate 5 继续在同一真实尾管 cellview 上做 exact-delta，而不是复制差分对模板或仿真器。add 前必须精确匹配 Gate 4 拓扑；add 后只允许新增 `RS0/RS1` 与内部网 `NSP/NSN`，两管、尾管、负载、顶层 pins 和未点名 placement/参数保持不变。`source_resistance_ohm` 是对称 OA semantic 参数：应用或搜索时必须同时写两只电阻并逐只回读；任一电阻缺失、节点错误或数值不等都会在 OA inspect 或 `si` parser 阶段停止。
+
+自动网表明确要求 `MN0(OUTP,INP,NSP,VSS)`、`MN1(OUTN,INN,NSN,VSS)`、`RS0(NSP,TAIL)`、`RS1(NSN,TAIL)` 和原 `MNTAIL(TAIL,BIAS,VSS,VSS)`。DC 额外保存 NSP/NSN，并从各自 `(NS?-TAIL)/R` 重算电阻电流；两只源电阻分别与对应 MOS 支路核对，误差上限 1%。VGS/VDS/饱和区也从真实支路源节点计算，不能继续错误使用公共 TAIL。AC/CMRR/ICMR/transient/noise 与 checkpoint/有限搜索沿用 Gate 4 状态机，故局部 RS 调整能够进入现有全部分析，而不是一条专用 smoke 脚本。
+
+2026-07-23 的 live Gate 在 `vda_diffpair_deg_gate5_001` 上完成 add、500 Ω 单点全分析、250/500 Ω transient 两点调优与最佳 OA 写回、remove、恢复 DC，并将整个 add/remove/restore 序列重复一次。两次 remove 后 placement SHA 都精确恢复为 add 前值；两次恢复网表 SHA、semantic 参数和所选 DC metrics 完全相同。完整证据与权衡见 [`validation/2026-07-23-differential-pair-source-degeneration-gate5-live.md`](validation/2026-07-23-differential-pair-source-degeneration-gate5-live.md)。
+
 ## 证据链
 
 每次运行至少保存任务和计划 token、adapter 与证据来源、动作状态、候选参数、仿真指标、逐条规格判定、最终选择、OA 回读摘要，以及错误和未验证边界。显式实例写入还保存请求、写入前目标字段、立即确认和独立 inspect 的完整参数表。ADE `prepare` 保存 design/test/simulator 请求、持久化 view/test 回读、未覆盖既有 view 以及没有设置 analysis/sweep 的范围；`capture` 保存焦点目标、是否已保存、setup/simulation 聚合指纹、逐文件 manifest、history 选择来源以及可用时的逐点 output/spec；变量/setup patch 保存声明目标、全部旧值、即时值、独立重开值、targeted 前后指纹及未覆盖范围，并明确记录没有运行仿真；严格 sweep run 还保存 setup 前后 scope 指纹、每个 point 的 Detail 参数/非空 output、逐 test input/result hash、OA/input comparison hash 和逐点绑定指纹。存在显式 legacy output evaluation-error 契约时，还保存任务期望、RDB 实际错误单元格、completion-log 数量、逐项匹配和零未解释错误；启用 result mapping 时再保存 output expression 前后状态/指纹、显式 scale、映射后的候选、逐条 constraint 与 selection。调优 checkpoint 保留历史失败 actions，但恢复后只有完成的候选证据参与选择；最终 run 可以在完整证据和最终回读成立时成功，同时仍显式留下已恢复的 transport 事件。自动 netlisting 还保存远端网表/wrapper 路径、SHA-256、解析后的实例参数和一致性结论。
 
 有限 PVT 还保存每个原始 condition 的完整 `CandidateEvaluation`、同一 OA/netlist identity、每个 analysis 的 testbench/model manifest、独立 noise PSF，以及跨条件 `all_conditions_required`/worst-case 聚合。缺一个条件、条件顺序或值与任务不一致、任一 analysis 不完整、netlist 漂移或 model corner 未映射都直接失败，不会降级为 nominal 结果。
 
-timing、过冲/欠冲、`supply_energy_per_cycle_fj`、`average_supply_power_uw`、共源与差分对的 DC/供电/KCL 连续指标，以及从 AC、相干 transient 或 noise PSF 提取的连续量标为 `eda_result`；OA 结构和参数（包括 MNTAIL W/L）标为 `bridge_readback`；任务显式给出的 VDD、负载、偏置、尾电流或尾管 BIAS、有限尾源输出电阻、analysis 或 sweep 字段标为 `user_input`；默认 analysis/sweep 字段、`gate_area_proxy_um2=(Wn+Wp)L`、饱和区分类、CMRR/交点/压缩点规则和指标完整性判断是 `software_inference`。供电能量或功耗保留积分窗口和源电流方向，不能称为纯动态开关能量；AC、linearity 和 noise 指标也必须保存提取公式、范围和 unresolved 诊断，不能只保存一个无来源标量。后续 Maestro、Calibre 和 PEX 沿用同一证据模型。
+timing、过冲/欠冲、`supply_energy_per_cycle_fj`、`average_supply_power_uw`、共源与差分对的 DC/供电/KCL 连续指标，以及从 AC、相干 transient 或 noise PSF 提取的连续量标为 `eda_result`；OA 结构和参数（包括 MNTAIL W/L、RS0/RS1 与 NSP/NSN 连接）标为 `bridge_readback`；任务显式给出的 VDD、负载、偏置、尾电流或尾管 BIAS、有限尾源输出电阻、对称源电阻值、analysis 或 sweep 字段标为 `user_input`；默认 analysis/sweep 字段、`gate_area_proxy_um2=(Wn+Wp)L`、电阻电流与 KCL 重算、饱和区分类、CMRR/交点/压缩点规则和指标完整性判断是 `software_inference`。供电能量或功耗保留积分窗口和源电流方向，不能称为纯动态开关能量；AC、linearity 和 noise 指标也必须保存提取公式、范围和 unresolved 诊断，不能只保存一个无来源标量。后续 Maestro、Calibre 和 PEX 沿用同一证据模型。
 
 PVT 中的角名、温度和逐角 VDD 是 `user_input`；profile include 映射来自 `pdk_profile`，映射选择及 manifest 组合标为 `software_inference`；每角 Spectre 标量/波形指标仍是 `eda_result`；跨角保守 constraint/objective 值全部标为 `software_inference`。因此聚合最坏值不能被误读为某个单独 Spectre analysis 直接输出的标量。

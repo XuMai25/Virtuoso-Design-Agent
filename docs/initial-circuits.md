@@ -70,7 +70,20 @@ Gate 3 的理想尾源路径继续保留为独立、低成本的局部能力；�
 - 100 MHz 六点 transient 得到小信号增益 `2.927 V/V`、输入 P1dB `116.3 mV peak`；0.2 V peak 点 THD `10.17%`、最大平均功耗 `45.63 µW`。1 kHz–10 GHz 的 141 点 ordinary noise PSF 得到输入参考积分噪声 `921.8 µV RMS`、差分输出积分噪声 `2.584 mV RMS`。
 - 首轮 ICMR 曾把“尾管非饱和”误归为分析不完整；修正后工作区只由 metric/constraint 判可行性，完整性只描述数据与解析。首轮 noise 的 1 TΩ 共模偏置真实漂移到 0.4395 V；改为唯一差分 `iprobe` 加 `+0.5/-0.5` VCVS 后，DC 共模和 PSF 均通过。两次失败记录都保留。
 
-下一 Gate 聚焦另一个 exact-delta、可逆的差分对拓扑小变更，并要求现有 DC/AC/CMRR/ICMR/transient/noise 与 checkpoint/失败恢复无缝迁移。可选 PVT 只在任务显式启用时加严，不默认附加。差分对 ADE/Maestro setup、人工打开/调整/重跑、mismatch/Monte Carlo 和多 test/multi-analysis 仍未闭合。
+Gate 4 的真实尾管能力继续保留；Gate 5 不替换它，而是在其上增加可逆的小变更。
+
+## Gate 5：差分对对称源极退化
+
+状态：2026-07-23 已在全新且不覆盖的 `vb_pdk_smoke/vda_diffpair_deg_gate5_001/schematic` 上完成 **reversible symmetric source-degeneration full-analysis live Gate**。它证明两支对称 RS 可以作为正式 agent 能力加入、调参、写回和移除，且 Gate 4 的 DC/AC/CMRR/ICMR/transient/noise 流程无需另建仿真器或一次性脚本。
+
+- add 只执行 `MN0.S/MN1.S: TAIL -> NSP/NSN` 并加入 `RS0(NSP,TAIL)`、`RS1(NSN,TAIL)`；原 `MN0/MN1/MNTAIL/RD0/RD1` 与所有 pins 保持。OA readback 和 `si` 都要求两只 R 数值相同、节点正确。
+- 500 Ω DC 的两支路电流均为 `24.2402 µA`；由电阻压降重算均为 `24.2400 µA`，最大差异 `0.00117%`。三管工作区、负载/尾管/两只源电阻 KCL、摆幅和功耗约束全部通过。
+- 500 Ω AC 得到差模增益 `2.404 V/V`、带宽 `13.077 GHz`、GBW `31.436 GHz`、unity `28.970 GHz`、低频 CMRR `19.466 dB`。10 点 ICMR 全部 analysis complete，离散通过点为 `0.40–0.80 V`。
+- 100 MHz 六点 transient 得到输入 P1dB `150.30 mV peak`、200 mV 点 THD `7.108%`；相对同参数无退化基线，P1dB 提升 `29.19%`、THD 降低 `30.11%`，同时 GBW 降低 `22.22%`。输入参考积分噪声为 `1086.05 µV RMS`，高于基线 `17.82%`。
+- `source_resistance_ohm=[250,500]` 的两点搜索都完成真实 OA 暂存→回读→自动网表→transient；按 P1dB 选择 500 Ω并独立回读 `RS0=RS1=500 Ω`。这证明 RS 是可重复使用的有限调参维度，而不只是本次固定值 smoke。
+- remove 绑定 add 前 placement SHA，只删除 VDA 创建的两只 R 和四条 terminal stub/label，恢复两管源极到 TAIL。完整 add/remove/restore 序列重复两次；两次恢复 placement 相同，两份恢复网表 SHA 相同，semantic 参数和全部所选 DC metrics 也逐项相同。最终 cell 保持 Gate 4 真实尾管状态，不残留 RS0/RS1/NSP/NSN。
+
+下一默认 Gate 是固定 active-load/current-mirror 差分对模板；先闭合 exact OA delta、匹配、DC KCL、偏置和工作区，再迁移已有动态分析。可选 PVT 只在任务显式启用时加严，不默认附加。差分对 ADE/Maestro setup、人工打开/调整/重跑、mismatch/Monte Carlo 和多 test/multi-analysis 仍未闭合。
 
 ## 升级原则
 

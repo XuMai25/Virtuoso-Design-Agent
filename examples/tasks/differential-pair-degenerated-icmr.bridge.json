@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-degenerated-icmr-bridge",
+  "operation": "design.tune",
+  "circuit": "differential_pair",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_diffpair_deg_gate5_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis": "dc",
+  "parameters": {"tail_bias_v": 0.4, "vdd_v": 0.9},
+  "parameter_space": {
+    "common_mode_v": [0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8]
+  },
+  "constraints": [
+    {"metric": "tail_device_saturation_region", "relation": ">=", "value": 1.0},
+    {"metric": "both_saturation_region", "relation": ">=", "value": 1.0},
+    {"metric": "max_source_current_mismatch_percent", "relation": "<=", "value": 1.0},
+    {"metric": "tail_device_branch_sum_mismatch_percent", "relation": "<=", "value": 1.0},
+    {"metric": "minimum_output_swing_margin_v", "relation": ">=", "value": 0.05},
+    {"metric": "output_offset_abs_mv", "relation": "<=", "value": 2.0}
+  ],
+  "objective": {"metric": "minimum_output_swing_margin_v", "goal": "maximize"},
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 10, "timeout_seconds": 900}
+}
