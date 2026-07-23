@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from virtuoso_design_agent.models import SideEffect, TaskSpec
 from virtuoso_design_agent.planner import build_plan
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _task(operation: str, **extra) -> TaskSpec:
@@ -19,6 +25,35 @@ def _task(operation: str, **extra) -> TaskSpec:
 def test_plan_token_is_stable() -> None:
     task = _task("schematic.create")
     assert build_plan(task).confirmation_token == build_plan(task).confirmation_token
+
+
+def test_psrr_length_task_is_an_eight_point_guarded_oa_search() -> None:
+    task_path = (
+        ROOT
+        / "examples"
+        / "tasks"
+        / "differential-pair-current-mirror-psrr-length-tune.bridge.json"
+    )
+    task = TaskSpec.model_validate(json.loads(task_path.read_text(encoding="utf-8")))
+    plan = build_plan(task)
+    stage = next(step for step in plan.steps if step.capability == "parameters.stage")
+    finalize = next(
+        step for step in plan.steps if step.capability == "parameters.finalize"
+    )
+
+    assert task.parameter_space == {
+        "length_um": [0.03, 0.06],
+        "pmos_load_length_um": [0.03, 0.06],
+        "tail_length_um": [0.03, 0.06],
+    }
+    assert task.limits.max_iterations == 8
+    assert plan.requires_remote_write
+    assert plan.requires_remote_compute
+    assert stage.side_effect is SideEffect.REMOTE_WRITE
+    assert finalize.side_effect is SideEffect.REMOTE_WRITE
+    assert task.safety.allowed_library == "vb_pdk_smoke"
+    assert task.safety.required_cell_prefix == "vda_"
+    assert task.safety.replace_existing is False
 
 
 def test_common_source_pvt_plan_discloses_finite_worst_case_gate() -> None:

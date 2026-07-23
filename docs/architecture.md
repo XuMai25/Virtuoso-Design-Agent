@@ -261,6 +261,8 @@ PSRR 作为正交 analysis 接在同一 Gate 6 输出契约上，而不是另建
 
 只有 `tail_bias_v/common_mode_v/vdd_v/load_ff` 的搜索仍是纯 testbench 搜索，不写 OA。该契约先通过本地 synthetic worker/demo，2026-07-24 又在现有 Gate 6 cell 上完成 nominal 单点和 `tail_bias_v=[0.30,0.32] V × load_ff=[0.5,2.0] fF` 四点 live。四点共 12 次 AC，网表 SHA 相同，DC/网格一致，根 AC 文件清单完整；两个 transport 中断经 checkpoint 和独立 OA 回读恢复。四点都通过饱和、摆幅、增益、带宽和功耗护栏，但 `1 kHz–100 MHz` 最差 PSRR 只有 `11.4275–11.5125 dB`，未通过明确标为临时证伪门的 `20 dB`。`load_ff` 对带内值无可见改善，BIAS 提升只有约 `0.085 dB`；executor 因零可行点不选择参数，OA 前后不变。这证明 bias/load-only 路径不足，不代表最终产品规格已定义或闭合；详见[本地记录](validation/2026-07-23-differential-pair-psrr-local.md)、[单点记录](validation/2026-07-24-differential-pair-psrr-live.md)和[带限搜索记录](validation/2026-07-24-differential-pair-psrr-search-live.md)。
 
+获显式 OA 写授权后，同一 `design.tune` 状态机又完成 `length_um × pmos_load_length_um × tail_length_um` 的 `0.03/0.06 µm` 八点 Gate。每点先同时写回匹配器件并立即 OA 回读，再生成一份不同 SHA 的 `si` 网表，运行差模/VDD/VSS 三次 AC；8/8 候选均 `analysis_complete`、无 issues/warnings，并分别绑定三份根 `ac.ac`。PMOS L 的两水平平均改善约 `5.20 dB`，输入对 L 改善约 `3.27 dB`；二者同为 `0.06 µm` 时达到 `19.712–19.744 dB`。尾管 L 的平均影响为 `-0.19 dB`，却把平均带宽从 `2.033 GHz` 降到 `0.581 GHz`、平均 GBW 从 `10.996 GHz` 降到 `3.130 GHz`，因此后续不应继续把它当主 PSRR 旋钮。全部点仍只因临时 `20 dB` 门失败，executor 没有提交 objective 最大点；一次候选 3 写后回读 `WinError 10054` 先恢复基线，再从 checkpoint index 3 独立回读续跑，最终恢复三组 `L=0.03 µm` 并由额外只读 inspect 复核。该 Gate 证明 OA 几何确实能显著改变同源 PSRR，也证明不可行恢复语义；它没有定义产品 PSRR 规格，也没有对近门点完成 CMRR、线性度、噪声、PVT 或 mismatch 复核。详见[长度搜索记录](validation/2026-07-24-differential-pair-psrr-length-search-live.md)。
+
 live 首版曾把 PMOS 实例命名为 `PM0/PM1`；OA 和 `si` 一致，但 Spectre 将 `P` 前缀解析为 port primitive 并报 `SFE-1703`。VDA 先精确恢复 RD 基线，再将该固定模板统一改为 Spectre 安全的 `MP0/MP1`。worker 同时增加 Spectre 失败详情提取，把 `spectre.out` 错误上下文写入 run record；这类失败属于执行/网表错误，不能被分类为电路规格不可行。
 
 ## 证据链
