@@ -16,6 +16,7 @@ from .characterization import (
     MosPolarity,
     MosSmallSignalPoint,
 )
+from .linear_network import ComplexNodalSystem
 from .models import EvidenceSource, RunStatus, StrictModel
 
 
@@ -295,33 +296,8 @@ def _derived_mos(
     )
 
 
-def _add(
-    matrix: list[list[complex]],
-    indexes: dict[str, int],
-    row: str,
-    column: str,
-    value: complex,
-) -> None:
-    if row != "0" and column != "0":
-        matrix[indexes[row]][indexes[column]] += value
-
-
-def _stamp_admittance(
-    matrix: list[list[complex]],
-    indexes: dict[str, int],
-    positive: str,
-    negative: str,
-    admittance: complex,
-) -> None:
-    _add(matrix, indexes, positive, positive, admittance)
-    _add(matrix, indexes, negative, negative, admittance)
-    _add(matrix, indexes, positive, negative, -admittance)
-    _add(matrix, indexes, negative, positive, -admittance)
-
-
 def _stamp_mos(
-    matrix: list[list[complex]],
-    indexes: dict[str, int],
+    system: ComplexNodalSystem,
     instance: MosSmallSignalInstance,
     values: DerivedMosSmallSignal,
     omega: float,
@@ -336,14 +312,14 @@ def _stamp_mos(
         instance.source,
         instance.bulk,
     )
-    _add(matrix, indexes, drain, drain, values.gds_s)
-    _add(matrix, indexes, drain, source, -values.gds_s - signed_gm - signed_gmb)
-    _add(matrix, indexes, drain, gate, signed_gm)
-    _add(matrix, indexes, drain, bulk, signed_gmb)
-    _add(matrix, indexes, source, drain, -values.gds_s)
-    _add(matrix, indexes, source, source, values.gds_s + signed_gm + signed_gmb)
-    _add(matrix, indexes, source, gate, -signed_gm)
-    _add(matrix, indexes, source, bulk, -signed_gmb)
+    system.add_coefficient(drain, drain, values.gds_s)
+    system.add_coefficient(drain, source, -values.gds_s - signed_gm - signed_gmb)
+    system.add_coefficient(drain, gate, signed_gm)
+    system.add_coefficient(drain, bulk, signed_gmb)
+    system.add_coefficient(source, drain, -values.gds_s)
+    system.add_coefficient(source, source, values.gds_s + signed_gm + signed_gmb)
+    system.add_coefficient(source, gate, -signed_gm)
+    system.add_coefficient(source, bulk, -signed_gmb)
     for first, second, capacitance in (
         (gate, source, values.cgs_f),
         (gate, drain, values.cgd_f),
@@ -352,35 +328,9 @@ def _stamp_mos(
         (source, bulk, values.csb_f),
     ):
         if capacitance > 0.0:
-            _stamp_admittance(
-                matrix, indexes, first, second, complex(0.0, omega * capacitance)
+            system.stamp_admittance(
+                first, second, complex(0.0, omega * capacitance)
             )
-
-
-def _solve(matrix: list[list[complex]], right_hand_side: list[complex]) -> list[complex]:
-    size = len(right_hand_side)
-    augmented = [row[:] + [right_hand_side[index]] for index, row in enumerate(matrix)]
-    scale = max((abs(value) for row in matrix for value in row), default=0.0)
-    threshold = max(scale, 1e-30) * 1e-12
-    for column in range(size):
-        pivot = max(range(column, size), key=lambda row: abs(augmented[row][column]))
-        if abs(augmented[pivot][column]) <= threshold:
-            raise ValueError("small-signal network matrix is singular or ill-conditioned")
-        augmented[column], augmented[pivot] = augmented[pivot], augmented[column]
-        for row in range(column + 1, size):
-            factor = augmented[row][column] / augmented[column][column]
-            if factor == 0.0:
-                continue
-            for index in range(column, size + 1):
-                augmented[row][index] -= factor * augmented[column][index]
-    result = [0j] * size
-    for row in range(size - 1, -1, -1):
-        remainder = augmented[row][size] - sum(
-            augmented[row][column] * result[column]
-            for column in range(row + 1, size)
-        )
-        result[row] = remainder / augmented[row][row]
-    return result
 
 
 def _expression_value(expression: LinearExpression, voltages: dict[str, complex]) -> complex:
@@ -432,63 +382,38 @@ def analyze_small_signal_network(
         )
     for instance in [*request.resistors, *request.capacitors]:
         circuit_nodes.update((instance.positive, instance.negative))
-    nodes = sorted(circuit_nodes - {"0"})
-    indexes = {node: index for index, node in enumerate(nodes)}
     fixed_voltages = {
         item.node: item.voltage.as_complex() for item in request.boundary_voltages
     }
-    fixed_voltages["0"] = 0j
-    unknown_nodes = [node for node in nodes if node not in fixed_voltages]
-    unknown_indexes = [indexes[node] for node in unknown_nodes]
-    fixed_nodes = [node for node in nodes if node in fixed_voltages]
-    fixed_indexes = [indexes[node] for node in fixed_nodes]
     response_points: list[SmallSignalResponsePoint] = []
 
     for frequency_hz in request.frequencies_hz:
-        matrix = [[0j for _ in nodes] for _ in nodes]
+        system = ComplexNodalSystem(circuit_nodes)
         omega = 2.0 * math.pi * frequency_hz
         for resistor in request.resistors:
-            _stamp_admittance(
-                matrix,
-                indexes,
+            system.stamp_admittance(
                 resistor.positive,
                 resistor.negative,
                 1.0 / resistor.resistance_ohm,
             )
         for capacitor in request.capacitors:
-            _stamp_admittance(
-                matrix,
-                indexes,
+            system.stamp_admittance(
                 capacitor.positive,
                 capacitor.negative,
                 complex(0.0, omega * capacitor.capacitance_f),
             )
         for mosfet in request.mosfets:
             _stamp_mos(
-                matrix,
-                indexes,
+                system,
                 mosfet,
                 derived_by_name[mosfet.name],
                 omega,
             )
 
-        unknown_matrix = [
-            [matrix[row][column] for column in unknown_indexes]
-            for row in unknown_indexes
-        ]
-        right_hand_side = [
-            -sum(
-                matrix[row][column] * fixed_voltages[node]
-                for node, column in zip(fixed_nodes, fixed_indexes)
-            )
-            for row in unknown_indexes
-        ]
         try:
-            solution = _solve(unknown_matrix, right_hand_side)
+            voltages = system.solve(fixed_voltages)
         except ValueError as exc:
             raise ValueError(f"{exc} at {frequency_hz:.12g} Hz") from exc
-        voltages = dict(fixed_voltages)
-        voltages.update(dict(zip(unknown_nodes, solution)))
         input_value = _expression_value(request.input_expression, voltages)
         if abs(input_value) <= 1e-30:
             raise ValueError("input_expression evaluates to zero")

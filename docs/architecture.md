@@ -118,6 +118,10 @@ GBW  = gm / (2*pi*Cout)
 
 MOS characterization 点不绑定“输入管/负载管/尾管”等电路角色，而是绑定 model、polarity、L、VGS/VDS/VSB、`Id/W`、`gm/Id`、`gds/Id`、`gmb/Id` 和端子电容密度。实例必须声明相同 model/L 和容差内偏置，随后才按 W/multiplicity 缩放；真实 PDK/EDA 表必须绑定原始 `eda_result` artifact SHA-256，归一化点值明确标为 `software_inference`。矩阵组装和指标也始终是 `software_inference`。这使器件数据可跨拓扑复用，同时避免把一个 Gate 6 拟合系数推广到其他电路。
 
+为了保留面向后续复杂电路的可修改性，数值层与正式请求契约进一步分开。`ComplexNodalSystem` 公开最小的复数 KCL 系数、RHS、二端导纳和电流注入接口；电路专属脚本可以在这些接口上增加局部 VCCS/CCCS、频率相关等效项或特殊激励，而不复制节点分块和高斯求解。若普通节点法不足，`solve_complex_linear_system` 允许脚本自行组装带支路电流等辅助未知量的 MNA 方程。节点 API 的 pivot tolerance 也是显式参数，默认仍保持保守值。
+
+这不是运行时加载任意代码的任务插件系统。正式 `vda small-signal` JSON 仍只接受已经验证的 MOS/R/C 与固定电压边界，以维持确定性、可序列化和证据可审计性。电路专属脚本负责局部构图、观测量和约束；某种新 element、激励或 metric 只有在重复需要、补齐 strict schema、失败测试和 Spectre 对照后，才提升到正式任务契约。底层当前仍是纯 Python dense solver，适合 theory seed 和有界本地网络；大规模、强病态、noise/nonlinear 或精确 foundry 模型继续交给 Spectre，未来确有证据时再替换成稀疏数值后端。
+
 首个本地 Gate 用同一核心验证 NMOS 共源、源退化共源、对称 NMOS 差分对和 PMOS 共源，并注入浮空矩阵、偏置漂移、缺失 artifact hash 等失败。当前没有非线性 DC 解、characterization 插值或 `si`→network 自动转换，所以实例偏置和图仍需显式提供；W/multiplicity 也只按线性缩放，真实 `nf`、finger width、窄宽效应和 LDE 必须成为表的独立几何维度。该核心不支持任意拓扑综合。下一纵向 Gate 是生成真实 TSMC N28 独立器件表，把现有 `si` 结构网表映射到该网络契约，并用完全留出的电路拓扑验证误差。Spectre 仍是最终规格证据。
 
 ## ADE 人工介入与状态所有权

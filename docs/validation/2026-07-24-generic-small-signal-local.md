@@ -79,6 +79,26 @@ Cgs/W, Cgd/W, Cgb/W, Cdb/W, Csb/W
 
 这些测试没有调用 topology-specific 方程或分支。
 
+## 电路脚本扩展接缝
+
+严格 `vda small-signal` 请求继续只接受已验证的 MOS/R/C element。其下的数值层现已
+拆成两个公开入口：
+
+- `ComplexNodalSystem`：提供 KCL coefficient、RHS、二端 admittance 和独立电流
+  injection；具体电路脚本可以据此加入局部受控源或频率相关 stamp；
+- `solve_complex_linear_system`：直接求有限复数方程组，允许脚本在普通节点之外
+  增加支路电流等 MNA auxiliary unknown。
+
+新增测试在不修改正式 element schema 的情况下，由测试侧脚本实现一个 VCCS stamp，
+得到 `gm=1 mS`、负载导纳 `100 µS` 时的 `-10 V/V`；另用 `1 mA` 电流探针和
+`10 kΩ` 端口得到 `10 V`，并用三未知量 MNA 解出跨两个节点的理想 `1 V` 电压源。
+未知节点、非有限系数、非零 ground 和非法 pivot tolerance 均拒绝。
+
+这是 Agent 为具体电路编写薄脚本的受控接缝，不是任意代码进入 VDA 任务的插件入口。
+新 stamp 的结果仍是 `software_inference`；只有在语义重复、加入 strict schema、失败
+测试并完成 Spectre 数值对照后，才可把它写入 capability catalog。当前 dense Python
+solver 也不宣称适用于大型或强病态网络。
+
 本地入口：
 
 ```powershell
@@ -90,7 +110,7 @@ Cgs/W, Cgd/W, Cgb/W, Cdb/W, Csb/W
 
 ```text
 python -m pytest
-486 passed
+493 passed
 
 vda small-signal examples\theory\common-source-small-signal.synthetic.json
 exit 0；complex response 和 -3 dB bandwidth resolved
@@ -104,8 +124,9 @@ exit 0；complex response 和 -3 dB bandwidth resolved
 
 1. 当前求解器不求非线性 DC operating point；实例必须先绑定匹配的器件偏置点。
 2. 当前没有 `si` 网表到通用节点图的自动转换，样例图仍由请求显式提供。
-3. 当前只实现 normal-mode MOS、R、C 和固定电压边界，没有独立电流激励、BJT、
-   通用受控源、inductor、transmission line、开关模型或 hierarchy flattening。
+3. 正式 JSON 只实现 normal-mode MOS、R、C 和固定电压边界；低层脚本 API 已能表达
+   电流注入、自定义受控源 stamp 和 raw MNA，但这些还不是带 schema/evidence record
+   的正式 BJT、inductor、transmission line、开关或 hierarchy flattening 能力。
 4. 没有真实 TSMC N28/SMIC characterization、插值、corner、noise、distortion、
    slew、settling、mismatch 或大信号预测。
 5. 当前 W/multiplicity 采用线性缩放；`nf`、finger width、窄宽效应、扩散共享和

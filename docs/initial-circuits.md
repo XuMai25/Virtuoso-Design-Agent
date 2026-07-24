@@ -100,7 +100,7 @@ Gate 4 的真实尾管能力继续保留；Gate 5 不替换它，而是在其上
 
 为避免上述几何小网格退化成随意试值，Gate 6 已增加本地 theory-first 尺寸入口。它对声明的输入 NMOS/PMOS 负载/尾管 gm/Id 表域逐组合解析求解最小支路电流与 W，而不是把人工 W 列表重新排序；增益、BW、GBW、功耗、面积代理和三管 KVL 余量都保留公式、裕量与证据来源。只有完整穷尽声明表域时才报告 `best_in_declared_discrete_domain`，从不报告连续或全局最优。六点真实 Wn×Wp 同源数据现已把固定 `top_tt`/30 nm L/单偏置下的一阶增益与带宽模型校准到最大留一误差小于 `0.46%`，并由一次新鲜只读同点 Spectre 复跑确认执行重复性；这只证明 topology-local 表内模型。独立 TSMC N28 MOS gm/Id 表、L/VDS/BIAS/VCM/CL/PVT 范围和未参与拟合的电路点仍未闭合，因此 synthetic 推荐与该局部校准都不得直接写回 OA。
 
-该固定拓扑尺寸器之下现已增加通用 MOS/R/C 小信号矩阵核心。它不识别 Gate 2/3/4/5/6 名称，同一套器件点和节点 stamping 已覆盖共源、源退化共源、NMOS 差分对与 PMOS 共源本地解析测试。后续新电路不应复制一套 AC 方程；应先由 OA/`si` 图绑定通用网络，再由少量 topology-aware 层定义设计意图、约束和允许的结构变换。当前真实 PDK 表和自动图绑定尚未完成，所以这仍是本地分析基础，不改变各 Gate 的 live 证据状态。
+该固定拓扑尺寸器之下现已增加通用 MOS/R/C 小信号矩阵核心。它不识别 Gate 2/3/4/5/6 名称，同一套器件点和节点 stamping 已覆盖共源、源退化共源、NMOS 差分对与 PMOS 共源本地解析测试。后续新电路不应复制一套 AC 方程；应先由 OA/`si` 图绑定通用网络，再由少量 topology-aware 层定义设计意图、约束和允许的结构变换。对于尚未进入正式 JSON 契约的特殊受控源、激励或辅助方程，电路脚本可复用公开的 `ComplexNodalSystem` 系数/RHS 接口或 raw complex MNA solver；重复出现并通过 Spectre 对照后才提升为正式 element/metric。当前真实 PDK 表和自动图绑定尚未完成，所以这仍是本地分析基础，不改变各 Gate 的 live 证据状态。
 
 ## 升级原则
 
