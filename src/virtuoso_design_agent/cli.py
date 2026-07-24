@@ -27,6 +27,7 @@ from .models import (
 )
 from .planner import build_plan
 from .safety import SafetyViolation
+from .small_signal import SmallSignalNetworkRequest, analyze_small_signal_network
 from .theory import DifferentialPairTheoryRequest, size_differential_pair
 from .theory_calibration import calibrate_differential_pair_theory
 
@@ -116,6 +117,19 @@ def _cmd_theory_calibrate(args: argparse.Namespace) -> int:
         args.output.write_text(payload, encoding="utf-8")
     print(payload)
     return 0 if result.status is RunStatus.SUCCEEDED else 1
+
+
+def _cmd_small_signal(args: argparse.Namespace) -> int:
+    request = SmallSignalNetworkRequest.model_validate_json(
+        args.request.read_text(encoding="utf-8")
+    )
+    result = analyze_small_signal_network(request)
+    payload = result.model_dump_json(indent=2)
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(payload, encoding="utf-8")
+    print(payload)
+    return 0
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -225,6 +239,14 @@ def build_parser() -> argparse.ArgumentParser:
     theory_calibrate.add_argument("--id", default="gate6-one-pole-calibration")
     theory_calibrate.add_argument("--output", type=Path)
     theory_calibrate.set_defaults(handler=_cmd_theory_calibrate)
+
+    small_signal = subparsers.add_parser(
+        "small-signal",
+        help="solve a characterization-bound MOS/R/C network without a topology formula",
+    )
+    small_signal.add_argument("request", type=Path)
+    small_signal.add_argument("--output", type=Path)
+    small_signal.set_defaults(handler=_cmd_small_signal)
 
     run = subparsers.add_parser("run", help="plan or execute a task")
     run.add_argument("task", type=Path)

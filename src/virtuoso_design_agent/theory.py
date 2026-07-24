@@ -12,11 +12,11 @@ import hashlib
 import itertools
 import json
 import math
-from enum import Enum
 from typing import Literal
 
 from pydantic import Field, StrictStr, model_validator
 
+from .characterization import DeviceDataSource
 from .metrics import evaluate_constraints
 from .models import (
     ConstraintEvaluation,
@@ -28,15 +28,6 @@ from .models import (
     RunStatus,
     StrictModel,
 )
-
-
-class DeviceDataSource(str, Enum):
-    """Declared origin of the characterization values supplied to VDA."""
-
-    PDK_CHARACTERIZATION = "pdk_characterization"
-    EDA_OPERATING_POINT = "eda_operating_point"
-    SYNTHETIC_EXAMPLE = "synthetic_example"
-
 
 class MosCharacterizationPoint(StrictModel):
     """One positive-magnitude gm/Id lookup point for a MOS device."""

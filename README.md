@@ -14,6 +14,7 @@ PDK 默认面向晶圆厂 CMOS 设计。当前缺省 profile 为 `nics4304_tsmc2
 - 单独规划或执行：`schematic.create`、`schematic.inspect`、`schematic.transform`、`parameters.apply`、`ade.prepare`、`ade.capture`、`ade.corners.apply`、`ade.variables.apply`、`ade.setup.apply`、`ade.run`、`simulation.run`、`design.tune`、`design.close_loop`。当前 `schematic.transform` 开放共源级源极退化的受控 add/remove、反相器 core→ADE source/load testbench、差分对 core→`MNTAIL/BIAS`、真实尾管差分对的对称源极退化 add/remove，以及无源退化真实尾管差分对的 `RD0/RD1 ↔ MP0/MP1` 电流镜负载可逆变换。
 - 用确定性 demo adapter 离线验证闭环、规格判定和参数选择；结果明确标为 `software_inference`。
 - 用独立本地命令 `vda theory` 对 Gate 6 电流镜负载差分对做理论先导尺寸估算。它不接收一份任意手列的 W 候选，而是遍历声明且有来源绑定的有限 gm/Id 表域，对每个输入管/PMOS 负载/尾管工作点组合用 KCL、小信号和一阶极点方程反解满足 BW/GBW 的最小支路电流与三组 W，再检查增益、余量、功耗、面积和宽度边界。输出包括约束裕量、主导电流下界、寄生渐近上限和局部对数敏感性；只称为 `best_in_declared_discrete_characterization_domain`，`continuous_optimum_claim` 与 `global_optimum_claim` 永远为 false。`vda theory-calibrate` 又能从绑定的真实 Bridge run records 拟合并留一验证 topology-local 增益修正和等效输出电容模型；首个 TSMC N28 六点 Gate 的 gain/BW/GBW 最大留一误差为 `0.083%/0.373%/0.457%`，新鲜只读同点复跑误差为 `0.069%/0.320%/0.390%`。该结果只适用于当前 `top_tt`、固定偏置/30 nm L 和 Wn/Wp 表内区间；独立 MOS gm/Id 表仍未建立，所以 synthetic 推荐不能写 OA。
+- 用 `vda small-signal` 对 characterization-bound MOS/R/C 实例图做不依赖拓扑名称的复数矩阵分析。器件点按 model/polarity/L/VGS/VDS/VSB 绑定 `Id/W、gm/Id、gds/Id、gmb/Id` 和五类电容密度；实例 model、L 和偏置不匹配即拒绝。求解器统一组装 `Y(f)`，支持固定 AC 边界、差分输入/输出线性表达式、低频增益、相位和 −3 dB 带宽；同一核心已用 NMOS/PMOS 共源、源极退化共源和差分对解析值测试。它不求非线性 DC，也尚未自动读取 `si` 网表或真实 TSMC N28 器件表，因此当前只证明通用求解契约，不能替代 Spectre。
 - 通过独立 worker 调用本机 `virtuoso-bridge-lite` 环境。反相器支持 `OA -> si -> Spectre transient` 的 timing、过冲/欠冲和周期供电能量；共源级支持同一 `OA -> si` 网表上的 DC OP、复数 AC、相干正弦 transient 幅度 sweep 和普通 noise sweep。可提取 `Id/VGS/VDS/VDSAT/gm/gds`、真实 VDD 功耗与 KCL、低频增益、首个 −3 dB 带宽、GBW、unity、HD2/HD3、THD、P1dB，以及频带积分的输出/输入参考噪声；单项执行与提取均有 live 证据。`analysis: "quality"` 已在一次 OA/`si` 核对后依次运行 AC、linearity、noise，并完成 bias/load、W/RD/RS、L/VDD 搜索、固定设计 TT/SS/FF 验证和显式启用的 PVT-aware bias 调优；每个 PVT 条件保留原始 `eda_result`，跨条件约束和最坏值聚合标为 `software_inference`。
 - Gate 3/4/5/6 差分对复用同一 worker 与 executor，不复制 Bridge。Gate 3 保留外部理想尾源能力；Gate 4 只新增 `MNTAIL(TAIL,BIAS,VSS,VSS)` 与 `BIAS` pin；Gate 5 再把 `MN0.S/MN1.S` 从 `TAIL` 分离到 `NSP/NSN`，只新增对称 `RS0(NSP,TAIL)`、`RS1(NSN,TAIL)`。Gate 6 从未退化的 Gate 4 拓扑删除 `RD0/RD1` 并加入 `MP0(OUTP,OUTP,VDD,VDD)`、`MP1(OUTN,OUTP,VDD,VDD)`，反向操作可按声明电阻值恢复原负载和可选 placement 指纹。`tail_width_um/tail_length_um/source_resistance_ohm/pmos_load_width_um/pmos_load_length_um` 属于 OA semantic 参数，`tail_bias_v` 只属于 wrapper；真实尾管路径拒绝理想 `tail_current_ua/tail_output_resistance_ohm`。Gate 3–6 的 OA→`si` 证据链均已有 live 结果；Gate 6 还真实覆盖 ICMR、多种有限搜索、预算、不可行和 transport checkpoint/resume。新增 `analysis: "psrr"` 在同一自动 `si` 网表上分别运行平衡差模、VDD 注入和 VSS 注入，并核对三次 DC 与频率网格；`evaluation_stop_hz` 提供声明频带内最差 PSRR，三份下载根 AC 文件各自绑定大小与 SHA-256。nominal 单点、四点 bias/load 只读搜索和三种沟道长度的八点 OA 搜索已经 live。后者把带内最差 PSRR 从 `11.5125 dB` 提高到 `19.7438 dB`，但临时 `20 dB` 门仍不可行，故自动恢复基线；下一步应固定对 PSRR 几乎无益且严重损失带宽的尾管 `L=0.03 µm`，再在显式小网格内验证输入对/PMOS L，并对任何可行点补做 CMRR、线性度和噪声复核。不得把“最大值”包装成规格闭合。可选 PVT、mismatch、更多质量指标和 ADE handoff 仍是边界。
 - 源极退化不新建第二套模板或仿真器：add 在同一 common-source cellview 中把 `MN0.S: VSS -> NSRC`，只新增 `RS0(NSRC,VSS)`；remove 只删除 VDA 创建的 RS0 两条端子 stub/标签、恢复 `MN0.S: NSRC -> VSS`。同一 inspect、参数应用、`si` 网表解析、DC/AC 指标和有限搜索路径动态识别两种变体。
@@ -61,6 +62,18 @@ py -3.13 -m venv .venv
 输入必须来自 real Bridge adapter，且逐点具有 OA `bridge_readback`、匹配的自动
 `si` 网表、Spectre OP/AC `eda_result` 和文件哈希；条件漂移、证据降级、训练网格
 缺点或验证点外推都会拒绝。详见[真实校准记录](docs/validation/2026-07-24-theory-calibration-live.md)。
+
+同一个本地小信号核心可以直接消费不同实例/节点图，不需要声明拓扑名称：
+
+```powershell
+.\.venv\Scripts\vda.exe small-signal `
+  examples\theory\common-source-small-signal.synthetic.json
+```
+
+该样例的器件值是 `user_input` synthetic 数据，网络结果是 `software_inference`。
+真实 PDK characterization 必须绑定 raw `eda_result` artifact SHA-256；归一化点值
+和网络推导分别保持 `software_inference`。详见
+[通用小信号本地 Gate](docs/validation/2026-07-24-generic-small-signal-local.md)。
 
 查看能力目录并生成计划：
 
@@ -286,4 +299,5 @@ C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe 
 - [2026-07-24 差分对带限 PSRR 四点搜索与 transport 恢复](docs/validation/2026-07-24-differential-pair-psrr-search-live.md)
 - [2026-07-24 theory-first gm/Id 尺寸分析本地 Gate](docs/validation/2026-07-24-theory-first-sizing-local.md)
 - [2026-07-24 Gate 6 theory 一阶模型真实校准](docs/validation/2026-07-24-theory-calibration-live.md)
+- [2026-07-24 通用 MOS 小信号网络本地 Gate](docs/validation/2026-07-24-generic-small-signal-local.md)
 - [延期的人工 ADE Gate](docs/deferred-manual-gates.md)

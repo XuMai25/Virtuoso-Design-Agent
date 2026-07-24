@@ -112,6 +112,14 @@ GBW  = gm / (2*pi*Cout)
 
 该 topology-local 校准已经量化当前一阶模型在小范围内的误差，但它不是独立 MOS characterization：`Cn/Cp` 是拓扑等效电容，不能冒充 PDK `Cgg/Cgd/Cdb`；每个校准预测仍消费该观测点由 Spectre 得到的 `gm/gds`，尚不能在 EDA 前预测一个从未仿真的新点。它也没有给 theory solver 提供跨 gm/Id、L、VDS/VSD 的 `Id/W`、`gds/Id` 和 `VDSAT` 表。因此校准产物目前不会自动注入 `vda theory` 或触发 OA 写入。下一 Gate 仍是生成并绑定真实 TSMC N28 独立器件 characterization 表，再用未参与拟合的同源电路点复核；只有通过该 Gate 才能用理论结果缩小 Spectre 搜索域。
 
+### 通用小信号网络核心
+
+`vda small-signal` 补充的是 `vda theory` 下方的拓扑无关计算层，而不是第二套仿真器。请求没有 topology 枚举，只包含 width-normalized MOS characterization、MOS/R/C 实例与节点、固定 AC 边界、输入/输出节点线性表达式和频率点。共源、源极退化、差分连接和电流镜的差异由图连接表达；同一个 stamping 路径组装复数 `Y(f)`，分块求解未知节点，再计算 transfer、低频参考、相位和首个 −3 dB 交点。
+
+MOS characterization 点不绑定“输入管/负载管/尾管”等电路角色，而是绑定 model、polarity、L、VGS/VDS/VSB、`Id/W`、`gm/Id`、`gds/Id`、`gmb/Id` 和端子电容密度。实例必须声明相同 model/L 和容差内偏置，随后才按 W/multiplicity 缩放；真实 PDK/EDA 表必须绑定原始 `eda_result` artifact SHA-256，归一化点值明确标为 `software_inference`。矩阵组装和指标也始终是 `software_inference`。这使器件数据可跨拓扑复用，同时避免把一个 Gate 6 拟合系数推广到其他电路。
+
+首个本地 Gate 用同一核心验证 NMOS 共源、源退化共源、对称 NMOS 差分对和 PMOS 共源，并注入浮空矩阵、偏置漂移、缺失 artifact hash 等失败。当前没有非线性 DC 解、characterization 插值或 `si`→network 自动转换，所以实例偏置和图仍需显式提供；W/multiplicity 也只按线性缩放，真实 `nf`、finger width、窄宽效应和 LDE 必须成为表的独立几何维度。该核心不支持任意拓扑综合。下一纵向 Gate 是生成真实 TSMC N28 独立器件表，把现有 `si` 结构网表映射到该网络契约，并用完全留出的电路拓扑验证误差。Spectre 仍是最终规格证据。
+
 ## ADE 人工介入与状态所有权
 
 ADE 兼容是当前架构约束，不是 UI 附加项。VDA 可以规划、搜索、判规格和选优，但可复核的 ADE setup/history 必须继续允许人类打开、调整、运行和保存；VDA 不能把唯一真源藏在一次性 wrapper 或内存状态里。自动路径和人工路径通过显式 operation 交接，不能在一次运行中暗中互相覆盖。

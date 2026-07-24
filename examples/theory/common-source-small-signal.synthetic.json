@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "id": "common-source-small-signal-synthetic",
+  "characterization": {
+    "schema_version": 1,
+    "id": "synthetic-nmos-table",
+    "source": "synthetic_example",
+    "pdk_profile": "synthetic_cmos",
+    "process_corner": "synthetic_tt",
+    "temperature_c": 27.0,
+    "raw_data_evidence_source": "user_input",
+    "normalized_point_evidence_source": "user_input",
+    "points": [
+      {
+        "id": "nmos-example",
+        "model": "synthetic_nmos",
+        "polarity": "nmos",
+        "length_um": 0.03,
+        "vgs_magnitude_v": 0.5,
+        "vds_magnitude_v": 0.5,
+        "vsb_magnitude_v": 0.0,
+        "vdsat_magnitude_v": 0.1,
+        "drain_current_density_a_per_um": 0.001,
+        "gm_over_id_per_v": 1.0,
+        "gds_over_id_per_v": 0.01,
+        "gmb_over_id_per_v": 0.0,
+        "cgs_f_per_um": 0.0,
+        "cgd_f_per_um": 0.0,
+        "cgb_f_per_um": 0.0,
+        "cdb_f_per_um": 1e-12,
+        "csb_f_per_um": 0.0
+      }
+    ]
+  },
+  "mosfets": [
+    {
+      "name": "MN0",
+      "model": "synthetic_nmos",
+      "point_id": "nmos-example",
+      "drain": "OUT",
+      "gate": "IN",
+      "source": "0",
+      "bulk": "0",
+      "width_um": 1.0,
+      "length_um": 0.03,
+      "multiplicity": 1.0,
+      "vgs_magnitude_v": 0.5,
+      "vds_magnitude_v": 0.5,
+      "vsb_magnitude_v": 0.0,
+      "maximum_voltage_mismatch_v": 0.01
+    }
+  ],
+  "resistors": [
+    {
+      "name": "RD",
+      "positive": "OUT",
+      "negative": "VDD",
+      "resistance_ohm": 10000.0
+    }
+  ],
+  "capacitors": [],
+  "boundary_voltages": [
+    {"node": "IN", "voltage": {"real": 1.0, "imaginary": 0.0}},
+    {"node": "VDD", "voltage": {"real": 0.0, "imaginary": 0.0}}
+  ],
+  "input_expression": {"terms": {"IN": 1.0}},
+  "output_expression": {"terms": {"OUT": 1.0}},
+  "frequencies_hz": [
+    1000.0,
+    10000.0,
+    100000.0,
+    1000000.0,
+    3000000.0,
+    10000000.0,
+    15000000.0,
+    17000000.0,
+    18000000.0,
+    20000000.0,
+    30000000.0,
+    100000000.0
+  ],
+  "reference_points": 3,
+  "maximum_reference_variation_db": 0.5
+}
