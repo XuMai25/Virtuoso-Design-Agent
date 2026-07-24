@@ -72,7 +72,7 @@ OA_SEMANTIC_PARAMETER_NAMES: dict[CircuitKind, frozenset[str]] = {
 CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     CircuitKind.MOS_DEVICE: CircuitCapability(
         circuit=CircuitKind.MOS_DEVICE,
-        stage="Gate 7A topology-independent nominal MOS characterization",
+        stage="Gate 7A characterization + Gate 7B common-source validation",
         executable=True,
         operations=(Operation.DEVICE_CHARACTERIZE,),
         parameters=(),
@@ -82,7 +82,9 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "SHA-256 manifest + finite NMOS/PMOS sign-normalized gm/gds/gmb and "
             "terminal-capacitance table + declared interpolation holdout audit; "
             "240-point nominal TSMC N28 top_tt table and four real holdouts live; "
-            "PVT, si graph binding, and held-out circuit validation pending"
+            "exact-width and 31-parameter si signature common-source held-out "
+            "DC/gain/phase/BW/GBW validation live; source-degenerated and "
+            "multi-MOS topology migration plus optional PVT pending"
         ),
     ),
     CircuitKind.EXISTING_SCHEMATIC: CircuitCapability(
@@ -259,7 +261,8 @@ def validate_task_capability(task: TaskSpec) -> None:
         requested_corners = {
             condition.process_corner for condition in task.operating_conditions
         }
-        missing_corners = sorted(requested_corners - set(profile.process_corners))
+        available_corners = set(profile.process_corners) | {profile.model_section}
+        missing_corners = sorted(requested_corners - available_corners)
         if missing_corners:
             raise UnsupportedCapability(
                 f"PDK profile {profile.name} does not map process corner(s): "

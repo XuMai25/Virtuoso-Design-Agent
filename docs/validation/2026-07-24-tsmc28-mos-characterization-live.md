@@ -168,3 +168,12 @@ MOS/R/C 图和真实 DC 偏置，在表域内选择或插值器件点，生成�
 再用同一 `si` 网表的 Spectre AC 对比 gain、phase、−3 dB bandwidth 和 GBW。先以未参与
 器件建表的 nominal 共源为完整 held-out topology，通过后再迁移到源极退化和差分对。
 PVT 仍是可选扩展，不是 Gate 7B 的默认前置条件。
+
+## 后续状态
+
+Gate 7B 已在同日完成首个 nominal 共源 held-out 验证。该过程发现 W/L 相同仍不足以
+代表同一 OA 器件：扩散几何和 LDE 参数必须进入 characterization identity。VDA 已加入
+受限的逐 polarity Spectre 参数签名，并用匹配 `si` MN0 的 31 项参数表通过固定 DC/AC
+误差门。Gate 7A 的通用 W=1 µm 表和本页边界仍保留，不追溯包装成 exact-geometry
+电路证据。详见
+[Gate 7B 共源小信号真实验证](2026-07-24-common-source-small-signal-validation-live.md)。

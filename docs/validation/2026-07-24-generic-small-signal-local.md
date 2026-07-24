@@ -8,6 +8,11 @@ VDA 已增加不依赖电路拓扑名称的 MOS/R/C 线性网络求解核心。�
 
 后续状态：同日已完成[TSMC N28 独立 MOS characterization 真实 Gate](2026-07-24-tsmc28-mos-characterization-live.md)。240 点 nominal `top_tt` NMOS/PMOS artifact 与四个真实留出点已通过，并能直接进入本页的 schema/kernel。故当前剩余边界已收窄为 OA/`si` 图与 DC 偏置自动绑定、正式表内插值接口和完整 held-out circuit 的同源 Spectre 对照；本页以下 synthetic 解析测试仍作为数值层基线。
 
+进一步的[Gate 7B 共源真实验证](2026-07-24-common-source-small-signal-validation-live.md)
+已完成上述首个纵向点：exact-geometry 表、只读 OA/`si` 图、EDA DC bias 与原始 AC
+网格全部绑定，固定 DC/gain/phase/BW/GBW 门通过。本页的矩阵本地测试仍是跨拓扑
+数值基线；live 通过当前只提升 nominal 共源，不外推到源退化或差分对。
+
 这项实现把“适当通用性”限定在可验证范围：同一器件表和矩阵 stamping 核心可以
 分析不同连接图，但不宣称任意模拟拓扑自动综合，也不绕过 Spectre 做最终规格判定。
 
@@ -138,10 +143,6 @@ exit 0；complex response 和 -3 dB bandwidth resolved
 
 ## 下一 Gate
 
-下一步是 Gate 7B：把现有 `si` 结构网表和真实 DC OP 转换为本网络契约，在已验证表域
-内选择/插值器件点，并把一个完整 nominal 共源拓扑留出、不参与建表或调参，用同一网表
-Spectre AC 检验 gain、phase、BW 和 GBW 预测误差。通过后通用理论结果才可作为 Spectre
-搜索种子；源极退化、差分对和可选 PVT 依次后置。
-
-Gate 7A 的授权不自动扩展到 Gate 7B 的新远端运行；届时仍按目标、OA/compute 副作用和
-远端路径重新列明范围。
+Gate 7B 已完成首个 nominal 共源。下一步 Gate 7C 把同一 binder/kernel 迁移到已有
+源极退化共源，验证 RS0/NSRC 图差异和该实例自己的 exact-geometry 表；随后才扩展
+多 MOS 差分对。每次新的 live Gate 仍需按目标、OA/compute 副作用和远端路径单独授权。

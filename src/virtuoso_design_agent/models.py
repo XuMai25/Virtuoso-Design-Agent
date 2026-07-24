@@ -1435,6 +1435,9 @@ class DeviceCharacterizationSpec(StrictModel):
         max_length=2,
     )
     width_um: float = Field(gt=0.0)
+    model_parameters_by_polarity: dict[
+        Literal["nmos", "pmos"], dict[StrictStr, StrictStr]
+    ] = Field(default_factory=dict)
     lengths_um: list[float] = Field(min_length=1, max_length=8)
     vgs_magnitudes_v: list[float] = Field(min_length=1, max_length=16)
     vds_magnitudes_v: list[float] = Field(min_length=1, max_length=16)
@@ -1462,6 +1465,34 @@ class DeviceCharacterizationSpec(StrictModel):
             raise ValueError("temperature_c must be finite")
         if not math.isfinite(self.maximum_holdout_normalized_error):
             raise ValueError("maximum_holdout_normalized_error must be finite")
+        reserved_parameters = {"w", "l", "nf", "m", "multi"}
+        parameter_name = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+        numeric_literal = re.compile(
+            r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+            r"(?:[A-Za-z][A-Za-z0-9_]*)?$"
+        )
+        for polarity, parameters in self.model_parameters_by_polarity.items():
+            if polarity not in self.polarities:
+                raise ValueError(
+                    "model parameter polarity must be present in polarities"
+                )
+            if len(parameters) > 64:
+                raise ValueError(
+                    f"{polarity} model parameter signature exceeds 64 entries"
+                )
+            for name, value in parameters.items():
+                if parameter_name.fullmatch(name) is None:
+                    raise ValueError(f"invalid MOS model parameter name: {name!r}")
+                if name.lower() in reserved_parameters:
+                    raise ValueError(
+                        f"MOS model parameter {name!r} is controlled by the "
+                        "characterization contract"
+                    )
+                if len(value) > 64 or numeric_literal.fullmatch(value) is None:
+                    raise ValueError(
+                        f"MOS model parameter {name!r} must be a numeric Spectre "
+                        "literal"
+                    )
         for name, values in axes.items():
             if any(not math.isfinite(float(value)) for value in values):
                 raise ValueError(f"{name} must contain only finite values")

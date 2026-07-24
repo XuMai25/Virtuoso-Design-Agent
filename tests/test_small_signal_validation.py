@@ -1,0 +1,606 @@
+from __future__ import annotations
+
+import copy
+import json
+import math
+from pathlib import Path
+
+import pytest
+
+from virtuoso_design_agent.characterization import (
+    MosCharacterizationArtifact,
+    interpolate_mos_characterization_point,
+)
+from virtuoso_design_agent.cli import main
+from virtuoso_design_agent.models import RunStatus
+from virtuoso_design_agent.small_signal_validation import (
+    SmallSignalCircuitValidationPolicy,
+    validate_common_source_small_signal_runs,
+)
+
+
+_NOW = "2026-07-24T00:00:00Z"
+_TARGET = {"library": "vda_test", "cell": "vda_cs_gate7b", "view": "schematic"}
+
+
+def _artifact() -> dict:
+    points = []
+    for vgs in (0.3, 0.5):
+        for vds in (0.4, 0.6):
+            points.append(
+                {
+                    "id": f"n-{vgs}-{vds}",
+                    "model": "test_nmos",
+                    "polarity": "nmos",
+                    "length_um": 0.03,
+                    "vgs_magnitude_v": vgs,
+                    "vds_magnitude_v": vds,
+                    "vsb_magnitude_v": 0.0,
+                    "vdsat_magnitude_v": 0.1,
+                    "drain_current_density_a_per_um": 40e-6,
+                    "gm_over_id_per_v": 10.0,
+                    "gds_over_id_per_v": 0.5,
+                    "gmb_over_id_per_v": 0.0,
+                    "cgs_f_per_um": 0.0,
+                    "cgd_f_per_um": 0.0,
+                    "cgb_f_per_um": 0.0,
+                    "cdb_f_per_um": 1e-12,
+                    "csb_f_per_um": 0.0,
+                }
+            )
+    return {
+        "schema_version": 1,
+        "id": "test-mos-table",
+        "source": "pdk_characterization",
+        "source_artifact_sha256": "a" * 64,
+        "pdk_profile": "test_pdk",
+        "process_corner": "test_tt",
+        "temperature_c": 27.0,
+        "characterized_width_um": 1.0,
+        "model_parameters_by_polarity": {
+            "nmos": {"ad": "3.75e-14", "dfm_flag": "0"}
+        },
+        "raw_data_evidence_source": "eda_result",
+        "normalized_point_evidence_source": "software_inference",
+        "points": points,
+    }
+
+
+def _characterization_run() -> dict:
+    return {
+        "schema_version": 1,
+        "task_id": "test-characterization",
+        "plan_token": "char-token",
+        "adapter": "virtuoso-bridge-subprocess",
+        "status": "succeeded",
+        "started_at": _NOW,
+        "finished_at": _NOW,
+        "actions": [
+            {
+                "action": "device.characterize",
+                "status": "succeeded",
+                "started_at": _NOW,
+                "finished_at": _NOW,
+                "evidence_source": "eda_result",
+                "details": {
+                    "task_id": "test-characterization",
+                    "pdk_profile": "test_pdk",
+                    "process_corner": "test_tt",
+                    "temperature_c": 27.0,
+                    "width_um": 1.0,
+                    "model_parameters_by_polarity": {
+                        "nmos": {"ad": "3.75e-14", "dfm_flag": "0"}
+                    },
+                    "raw_point_evidence_source": "eda_result",
+                    "points": [{"id": "raw-point"}],
+                    "tool_version": "test-spectre-1",
+                    "evidence": {
+                        "source": "eda_result",
+                        "remote_run_root": "/data/xum/test-characterization",
+                        "remote_simulation_dir": (
+                            "/data/xum/test-characterization/simulator"
+                        ),
+                        "artifact_manifest_complete": True,
+                        "manifest_sha256": "a" * 64,
+                        "oa_access_performed": False,
+                        "oa_write_performed": False,
+                    },
+                },
+            },
+            {
+                "action": "device.characterize.validate",
+                "status": "succeeded",
+                "started_at": _NOW,
+                "finished_at": _NOW,
+                "evidence_source": "software_inference",
+                "details": {
+                    "artifact": _artifact(),
+                    "raw_data_evidence_source": "eda_result",
+                    "normalization_evidence_source": "software_inference",
+                },
+            }
+        ],
+    }
+
+
+def _circuit_run() -> dict:
+    frequencies = [10.0 ** (3.0 + index / 20.0) for index in range(121)]
+    output_conductance = 20e-6 + 1.0 / 10_000.0
+    load_capacitance = 1e-12 + 1e-15
+    gain = 400e-6 / output_conductance
+    bandwidth = output_conductance / (2.0 * math.pi * load_capacitance)
+    metrics = {
+        "low_frequency_gain_db": 20.0 * math.log10(gain),
+        "low_frequency_phase_deg": 180.0,
+        "bandwidth_3db_hz": bandwidth,
+        "phase_at_bandwidth_deg": 135.0,
+        "gain_bandwidth_product_hz": gain * bandwidth,
+    }
+    metric_sources = {name: "eda_result" for name in metrics}
+    semantic = {
+        "device_width_um": 1.0,
+        "length_um": 0.03,
+        "load_resistance_ohm": 10_000.0,
+    }
+    geometry = {
+        "finger_width_um": 1.0,
+        "fingers": 1.0,
+        "multiplicity": 1.0,
+        "total_width_um": 1.0,
+    }
+    result = {
+        "parameters": {**semantic, "bias_v": 0.4, "vdd_v": 0.9, "load_ff": 1.0},
+        "metrics": metrics,
+        "metric_sources": metric_sources,
+        "analysis_complete": True,
+        "analysis_issues": [],
+        "analysis_warnings": [],
+        "scalar_count": 100,
+        "tool_version": "test-spectre-1",
+        "warnings": [],
+        "evidence": {
+            "side_effects": {
+                "oa_access_performed": True,
+                "oa_write_performed": False,
+                "remote_compute_performed": True,
+            },
+            "schematic_readback": {
+                "source": "bridge_readback",
+                "target": copy.deepcopy(_TARGET),
+                "semantic_parameters": dict(semantic),
+                "device_geometry": dict(geometry),
+                "topology_variant": "common_source",
+            },
+            "netlist": {
+                "source": "eda_result",
+                "generator": "Cadence si -batch",
+                "remote_path": "/data/xum/vda_gate7b/netlist",
+                "sha256": "b" * 64,
+                "semantic_parameters": dict(semantic),
+                "device_geometry": dict(geometry),
+                "topology_variant": "common_source",
+                "parameter_consistency": "matched",
+                "instances": {
+                    "MN0": {
+                        "nodes": ["OUT", "IN", "VSS", "VSS"],
+                        "model": "test_nmos",
+                        "netlist_width_um": 1.0,
+                        "finger_width_um": 1.0,
+                        "fingers": 1.0,
+                        "multiplicity": 1.0,
+                        "total_width_um": 1.0,
+                        "length_um": 0.03,
+                        "model_parameters": {
+                            "ad": "3.75e-14",
+                            "dfm_flag": "0",
+                        },
+                    },
+                    "RD0": {
+                        "nodes": ["VDD", "OUT"],
+                        "model": "resistor",
+                        "resistance_ohm": 10_000.0,
+                    },
+                },
+            },
+            "testbench": {
+                "remote_path": "/data/xum/vda_gate7b/input_from_oa.scs",
+                "sha256": "c" * 64,
+                "values": {
+                    "analysis": "ac",
+                    "bias_v": 0.4,
+                    "vdd_v": 0.9,
+                    "load_ff": 1.0,
+                    "ac_sweep": {
+                        "start_hz": frequencies[0],
+                        "stop_hz": frequencies[-1],
+                        "points_per_decade": 20,
+                        "reference_points": 5,
+                        "max_reference_variation_db": 0.5,
+                    },
+                },
+                "model_configuration": {
+                    "source": "software_inference",
+                    "profile": "test_pdk",
+                    "process_corner": "test_tt",
+                    "temperature_c": 27.0,
+                },
+            },
+            "operating_point": {
+                "source": "eda_result",
+                "node_values_v": {"IN": 0.4, "OUT": 0.5, "VDD": 0.9, "VSS": 0.0},
+                "device_values": {
+                    "ids_a": 40e-6,
+                    "vgs_v": 0.4,
+                    "vds_v": 0.5,
+                    "vdsat_v": 0.1,
+                    "gm_s": 400e-6,
+                    "gds_s": 20e-6,
+                },
+                "node_device_consistency": "matched",
+                "kcl_consistency": "matched",
+            },
+            "ac_response": {
+                "source": "eda_result",
+                "extraction_source": "software_inference",
+                "analysis_complete": True,
+                "sample_count": len(frequencies),
+                "frequency_hz": frequencies,
+                "reference": {
+                    "points": 5,
+                    "variation_limit_db": 0.5,
+                    "status": "flat",
+                },
+                "raw_files": {
+                    "selection": "shallowest analysis-specific PSF file",
+                    "ac": {
+                        "relative_path": "ac.ac",
+                        "size_bytes": 100,
+                        "sha256": "d" * 64,
+                    },
+                },
+            },
+        },
+    }
+    return {
+        "schema_version": 1,
+        "task_id": "test-common-source",
+        "plan_token": "circuit-token",
+        "adapter": "virtuoso-bridge-subprocess",
+        "status": "succeeded",
+        "started_at": _NOW,
+        "finished_at": _NOW,
+        "actions": [
+            {
+                "action": "simulation.candidate.1",
+                "status": "succeeded",
+                "started_at": _NOW,
+                "finished_at": _NOW,
+                "evidence_source": "eda_result",
+                "details": result,
+            }
+        ],
+    }
+
+
+def _policy() -> dict:
+    return {
+        "schema_version": 1,
+        "id": "test-gate7b",
+        "expected_target": copy.deepcopy(_TARGET),
+        "expected_pdk_profile": "test_pdk",
+        "expected_process_corner": "test_tt",
+        "expected_temperature_c": 27.0,
+        "expected_vdd_v": 0.9,
+        "expected_topology_variant": "common_source",
+        "require_exact_characterization_width": True,
+        "require_exact_model_parameters": True,
+        "thresholds": {
+            "maximum_device_dc_relative_error": 0.01,
+            "maximum_gain_error_db": 0.05,
+            "maximum_phase_error_deg": 2.0,
+            "maximum_bandwidth_relative_error": 0.02,
+            "maximum_gbw_relative_error": 0.02,
+        },
+    }
+
+
+def _write_inputs(
+    tmp_path: Path,
+    circuit: dict | None = None,
+    characterization: dict | None = None,
+) -> tuple[Path, Path]:
+    characterization_path = tmp_path / "characterization.json"
+    circuit_path = tmp_path / "circuit.json"
+    characterization_path.write_text(
+        json.dumps(characterization or _characterization_run()), encoding="utf-8"
+    )
+    circuit_path.write_text(json.dumps(circuit or _circuit_run()), encoding="utf-8")
+    return characterization_path, circuit_path
+
+
+def test_rectilinear_interpolation_records_corners_and_rejects_length_guessing() -> None:
+    artifact = MosCharacterizationArtifact.model_validate(_artifact())
+    result = interpolate_mos_characterization_point(
+        artifact,
+        point_id="bound-MN0",
+        model="test_nmos",
+        polarity="nmos",
+        length_um=0.03,
+        vgs_magnitude_v=0.4,
+        vds_magnitude_v=0.5,
+        vsb_magnitude_v=0.0,
+    )
+
+    assert len(result.corners) == 4
+    assert sum(item.weight for item in result.corners) == pytest.approx(1.0)
+    assert result.point.drain_current_density_a_per_um == pytest.approx(40e-6)
+    assert result.evidence_source.value == "software_inference"
+
+    with pytest.raises(RuntimeError, match="length interpolation and extrapolation"):
+        interpolate_mos_characterization_point(
+            artifact,
+            point_id="bad-length",
+            model="test_nmos",
+            polarity="nmos",
+            length_um=0.04,
+            vgs_magnitude_v=0.4,
+            vds_magnitude_v=0.5,
+            vsb_magnitude_v=0.0,
+        )
+
+
+def test_same_source_validation_binds_graph_bias_raw_files_and_ac_metrics(
+    tmp_path: Path,
+) -> None:
+    characterization_path, circuit_path = _write_inputs(tmp_path)
+    result = validate_common_source_small_signal_runs(
+        SmallSignalCircuitValidationPolicy.model_validate(_policy()),
+        characterization_path,
+        circuit_path,
+    )
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert result.gate_passed is True
+    assert result.graph_binding["topology_equation_hardcoded"] is False
+    assert result.graph_binding["mos_instances"] == ["MN0"]
+    assert result.graph_binding["model_parameter_signatures"]["MN0"][
+        "parameter_count"
+    ] == 2
+    assert result.raw_artifact_bindings["ac_raw_sha256"] == "d" * 64
+    assert result.device_dc_validation[0].passed is True
+    assert result.ac_validation["low_frequency_gain_db"].passed is True
+    assert result.ac_validation["phase_at_bandwidth_deg"].passed is True
+    assert result.network_result.gain_bandwidth_product_hz is not None
+    assert result.evidence_sources["oa_schematic"].value == "bridge_readback"
+    assert result.evidence_sources["network_prediction"].value == (
+        "software_inference"
+    )
+
+
+def test_validation_selects_one_explicit_operating_condition(tmp_path: Path) -> None:
+    circuit = _circuit_run()
+    selected = circuit["actions"][0]["details"]
+    circuit["actions"][0]["details"] = {
+        "analysis_complete": True,
+        "analysis_issues": [],
+        "operating_condition_results": [
+            {
+                "condition": {
+                    "name": "test_tt_27c",
+                    "process_corner": "test_tt",
+                    "temperature_c": 27.0,
+                    "vdd_v": 0.9,
+                },
+                "result": selected,
+            }
+        ],
+    }
+    policy = _policy()
+    policy["operating_condition_name"] = "test_tt_27c"
+    characterization_path, circuit_path = _write_inputs(tmp_path, circuit)
+
+    result = validate_common_source_small_signal_runs(
+        SmallSignalCircuitValidationPolicy.model_validate(policy),
+        characterization_path,
+        circuit_path,
+    )
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert result.circuit_task_id == "test-common-source"
+
+
+def test_validation_is_partial_instead_of_moving_a_failed_gate(tmp_path: Path) -> None:
+    circuit = _circuit_run()
+    details = circuit["actions"][0]["details"]
+    details["metrics"]["bandwidth_3db_hz"] *= 2.0
+    details["metrics"]["gain_bandwidth_product_hz"] *= 2.0
+    characterization_path, circuit_path = _write_inputs(tmp_path, circuit)
+
+    result = validate_common_source_small_signal_runs(
+        SmallSignalCircuitValidationPolicy.model_validate(_policy()),
+        characterization_path,
+        circuit_path,
+    )
+
+    assert result.status is RunStatus.PARTIAL
+    assert result.gate_passed is False
+    assert result.ac_validation["bandwidth_3db_hz"].passed is False
+    assert result.ac_validation["bandwidth_3db_hz"].threshold == 0.02
+
+
+def test_validation_rejects_bias_extrapolation(tmp_path: Path) -> None:
+    circuit = _circuit_run()
+    details = circuit["actions"][0]["details"]
+    details["evidence"]["operating_point"]["node_values_v"]["IN"] = 0.2
+    details["evidence"]["operating_point"]["device_values"]["vgs_v"] = 0.2
+    characterization_path, circuit_path = _write_inputs(tmp_path, circuit)
+
+    with pytest.raises(RuntimeError, match="not bracketed by training data"):
+        validate_common_source_small_signal_runs(
+            SmallSignalCircuitValidationPolicy.model_validate(_policy()),
+            characterization_path,
+            circuit_path,
+        )
+
+
+def test_validation_rejects_a_different_characterized_width_plane(
+    tmp_path: Path,
+) -> None:
+    characterization = _characterization_run()
+    characterization["actions"][1]["details"]["artifact"][
+        "characterized_width_um"
+    ] = 2.0
+    characterization["actions"][0]["details"]["width_um"] = 2.0
+    characterization_path = tmp_path / "characterization.json"
+    circuit_path = tmp_path / "circuit.json"
+    characterization_path.write_text(json.dumps(characterization), encoding="utf-8")
+    circuit_path.write_text(json.dumps(_circuit_run()), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="does not match the characterized width"):
+        validate_common_source_small_signal_runs(
+            SmallSignalCircuitValidationPolicy.model_validate(_policy()),
+            characterization_path,
+            circuit_path,
+        )
+
+
+def test_validation_rejects_raw_characterization_manifest_drift(
+    tmp_path: Path,
+) -> None:
+    characterization = _characterization_run()
+    characterization["actions"][0]["details"]["evidence"][
+        "manifest_sha256"
+    ] = "e" * 64
+    characterization_path, circuit_path = _write_inputs(
+        tmp_path,
+        characterization=characterization,
+    )
+
+    with pytest.raises(ValueError, match="manifest does not match"):
+        validate_common_source_small_signal_runs(
+            SmallSignalCircuitValidationPolicy.model_validate(_policy()),
+            characterization_path,
+            circuit_path,
+        )
+
+
+def test_exploratory_policy_can_skip_exact_model_parameter_binding(
+    tmp_path: Path,
+) -> None:
+    circuit = _circuit_run()
+    circuit["actions"][0]["details"]["evidence"]["netlist"]["instances"][
+        "MN0"
+    ].pop("model_parameters")
+    policy = _policy()
+    policy["require_exact_model_parameters"] = False
+    characterization_path, circuit_path = _write_inputs(tmp_path, circuit)
+
+    result = validate_common_source_small_signal_runs(
+        SmallSignalCircuitValidationPolicy.model_validate(policy),
+        characterization_path,
+        circuit_path,
+    )
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert result.graph_binding["exact_model_parameters_required"] is False
+    assert result.graph_binding["model_parameter_signatures"] == {}
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing_ac_raw", "AC raw-file evidence"),
+        ("oa_si_mismatch", "OA/si semantic parameters"),
+        ("wrong_target", "schematic target"),
+        ("write_action", "OA write action"),
+        ("model_parameter_mismatch", "model parameter signature"),
+        ("unparsed_model_parameter", "signature is not fully parsed"),
+        ("simulation_vdd_mismatch", "simulation VDD"),
+    ],
+)
+def test_validation_rejects_broken_evidence_chains(
+    tmp_path: Path, mutation: str, message: str
+) -> None:
+    circuit = _circuit_run()
+    details = circuit["actions"][0]["details"]
+    if mutation == "missing_ac_raw":
+        details["evidence"]["ac_response"].pop("raw_files")
+    elif mutation == "oa_si_mismatch":
+        details["evidence"]["netlist"]["semantic_parameters"][
+            "load_resistance_ohm"
+        ] = 20_000.0
+    elif mutation == "wrong_target":
+        details["evidence"]["schematic_readback"]["target"]["cell"] = "other"
+    elif mutation == "model_parameter_mismatch":
+        details["evidence"]["netlist"]["instances"]["MN0"][
+            "model_parameters"
+        ]["ad"] = "4e-14"
+    elif mutation == "unparsed_model_parameter":
+        details["evidence"]["netlist"]["instances"]["MN0"][
+            "unparsed_model_parameter_tokens"
+        ] = ["opaque=(foo", "+", "bar)"]
+    elif mutation == "simulation_vdd_mismatch":
+        details["parameters"]["vdd_v"] = 0.8
+    else:
+        circuit["actions"].append(
+            {
+                "action": "parameters.apply",
+                "status": "succeeded",
+                "started_at": _NOW,
+                "finished_at": _NOW,
+                "evidence_source": "bridge_readback",
+                "details": {},
+            }
+        )
+    characterization_path, circuit_path = _write_inputs(tmp_path, circuit)
+
+    with pytest.raises(ValueError, match=message):
+        validate_common_source_small_signal_runs(
+            SmallSignalCircuitValidationPolicy.model_validate(_policy()),
+            characterization_path,
+            circuit_path,
+        )
+
+
+def test_small_signal_validation_cli_persists_the_same_result(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    characterization_path, circuit_path = _write_inputs(tmp_path)
+    policy_path = tmp_path / "policy.json"
+    output_path = tmp_path / "validation.json"
+    policy_path.write_text(json.dumps(_policy()), encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "small-signal-validate",
+                str(policy_path),
+                str(characterization_path),
+                str(circuit_path),
+                "--output",
+                str(output_path),
+            ]
+        )
+        == 0
+    )
+
+    printed = json.loads(capsys.readouterr().out)
+    saved = json.loads(output_path.read_text(encoding="utf-8"))
+    assert printed == saved
+    assert saved["gate_passed"] is True
+
+
+def test_validation_refuses_demo_records(tmp_path: Path) -> None:
+    characterization = _characterization_run()
+    characterization["adapter"] = "demo"
+    characterization_path = tmp_path / "characterization.json"
+    circuit_path = tmp_path / "circuit.json"
+    characterization_path.write_text(json.dumps(characterization), encoding="utf-8")
+    circuit_path.write_text(json.dumps(_circuit_run()), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="requires bridge run records"):
+        validate_common_source_small_signal_runs(
+            SmallSignalCircuitValidationPolicy.model_validate(_policy()),
+            characterization_path,
+            circuit_path,
+        )

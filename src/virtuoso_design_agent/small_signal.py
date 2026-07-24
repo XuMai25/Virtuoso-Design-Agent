@@ -270,6 +270,8 @@ class SmallSignalNetworkResult(_FiniteStrictModel):
     low_frequency_phase_deg: float
     bandwidth_status: Literal["resolved", "unresolved"]
     bandwidth_3db_hz: float | None = Field(default=None, gt=0.0)
+    phase_at_bandwidth_deg: float | None = None
+    gain_bandwidth_product_hz: float | None = Field(default=None, gt=0.0)
     equations: list[str]
     assumptions: list[str]
     warnings: list[str]
@@ -342,20 +344,22 @@ def _expression_value(expression: LinearExpression, voltages: dict[str, complex]
 
 def _bandwidth(
     points: list[SmallSignalResponsePoint], reference_db: float
-) -> float | None:
+) -> tuple[float, float] | None:
     threshold_db = reference_db - 10.0 * math.log10(2.0)
     for left, right in zip(points, points[1:]):
         if left.magnitude_db >= threshold_db >= right.magnitude_db:
             if math.isclose(left.magnitude_db, right.magnitude_db):
-                return left.frequency_hz
+                return left.frequency_hz, left.phase_deg
             fraction = (threshold_db - left.magnitude_db) / (
                 right.magnitude_db - left.magnitude_db
             )
-            return 10.0 ** (
+            frequency_hz = 10.0 ** (
                 math.log10(left.frequency_hz)
                 + fraction
                 * (math.log10(right.frequency_hz) - math.log10(left.frequency_hz))
             )
+            phase_delta = (right.phase_deg - left.phase_deg + 180.0) % 360.0 - 180.0
+            return frequency_hz, left.phase_deg + fraction * phase_delta
     return None
 
 
@@ -455,10 +459,14 @@ def analyze_small_signal_network(
         if reference_variation <= request.maximum_reference_variation_db
         else "not_flat"
     )
-    bandwidth = (
+    bandwidth_crossing = (
         _bandwidth(response_points, reference_db)
         if reference_status == "flat"
         else None
+    )
+    bandwidth = bandwidth_crossing[0] if bandwidth_crossing is not None else None
+    phase_at_bandwidth = (
+        bandwidth_crossing[1] if bandwidth_crossing is not None else None
     )
     warnings = [
         "This linearized network does not solve the nonlinear DC operating point; "
@@ -509,11 +517,16 @@ def analyze_small_signal_network(
         ),
         bandwidth_status="resolved" if bandwidth is not None else "unresolved",
         bandwidth_3db_hz=bandwidth,
+        phase_at_bandwidth_deg=phase_at_bandwidth,
+        gain_bandwidth_product_hz=(
+            reference_magnitude * bandwidth if bandwidth is not None else None
+        ),
         equations=[
             "Id = (Id/W) * W * multiplicity",
             "gm = (gm/Id) * Id; gds = (gds/Id) * Id",
             "Y(f) * V(f) = 0 with fixed boundary-node voltages",
             "transfer(f) = output_expression(V) / input_expression(V)",
+            "GBW = low_frequency_gain_v_per_v * bandwidth_3db_hz",
         ],
         assumptions=[
             "MOS parameters are linearized at the declared characterization bias.",

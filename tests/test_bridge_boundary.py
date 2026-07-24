@@ -4255,6 +4255,44 @@ def test_common_source_pvt_deck_uses_profile_mapped_process_and_temperature() ->
     }
 
 
+def test_common_source_can_explicitly_pin_the_profile_default_corner() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump(mode="json")
+    condition = {
+        "name": "top_tt_27c_0p90v",
+        "process_corner": "top_tt",
+        "temperature_c": 27.0,
+        "vdd_v": 0.9,
+    }
+
+    deck = _common_source_testbench_deck(
+        profile,
+        {
+            "device_width_um": 1.0,
+            "length_um": 0.03,
+            "load_resistance_ohm": 20_000.0,
+            "bias_v": 0.375,
+            "vdd_v": 0.9,
+            "load_ff": 3.0,
+        },
+        "/data/xum/virtuoso_bridge_smoke/vda_cs_gate7b/netlist",
+        analysis="ac",
+        ac_sweep={"start_hz": 1e3, "stop_hz": 1e12},
+        operating_condition=condition,
+    )
+    manifest = _common_source_model_manifest(profile, condition)
+
+    assert (
+        f'include "{profile["model_include"]}" section={profile["model_section"]}'
+        in deck
+    )
+    assert "simulatorOptions options temp=27" in deck
+    assert manifest["process_corner"] == "top_tt"
+    assert manifest["temperature_c"] == 27.0
+    assert manifest["includes"] == [
+        {"path": profile["model_include"], "section": profile["model_section"]}
+    ]
+
+
 def test_common_source_pvt_bundle_keeps_per_condition_results_and_one_netlist() -> None:
     conditions = [
         {
@@ -4700,7 +4738,7 @@ def test_common_source_oa_netlist_parameters_and_topology_are_parsed() -> None:
     profile = load_pdk_profile("nics4304_tsmc28").model_dump()
     parsed = _parse_common_source_netlist(
         """
-MN0 (OUT IN VSS VSS) nch_lvt_mac l=30n w=1u nf=1 multi=1
+MN0 (OUT IN VSS VSS) nch_lvt_mac l=30n w=1u nf=1 multi=1 ad=3.75e-14 sd=100n dfm_flag=0
 RD0 (VDD OUT) resistor r=20k
 """,
         profile,
@@ -4711,6 +4749,11 @@ RD0 (VDD OUT) resistor r=20k
         "load_resistance_ohm": pytest.approx(20_000.0),
     }
     assert parsed["instances"]["RD0"]["nodes"] == ["VDD", "OUT"]
+    assert parsed["instances"]["MN0"]["model_parameters"] == {
+        "ad": "3.75e-14",
+        "dfm_flag": "0",
+        "sd": "100n",
+    }
     assert parsed["device_geometry"] == {
         "finger_width_um": pytest.approx(1.0),
         "fingers": pytest.approx(1.0),
@@ -4718,6 +4761,47 @@ RD0 (VDD OUT) resistor r=20k
         "total_width_um": pytest.approx(1.0),
     }
     assert parsed["topology_variant"] == "common_source"
+
+
+def test_gate7b_characterization_signature_matches_the_observed_si_instance() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump()
+    task = TaskSpec.model_validate_json(
+        Path(
+            "examples/tasks/mos-device-characterize-cs-mn0-top-tt.bridge.json"
+        ).read_text(encoding="utf-8")
+    )
+    parsed = _parse_common_source_netlist(
+        """
+MN0 (OUT IN VSS VSS) nch_lvt_mac l=30n w=500n multi=1 nf=1 sd=100n ad=3.75e-14 as=3.75e-14 pd=1.15u ps=1.15u nrd=0.662935 nrs=0.662935 sa=75.0n sb=75.0n sa1=75.0n sa2=75.0n sa3=75.0n sa4=75.0n sb1=75.0n sb2=75.0n sb3=75.0n spa=100n spa1=100n spa2=100n spa3=100n sap=91.9776n sapb=114.444n spba=115.715n spba1=117.043n dfm_flag=0 spmt=1.11111e+15 spomt=0 spomt1=1.11111e+60 spmb=1.11111e+15 spomb=0 spomb1=1.11111e+60
+RD0 (VDD OUT) resistor r=20k
+""",
+        profile,
+    )
+
+    assert task.device_characterization is not None
+    signature = parsed["instances"]["MN0"]["model_parameters"]
+    assert len(signature) == 31
+    assert signature == task.device_characterization.model_parameters_by_polarity[
+        "nmos"
+    ]
+
+
+def test_common_source_simulation_parser_preserves_unknown_parameter_tokens() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump()
+    parsed = _parse_common_source_netlist(
+        """
+MN0 (OUT IN VSS VSS) nch_lvt_mac l=30n w=500n nf=1 multi=1 opaque=(foo + bar)
+RD0 (VDD OUT) resistor r=20k
+""",
+        profile,
+    )
+
+    assert parsed["semantic_parameters"]["device_width_um"] == pytest.approx(0.5)
+    assert parsed["instances"]["MN0"]["unparsed_model_parameter_tokens"] == [
+        "opaque=(foo",
+        "+",
+        "bar)",
+    ]
 
 
 def test_source_degenerated_oa_netlist_is_parsed_without_a_second_pipeline() -> None:
@@ -5859,14 +5943,19 @@ def test_common_source_ac_worker_returns_dc_and_complex_ac_evidence(
             return cls()
 
         def run_simulation(self, netlist, parameters):
+            output_dir = netlist.parent / "common_source_ac.raw"
+            output_dir.mkdir()
+            (output_dir / "ac.ac").write_text(
+                "fixture complex AC data", encoding="utf-8"
+            )
             return SimpleNamespace(
                 ok=True,
                 data={
                     "dc_IN": 0.35,
                     "dc_OUT": 0.68,
-                        "dc_VDD": 0.9,
-                        "dc_VSS": 0.0,
-                        "dc_VDD_SRC:p": -10e-6,
+                    "dc_VDD": 0.9,
+                    "dc_VSS": 0.0,
+                    "dc_VDD_SRC:p": -10e-6,
                     "dcOpInfo_MN0:ids": 10e-6,
                     "dcOpInfo_MN0:vgs": 0.35,
                     "dcOpInfo_MN0:vds": 0.68,
@@ -5877,6 +5966,7 @@ def test_common_source_ac_worker_returns_dc_and_complex_ac_evidence(
                     "ac_IN": vin,
                     "ac_OUT": vout,
                 },
+                metadata={"output_dir": str(output_dir)},
                 tool_version="test-spectre-ac",
                 warnings=[],
             )
@@ -5978,6 +6068,15 @@ def test_common_source_ac_worker_returns_dc_and_complex_ac_evidence(
     assert result["metric_sources"]["saturation_region"] == "software_inference"
     assert result["evidence"]["ac_response"]["source"] == "eda_result"
     assert result["evidence"]["ac_response"]["bandwidth"]["status"] == "resolved"
+    assert result["evidence"]["ac_response"]["frequency_hz"] == frequency_hz
+    assert result["evidence"]["ac_response"]["raw_files"]["ac"][
+        "size_bytes"
+    ] > 0
+    assert result["evidence"]["side_effects"] == {
+        "oa_access_performed": True,
+        "oa_write_performed": False,
+        "remote_compute_performed": True,
+    }
     sources = result["evidence"]["testbench"]["value_sources"]["ac_sweep"]
     assert sources["start_hz"] == "user_input"
     assert sources["reference_points"] == "software_inference"
@@ -6184,10 +6283,15 @@ def test_common_source_quality_bundle_reuses_one_verified_oa_netlist(
 
         def run_simulation(self, netlist, parameters):
             simulation_calls.append(netlist.read_text(encoding="utf-8"))
+            output_dir = netlist.parent / "quality_bundle.raw"
+            output_dir.mkdir(exist_ok=True)
+            (output_dir / "ac.ac").write_text(
+                "fixture complex AC data", encoding="utf-8"
+            )
             return SimpleNamespace(
                 ok=True,
                 data={"fixture": 1.0},
-                metadata={},
+                metadata={"output_dir": str(output_dir)},
                 tool_version="test-spectre-quality-bundle",
                 warnings=[],
             )

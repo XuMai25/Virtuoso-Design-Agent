@@ -91,9 +91,11 @@ CDF 的 `display` 和 `editable` 元数据不是写入 allowlist。2026-07-20 �
 ## 独立 MOS 器件表征
 
 `device.characterize` 是远端 task operation，但不是 OA operation。其 `TaskSpec` 必须使用
-`circuit: mos_device`、省略 target，并只声明 polarity、W、有限 L/VGS/VDS/VSB 网格、
-留出点、温度、limits 和 remote-compute safety。任何 OA target、remote-write 权限、
-analysis、ADE 状态、参数写入或设计搜索字段都会拒绝；其他 operation 仍强制要求 target。
+`circuit: mos_device`、省略 target，并只声明 polarity、W、可选的逐 polarity Spectre
+实例参数签名、有限 L/VGS/VDS/VSB 网格、留出点、温度、limits 和 remote-compute
+safety。任何 OA target、remote-write 权限、analysis、ADE 状态、参数写入或设计搜索字段
+都会拒绝；其他 operation 仍强制要求 target。实例参数签名最多 64 项，只接受标识符和
+纯 numeric Spectre literal；`w/l/nf/m/multi` 由契约单独控制，不能借签名覆盖或注入 deck。
 
 worker 复用 Bridge 已运行的默认 SSH 连接和公开 `SpectreSimulator`，但 PDK profile 仍由
 VDA 独立选择 model include/section；两者不能混成同一个 profile 名。每次运行先确认唯一
@@ -111,9 +113,11 @@ NaN、偏置/符号漂移、清单缺失或 transport 中断为 `failed/system_e
 
 首个 live Gate 在 TSMC N28 `top_tt`/27 ℃、W=1 µm、L=30/60 nm、240 个训练点和
 4 个真实 VGS 留出点上通过，最坏归一化误差为 13.70%，门为 25%。输出 artifact 与通用
-small-signal schema 相同，能直接被本地矩阵核心消费。当前 artifact 仍嵌在 run record；
-没有引入 registry/database。PVT、nf/m/LDE、多维边缘留出、`si` 图绑定和 held-out circuit
-Spectre 对照均未完成，故不能授权理论值直接写 OA。
+small-signal schema 相同，能直接被本地矩阵核心消费。Gate 7B 又证明 W 相同仍不足以
+定义同一物理器件：OA/`si` 中的扩散几何和 LDE 参数会显著改变 gds。artifact 因而保留
+逐 polarity 参数签名，下游可要求它与 `si` 实例除 `w/l/nf/m/multi` 外的参数集合和值
+完全一致。artifact 仍嵌在 run record，没有引入 registry/database；PVT、不同 finger/
+multiplicity 参数面、多维边缘留出仍需按任务显式表征，不能授权理论值直接写 OA。
 
 ## 理论先导尺寸分析
 
@@ -150,7 +154,16 @@ MOS characterization 点不绑定“输入管/负载管/尾管”等电路角色
 
 这不是运行时加载任意代码的任务插件系统。正式 `vda small-signal` JSON 仍只接受已经验证的 MOS/R/C 与固定电压边界，以维持确定性、可序列化和证据可审计性。电路专属脚本负责局部构图、观测量和约束；某种新 element、激励或 metric 只有在重复需要、补齐 strict schema、失败测试和 Spectre 对照后，才提升到正式任务契约。底层当前仍是纯 Python dense solver，适合 theory seed 和有界本地网络；大规模、强病态、noise/nonlinear 或精确 foundry 模型继续交给 Spectre，未来确有证据时再替换成稀疏数值后端。
 
-首个本地 Gate 用同一核心验证 NMOS 共源、源退化共源、对称 NMOS 差分对和 PMOS 共源，并注入浮空矩阵、偏置漂移、缺失 artifact hash 等失败。Gate 7A 的真实 TSMC N28 artifact 又直接进入同一 schema 和矩阵核心；表征 operation 内部已有局部留出审计，但正式 `vda small-signal` 仍按 exact point 绑定，没有公开的任意偏置插值/外推入口。当前也没有非线性 DC 解或 `si`→network 自动转换，所以实例偏置和图仍需显式提供；W/multiplicity 只按线性缩放，真实 `nf`、finger width、窄宽效应和 LDE 必须成为独立表征维度。下一纵向 Gate 是把现有 `si` 结构网表和真实 DC OP 映射到该网络契约，并用完全留出的共源电路对照同源 Spectre AC。Spectre 仍是最终规格证据。
+首个本地 Gate 用同一核心验证 NMOS 共源、源退化共源、对称 NMOS 差分对和 PMOS 共源，并注入浮空矩阵、偏置漂移、缺失 artifact hash 等失败。Gate 7A 的真实 TSMC N28 artifact 又直接进入同一 schema 和矩阵核心。
+
+Gate 7B 新增 `vda small-signal-validate` 作为 run-record 后处理入口。它只接受 real Bridge 的独立器件表记录和只读 OA/`si`/Spectre 电路记录；demo、OA 写 action、target/PVT 漂移、空 AC、缺失 raw hash 或 evidence source 降级都会拒绝。binder 从结构化 `si` 实例生成 MOS/R/C 图，以真实 DC OP 而非理论 DC 解确定 VGS/VDS/VSB，在 exact L 平面内做有角点权重记录的 VGS/VDS/VSB rectilinear interpolation，并拒绝所有 bias extrapolation。W 平面和除 `w/l/nf/m/multi` 外的模型参数集合/值必须与 `si` 完全相同；匹配集合另存 count 与 SHA-256。随后通用矩阵核心在原始 EDA 频率网格预测 gain、phase、−3 dB bandwidth 和 GBW，并按运行前固定 policy 同 Spectre OP/AC 比较。
+
+该严格签名只属于理论验证 policy，不收窄 Bridge 仿真面。common-source parser 对普通
+`simulation.run` 仍保留无法结构化的未知 Spectre parameter token 并继续原流程；只有
+`require_exact_model_parameters=true` 的 Gate 才因签名不完整而拒绝。探索性 policy 可
+显式关闭 exact signature，但这种结果不能作为 Gate 7B exact-geometry 证据。
+
+首个 nominal `top_tt` 共源 held-out circuit 已通过：DC Id/gm/gds/VDSAT 误差分别为 7.57%/9.78%/11.04%/0.78%，增益误差 0.464 dB，BW/GBW 相对误差 10.38%/15.05%，相位门也通过。中间的 W=1 µm 表和未携带 LDE 的 W=0.5 µm 表均按原门限保留为 partial，促成了完整 31 项 `si` 参数签名而不是放宽门限。当前自动 binder 只提升了已验证的 common-source readback schema；矩阵核心本身仍拓扑无关。下一步是让源极退化复用同一 binder/solver 并建立自己的 held-out Spectre 证据，再处理多 MOS 的差分对；PVT 可选，Spectre 始终是最终规格证据。
 
 ## ADE 人工介入与状态所有权
 

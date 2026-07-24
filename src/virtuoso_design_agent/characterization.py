@@ -83,6 +83,10 @@ class MosCharacterizationArtifact(_FiniteStrictModel):
     pdk_profile: StrictStr = Field(min_length=1, max_length=96)
     process_corner: StrictStr = Field(min_length=1, max_length=64)
     temperature_c: float = Field(ge=-273.15, le=300.0)
+    characterized_width_um: float | None = Field(default=None, gt=0.0)
+    model_parameters_by_polarity: dict[
+        Literal["nmos", "pmos"], dict[StrictStr, StrictStr]
+    ] = Field(default_factory=dict)
     raw_data_evidence_source: EvidenceSource
     normalized_point_evidence_source: EvidenceSource
     points: list[MosSmallSignalPoint] = Field(min_length=1, max_length=4096)
@@ -117,6 +121,32 @@ class MosCharacterizationArtifact(_FiniteStrictModel):
         if len(point_ids) != len(set(point_ids)):
             raise ValueError("characterization contains duplicate point ids")
         return self
+
+
+class MosInterpolationCorner(_FiniteStrictModel):
+    point_id: StrictStr = Field(min_length=1, max_length=96)
+    weight: float = Field(gt=0.0, le=1.0)
+    length_um: float = Field(gt=0.0)
+    vgs_magnitude_v: float = Field(ge=0.0)
+    vds_magnitude_v: float = Field(ge=0.0)
+    vsb_magnitude_v: float = Field(ge=0.0)
+
+
+class MosInterpolationResult(_FiniteStrictModel):
+    point: MosSmallSignalPoint
+    method: Literal["rectilinear_linear_exact_length"] = (
+        "rectilinear_linear_exact_length"
+    )
+    corners: list[MosInterpolationCorner] = Field(min_length=1, max_length=8)
+    source_artifact_id: str
+    source_artifact_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    source_characterized_width_um: float | None = Field(default=None, gt=0.0)
+    evidence_source: Literal[EvidenceSource.SOFTWARE_INFERENCE] = (
+        EvidenceSource.SOFTWARE_INFERENCE
+    )
 
 
 _RAW_QUANTITIES = (
@@ -309,6 +339,117 @@ def _axis_bracket(values: list[float], target: float) -> tuple[tuple[float, floa
     return ((lower, (upper - target) / span), (upper, (target - lower) / span))
 
 
+def interpolate_mos_characterization_point(
+    artifact: MosCharacterizationArtifact,
+    *,
+    point_id: str,
+    model: str,
+    polarity: MosPolarity | str,
+    length_um: float,
+    vgs_magnitude_v: float,
+    vds_magnitude_v: float,
+    vsb_magnitude_v: float,
+) -> MosInterpolationResult:
+    """Interpolate one bias point without crossing or extrapolating length planes."""
+
+    requested_polarity = MosPolarity(polarity)
+    model_points = [
+        point
+        for point in artifact.points
+        if point.model == model and point.polarity is requested_polarity
+    ]
+    if not model_points:
+        raise RuntimeError(
+            f"characterization has no {requested_polarity.value} model {model}"
+        )
+    exact_lengths = sorted(
+        {
+            point.length_um
+            for point in model_points
+            if _matches(point.length_um, length_um, tolerance=1e-12)
+        }
+    )
+    if len(exact_lengths) != 1:
+        available = sorted({point.length_um for point in model_points})
+        raise RuntimeError(
+            f"length {length_um}um has no exact characterized plane for {model}; "
+            f"available={available}; length interpolation and extrapolation are disabled"
+        )
+    exact_length = exact_lengths[0]
+    plane = [
+        point
+        for point in model_points
+        if _matches(point.length_um, exact_length, tolerance=1e-12)
+    ]
+    axes = (
+        _axis_bracket(
+            sorted({point.vgs_magnitude_v for point in plane}),
+            vgs_magnitude_v,
+        ),
+        _axis_bracket(
+            sorted({point.vds_magnitude_v for point in plane}),
+            vds_magnitude_v,
+        ),
+        _axis_bracket(
+            sorted({point.vsb_magnitude_v for point in plane}),
+            vsb_magnitude_v,
+        ),
+    )
+    lookup = {
+        (
+            point.vgs_magnitude_v,
+            point.vds_magnitude_v,
+            point.vsb_magnitude_v,
+        ): point
+        for point in plane
+    }
+    predicted = {name: 0.0 for name in _INTERPOLATED_QUANTITIES}
+    corners: list[MosInterpolationCorner] = []
+    total_weight = 0.0
+    for corner in itertools.product(*axes):
+        coordinates = tuple(item[0] for item in corner)
+        weight = math.prod(item[1] for item in corner)
+        source = lookup.get(coordinates)
+        if source is None:
+            raise RuntimeError(
+                f"characterization is missing interpolation corner {coordinates} "
+                f"for {model} at L={exact_length}um"
+            )
+        total_weight += weight
+        corners.append(
+            MosInterpolationCorner(
+                point_id=source.id,
+                weight=weight,
+                length_um=source.length_um,
+                vgs_magnitude_v=source.vgs_magnitude_v,
+                vds_magnitude_v=source.vds_magnitude_v,
+                vsb_magnitude_v=source.vsb_magnitude_v,
+            )
+        )
+        for name in predicted:
+            predicted[name] += weight * float(getattr(source, name))
+    if not _matches(total_weight, 1.0, tolerance=1e-9):
+        raise RuntimeError(
+            f"interpolation weights for {point_id} sum to {total_weight}"
+        )
+    return MosInterpolationResult(
+        point=MosSmallSignalPoint(
+            id=point_id,
+            model=model,
+            polarity=requested_polarity,
+            length_um=exact_length,
+            vgs_magnitude_v=vgs_magnitude_v,
+            vds_magnitude_v=vds_magnitude_v,
+            vsb_magnitude_v=vsb_magnitude_v,
+            **predicted,
+        ),
+        corners=corners,
+        source_artifact_id=artifact.id,
+        source_artifact_sha256=artifact.source_artifact_sha256,
+        source_characterized_width_um=artifact.characterized_width_um,
+    )
+
+
 def _interpolate_holdout(
     settings: DeviceCharacterizationSpec,
     training: list[MosSmallSignalPoint],
@@ -440,6 +581,7 @@ def normalize_mos_characterization(
         "process_corner": profile.model_section,
         "temperature_c": settings.temperature_c,
         "width_um": settings.width_um,
+        "model_parameters_by_polarity": settings.model_parameters_by_polarity,
         "raw_point_evidence_source": EvidenceSource.EDA_RESULT.value,
     }
     for name, expected in expected_header.items():
@@ -495,6 +637,8 @@ def normalize_mos_characterization(
         pdk_profile=profile.name,
         process_corner=profile.model_section,
         temperature_c=settings.temperature_c,
+        characterized_width_um=settings.width_um,
+        model_parameters_by_polarity=settings.model_parameters_by_polarity,
         raw_data_evidence_source=EvidenceSource.EDA_RESULT,
         normalized_point_evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
         points=training,

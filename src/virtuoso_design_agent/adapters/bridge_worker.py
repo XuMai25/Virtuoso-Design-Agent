@@ -9055,6 +9055,23 @@ def _parse_common_source_netlist(
         nodes = match.group(1).split()
         model = match.group(2)
         parameter_text = match.group(3)
+        parameters: dict[str, str] = {}
+        unparsed_parameter_tokens: list[str] = []
+        for token in parameter_text.split():
+            parameter_match = re.fullmatch(
+                r"([A-Za-z_][A-Za-z0-9_$]*)=([^\s\\]+)", token
+            )
+            if parameter_match is None:
+                unparsed_parameter_tokens.append(token)
+                continue
+            parameter_name, parameter_value = parameter_match.groups()
+            if parameter_name in parameters:
+                raise RuntimeError(
+                    f"si netlist repeats parameter {parameter_name!r} for {name}"
+                )
+            parameters[parameter_name] = parameter_value
+            if _ENGINEERING_VALUE.fullmatch(parameter_value) is None:
+                unparsed_parameter_tokens.append(token)
         if nodes != expected_item["nodes"]:
             raise RuntimeError(
                 f"si netlist topology mismatch for {name}: nodes={nodes}, "
@@ -9067,25 +9084,20 @@ def _parse_common_source_netlist(
             )
         instances[name] = {"nodes": nodes, "model": model}
         if name == "MN0":
-            width_match = re.search(r"(?:^|\s)w=([^\s\\]+)", parameter_text)
-            length_match = re.search(r"(?:^|\s)l=([^\s\\]+)", parameter_text)
-            if width_match is None or length_match is None:
+            if "w" not in parameters or "l" not in parameters:
                 raise RuntimeError("si netlist is missing w/l for MN0")
-            fingers_match = re.search(
-                r"(?:^|\s)nf=([^\s\\]+)", parameter_text
-            )
-            multiplicity_match = re.search(
-                r"(?:^|\s)multi=([^\s\\]+)", parameter_text
-            )
             fingers = _positive_device_count(
-                fingers_match.group(1) if fingers_match else 1,
+                parameters.get("nf", 1),
                 "si MN0.nf",
             )
+            if "multi" in parameters and "m" in parameters:
+                raise RuntimeError("si netlist MN0 declares both multi and m")
             multiplicity = _positive_device_count(
-                multiplicity_match.group(1) if multiplicity_match else 1,
+                parameters.get("multi", parameters.get("m", 1)),
                 "si MN0.multi",
             )
-            netlist_width_um = _length_um(width_match.group(1))
+            netlist_width_um = _length_um(parameters["w"])
+            controlled = {"w", "l", "nf", "m", "multi"}
             instances[name].update(
                 {
                     "netlist_width_um": netlist_width_um,
@@ -9093,17 +9105,23 @@ def _parse_common_source_netlist(
                     "fingers": fingers,
                     "multiplicity": multiplicity,
                     "total_width_um": netlist_width_um * multiplicity,
-                    "length_um": _length_um(length_match.group(1)),
+                    "length_um": _length_um(parameters["l"]),
+                    "model_parameters": {
+                        parameter_name: parameter_value
+                        for parameter_name, parameter_value in sorted(
+                            parameters.items()
+                        )
+                        if parameter_name.lower() not in controlled
+                        and _ENGINEERING_VALUE.fullmatch(parameter_value) is not None
+                    },
+                    "unparsed_model_parameter_tokens": unparsed_parameter_tokens,
                 }
             )
         else:
-            resistance_match = re.search(
-                r"(?:^|\s)r=([^\s\\]+)", parameter_text
-            )
-            if resistance_match is None:
+            if "r" not in parameters:
                 raise RuntimeError(f"si netlist is missing resistance for {name}")
             instances[name]["resistance_ohm"] = _resistance_ohm(
-                resistance_match.group(1)
+                parameters["r"]
             )
     semantic_parameters = {
         "device_width_um": instances["MN0"]["finger_width_um"],
@@ -9734,6 +9752,10 @@ def _mos_characterization_deck(
         gate_v = sign * float(point["vgs_magnitude_v"])
         drain_v = sign * float(point["vds_magnitude_v"])
         bulk_v = -sign * float(point["vsb_magnitude_v"])
+        model_parameters = settings.model_parameters_by_polarity.get(polarity, {})
+        model_parameter_text = "".join(
+            f" {name}={value}" for name, value in sorted(model_parameters.items())
+        )
         elements.extend(
             (
                 f"VG{suffix} (G{suffix} 0) vsource dc={gate_v:.12g}",
@@ -9742,7 +9764,8 @@ def _mos_characterization_deck(
                 (
                     f"{instance} (D{suffix} G{suffix} 0 B{suffix}) "
                     f"{models[polarity]} w={settings.width_um:.12g}u "
-                    f"l={float(point['length_um']):.12g}u nf=1 m=1"
+                    f"l={float(point['length_um']):.12g}u nf=1 multi=1"
+                    f"{model_parameter_text}"
                 ),
             )
         )
@@ -9862,10 +9885,10 @@ def _spectre_version_from_log(work_dir: Path) -> str:
     try:
         text = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
-        raise RuntimeError("MOS characterization Spectre log is missing") from exc
+        raise RuntimeError("Spectre log is missing") from exc
     match = re.search(r"(?im)^\s*Version\s+([^\s]+)", text)
     if match is None:
-        raise RuntimeError("MOS characterization Spectre log has no version marker")
+        raise RuntimeError("Spectre log has no version marker")
     return match.group(1)
 
 
@@ -9968,6 +9991,7 @@ def characterize_mos_devices(payload: dict[str, Any]) -> dict[str, Any]:
             "process_corner": str(profile["model_section"]),
             "temperature_c": settings.temperature_c,
             "width_um": settings.width_um,
+            "model_parameters_by_polarity": settings.model_parameters_by_polarity,
             "raw_point_evidence_source": "eda_result",
             "points": returned_points,
             "tool_version": tool_version,
@@ -10499,6 +10523,7 @@ def _common_source_ac_metrics_from_result(
     )
     diagnostics["signals"] = ["ac_freq", "ac_IN", "ac_OUT"]
     diagnostics["transfer"] = "VOUT/VIN complex ratio"
+    diagnostics["frequency_hz"] = [float(value) for value in frequency_hz]
     return metrics, diagnostics
 
 
@@ -10905,10 +10930,18 @@ def _common_source_model_manifest(
         }
 
     corner = str(operating_condition["process_corner"])
-    raw_corners = profile.get("process_corners", {})
-    raw_includes = raw_corners.get(corner)
-    if not isinstance(raw_includes, list) or not raw_includes:
-        raise ValueError(f"PDK profile does not map process corner {corner!r}")
+    if corner == str(profile["model_section"]):
+        raw_includes: Any = [
+            {
+                "path": str(profile["model_include"]),
+                "section": str(profile["model_section"]),
+            }
+        ]
+    else:
+        raw_corners = profile.get("process_corners", {})
+        raw_includes = raw_corners.get(corner)
+        if not isinstance(raw_includes, list) or not raw_includes:
+            raise ValueError(f"PDK profile does not map process corner {corner!r}")
     includes: list[dict[str, str]] = []
     for item in raw_includes:
         if not isinstance(item, dict):
@@ -11727,6 +11760,9 @@ def simulate_common_source(
         if not result.ok:
             detail = _spectre_failure_detail(result, work_dir)
             raise RuntimeError(f"Spectre simulation failed: {detail}")
+        tool_version = str(result.tool_version or "").strip()
+        if not tool_version:
+            tool_version = _spectre_version_from_log(work_dir)
         dc_data, dc_psf_evidence = _common_source_dc_data_from_result(result)
         metrics, operating_point = _common_source_metrics_from_result(
             dc_data, parameters
@@ -11742,6 +11778,9 @@ def simulate_common_source(
             assert isinstance(ac_sweep, dict)
             ac_metrics, ac_diagnostics = _common_source_ac_metrics_from_result(
                 result.data, ac_sweep
+            )
+            ac_diagnostics["raw_files"] = _spectre_ac_file_evidence_from_result(
+                result
             )
             metrics.update(ac_metrics)
             analysis_issues.extend(
@@ -11899,9 +11938,14 @@ def simulate_common_source(
             "analysis_issues": analysis_issues,
             "analysis_warnings": analysis_warnings,
             "scalar_count": len(result.data),
-            "tool_version": result.tool_version,
+            "tool_version": tool_version,
             "warnings": result.warnings[:20],
             "evidence": {
+                "side_effects": {
+                    "oa_access_performed": True,
+                    "oa_write_performed": False,
+                    "remote_compute_performed": True,
+                },
                 "schematic_readback": {
                     "source": "bridge_readback",
                     "target": payload["target"],

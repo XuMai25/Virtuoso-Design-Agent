@@ -28,6 +28,10 @@ from .models import (
 from .planner import build_plan
 from .safety import SafetyViolation
 from .small_signal import SmallSignalNetworkRequest, analyze_small_signal_network
+from .small_signal_validation import (
+    SmallSignalCircuitValidationPolicy,
+    validate_common_source_small_signal_runs,
+)
 from .theory import DifferentialPairTheoryRequest, size_differential_pair
 from .theory_calibration import calibrate_differential_pair_theory
 
@@ -130,6 +134,23 @@ def _cmd_small_signal(args: argparse.Namespace) -> int:
         args.output.write_text(payload, encoding="utf-8")
     print(payload)
     return 0
+
+
+def _cmd_small_signal_validate(args: argparse.Namespace) -> int:
+    policy = SmallSignalCircuitValidationPolicy.model_validate_json(
+        args.policy.read_text(encoding="utf-8")
+    )
+    result = validate_common_source_small_signal_runs(
+        policy,
+        args.characterization_run,
+        args.circuit_run,
+    )
+    payload = result.model_dump_json(indent=2)
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(payload, encoding="utf-8")
+    print(payload)
+    return 0 if result.status is RunStatus.SUCCEEDED else 1
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -247,6 +268,19 @@ def build_parser() -> argparse.ArgumentParser:
     small_signal.add_argument("request", type=Path)
     small_signal.add_argument("--output", type=Path)
     small_signal.set_defaults(handler=_cmd_small_signal)
+
+    small_signal_validate = subparsers.add_parser(
+        "small-signal-validate",
+        help=(
+            "bind a real OA/si/DC/AC run to an independent MOS table and "
+            "audit the held-out circuit error"
+        ),
+    )
+    small_signal_validate.add_argument("policy", type=Path)
+    small_signal_validate.add_argument("characterization_run", type=Path)
+    small_signal_validate.add_argument("circuit_run", type=Path)
+    small_signal_validate.add_argument("--output", type=Path)
+    small_signal_validate.set_defaults(handler=_cmd_small_signal_validate)
 
     run = subparsers.add_parser("run", help="plan or execute a task")
     run.add_argument("task", type=Path)

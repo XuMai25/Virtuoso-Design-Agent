@@ -38,6 +38,10 @@ def _task(*, allow_compute: bool = True) -> TaskSpec:
             "device_characterization": {
                 "polarities": ["nmos", "pmos"],
                 "width_um": 1.0,
+                "model_parameters_by_polarity": {
+                    "nmos": {"ad": "3.75e-14", "dfm_flag": "0"},
+                    "pmos": {"ad": "4.0e-14", "dfm_flag": "0"},
+                },
                 "lengths_um": [0.03, 0.06],
                 "vgs_magnitudes_v": [0.4, 0.6],
                 "vds_magnitudes_v": [0.3, 0.6],
@@ -134,6 +138,9 @@ def _raw_result(task: TaskSpec) -> dict:
         "process_corner": profile.model_section,
         "temperature_c": settings.temperature_c,
         "width_um": settings.width_um,
+        "model_parameters_by_polarity": deepcopy(
+            settings.model_parameters_by_polarity
+        ),
         "raw_point_evidence_source": "eda_result",
         "points": points,
         "tool_version": "test-spectre",
@@ -217,6 +224,29 @@ def test_subprocess_payload_omits_target_and_analysis() -> None:
     assert "target" not in payload
     assert "analysis" not in payload
     assert payload["device_characterization"]["width_um"] == 1.0
+    assert payload["device_characterization"]["model_parameters_by_polarity"] == {
+        "nmos": {"ad": "3.75e-14", "dfm_flag": "0"},
+        "pmos": {"ad": "4.0e-14", "dfm_flag": "0"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("parameters", "message"),
+    [
+        ({"nmos": {"w": "1u"}}, "controlled by the characterization contract"),
+        ({"nmos": {"ad": "1u;alter"}}, "numeric Spectre literal"),
+        ({"pmos": {"ad": "1e-14"}}, "polarity must be present"),
+    ],
+)
+def test_characterization_model_parameters_are_bounded_and_injection_safe(
+    parameters: dict, message: str
+) -> None:
+    data = _task().model_dump(mode="json")
+    data["device_characterization"]["polarities"] = ["nmos"]
+    data["device_characterization"]["model_parameters_by_polarity"] = parameters
+
+    with pytest.raises(ValidationError, match=message):
+        TaskSpec.model_validate(data)
 
 
 def test_characterization_deck_has_independent_nmos_and_pmos_biases() -> None:
@@ -232,6 +262,7 @@ def test_characterization_deck_has_independent_nmos_and_pmos_biases() -> None:
 
     assert f'include "{profile["model_include"]}" section=top_tt' in deck
     assert "MCHAR0000 (DP0000 GP0000 0 BP0000) nch_lvt_mac" in deck
+    assert "nf=1 multi=1 ad=3.75e-14 dfm_flag=0" in deck
     pmos_index = next(
         index for index, point in enumerate(points) if point["polarity"] == "pmos"
     )
@@ -259,6 +290,10 @@ def test_normalization_builds_real_pdk_artifact_and_passes_linear_holdouts() -> 
     artifact = normalized["artifact"]
     assert len(artifact["points"]) == 32
     assert artifact["source"] == "pdk_characterization"
+    assert artifact["characterized_width_um"] == task.device_characterization.width_um
+    assert artifact["model_parameters_by_polarity"] == (
+        task.device_characterization.model_parameters_by_polarity
+    )
     assert artifact["raw_data_evidence_source"] == "eda_result"
     assert artifact["normalized_point_evidence_source"] == "software_inference"
     assert normalized["holdout_audit"]["passed"] is True
@@ -331,6 +366,7 @@ def test_normalized_real_artifact_is_consumed_by_generic_small_signal_core() -> 
         ("pmos_sign", "drain-current sign is invalid"),
         ("nonfinite", "is not finite"),
         ("manifest", "fingerprint does not match"),
+        ("model_parameters", "header model_parameters_by_polarity"),
     ],
 )
 def test_normalization_rejects_empty_inconsistent_or_unbound_evidence(
@@ -345,6 +381,8 @@ def test_normalization_rejects_empty_inconsistent_or_unbound_evidence(
         point["raw"]["ids_a"] = abs(point["raw"]["ids_a"])
     elif mutation == "nonfinite":
         raw["points"][0]["raw"]["gm_s"] = float("nan")
+    elif mutation == "model_parameters":
+        raw["model_parameters_by_polarity"]["nmos"]["ad"] = "4e-14"
     else:
         raw["evidence"]["manifest_sha256"] = "0" * 64
     with pytest.raises(RuntimeError, match=message):
