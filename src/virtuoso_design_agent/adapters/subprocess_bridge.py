@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import uuid
 from pathlib import Path
@@ -18,6 +19,7 @@ DEFAULT_BRIDGE_PYTHON = Path(
     r"C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\python.exe"
 )
 _MARKER = "VDA_RESULT="
+_PROCESS_TREE_GRACE_SECONDS = 3.0
 
 _WORKER_ACTIONS = {
     CircuitKind.EXISTING_SCHEMATIC: {
@@ -52,6 +54,141 @@ class BridgeWorkerError(AdapterInterrupted):
     pass
 
 
+class _WindowsProcessJob:
+    """Own a Windows Job Object without killing it on normal handle close."""
+
+    def __init__(self, process: subprocess.Popen[str]) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.AssignProcessToJobObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.HANDLE,
+        ]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        handle = kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        self._kernel32 = kernel32
+        self._handle = handle
+        if not kernel32.AssignProcessToJobObject(
+            handle,
+            wintypes.HANDLE(int(process._handle)),  # type: ignore[attr-defined]
+        ):
+            error = ctypes.get_last_error()
+            self.close()
+            raise ctypes.WinError(error)
+
+    def terminate(self) -> None:
+        import ctypes
+
+        if self._handle is None:
+            raise RuntimeError("Bridge worker Job Object is already closed")
+        if not self._kernel32.TerminateJobObject(self._handle, 1):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def close(self) -> None:
+        if getattr(self, "_handle", None) is not None:
+            self._kernel32.CloseHandle(self._handle)
+            self._handle = None
+
+
+def _hidden_windows_process_kwargs() -> dict[str, Any]:
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "creationflags": (
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        ),
+        "startupinfo": startupinfo,
+    }
+
+
+def _worker_process_kwargs() -> dict[str, Any]:
+    if os.name == "nt":
+        return _hidden_windows_process_kwargs()
+    return {"start_new_session": True}
+
+
+def _terminate_process_tree(
+    process: subprocess.Popen[str],
+    *,
+    windows_job: _WindowsProcessJob | None = None,
+) -> None:
+    """Stop the worker and descendants after timeout or caller cancellation."""
+
+    if process.poll() is not None and os.name == "nt" and windows_job is None:
+        return
+    cleanup_error: Exception | None = None
+    try:
+        if windows_job is not None:
+            windows_job.terminate()
+        elif os.name == "nt":
+            completed = subprocess.run(
+                [
+                    "taskkill.exe",
+                    "/PID",
+                    str(process.pid),
+                    "/T",
+                    "/F",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                **_hidden_windows_process_kwargs(),
+            )
+            if completed.returncode != 0 and process.poll() is None:
+                detail = (completed.stderr or completed.stdout).strip()[-500:]
+                raise RuntimeError(
+                    "taskkill could not stop Bridge worker tree "
+                    f"(rc={completed.returncode}): {detail}"
+                )
+        else:
+            os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=_PROCESS_TREE_GRACE_SECONDS)
+    except Exception as exc:  # best-effort escalation still verifies the parent
+        cleanup_error = exc
+        if process.poll() is None:
+            try:
+                if os.name != "nt":
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+                process.wait(timeout=_PROCESS_TREE_GRACE_SECONDS)
+            except Exception as force_exc:
+                raise RuntimeError(
+                    "Bridge worker process tree cleanup failed: "
+                    f"{type(force_exc).__name__}: {force_exc}"
+                ) from cleanup_error
+    if process.poll() is None:
+        raise RuntimeError("Bridge worker remained alive after process tree cleanup")
+    if cleanup_error is not None and os.name == "nt":
+        raise RuntimeError(
+            "Bridge worker exited, but descendant cleanup was not confirmed: "
+            f"{type(cleanup_error).__name__}: {cleanup_error}"
+        ) from cleanup_error
+
+
+def _drain_worker_pipes(process: subprocess.Popen[str]) -> None:
+    try:
+        process.communicate(timeout=_PROCESS_TREE_GRACE_SECONDS)
+    except Exception:
+        # The process has already been stopped; pipe draining must not hide the
+        # original timeout or cancellation.
+        pass
+
+
 class SubprocessBridgeAdapter:
     name = "virtuoso-bridge-subprocess"
 
@@ -78,30 +215,68 @@ class SubprocessBridgeAdapter:
         env = os.environ.copy()
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = str(self.source_root) + (os.pathsep + existing if existing else "")
+        process = subprocess.Popen(
+            [
+                str(self.bridge_python),
+                "-m",
+                "virtuoso_design_agent.adapters.bridge_worker",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            **_worker_process_kwargs(),
+        )
+        windows_job: _WindowsProcessJob | None = None
+        if os.name == "nt":
+            try:
+                windows_job = _WindowsProcessJob(process)
+            except Exception as exc:
+                process.kill()
+                process.wait(timeout=_PROCESS_TREE_GRACE_SECONDS)
+                _drain_worker_pipes(process)
+                raise BridgeWorkerError(
+                    "Bridge worker was not started because Windows process-tree "
+                    f"containment failed: {type(exc).__name__}: {exc}"
+                ) from exc
         try:
-            process = subprocess.run(
-                [
-                    str(self.bridge_python),
-                    "-m",
-                    "virtuoso_design_agent.adapters.bridge_worker",
-                ],
-                input=json.dumps({"action": action, "payload": payload}),
-                text=True,
-                capture_output=True,
+            stdout, stderr = process.communicate(
+                json.dumps({"action": action, "payload": payload}),
                 timeout=timeout,
-                env=env,
-                check=False,
             )
         except subprocess.TimeoutExpired as exc:
+            try:
+                _terminate_process_tree(process, windows_job=windows_job)
+            except Exception as cleanup_exc:
+                raise BridgeWorkerError(
+                    f"Bridge worker timed out after {timeout}s during {action}; "
+                    "process tree cleanup was not confirmed: "
+                    f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                ) from exc
+            finally:
+                _drain_worker_pipes(process)
+                if windows_job is not None:
+                    windows_job.close()
             raise BridgeWorkerError(
                 f"Bridge worker timed out after {timeout}s during {action}"
             ) from exc
+        except BaseException:
+            try:
+                _terminate_process_tree(process, windows_job=windows_job)
+            finally:
+                _drain_worker_pipes(process)
+                if windows_job is not None:
+                    windows_job.close()
+            raise
+        if windows_job is not None:
+            windows_job.close()
         result_line = next(
-            (line for line in reversed(process.stdout.splitlines()) if line.startswith(_MARKER)),
+            (line for line in reversed(stdout.splitlines()) if line.startswith(_MARKER)),
             None,
         )
         if result_line is None:
-            detail = (process.stderr or process.stdout).strip()[-1000:]
+            detail = (stderr or stdout).strip()[-1000:]
             raise BridgeWorkerError(
                 f"Bridge worker returned no structured result (rc={process.returncode}): {detail}"
             )

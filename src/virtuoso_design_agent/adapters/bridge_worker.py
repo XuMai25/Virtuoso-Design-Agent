@@ -45,6 +45,10 @@ from virtuoso_design_agent.spectre_values import spectre_values_equal
 from virtuoso_design_agent.calculator_expressions import calculator_expressions_equal
 
 _MARKER = "VDA_RESULT="
+_WORKER_RESOURCES: list[Any] = []
+_WORKER_RESOURCE_TRACKING = False
+_SPECTRE_REMOTE_CLEANUP_GRACE_SECONDS = 15
+_SPECTRE_REMOTE_KILL_AFTER_SECONDS = 10
 
 _DIFFERENTIAL_PAIR_BASE_VARIANT = "resistive_load_nmos_differential_pair"
 _DIFFERENTIAL_PAIR_TAIL_VARIANT = (
@@ -74,10 +78,30 @@ def _differential_pair_has_current_mirror_load(topology_variant: str) -> bool:
     return topology_variant == _DIFFERENTIAL_PAIR_CURRENT_MIRROR_LOAD_VARIANT
 
 
+def _register_worker_resource(resource: Any) -> Any:
+    if _WORKER_RESOURCE_TRACKING:
+        _WORKER_RESOURCES.append(resource)
+    return resource
+
+
+def _close_worker_resources() -> list[str]:
+    errors: list[str] = []
+    while _WORKER_RESOURCES:
+        resource = _WORKER_RESOURCES.pop()
+        close = getattr(resource, "close", None)
+        if not callable(close):
+            continue
+        try:
+            close()
+        except Exception as exc:
+            errors.append(f"{type(resource).__name__}: {type(exc).__name__}: {exc}")
+    return errors
+
+
 def _client():
     from virtuoso_bridge import VirtuosoClient
 
-    client = VirtuosoClient.from_env()
+    client = _register_worker_resource(VirtuosoClient.from_env())
     ssh_runner = getattr(client, "ssh_runner", None)
     if ssh_runner is not None:
         # Required by the verified Windows + nics4304 setup.
@@ -9466,6 +9490,18 @@ def _require_bridge_result(result: Any, action: str) -> None:
         raise RuntimeError(f"{action} failed: {_bridge_result_error(result)}")
 
 
+def _require_transport_result(result: Any, action: str) -> None:
+    if hasattr(result, "returncode"):
+        returncode = int(getattr(result, "returncode", -1))
+        if returncode != 0:
+            detail = str(getattr(result, "stderr", "")).strip()
+            raise RuntimeError(
+                f"{action} failed (rc={returncode}): {detail or 'no stderr'}"
+            )
+        return
+    _require_bridge_result(result, action)
+
+
 def _spectre_failure_detail(result: Any, work_dir: Path) -> str:
     errors = [str(item) for item in (getattr(result, "errors", None) or [])]
     if errors:
@@ -9511,6 +9547,107 @@ def _download_text(
 def _upload_file(client, local_path: Path, remote_path: str, *, timeout: int) -> None:
     result = client.upload_file(local_path, remote_path, timeout=timeout)
     _require_bridge_result(result, f"upload {local_path.name}")
+
+
+def _install_remote_spectre_guard(
+    client: Any,
+    work_dir: Path,
+    remote_run_dir: str,
+    *,
+    timeout: int,
+) -> tuple[str, dict[str, Any]]:
+    """Install a bounded remote Spectre launcher without changing Bridge."""
+
+    runner = getattr(client, "ssh_runner", None)
+    if runner is None:
+        return "spectre", {
+            "source": "software_inference",
+            "status": "not_applicable_local_runner",
+            "bounded_remote_process": False,
+        }
+    remote_run_dir = str(remote_run_dir).rstrip("/")
+    if not remote_run_dir.startswith("/data/xum/"):
+        raise RuntimeError("remote Spectre guard must stay under /data/xum")
+    remote_path = f"{remote_run_dir}/vda_spectre_guard.sh"
+    script = (
+        "#!/bin/sh\n"
+        "exec timeout --signal=TERM "
+        f"--kill-after={_SPECTRE_REMOTE_KILL_AFTER_SECONDS}s "
+        f"{int(timeout)}s spectre \"$@\"\n"
+    )
+    local_path = work_dir / "vda_spectre_guard.sh"
+    local_path.write_text(script, encoding="utf-8", newline="\n")
+    upload_timeout = min(max(int(timeout), 1), 60)
+    if hasattr(client, "upload_file"):
+        upload_result = client.upload_file(
+            local_path,
+            remote_path,
+            timeout=upload_timeout,
+        )
+    else:
+        upload_result = runner.upload(
+            local_path,
+            remote_path,
+            timeout=upload_timeout,
+        )
+    _require_transport_result(upload_result, "upload remote Spectre guard")
+    remote_q = shlex.quote(remote_path)
+    verify_result = runner.run_command(
+        f"command -v timeout >/dev/null && chmod 700 {remote_q} "
+        f"&& sha256sum {remote_q}",
+        timeout=upload_timeout,
+    )
+    _require_transport_result(verify_result, "verify remote Spectre guard")
+    expected_sha256 = hashlib.sha256(script.encode("utf-8")).hexdigest()
+    returned_sha256 = str(getattr(verify_result, "stdout", "")).split(maxsplit=1)[0]
+    if returned_sha256 != expected_sha256:
+        raise RuntimeError(
+            "remote Spectre guard SHA-256 mismatch: "
+            f"expected {expected_sha256}, got {returned_sha256 or '<empty>'}"
+        )
+    return remote_path, {
+        "source": "bridge_readback",
+        "configuration_source": "software_inference",
+        "status": "installed_and_hash_matched",
+        "bounded_remote_process": True,
+        "remote_path": remote_path,
+        "sha256": expected_sha256,
+        "simulation_timeout_seconds": int(timeout),
+        "kill_after_seconds": _SPECTRE_REMOTE_KILL_AFTER_SECONDS,
+        "bridge_wait_timeout_seconds": (
+            int(timeout) + _SPECTRE_REMOTE_CLEANUP_GRACE_SECONDS
+        ),
+    }
+
+
+def _create_spectre_simulator(
+    simulator_type: Any,
+    client: Any,
+    *,
+    spectre_cmd: str,
+    timeout: int,
+    work_dir: Path,
+    remote_run_dir: str,
+    keep_remote_files: bool,
+) -> Any:
+    runner = getattr(client, "ssh_runner", None)
+    common = {
+        "spectre_cmd": spectre_cmd,
+        "timeout": timeout,
+        "work_dir": work_dir,
+        "output_format": "psfascii",
+        "keep_remote_files": keep_remote_files,
+    }
+    if runner is None:
+        return simulator_type.from_env(**common)
+    common["timeout"] = timeout + _SPECTRE_REMOTE_CLEANUP_GRACE_SECONDS
+    runner._persistent_shell_enabled = False
+    return simulator_type(
+        **common,
+        remote=True,
+        ssh_runner=runner,
+        remote_work_dir=remote_run_dir,
+    )
 
 
 def _generate_oa_netlist(
@@ -10017,8 +10154,10 @@ def characterize_mos_devices(payload: dict[str, Any]) -> dict[str, Any]:
     # reuse the already-running default Bridge connection.
     if not SSHClient.is_running():
         raise RuntimeError("no default virtuoso-bridge connection is running")
-    ssh_client = SSHClient.from_env(
-        keep_remote_files=True,
+    ssh_client = _register_worker_resource(
+        SSHClient.from_env(
+            keep_remote_files=True,
+        )
     )
     runner = ssh_client.ssh_runner
     runner._persistent_shell_enabled = False
@@ -10034,14 +10173,20 @@ def characterize_mos_devices(payload: dict[str, Any]) -> dict[str, Any]:
         deck_path = work_dir / "mos_characterization.scs"
         deck = _mos_characterization_deck(profile, settings, points)
         deck_path.write_text(deck, encoding="utf-8")
-        simulator = SpectreSimulator(
+        spectre_cmd, process_lifecycle = _install_remote_spectre_guard(
+            ssh_client,
+            work_dir,
+            remote_run_root,
+            timeout=timeout,
+        )
+        simulator = _create_spectre_simulator(
+            SpectreSimulator,
+            ssh_client,
+            spectre_cmd=spectre_cmd,
             timeout=timeout,
             work_dir=work_dir,
-            output_format="psfascii",
             keep_remote_files=True,
-            remote=True,
-            ssh_runner=runner,
-            remote_work_dir=remote_run_root,
+            remote_run_dir=remote_run_root,
         )
         result = simulator.run_simulation(deck_path, {})
         if not result.ok:
@@ -10105,6 +10250,7 @@ def characterize_mos_devices(payload: dict[str, Any]) -> dict[str, Any]:
                 "root_psf_selection": root_evidence,
                 "deck_sha256": hashlib.sha256(deck.encode("utf-8")).hexdigest(),
                 "spectre_tool_version": tool_version,
+                "process_lifecycle": process_lifecycle,
                 "oa_access_performed": False,
                 "oa_write_performed": False,
             },
@@ -11417,16 +11563,21 @@ def simulate_inverter(payload: dict[str, Any]) -> dict[str, Any]:
         netlist.write_text(deck, encoding="utf-8")
         remote_wrapper = f"{netlist_evidence['remote_run_dir']}/input_from_oa.scs"
         _upload_file(client, netlist, remote_wrapper, timeout=min(timeout, 60))
-        simulator = SpectreSimulator.from_env(
+        spectre_cmd, process_lifecycle = _install_remote_spectre_guard(
+            client,
+            work_dir,
+            netlist_evidence["remote_run_dir"],
+            timeout=timeout,
+        )
+        simulator = _create_spectre_simulator(
+            SpectreSimulator,
+            client,
+            spectre_cmd=spectre_cmd,
             timeout=timeout,
             work_dir=work_dir,
-            output_format="psfascii",
             keep_remote_files=False,
-            ssh_runner=getattr(client, "ssh_runner", None),
+            remote_run_dir=netlist_evidence["remote_run_dir"],
         )
-        ssh_runner = getattr(simulator, "_ssh_runner", None)
-        if ssh_runner is not None:
-            ssh_runner._persistent_shell_enabled = False
         result = simulator.run_simulation(netlist, {})
         if not result.ok:
             detail = _spectre_failure_detail(result, work_dir)
@@ -11499,6 +11650,7 @@ def simulate_inverter(payload: dict[str, Any]) -> dict[str, Any]:
                     "signals": ["time", "IN", "OUT", "VDD_SRC:p"],
                     "supply_metric_window": "first two VIN 50% rising crossings",
                 },
+                "process_lifecycle": process_lifecycle,
                 "gate_area_proxy_um2": {
                     "source": "software_inference",
                     "formula": "(nmos_width_um + pmos_width_um) * length_um",
@@ -11891,16 +12043,21 @@ def simulate_common_source(
             wrapper_name = "input_from_oa.scs"
         remote_wrapper = f"{netlist_evidence['remote_run_dir']}/{wrapper_name}"
         _upload_file(client, netlist, remote_wrapper, timeout=min(timeout, 60))
-        simulator = SpectreSimulator.from_env(
+        spectre_cmd, process_lifecycle = _install_remote_spectre_guard(
+            client,
+            work_dir,
+            netlist_evidence["remote_run_dir"],
+            timeout=timeout,
+        )
+        simulator = _create_spectre_simulator(
+            SpectreSimulator,
+            client,
+            spectre_cmd=spectre_cmd,
             timeout=timeout,
             work_dir=work_dir,
-            output_format="psfascii",
             keep_remote_files=False,
-            ssh_runner=getattr(client, "ssh_runner", None),
+            remote_run_dir=netlist_evidence["remote_run_dir"],
         )
-        ssh_runner = getattr(simulator, "_ssh_runner", None)
-        if ssh_runner is not None:
-            ssh_runner._persistent_shell_enabled = False
         result = simulator.run_simulation(netlist, {})
         if not result.ok:
             detail = _spectre_failure_detail(result, work_dir)
@@ -12091,6 +12248,7 @@ def simulate_common_source(
                     "oa_write_performed": False,
                     "remote_compute_performed": True,
                 },
+                "process_lifecycle": process_lifecycle,
                 "schematic_readback": {
                     "source": "bridge_readback",
                     "target": payload["target"],
@@ -12355,16 +12513,21 @@ def simulate_differential_pair(
         )
         remote_wrapper = f"{netlist_evidence['remote_run_dir']}/{wrapper_name}"
         _upload_file(client, wrapper, remote_wrapper, timeout=min(timeout, 60))
-        simulator = SpectreSimulator.from_env(
+        spectre_cmd, process_lifecycle = _install_remote_spectre_guard(
+            client,
+            work_dir,
+            netlist_evidence["remote_run_dir"],
+            timeout=timeout,
+        )
+        simulator = _create_spectre_simulator(
+            SpectreSimulator,
+            client,
+            spectre_cmd=spectre_cmd,
             timeout=timeout,
             work_dir=work_dir,
-            output_format="psfascii",
             keep_remote_files=False,
-            ssh_runner=getattr(client, "ssh_runner", None),
+            remote_run_dir=netlist_evidence["remote_run_dir"],
         )
-        ssh_runner = getattr(simulator, "_ssh_runner", None)
-        if ssh_runner is not None:
-            ssh_runner._persistent_shell_enabled = False
         result = simulator.run_simulation(wrapper, {})
         if not result.ok:
             detail = _spectre_failure_detail(result, work_dir)
@@ -12475,18 +12638,15 @@ def simulate_differential_pair(
                     common_mode_remote_wrapper,
                     timeout=min(timeout, 60),
                 )
-                common_mode_simulator = SpectreSimulator.from_env(
+                common_mode_simulator = _create_spectre_simulator(
+                    SpectreSimulator,
+                    client,
+                    spectre_cmd=spectre_cmd,
                     timeout=timeout,
                     work_dir=common_mode_dir,
-                    output_format="psfascii",
                     keep_remote_files=False,
-                    ssh_runner=getattr(client, "ssh_runner", None),
+                    remote_run_dir=netlist_evidence["remote_run_dir"],
                 )
-                common_mode_ssh_runner = getattr(
-                    common_mode_simulator, "_ssh_runner", None
-                )
-                if common_mode_ssh_runner is not None:
-                    common_mode_ssh_runner._persistent_shell_enabled = False
                 common_mode_result = common_mode_simulator.run_simulation(
                     common_mode_wrapper, {}
                 )
@@ -12650,18 +12810,15 @@ def simulate_differential_pair(
                         supply_remote_wrapper,
                         timeout=min(timeout, 60),
                     )
-                    supply_simulator = SpectreSimulator.from_env(
+                    supply_simulator = _create_spectre_simulator(
+                        SpectreSimulator,
+                        client,
+                        spectre_cmd=spectre_cmd,
                         timeout=timeout,
                         work_dir=supply_dir,
-                        output_format="psfascii",
                         keep_remote_files=False,
-                        ssh_runner=getattr(client, "ssh_runner", None),
+                        remote_run_dir=netlist_evidence["remote_run_dir"],
                     )
-                    supply_ssh_runner = getattr(
-                        supply_simulator, "_ssh_runner", None
-                    )
-                    if supply_ssh_runner is not None:
-                        supply_ssh_runner._persistent_shell_enabled = False
                     supply_result = supply_simulator.run_simulation(
                         supply_wrapper, {}
                     )
@@ -13005,6 +13162,7 @@ def simulate_differential_pair(
                     "oa_write_performed": False,
                     "remote_compute_performed": True,
                 },
+                "process_lifecycle": process_lifecycle,
                 "schematic_readback": {
                     "source": "bridge_readback",
                     "target": payload["target"],
@@ -13247,6 +13405,10 @@ _ACTIONS = {
 
 
 def main() -> int:
+    global _WORKER_RESOURCE_TRACKING
+
+    result: dict[str, Any]
+    _WORKER_RESOURCE_TRACKING = True
     try:
         request = json.loads(sys.stdin.read())
         action = request.get("action")
@@ -13257,6 +13419,22 @@ def main() -> int:
         return_code = 0
     except Exception as exc:  # worker boundary: return a compact structured failure
         result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        return_code = 1
+    finally:
+        cleanup_errors = _close_worker_resources()
+        _WORKER_RESOURCE_TRACKING = False
+    if cleanup_errors:
+        cleanup_detail = "; ".join(cleanup_errors)
+        if result.get("ok", False):
+            result = {
+                "ok": False,
+                "error": f"Bridge worker resource cleanup failed: {cleanup_detail}",
+            }
+        else:
+            result["error"] = (
+                f"{result.get('error', 'Bridge worker failed')}; "
+                f"resource cleanup failed: {cleanup_detail}"
+            )
         return_code = 1
     print(_MARKER + json.dumps(result, ensure_ascii=False, default=str))
     return return_code

@@ -93,6 +93,8 @@ Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发�
 
 需要用户操作 Virtuoso/ADE 的验证已按用户决定延期，并集中记录在 [`deferred-manual-gates.md`](deferred-manual-gates.md)：包括人工修改/保存/重跑后的双向交接、旧 ADE L state 备份后迁移与重开，以及相同 history/output 的人工数值交叉检查。这些项目不阻塞后台自动化实现，但在真实完成前仍保留为未验证边界；延期记录本身不构成远端授权。
 
+2026-07-25 又完成 direct Bridge/Spectre 资源生命周期 Gate。重复 10 次真实只读 worker 请求没有新增本地 Python/Spectre/SSH、句柄或 `vda_*` temp；合成超时先证伪 `taskkill /T`，随后 Windows Job Object 真实杀净 worker 的 120 秒后代进程，`KeyboardInterrupt` 和 action-error 也进入测试。远端探针进一步证明“本地 SSH 超时”本身会留下仍运行的远端 child，因此 direct Spectre 现在使用已哈希回读的远端 timeout guard，并把 Bridge 子运行目录约束到唯一 VDA root。最小 Spectre 和现有 Gate 6 差分对 DC 均 live 成功，独立延迟复查无 Spectre/si/Virtuoso 残留；两次启动前失败的精确 smoke root 已清理，本地失败 record 保留。状态升级为 **direct Bridge worker and Spectre process lifecycle bounded and live-verified**。这不覆盖 ADE/Maestro 硬中断，也不解决持久证据的长期 retention；二者仍是资源可靠性后续 Gate。
+
 ## L5B：单模块设计代理（产品目标）
 
 面向反相器、单管放大器、差分对等单模块，由规格驱动完成更完整的设计过程：

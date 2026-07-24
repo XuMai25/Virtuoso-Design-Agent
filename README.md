@@ -250,6 +250,12 @@ C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe 
 .\.venv\Scripts\vda.exe doctor --adapter bridge
 ```
 
+VDA 的 Bridge adapter 不会为每次请求启动 PowerShell。主进程直接启动 Bridge 虚拟环境中的 `python.exe -m virtuoso_design_agent.adapters.bridge_worker`，worker 再复用 Bridge 的原生 `ssh.exe`/`scp.exe`/`tar.exe` 路径。Windows worker 以隐藏窗口运行，并绑定 Job Object；正常或失败返回时显式关闭本次 Bridge client，超时或用户中断时终止整个本地 worker 子树。Bridge 的一条共享 SSH tunnel/jump chain 会有意跨请求保留，用固定进程数换取连接复用；它不是每次请求新增的 PowerShell 或无限增长的 session。
+
+direct `si`/Spectre 路径还会在每个唯一 `/data/xum/.../vda_<task>_<nonce>/` 根下安装并回读 SHA-256 匹配的 `vda_spectre_guard.sh`。远端 Spectre 受任务 timeout 和二级 TERM/KILL 限制，即使本地 SSH/worker 断开也不会无限运行；Bridge 等待预算比远端仿真预算多 15 秒，给远端清理留出窗口。Spectre 子运行目录被约束在该 VDA root 内，成功下载后由 Bridge 清理；`si` 网表、wrapper、guard 与失败诊断仍作为持久证据保留，不会被当作临时垃圾自动删除。ADE/Maestro 后台运行仍使用其独立 session/history 生命周期，尚未用同一故障注入证明远端硬中断清理。
+
+2026-07-25 的真实资源审计覆盖重复只读 Bridge 调用、真实后代进程超时、用户中断单测、SSH 超时后的远端孤儿探针、最小 guarded Spectre 和现有差分对单点 DC。详情、磁盘快照和未验证边界见[进程与资源生命周期审计](docs/validation/2026-07-25-process-resource-lifecycle.md)。
+
 真实任务仍必须先 `plan`，再使用同一个 token 执行。任务文件还要显式允许远端计算或写入。默认 profile `nics4304_tsmc28` 的反相器 transient 与共源 DC OP 均已有 OA/`si` 单点和有限搜索 live 证据，包括逐候选暂存、最佳参数提交、不可行/预算耗尽恢复与 checkpoint；共源 nominal/退化 AC、相干 transient 线性度和 ordinary noise PSF 也已有只读 live 证据，专用 cell 的 W/RD/RS `design.tune` 已真实执行。调优默认在 run record 旁生成 `*.checkpoint.json`；Bridge 外部恢复后用 `--resume <checkpoint>` 续跑。恢复会重新核对 task、plan token、adapter 和当前 OA 参数，已完成 checkpoint 或不属于基线/已确认写入/待确认写入/声明候选的 OA 状态都会被拒绝。换 library、cell 模板、PDK、analysis 或服务器也必须重新验证，不能从既有 smoke 外推。
 
 ```powershell
@@ -358,4 +364,5 @@ C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe 
 - [2026-07-24 Gate 7B 共源小信号真实验证](docs/validation/2026-07-24-common-source-small-signal-validation-live.md)
 - [2026-07-24 Gate 7C 源极退化共源小信号迁移](docs/validation/2026-07-24-source-degenerated-small-signal-migration-live.md)
 - [2026-07-24 反相器驱动比例校准 live Gate](docs/validation/2026-07-24-inverter-drive-ratio-calibration-live.md)
+- [2026-07-25 进程与资源生命周期审计](docs/validation/2026-07-25-process-resource-lifecycle.md)
 - [延期的人工 ADE Gate](docs/deferred-manual-gates.md)

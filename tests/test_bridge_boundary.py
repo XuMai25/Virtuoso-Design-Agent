@@ -3,9 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import shlex
+import subprocess
 import sys
+import time
 from copy import deepcopy
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -6579,18 +6582,34 @@ def test_subprocess_boundary_parses_only_structured_marker(tmp_path, monkeypatch
     bridge_python = tmp_path / "python.exe"
     bridge_python.touch()
     payload = {"ok": True, "data": {"connected": True}}
+    jobs = []
 
-    def fake_run(*args, **kwargs):
-        return SimpleNamespace(
-            returncode=0,
-            stdout="bridge noise\nVDA_RESULT=" + json.dumps(payload) + "\n",
-            stderr="",
-        )
+    class FakeProcess:
+        returncode = 0
 
-    monkeypatch.setattr("subprocess.run", fake_run)
+        def communicate(self, request, *, timeout):
+            assert json.loads(request)["action"] == "probe"
+            assert timeout == 30
+            return "bridge noise\nVDA_RESULT=" + json.dumps(payload) + "\n", ""
+
+    class FakeJob:
+        def __init__(self, process):
+            self.process = process
+            self.closed = False
+            jobs.append(self)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.subprocess_bridge._WindowsProcessJob",
+        FakeJob,
+    )
     result = SubprocessBridgeAdapter(bridge_python).probe("nics4304_tsmc28")
     assert result.data == {"connected": True}
     assert result.evidence_source.value == "bridge_readback"
+    assert len(jobs) == 1 and jobs[0].closed is True
 
 
 def test_subprocess_payload_preserves_ac_sweep_and_user_input_fields() -> None:
@@ -6761,10 +6780,24 @@ def test_subprocess_boundary_rejects_unstructured_output(tmp_path, monkeypatch) 
     bridge_python = tmp_path / "python.exe"
     bridge_python.touch()
 
-    def fake_run(*args, **kwargs):
-        return SimpleNamespace(returncode=1, stdout="traceback", stderr="failure")
+    class FakeProcess:
+        returncode = 1
 
-    monkeypatch.setattr("subprocess.run", fake_run)
+        def communicate(self, request, *, timeout):
+            return "traceback", "failure"
+
+    class FakeJob:
+        def __init__(self, process):
+            self.process = process
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.subprocess_bridge._WindowsProcessJob",
+        FakeJob,
+    )
     with pytest.raises(BridgeWorkerError, match="no structured result"):
         SubprocessBridgeAdapter(bridge_python).probe("nics4304_tsmc28")
 
@@ -6773,12 +6806,322 @@ def test_subprocess_boundary_converts_timeout(tmp_path, monkeypatch) -> None:
     bridge_python = tmp_path / "python.exe"
     bridge_python.touch()
 
-    def fake_run(*args, **kwargs):
-        raise __import__("subprocess").TimeoutExpired("worker", 30)
+    class FakeProcess:
+        returncode = None
 
-    monkeypatch.setattr("subprocess.run", fake_run)
+        def communicate(self, request=None, *, timeout):
+            if self.returncode is None:
+                raise subprocess.TimeoutExpired("worker", 30)
+            return "", ""
+
+    class FakeJob:
+        def __init__(self, process):
+            self.process = process
+
+        def close(self):
+            pass
+
+    process = FakeProcess()
+    cleanup_calls = []
+    monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.subprocess_bridge._WindowsProcessJob",
+        FakeJob,
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.subprocess_bridge._terminate_process_tree",
+        lambda observed, **_kwargs: (
+            cleanup_calls.append(observed),
+            setattr(observed, "returncode", -9),
+        ),
+    )
     with pytest.raises(BridgeWorkerError, match="timed out"):
         SubprocessBridgeAdapter(bridge_python).probe("nics4304_tsmc28")
+    assert cleanup_calls == [process]
+
+
+def _process_is_running(pid: int) -> bool:
+    if os.name == "nt":
+        import ctypes
+
+        process_query_limited_information = 0x1000
+        still_active = 259
+        handle = ctypes.windll.kernel32.OpenProcess(
+            process_query_limited_information,
+            False,
+            pid,
+        )
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not ctypes.windll.kernel32.GetExitCodeProcess(
+                handle, ctypes.byref(exit_code)
+            ):
+                return False
+            return exit_code.value == still_active
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def test_subprocess_timeout_stops_worker_descendant_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "virtuoso_design_agent" / "adapters"
+    package.mkdir(parents=True)
+    (package.parent / "__init__.py").write_text("", encoding="utf-8")
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "bridge_worker.py").write_text(
+        """
+import os
+import pathlib
+import subprocess
+import sys
+import time
+
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+pathlib.Path(os.environ["VDA_TEST_CHILD_PID"]).write_text(str(child.pid))
+time.sleep(120)
+""".strip(),
+        encoding="utf-8",
+    )
+    child_pid_path = tmp_path / "child.pid"
+    monkeypatch.setenv("VDA_TEST_CHILD_PID", str(child_pid_path))
+    adapter = SubprocessBridgeAdapter(sys.executable)
+    adapter.source_root = tmp_path
+
+    with pytest.raises(BridgeWorkerError, match="timed out"):
+        adapter._request("spawn_child", {}, timeout=1)
+
+    assert child_pid_path.is_file()
+    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 3.0
+    while _process_is_running(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _process_is_running(child_pid)
+
+
+def test_subprocess_keyboard_interrupt_stops_worker_tree_and_reraises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bridge_python = tmp_path / "python.exe"
+    bridge_python.touch()
+
+    class FakeProcess:
+        returncode = None
+
+        def communicate(self, request=None, *, timeout):
+            if self.returncode is None:
+                raise KeyboardInterrupt
+            return "", ""
+
+    class FakeJob:
+        closed = False
+
+        def __init__(self, process):
+            self.process = process
+
+        def close(self):
+            self.closed = True
+
+    process = FakeProcess()
+    job_holder = []
+
+    def make_job(observed):
+        job = FakeJob(observed)
+        job_holder.append(job)
+        return job
+
+    cleanup_calls = []
+
+    def cleanup(observed, **_kwargs):
+        cleanup_calls.append(observed)
+        observed.returncode = -9
+
+    monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.subprocess_bridge._WindowsProcessJob",
+        make_job,
+    )
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.subprocess_bridge._terminate_process_tree",
+        cleanup,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        SubprocessBridgeAdapter(bridge_python).probe("nics4304_tsmc28")
+
+    assert cleanup_calls == [process]
+    assert len(job_holder) == 1 and job_holder[0].closed is True
+
+
+def test_process_tree_cleanup_terminates_job_after_worker_parent_exits() -> None:
+    from virtuoso_design_agent.adapters import subprocess_bridge
+
+    calls = []
+
+    class Process:
+        pid = 123
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout):
+            calls.append(("wait", timeout))
+            return 0
+
+    class Job:
+        def terminate(self):
+            calls.append(("terminate", None))
+
+    subprocess_bridge._terminate_process_tree(Process(), windows_job=Job())
+
+    assert calls[0] == ("terminate", None)
+    assert calls[1][0] == "wait"
+
+
+def test_worker_resource_cleanup_is_reverse_order_and_not_short_circuited() -> None:
+    closed = []
+
+    class Resource:
+        def __init__(self, name: str, *, fail: bool = False) -> None:
+            self.name = name
+            self.fail = fail
+
+        def close(self) -> None:
+            closed.append(self.name)
+            if self.fail:
+                raise RuntimeError("injected close failure")
+
+    bridge_worker._WORKER_RESOURCE_TRACKING = True
+    try:
+        bridge_worker._register_worker_resource(Resource("first"))
+        bridge_worker._register_worker_resource(Resource("second", fail=True))
+        errors = bridge_worker._close_worker_resources()
+    finally:
+        bridge_worker._WORKER_RESOURCE_TRACKING = False
+        bridge_worker._close_worker_resources()
+
+    assert closed == ["second", "first"]
+    assert len(errors) == 1
+    assert "injected close failure" in errors[0]
+
+
+def test_worker_main_closes_registered_resources_after_action_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from io import StringIO
+
+    closed = []
+
+    class Resource:
+        def close(self) -> None:
+            closed.append("closed")
+
+    def failing_action(_payload):
+        bridge_worker._register_worker_resource(Resource())
+        raise RuntimeError("injected action failure")
+
+    bridge_worker._close_worker_resources()
+    monkeypatch.setitem(bridge_worker._ACTIONS, "resource_cleanup_test", failing_action)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        StringIO(json.dumps({"action": "resource_cleanup_test", "payload": {}})),
+    )
+
+    assert bridge_worker.main() == 1
+    assert closed == ["closed"]
+    assert bridge_worker._WORKER_RESOURCE_TRACKING is False
+    output = capsys.readouterr().out.strip()
+    assert output.startswith("VDA_RESULT=")
+    assert "injected action failure" in output
+
+
+def test_remote_spectre_guard_is_uploaded_executable_and_hash_verified(
+    tmp_path: Path,
+) -> None:
+    uploaded = {}
+
+    class Runner:
+        def upload(self, local_path, remote_path, timeout=None):
+            uploaded["content"] = local_path.read_text(encoding="utf-8")
+            uploaded["remote_path"] = remote_path
+            uploaded["timeout"] = timeout
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        def run_command(self, command, timeout=None):
+            uploaded["verify_command"] = command
+            digest = hashlib.sha256(uploaded["content"].encode("utf-8")).hexdigest()
+            return SimpleNamespace(
+                returncode=0,
+                stderr="",
+                stdout=f"{digest}  {uploaded['remote_path']}\n",
+            )
+
+    client = SimpleNamespace(ssh_runner=Runner())
+    remote_path, evidence = bridge_worker._install_remote_spectre_guard(
+        client,
+        tmp_path,
+        "/data/xum/virtuoso_bridge_smoke/vda_guard_test",
+        timeout=60,
+    )
+
+    assert remote_path.endswith("/vda_spectre_guard.sh")
+    assert "exec timeout --signal=TERM --kill-after=10s 60s spectre \"$@\"" in (
+        uploaded["content"]
+    )
+    assert "chmod 700" in uploaded["verify_command"]
+    assert evidence["status"] == "installed_and_hash_matched"
+    assert evidence["bounded_remote_process"] is True
+    assert evidence["bridge_wait_timeout_seconds"] == 75
+
+
+def test_remote_spectre_guard_rejects_non_data_xum_root(tmp_path: Path) -> None:
+    client = SimpleNamespace(ssh_runner=SimpleNamespace())
+    with pytest.raises(RuntimeError, match="must stay under /data/xum"):
+        bridge_worker._install_remote_spectre_guard(
+            client,
+            tmp_path,
+            "/home/xum/vda_guard_test",
+            timeout=60,
+        )
+
+
+def test_remote_spectre_simulator_is_scoped_under_vda_run_root(
+    tmp_path: Path,
+) -> None:
+    observed = {}
+
+    class Simulator:
+        def __init__(self, **kwargs):
+            observed.update(kwargs)
+
+    runner = SimpleNamespace(_persistent_shell_enabled=True)
+    client = SimpleNamespace(ssh_runner=runner)
+    simulator = bridge_worker._create_spectre_simulator(
+        Simulator,
+        client,
+        spectre_cmd="/data/xum/vda/vda_spectre_guard.sh",
+        timeout=60,
+        work_dir=tmp_path,
+        remote_run_dir="/data/xum/vda",
+        keep_remote_files=False,
+    )
+
+    assert isinstance(simulator, Simulator)
+    assert observed["remote"] is True
+    assert observed["remote_work_dir"] == "/data/xum/vda"
+    assert observed["timeout"] == 75
+    assert observed["ssh_runner"] is runner
+    assert runner._persistent_shell_enabled is False
 
 
 def _differential_pair_readback() -> dict:

@@ -377,6 +377,16 @@ PSRR 作为正交 analysis 接在同一 Gate 6 输出契约上，而不是另建
 
 live 首版曾把 PMOS 实例命名为 `PM0/PM1`；OA 和 `si` 一致，但 Spectre 将 `P` 前缀解析为 port primitive 并报 `SFE-1703`。VDA 先精确恢复 RD 基线，再将该固定模板统一改为 Spectre 安全的 `MP0/MP1`。worker 同时增加 Spectre 失败详情提取，把 `spectre.out` 错误上下文写入 run record；这类失败属于执行/网表错误，不能被分类为电路规格不可行。
 
+## 进程与资源生命周期
+
+Bridge subprocess adapter 的本地进程边界是一个请求一个 Python worker，不经过 PowerShell。Windows worker 使用隐藏窗口和独立进程组，并在创建后立即加入本次请求专属的 Job Object。Job Object 正常关闭时不带 `KILL_ON_JOB_CLOSE`，因此 Bridge 已建立并写入共享 state 的 tunnel 可以按 Bridge 原语跨 worker 复用；请求超时、`KeyboardInterrupt` 或其他调用方异常时则调用 `TerminateJobObject`，等待并回收 worker、SSH/SCP/tar 等全部后代。若 Job Object 无法建立，请求在执行 payload 前失败，而不是以无法证明清理的方式继续。POSIX 路径使用独立 session/process group，并按 TERM→KILL 顺序收敛。
+
+worker 内部把本次创建的 `VirtuosoClient`/`SSHClient` 注册为资源，action 无论成功还是异常都逆序显式 `close()`；资源对象向外抛出的关闭异常会使 worker 结构化失败，不会静默吞掉。这里的 `close()` 只释放本次 runner/persistent shell，遵守 Bridge 的共享 tunnel 语义，不调用会影响其他脚本的 `stop()`。Maestro action 另在各自 `finally` 中关闭 background session；direct Spectre 使用 `TemporaryDirectory`，正常/异常 Python 展开时清理本地网表与下载目录。
+
+远端进程不能只靠关闭本地 SSH 来证明结束。direct inverter/common-source/differential-pair/device-characterization 在各自唯一 `/data/xum` 根下上传小型 `vda_spectre_guard.sh`，执行位和 SHA-256 都通过 Bridge 独立回读。guard 以任务 timeout 运行 Spectre，先发 TERM，10 秒后仍未结束则 KILL；Bridge transport 等待比该上限多 15 秒。SpectreSimulator 的 `remote_work_dir` 同时固定到该 VDA 根，因此子运行目录不会散落成无所属的顶层 nonce；成功下载后 Bridge 清理子目录，失败诊断和同源 netlist 根按证据策略保留。
+
+资源分成两类，不能混淆：本地 `vda_*` temp、worker 和一次性 SSH/SCP 是退出时必须归零的临时资源；`artifacts/runs`、远端 `si` 网表/wrapper/guard、characterization raw bundle 和 ADE exact-history manifest 是有意保留的证据。后者会占磁盘，删除必须按精确路径和保留策略显式执行，不能在 worker 退出时广泛 `rm -rf`。当前尚无通用 retention/garbage-collection CLI；ADE/Maestro 硬中断后的远端 session/process 清理也尚未完成等价故障注入。详见[2026-07-25 生命周期审计](validation/2026-07-25-process-resource-lifecycle.md)。
+
 ## 证据链
 
 每次运行至少保存任务和计划 token、adapter 与证据来源、动作状态、候选参数、仿真指标、逐条规格判定、最终选择、结构化 `search_audit`、OA 回读摘要，以及错误和未验证边界。显式实例写入还保存请求、写入前目标字段、立即确认和独立 inspect 的完整参数表。ADE `prepare` 保存 design/test/simulator 请求、持久化 view/test 回读、未覆盖既有 view 以及没有设置 analysis/sweep 的范围；`capture` 保存焦点目标、是否已保存、setup/simulation 聚合指纹、逐文件 manifest、history 选择来源以及可用时的逐点 output/spec；变量/setup patch 保存声明目标、全部旧值、即时值、独立重开值、targeted 前后指纹及未覆盖范围，并明确记录没有运行仿真；严格 sweep run 还保存 setup 前后 scope 指纹、每个 point 的 Detail 参数/非空 output、逐 test input/result hash、OA/input comparison hash 和逐点绑定指纹。存在显式 legacy output evaluation-error 契约时，还保存任务期望、RDB 实际错误单元格、completion-log 数量、逐项匹配和零未解释错误；启用 result mapping 时再保存 output expression 前后状态/指纹、显式 scale、映射后的候选、逐条 constraint 与 selection。调优 checkpoint 保留历史失败 actions，但恢复后只有完成的候选证据参与选择；最终 run 可以在完整证据和最终回读成立时成功，同时仍显式留下已恢复的 transport 事件。自动 netlisting 还保存远端网表/wrapper 路径、SHA-256、解析后的实例参数和一致性结论。
