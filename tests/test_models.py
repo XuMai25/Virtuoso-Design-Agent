@@ -12,6 +12,7 @@ from virtuoso_design_agent.models import (
     TaskSpec,
 )
 from virtuoso_design_agent.planner import build_plan
+from virtuoso_design_agent.profiles import load_pdk_profile
 
 
 def _base_task() -> dict:
@@ -27,9 +28,12 @@ def _base_task() -> dict:
 
 def test_default_pdk_is_the_verified_tsmc_n28_foundry_profile() -> None:
     task = TaskSpec.model_validate(_base_task())
+    profile = load_pdk_profile(task.pdk_profile)
 
     assert DEFAULT_PDK_PROFILE == "nics4304_tsmc28"
     assert task.pdk_profile == DEFAULT_PDK_PROFILE
+    assert profile.default_inverter_nmos_width_um == pytest.approx(0.6)
+    assert profile.default_inverter_pmos_to_nmos_width_ratio == pytest.approx(1.25)
 
 
 def test_common_source_simulation_accepts_explicit_finite_pvt_conditions() -> None:

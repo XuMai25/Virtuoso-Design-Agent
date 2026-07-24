@@ -86,8 +86,9 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "240-point nominal TSMC N28 top_tt table and four real holdouts live; "
             "exact-width and 31-parameter si signature nominal/source-degenerated "
             "common-source held-out DC/gain/phase/BW/GBW validation live; "
-            "real-si-derived characterization task binding live; multi-MOS "
-            "topology migration plus optional PVT pending"
+            "real-si-derived characterization task binding live; multi-artifact "
+            "active-load differential-pair binder locally verified, while its "
+            "real three-plane Spectre gate and optional PVT remain pending"
         ),
     ),
     CircuitKind.EXISTING_SCHEMATIC: CircuitCapability(

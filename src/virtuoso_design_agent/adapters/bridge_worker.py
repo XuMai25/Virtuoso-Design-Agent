@@ -1162,17 +1162,27 @@ def _resolved_parameters(
     profile = payload["profile"]
     supplied = payload.get("parameters", {})
     device_parameters = device_parameters or {}
+    nmos_width_um = float(
+        supplied.get(
+            "nmos_width_um",
+            device_parameters.get(
+                "nmos_width_um", profile["default_inverter_nmos_width_um"]
+            ),
+        )
+    )
+    pmos_width_um = float(
+        supplied.get(
+            "pmos_width_um",
+            device_parameters.get(
+                "pmos_width_um",
+                nmos_width_um
+                * profile["default_inverter_pmos_to_nmos_width_ratio"],
+            ),
+        )
+    )
     return {
-        "nmos_width_um": float(
-            supplied.get(
-                "nmos_width_um", device_parameters.get("nmos_width_um", 0.5)
-            )
-        ),
-        "pmos_width_um": float(
-            supplied.get(
-                "pmos_width_um", device_parameters.get("pmos_width_um", 1.0)
-            )
-        ),
+        "nmos_width_um": nmos_width_um,
+        "pmos_width_um": pmos_width_um,
         "length_um": float(
             supplied.get(
                 "length_um",

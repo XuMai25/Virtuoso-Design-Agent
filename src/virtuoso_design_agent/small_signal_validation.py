@@ -6,8 +6,9 @@ import hashlib
 import json
 import math
 import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 from pydantic import ConfigDict, Field, StrictStr
 
@@ -65,7 +66,9 @@ class SmallSignalCircuitValidationPolicy(_FiniteStrictModel):
     expected_temperature_c: float = Field(ge=-273.15, le=300.0)
     expected_vdd_v: float = Field(gt=0.0)
     expected_topology_variant: Literal[
-        "common_source", "source_degenerated_common_source"
+        "common_source",
+        "source_degenerated_common_source",
+        "pmos_current_mirror_load_nmos_differential_pair_with_tail_device",
     ]
     characterization_action: StrictStr = "device.characterize.validate"
     characterization_raw_action: StrictStr = "device.characterize"
@@ -103,8 +106,10 @@ class SmallSignalCircuitValidationResult(_FiniteStrictModel):
     policy_id: str
     policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     characterization_run_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    characterization_run_sha256s: list[str] = Field(min_length=1, max_length=1024)
     circuit_run_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     characterization_task_id: str
+    characterization_task_ids: list[str] = Field(min_length=1, max_length=1024)
     circuit_task_id: str
     status: RunStatus
     gate_passed: bool
@@ -302,17 +307,6 @@ def _device_operating_points(
     raise ValueError("operating-point device values do not map to si MOS instances")
 
 
-def _model_polarity(
-    artifact: MosCharacterizationArtifact, model: str
-) -> MosPolarity:
-    polarities = {point.polarity for point in artifact.points if point.model == model}
-    if len(polarities) != 1:
-        raise ValueError(
-            f"characterization model {model} must map to exactly one polarity"
-        )
-    return next(iter(polarities))
-
-
 def _node_voltage(node_values: dict[str, Any], node: str) -> float:
     if node == "0":
         return 0.0
@@ -321,9 +315,302 @@ def _node_voltage(node_values: dict[str, Any], node: str) -> float:
     return _finite(node_values[node], f"node {node}")
 
 
+@dataclass(frozen=True)
+class _LoadedCharacterization:
+    run_sha256: str
+    task_id: str
+    artifact: MosCharacterizationArtifact
+    manifest_sha256: str
+    remote_root: str
+    remote_simulation_dir: str
+    tool_version: str
+
+
+def _load_characterization_binding(
+    policy: SmallSignalCircuitValidationPolicy,
+    path: Path,
+) -> _LoadedCharacterization:
+    run = _load_run(path, "characterization")
+    if run.adapter != "virtuoso-bridge-subprocess":
+        raise ValueError(
+            "small-signal validation requires bridge run records, not demo evidence"
+        )
+    if run.status is not RunStatus.SUCCEEDED:
+        raise ValueError("characterization run did not succeed")
+    normalized = _select_action(
+        run,
+        policy.characterization_action,
+        EvidenceSource.SOFTWARE_INFERENCE,
+    )
+    raw = _select_action(
+        run,
+        policy.characterization_raw_action,
+        EvidenceSource.EDA_RESULT,
+    )
+    if normalized.get("raw_data_evidence_source") != "eda_result":
+        raise ValueError("characterization raw data is not eda_result")
+    if normalized.get("normalization_evidence_source") != "software_inference":
+        raise ValueError("characterization normalization evidence is invalid")
+    artifact = MosCharacterizationArtifact.model_validate(normalized.get("artifact"))
+    raw_evidence = _mapping(raw.get("evidence"), "raw characterization evidence")
+    if raw.get("task_id") != run.task_id:
+        raise ValueError("raw characterization task id does not match its run")
+    if raw.get("pdk_profile") != artifact.pdk_profile:
+        raise ValueError("raw characterization PDK does not match its artifact")
+    if raw.get("process_corner") != artifact.process_corner:
+        raise ValueError("raw characterization corner does not match its artifact")
+    if not math.isclose(
+        _finite(raw.get("temperature_c"), "raw characterization temperature"),
+        artifact.temperature_c,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    ):
+        raise ValueError("raw characterization temperature does not match its artifact")
+    if artifact.characterized_width_um is None or not math.isclose(
+        _finite(raw.get("width_um"), "raw characterization width"),
+        artifact.characterized_width_um,
+        rel_tol=1e-9,
+        abs_tol=1e-12,
+    ):
+        raise ValueError("raw characterization width does not match its artifact")
+    if raw.get("model_parameters_by_polarity") != artifact.model_dump(mode="json")[
+        "model_parameters_by_polarity"
+    ]:
+        raise ValueError(
+            "raw characterization model parameters do not match its artifact"
+        )
+    source_binding = (
+        artifact.source_instance_binding.model_dump(mode="json")
+        if artifact.source_instance_binding is not None
+        else None
+    )
+    if raw.get("source_instance_binding") != source_binding:
+        raise ValueError(
+            "raw characterization source-instance binding does not match its artifact"
+        )
+    if (
+        policy.require_characterization_source_instance_binding
+        and artifact.source_instance_binding is None
+    ):
+        raise ValueError("characterization has no source-instance binding")
+    if artifact.source_instance_binding is not None:
+        binding = artifact.source_instance_binding
+        if (
+            binding.source_pdk_profile != policy.expected_pdk_profile
+            or binding.source_process_corner != policy.expected_process_corner
+            or not math.isclose(
+                binding.source_temperature_c,
+                policy.expected_temperature_c,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+        ):
+            raise ValueError(
+                "characterization source-instance PVT does not match the policy"
+            )
+        if not math.isclose(
+            binding.source_width_um,
+            artifact.characterized_width_um,
+            rel_tol=1e-9,
+            abs_tol=1e-12,
+        ):
+            raise ValueError(
+                "characterization source-instance width does not match its artifact"
+            )
+        matching_polarities = {
+            point.polarity.value
+            for point in artifact.points
+            if point.model == binding.source_model
+        }
+        if len(matching_polarities) != 1:
+            raise ValueError(
+                "characterization source model does not map to exactly one artifact polarity"
+            )
+        declared_parameters = artifact.model_parameters_by_polarity.get(
+            next(iter(matching_polarities)),
+            {},
+        )
+        if (
+            len(declared_parameters) != binding.source_model_parameter_count
+            or _canonical_sha256(declared_parameters)
+            != binding.source_model_parameters_sha256
+        ):
+            raise ValueError(
+                "characterization source-instance signature does not match its artifact"
+            )
+    if raw.get("raw_point_evidence_source") != "eda_result":
+        raise ValueError("raw characterization points are not eda_result")
+    raw_points = raw.get("points")
+    if not isinstance(raw_points, list) or not raw_points:
+        raise ValueError("raw characterization contains no operating points")
+    tool_version = str(raw.get("tool_version", "")).strip()
+    if not tool_version:
+        raise ValueError("raw characterization has no Spectre tool version")
+    manifest_hash = _valid_hash(
+        raw_evidence.get("manifest_sha256"),
+        "raw characterization manifest hash",
+    )
+    if manifest_hash != artifact.source_artifact_sha256:
+        raise ValueError("raw characterization manifest does not match its artifact")
+    if (
+        raw_evidence.get("source") != "eda_result"
+        or raw_evidence.get("artifact_manifest_complete") is not True
+        or raw_evidence.get("oa_access_performed") is not False
+        or raw_evidence.get("oa_write_performed") is not False
+    ):
+        raise ValueError("raw characterization evidence boundary is invalid")
+    remote_root = raw_evidence.get("remote_run_root")
+    remote_dir = raw_evidence.get("remote_simulation_dir")
+    if (
+        not isinstance(remote_root, str)
+        or not remote_root.startswith("/data/xum/")
+        or not isinstance(remote_dir, str)
+        or not remote_dir.startswith(remote_root.rstrip("/") + "/")
+    ):
+        raise ValueError("raw characterization remote artifact path is invalid")
+    if (
+        artifact.pdk_profile != policy.expected_pdk_profile
+        or artifact.process_corner != policy.expected_process_corner
+        or not math.isclose(
+            artifact.temperature_c,
+            policy.expected_temperature_c,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+    ):
+        raise ValueError("characterization conditions do not match the policy")
+    return _LoadedCharacterization(
+        run_sha256=_file_sha256(path),
+        task_id=run.task_id,
+        artifact=artifact,
+        manifest_sha256=manifest_hash,
+        remote_root=remote_root,
+        remote_simulation_dir=remote_dir,
+        tool_version=tool_version,
+    )
+
+
+def _select_instance_characterization(
+    policy: SmallSignalCircuitValidationPolicy,
+    artifacts: Sequence[MosCharacterizationArtifact],
+    *,
+    instance_name: str,
+    instance: dict[str, Any],
+) -> tuple[MosCharacterizationArtifact, MosPolarity, dict[str, Any]]:
+    model = str(instance.get("model", ""))
+    width_um = _finite(
+        instance.get("netlist_width_um", instance.get("width_um")),
+        f"{instance_name}.netlist_width_um",
+    )
+    length_um = _finite(instance.get("length_um"), f"{instance_name}.length_um")
+    unparsed = instance.get("unparsed_model_parameter_tokens", [])
+    if not isinstance(unparsed, list) or any(
+        not isinstance(token, str) for token in unparsed
+    ):
+        raise ValueError(f"{instance_name} has invalid unparsed parameter evidence")
+    if policy.require_exact_model_parameters and unparsed:
+        raise ValueError(
+            f"{instance_name} model parameter signature is not fully parsed"
+        )
+    raw_parameters = instance.get("model_parameters", {})
+    if policy.require_exact_model_parameters or any(
+        artifact.source_instance_binding is not None for artifact in artifacts
+    ):
+        model_parameters = _mapping(
+            raw_parameters,
+            f"{instance_name}.model_parameters",
+        )
+    else:
+        model_parameters = {}
+
+    candidates: list[tuple[MosCharacterizationArtifact, MosPolarity]] = []
+    model_matches: list[MosCharacterizationArtifact] = []
+    width_matches: list[MosCharacterizationArtifact] = []
+    parameter_matches: list[MosCharacterizationArtifact] = []
+    for artifact in artifacts:
+        polarities = {
+            point.polarity for point in artifact.points if point.model == model
+        }
+        if not polarities:
+            continue
+        if len(polarities) != 1:
+            raise ValueError(
+                f"characterization model {model} must map to exactly one polarity"
+            )
+        polarity = next(iter(polarities))
+        model_matches.append(artifact)
+        if policy.require_exact_characterization_width:
+            if artifact.characterized_width_um is None or not math.isclose(
+                artifact.characterized_width_um,
+                width_um,
+                rel_tol=1e-9,
+                abs_tol=1e-12,
+            ):
+                continue
+        width_matches.append(artifact)
+        if policy.require_exact_model_parameters:
+            expected = artifact.model_parameters_by_polarity.get(
+                polarity.value,
+                {},
+            )
+            if model_parameters != expected:
+                continue
+        parameter_matches.append(artifact)
+        binding = artifact.source_instance_binding
+        if binding is not None:
+            if (
+                binding.source_model != model
+                or not math.isclose(
+                    binding.source_width_um,
+                    width_um,
+                    rel_tol=1e-9,
+                    abs_tol=1e-12,
+                )
+                or not math.isclose(
+                    binding.source_length_um,
+                    length_um,
+                    rel_tol=1e-9,
+                    abs_tol=1e-12,
+                )
+                or len(model_parameters) != binding.source_model_parameter_count
+                or _canonical_sha256(model_parameters)
+                != binding.source_model_parameters_sha256
+            ):
+                continue
+        candidates.append((artifact, polarity))
+    if not candidates:
+        if model_matches and not width_matches:
+            planes = [artifact.characterized_width_um for artifact in model_matches]
+            raise ValueError(
+                f"{instance_name} width {width_um}um does not match the "
+                f"characterized width plane(s) {planes}"
+            )
+        if width_matches and not parameter_matches:
+            raise ValueError(
+                f"{instance_name} model parameter signature does not match any "
+                "characterized device"
+            )
+        if parameter_matches:
+            raise ValueError(
+                f"{instance_name} characterization source-instance signature "
+                "does not match the circuit"
+            )
+        raise ValueError(
+            f"no characterization artifact exactly matches {instance_name} "
+            f"model/width/signature"
+        )
+    if len(candidates) != 1:
+        raise ValueError(
+            f"{instance_name} matches multiple characterization artifacts: "
+            f"{[artifact.id for artifact, _ in candidates]}"
+        )
+    artifact, polarity = candidates[0]
+    return artifact, polarity, model_parameters
+
+
 def _bound_network(
     policy: SmallSignalCircuitValidationPolicy,
-    artifact: MosCharacterizationArtifact,
+    artifacts: Sequence[MosCharacterizationArtifact],
     details: dict[str, Any],
 ) -> tuple[
     SmallSignalNetworkRequest,
@@ -352,7 +639,11 @@ def _bound_network(
     )
     interpolations: list[MosInterpolationResult] = []
     mosfets: list[MosSmallSignalInstance] = []
-    bound_points = []
+    bound_points_by_artifact: dict[str, list[Any]] = {
+        artifact.id: [] for artifact in artifacts
+    }
+    characterization_by_instance: dict[str, str] = {}
+    characterized_width_by_instance: dict[str, float | None] = {}
     model_parameter_signatures: dict[str, dict[str, Any]] = {}
     for name in mos_names:
         item = _mapping(instances[name], f"si instance {name}")
@@ -363,7 +654,14 @@ def _bound_network(
             raise ValueError(f"si MOS {name} must have four named terminals")
         drain, gate, source, bulk = nodes
         model = str(item.get("model", ""))
-        polarity = _model_polarity(artifact, model)
+        artifact, polarity, model_parameters = _select_instance_characterization(
+            policy,
+            artifacts,
+            instance_name=name,
+            instance=item,
+        )
+        characterization_by_instance[name] = artifact.id
+        characterized_width_by_instance[name] = artifact.characterized_width_um
         device_op = device_ops[name]
         vgs = abs(_finite(device_op.get("vgs_v"), f"{name}.vgs_v"))
         vds = abs(_finite(device_op.get("vds_v"), f"{name}.vds_v"))
@@ -392,52 +690,12 @@ def _bound_network(
             vsb_magnitude_v=vsb,
         )
         interpolations.append(interpolation)
-        bound_points.append(interpolation.point)
+        bound_points_by_artifact[artifact.id].append(interpolation.point)
         width_um = _finite(
             item.get("netlist_width_um", item.get("width_um")),
             f"{name}.netlist_width_um",
         )
-        if policy.require_exact_characterization_width:
-            if artifact.characterized_width_um is None:
-                raise ValueError(
-                    "characterization artifact does not declare its physical width"
-                )
-            if not math.isclose(
-                artifact.characterized_width_um,
-                width_um,
-                rel_tol=1e-9,
-                abs_tol=1e-12,
-            ):
-                raise ValueError(
-                    f"{name} width {width_um}um does not match the characterized "
-                    f"width plane {artifact.characterized_width_um}um"
-                )
         if policy.require_exact_model_parameters:
-            unparsed_parameter_tokens = item.get(
-                "unparsed_model_parameter_tokens",
-                [],
-            )
-            if not isinstance(unparsed_parameter_tokens, list) or any(
-                not isinstance(token, str) for token in unparsed_parameter_tokens
-            ):
-                raise ValueError(f"{name} has invalid unparsed parameter evidence")
-            if unparsed_parameter_tokens:
-                raise ValueError(
-                    f"{name} model parameter signature is not fully parsed"
-                )
-            model_parameters = _mapping(
-                item.get("model_parameters"),
-                f"{name}.model_parameters",
-            )
-            expected_model_parameters = artifact.model_parameters_by_polarity.get(
-                polarity.value,
-                {},
-            )
-            if model_parameters != expected_model_parameters:
-                raise ValueError(
-                    f"{name} model parameter signature does not match the "
-                    f"characterized {polarity.value} device"
-                )
             model_parameter_signatures[name] = {
                 "polarity": polarity.value,
                 "parameter_count": len(model_parameters),
@@ -448,6 +706,7 @@ def _bound_network(
             MosSmallSignalInstance(
                 name=name,
                 model=model,
+                characterization_id=artifact.id,
                 point_id=interpolation.point.id,
                 drain=drain,
                 gate=gate,
@@ -481,29 +740,33 @@ def _bound_network(
             )
         )
     source_degeneration_bindings: list[dict[str, Any]] = []
-    for mosfet in mosfets:
-        if mosfet.source in {"0", "VSS"}:
-            continue
-        matching_resistors = [
-            resistor
-            for resistor in resistors
-            if {resistor.positive, resistor.negative} == {mosfet.source, "VSS"}
-        ]
-        if len(matching_resistors) != 1:
-            raise ValueError(
-                f"{mosfet.name} source node {mosfet.source} must connect to VSS "
-                "through exactly one si resistor"
+    if policy.expected_topology_variant in {
+        "common_source",
+        "source_degenerated_common_source",
+    }:
+        for mosfet in mosfets:
+            if mosfet.source in {"0", "VSS"}:
+                continue
+            matching_resistors = [
+                resistor
+                for resistor in resistors
+                if {resistor.positive, resistor.negative} == {mosfet.source, "VSS"}
+            ]
+            if len(matching_resistors) != 1:
+                raise ValueError(
+                    f"{mosfet.name} source node {mosfet.source} must connect to VSS "
+                    "through exactly one si resistor"
+                )
+            resistor = matching_resistors[0]
+            source_degeneration_bindings.append(
+                {
+                    "mos_instance": mosfet.name,
+                    "source_node": mosfet.source,
+                    "reference_node": "VSS",
+                    "resistor_instance": resistor.name,
+                    "resistance_ohm": resistor.resistance_ohm,
+                }
             )
-        resistor = matching_resistors[0]
-        source_degeneration_bindings.append(
-            {
-                "mos_instance": mosfet.name,
-                "source_node": mosfet.source,
-                "reference_node": "VSS",
-                "resistor_instance": resistor.name,
-                "resistance_ohm": resistor.resistance_ohm,
-            }
-        )
     if (
         policy.expected_topology_variant == "source_degenerated_common_source"
         and not source_degeneration_bindings
@@ -516,10 +779,16 @@ def _bound_network(
     if "load_ff" in testbench_values:
         load_ff = _finite(testbench_values["load_ff"], "testbench load_ff")
         if load_ff > 0.0:
+            load_node = (
+                "OUTN"
+                if policy.expected_topology_variant
+                == "pmos_current_mirror_load_nmos_differential_pair_with_tail_device"
+                else "OUT"
+            )
             capacitors.append(
                 CapacitorSmallSignalInstance(
                     name="CL0",
-                    positive="OUT",
+                    positive=load_node,
                     negative="0",
                     capacitance_f=load_ff * 1e-15,
                 )
@@ -528,32 +797,65 @@ def _bound_network(
     if not isinstance(frequencies, list):
         raise ValueError("AC response does not retain the EDA frequency grid")
     reference = _mapping(ac_response.get("reference"), "AC reference evidence")
-    bound_artifact = MosCharacterizationArtifact(
-        id=(f"{policy.id}-bound")[:96],
-        source=artifact.source,
-        source_artifact_sha256=artifact.source_artifact_sha256,
-        pdk_profile=artifact.pdk_profile,
-        process_corner=artifact.process_corner,
-        temperature_c=artifact.temperature_c,
-        characterized_width_um=artifact.characterized_width_um,
-        model_parameters_by_polarity=artifact.model_parameters_by_polarity,
-        raw_data_evidence_source=artifact.raw_data_evidence_source,
-        normalized_point_evidence_source=artifact.normalized_point_evidence_source,
-        points=bound_points,
+    unused_artifacts = [
+        artifact.id
+        for artifact in artifacts
+        if not bound_points_by_artifact[artifact.id]
+    ]
+    if unused_artifacts:
+        raise ValueError(
+            f"characterization artifacts are unused by the si graph: {unused_artifacts}"
+        )
+    bound_artifacts = [
+        MosCharacterizationArtifact(
+            id=artifact.id,
+            source=artifact.source,
+            source_artifact_sha256=artifact.source_artifact_sha256,
+            pdk_profile=artifact.pdk_profile,
+            process_corner=artifact.process_corner,
+            temperature_c=artifact.temperature_c,
+            characterized_width_um=artifact.characterized_width_um,
+            model_parameters_by_polarity=artifact.model_parameters_by_polarity,
+            source_instance_binding=artifact.source_instance_binding,
+            raw_data_evidence_source=artifact.raw_data_evidence_source,
+            normalized_point_evidence_source=artifact.normalized_point_evidence_source,
+            points=bound_points_by_artifact[artifact.id],
+        )
+        for artifact in artifacts
+    ]
+    differential = (
+        policy.expected_topology_variant
+        == "pmos_current_mirror_load_nmos_differential_pair_with_tail_device"
     )
-    request = SmallSignalNetworkRequest(
-        id=(f"{policy.id}-network")[:96],
-        characterization=bound_artifact,
-        mosfets=mosfets,
-        resistors=resistors,
-        capacitors=capacitors,
-        boundary_voltages=[
+    boundary_voltages = (
+        [
+            BoundaryVoltage(node="INP", voltage=ComplexValue(real=0.5)),
+            BoundaryVoltage(node="INN", voltage=ComplexValue(real=-0.5)),
+            BoundaryVoltage(node="BIAS", voltage=ComplexValue()),
+            BoundaryVoltage(node="VDD", voltage=ComplexValue()),
+            BoundaryVoltage(node="VSS", voltage=ComplexValue()),
+        ]
+        if differential
+        else [
             BoundaryVoltage(node="IN", voltage=ComplexValue(real=1.0)),
             BoundaryVoltage(node="VDD", voltage=ComplexValue()),
             BoundaryVoltage(node="VSS", voltage=ComplexValue()),
-        ],
-        input_expression=LinearExpression(terms={"IN": 1.0}),
-        output_expression=LinearExpression(terms={"OUT": 1.0}),
+        ]
+    )
+    request = SmallSignalNetworkRequest(
+        id=(f"{policy.id}-network")[:96],
+        characterization=bound_artifacts[0],
+        additional_characterizations=bound_artifacts[1:],
+        mosfets=mosfets,
+        resistors=resistors,
+        capacitors=capacitors,
+        boundary_voltages=boundary_voltages,
+        input_expression=LinearExpression(
+            terms={"INP": 1.0, "INN": -1.0} if differential else {"IN": 1.0}
+        ),
+        output_expression=LinearExpression(
+            terms={"OUTN": 1.0} if differential else {"OUT": 1.0}
+        ),
         frequencies_hz=[_finite(value, "AC frequency") for value in frequencies],
         reference_points=int(reference.get("points", 0)),
         maximum_reference_variation_db=_finite(
@@ -569,7 +871,8 @@ def _bound_network(
         "mos_instances": mos_names,
         "resistor_instances": [item.name for item in resistors],
         "testbench_capacitors": [item.name for item in capacitors],
-        "characterized_width_um": artifact.characterized_width_um,
+        "characterization_artifact_by_instance": characterization_by_instance,
+        "characterized_width_um_by_instance": characterized_width_by_instance,
         "exact_width_plane_required": policy.require_exact_characterization_width,
         "exact_model_parameters_required": policy.require_exact_model_parameters,
         "model_parameter_signatures": model_parameter_signatures,
@@ -580,26 +883,34 @@ def _bound_network(
     return request, interpolations, device_ops, graph_binding
 
 
-def validate_common_source_small_signal_runs(
+def validate_small_signal_runs(
     policy: SmallSignalCircuitValidationPolicy,
-    characterization_run_path: Path,
+    characterization_run_path: Path | Sequence[Path],
     circuit_run_path: Path,
 ) -> SmallSignalCircuitValidationResult:
-    """Validate an independent MOS table against one complete OA/si/Spectre run."""
+    """Validate independent MOS planes against one complete OA/si/Spectre run."""
 
-    characterization_run = _load_run(characterization_run_path, "characterization")
+    characterization_paths = (
+        [characterization_run_path]
+        if isinstance(characterization_run_path, Path)
+        else list(characterization_run_path)
+    )
+    if not characterization_paths:
+        raise ValueError("at least one characterization run is required")
+    loaded_characterizations = [
+        _load_characterization_binding(policy, path)
+        for path in characterization_paths
+    ]
+    artifacts = [item.artifact for item in loaded_characterizations]
+    artifact_ids = [artifact.id for artifact in artifacts]
+    if len(artifact_ids) != len(set(artifact_ids)):
+        raise ValueError("characterization artifact ids must be unique")
     circuit_run = _load_run(circuit_run_path, "circuit")
-    characterization_run_sha256 = _file_sha256(characterization_run_path)
     circuit_run_sha256 = _file_sha256(circuit_run_path)
-    if (
-        characterization_run.adapter != "virtuoso-bridge-subprocess"
-        or circuit_run.adapter != "virtuoso-bridge-subprocess"
-    ):
+    if circuit_run.adapter != "virtuoso-bridge-subprocess":
         raise ValueError(
             "small-signal validation requires bridge run records, not demo evidence"
         )
-    if characterization_run.status is not RunStatus.SUCCEEDED:
-        raise ValueError("characterization run did not succeed")
     if circuit_run.status is not RunStatus.SUCCEEDED:
         raise ValueError("circuit run did not succeed")
     forbidden_write_actions = {
@@ -610,117 +921,6 @@ def validate_common_source_small_signal_runs(
     }
     if any(item.action in forbidden_write_actions for item in circuit_run.actions):
         raise ValueError("circuit validation run contains an OA write action")
-    characterization_details = _select_action(
-        characterization_run,
-        policy.characterization_action,
-        EvidenceSource.SOFTWARE_INFERENCE,
-    )
-    raw_characterization_details = _select_action(
-        characterization_run,
-        policy.characterization_raw_action,
-        EvidenceSource.EDA_RESULT,
-    )
-    if characterization_details.get("raw_data_evidence_source") != "eda_result":
-        raise ValueError("characterization raw data is not eda_result")
-    if (
-        characterization_details.get("normalization_evidence_source")
-        != "software_inference"
-    ):
-        raise ValueError("characterization normalization evidence is invalid")
-    artifact = MosCharacterizationArtifact.model_validate(
-        characterization_details.get("artifact")
-    )
-    raw_characterization_evidence = _mapping(
-        raw_characterization_details.get("evidence"),
-        "raw characterization evidence",
-    )
-    if raw_characterization_details.get("task_id") != characterization_run.task_id:
-        raise ValueError("raw characterization task id does not match its run")
-    if raw_characterization_details.get("pdk_profile") != artifact.pdk_profile:
-        raise ValueError("raw characterization PDK does not match its artifact")
-    if raw_characterization_details.get("process_corner") != artifact.process_corner:
-        raise ValueError("raw characterization corner does not match its artifact")
-    if not math.isclose(
-        _finite(
-            raw_characterization_details.get("temperature_c"),
-            "raw characterization temperature",
-        ),
-        artifact.temperature_c,
-        rel_tol=0.0,
-        abs_tol=1e-9,
-    ):
-        raise ValueError("raw characterization temperature does not match its artifact")
-    if artifact.characterized_width_um is None or not math.isclose(
-        _finite(
-            raw_characterization_details.get("width_um"),
-            "raw characterization width",
-        ),
-        artifact.characterized_width_um,
-        rel_tol=1e-9,
-        abs_tol=1e-12,
-    ):
-        raise ValueError("raw characterization width does not match its artifact")
-    if raw_characterization_details.get(
-        "model_parameters_by_polarity"
-    ) != artifact.model_dump(mode="json")["model_parameters_by_polarity"]:
-        raise ValueError(
-            "raw characterization model parameters do not match its artifact"
-        )
-    artifact_source_binding = (
-        artifact.source_instance_binding.model_dump(mode="json")
-        if artifact.source_instance_binding is not None
-        else None
-    )
-    if (
-        raw_characterization_details.get("source_instance_binding")
-        != artifact_source_binding
-    ):
-        raise ValueError(
-            "raw characterization source-instance binding does not match its artifact"
-        )
-    if (
-        policy.require_characterization_source_instance_binding
-        and artifact.source_instance_binding is None
-    ):
-        raise ValueError("characterization has no source-instance binding")
-    if raw_characterization_details.get("raw_point_evidence_source") != "eda_result":
-        raise ValueError("raw characterization points are not eda_result")
-    raw_characterization_points = raw_characterization_details.get("points")
-    if not isinstance(raw_characterization_points, list) or not raw_characterization_points:
-        raise ValueError("raw characterization contains no operating points")
-    characterization_tool_version = str(
-        raw_characterization_details.get("tool_version", "")
-    ).strip()
-    if not characterization_tool_version:
-        raise ValueError("raw characterization has no Spectre tool version")
-    characterization_manifest_hash = _valid_hash(
-        raw_characterization_evidence.get("manifest_sha256"),
-        "raw characterization manifest hash",
-    )
-    if characterization_manifest_hash != artifact.source_artifact_sha256:
-        raise ValueError("raw characterization manifest does not match its artifact")
-    if (
-        raw_characterization_evidence.get("source") != "eda_result"
-        or raw_characterization_evidence.get("artifact_manifest_complete") is not True
-        or raw_characterization_evidence.get("oa_access_performed") is not False
-        or raw_characterization_evidence.get("oa_write_performed") is not False
-    ):
-        raise ValueError("raw characterization evidence boundary is invalid")
-    characterization_remote_root = raw_characterization_evidence.get(
-        "remote_run_root"
-    )
-    characterization_remote_dir = raw_characterization_evidence.get(
-        "remote_simulation_dir"
-    )
-    if (
-        not isinstance(characterization_remote_root, str)
-        or not characterization_remote_root.startswith("/data/xum/")
-        or not isinstance(characterization_remote_dir, str)
-        or not characterization_remote_dir.startswith(
-            characterization_remote_root.rstrip("/") + "/"
-        )
-    ):
-        raise ValueError("raw characterization remote artifact path is invalid")
     simulation_action_details = _select_action(
         circuit_run,
         policy.simulation_action,
@@ -821,77 +1021,7 @@ def validate_common_source_small_signal_runs(
         abs_tol=1e-9,
     ):
         raise ValueError("circuit temperature does not match the validation policy")
-    if (
-        artifact.pdk_profile != policy.expected_pdk_profile
-        or artifact.process_corner != policy.expected_process_corner
-        or not math.isclose(
-            artifact.temperature_c,
-            policy.expected_temperature_c,
-            rel_tol=0.0,
-            abs_tol=1e-9,
-        )
-    ):
-        raise ValueError("characterization conditions do not match the policy")
     netlist_hash = _valid_hash(netlist.get("sha256"), "si netlist hash")
-    source_binding_matching_instances: list[str] = []
-    if artifact.source_instance_binding is not None:
-        binding = artifact.source_instance_binding
-        if (
-            binding.source_pdk_profile != policy.expected_pdk_profile
-            or binding.source_process_corner != policy.expected_process_corner
-            or not math.isclose(
-                binding.source_temperature_c,
-                policy.expected_temperature_c,
-                rel_tol=0.0,
-                abs_tol=1e-9,
-            )
-        ):
-            raise ValueError(
-                "characterization source-instance PVT does not match the policy"
-            )
-        bound_instances = _mapping(netlist.get("instances"), "si netlist instances")
-        for name, raw_instance in bound_instances.items():
-            bound_instance = _mapping(raw_instance, f"si instance {name}")
-            if bound_instance.get("model") != binding.source_model:
-                continue
-            bound_width_um = _finite(
-                bound_instance.get(
-                    "netlist_width_um",
-                    bound_instance.get("width_um"),
-                ),
-                f"si instance {name} width",
-            )
-            bound_length_um = _finite(
-                bound_instance.get("length_um"),
-                f"si instance {name} length",
-            )
-            bound_model_parameters = _mapping(
-                bound_instance.get("model_parameters"),
-                f"si instance {name} model parameters",
-            )
-            if (
-                math.isclose(
-                    bound_width_um,
-                    binding.source_width_um,
-                    rel_tol=1e-9,
-                    abs_tol=1e-12,
-                )
-                and math.isclose(
-                    bound_length_um,
-                    binding.source_length_um,
-                    rel_tol=1e-9,
-                    abs_tol=1e-12,
-                )
-                and len(bound_model_parameters)
-                == binding.source_model_parameter_count
-                and _canonical_sha256(bound_model_parameters)
-                == binding.source_model_parameters_sha256
-            ):
-                source_binding_matching_instances.append(str(name))
-        if not source_binding_matching_instances:
-            raise ValueError(
-                "characterization source-instance signature does not match the circuit"
-            )
     testbench_hash = _valid_hash(testbench.get("sha256"), "testbench hash")
     raw_files = _mapping(ac_response.get("raw_files"), "AC raw-file evidence")
     raw_ac = _mapping(raw_files.get("ac"), "AC raw file")
@@ -905,29 +1035,89 @@ def validate_common_source_small_signal_runs(
     metric_sources = _mapping(
         simulation_details.get("metric_sources"), "metric evidence sources"
     )
-    required_metrics = (
-        "low_frequency_gain_db",
-        "low_frequency_phase_deg",
-        "bandwidth_3db_hz",
-        "phase_at_bandwidth_deg",
-        "gain_bandwidth_product_hz",
+    differential = (
+        policy.expected_topology_variant
+        == "pmos_current_mirror_load_nmos_differential_pair_with_tail_device"
     )
+    metric_names = {
+        "low_frequency_gain_db": (
+            "differential_low_frequency_gain_db"
+            if differential
+            else "low_frequency_gain_db"
+        ),
+        "low_frequency_phase_deg": (
+            "differential_low_frequency_phase_deg"
+            if differential
+            else "low_frequency_phase_deg"
+        ),
+        "phase_at_bandwidth_deg": (
+            "differential_phase_at_bandwidth_deg"
+            if differential
+            else "phase_at_bandwidth_deg"
+        ),
+        "bandwidth_3db_hz": (
+            "differential_bandwidth_3db_hz"
+            if differential
+            else "bandwidth_3db_hz"
+        ),
+        "gain_bandwidth_product_hz": (
+            "differential_gain_bandwidth_product_hz"
+            if differential
+            else "gain_bandwidth_product_hz"
+        ),
+    }
+    required_metrics = tuple(metric_names.values())
     if any(metric_sources.get(name) != "eda_result" for name in required_metrics):
         raise ValueError("required AC metrics are not all eda_result")
 
     request, interpolations, device_ops, graph_binding = _bound_network(
-        policy, artifact, simulation_details
+        policy, artifacts, simulation_details
     )
-    graph_binding["characterization_source_instance_binding"] = (
-        artifact_source_binding
+    artifact_by_instance = _mapping(
+        graph_binding["characterization_artifact_by_instance"],
+        "characterization bindings",
     )
+    matching_instances_by_artifact = {
+        artifact.id: sorted(
+            name
+            for name, artifact_id in artifact_by_instance.items()
+            if artifact_id == artifact.id
+        )
+        for artifact in artifacts
+    }
+    graph_binding["characterization_source_instance_bindings"] = {
+        artifact.id: (
+            artifact.source_instance_binding.model_dump(mode="json")
+            if artifact.source_instance_binding is not None
+            else None
+        )
+        for artifact in artifacts
+    }
     graph_binding["characterization_source_matching_instances"] = (
-        source_binding_matching_instances
+        matching_instances_by_artifact
     )
-    graph_binding["characterization_source_run_is_current_circuit_run"] = (
-        artifact.source_instance_binding is not None
-        and artifact.source_instance_binding.source_run_sha256 == circuit_run_sha256
-    )
+    graph_binding["characterization_source_run_is_current_circuit_run"] = {
+        artifact.id: (
+            artifact.source_instance_binding is not None
+            and artifact.source_instance_binding.source_run_sha256
+            == circuit_run_sha256
+        )
+        for artifact in artifacts
+    }
+    if len(artifacts) == 1:
+        only = artifacts[0]
+        graph_binding["characterization_source_instance_binding"] = (
+            only.source_instance_binding.model_dump(mode="json")
+            if only.source_instance_binding is not None
+            else None
+        )
+        graph_binding["characterization_source_matching_instances"] = (
+            matching_instances_by_artifact[only.id]
+        )
+        graph_binding["characterization_source_run_is_current_circuit_run"] = (
+            only.source_instance_binding is not None
+            and only.source_instance_binding.source_run_sha256 == circuit_run_sha256
+        )
     network_result = analyze_small_signal_network(request)
     derived_by_name = {item.instance: item for item in network_result.derived_mos_values}
     interpolation_by_name = {
@@ -978,27 +1168,42 @@ def validate_common_source_small_signal_runs(
     ac_validation = {
         "low_frequency_gain_db": _absolute_comparison(
             network_result.low_frequency_gain_db,
-            _finite(metrics.get("low_frequency_gain_db"), "EDA low-frequency gain"),
+            _finite(
+                metrics.get(metric_names["low_frequency_gain_db"]),
+                "EDA low-frequency gain",
+            ),
             policy.thresholds.maximum_gain_error_db,
         ),
         "low_frequency_phase_deg": _phase_comparison(
             network_result.low_frequency_phase_deg,
-            _finite(metrics.get("low_frequency_phase_deg"), "EDA low-frequency phase"),
+            _finite(
+                metrics.get(metric_names["low_frequency_phase_deg"]),
+                "EDA low-frequency phase",
+            ),
             policy.thresholds.maximum_phase_error_deg,
         ),
         "phase_at_bandwidth_deg": _phase_comparison(
             network_result.phase_at_bandwidth_deg,
-            _finite(metrics.get("phase_at_bandwidth_deg"), "EDA phase at bandwidth"),
+            _finite(
+                metrics.get(metric_names["phase_at_bandwidth_deg"]),
+                "EDA phase at bandwidth",
+            ),
             policy.thresholds.maximum_phase_error_deg,
         ),
         "bandwidth_3db_hz": _relative_comparison(
             network_result.bandwidth_3db_hz,
-            _finite(metrics.get("bandwidth_3db_hz"), "EDA bandwidth"),
+            _finite(
+                metrics.get(metric_names["bandwidth_3db_hz"]),
+                "EDA bandwidth",
+            ),
             policy.thresholds.maximum_bandwidth_relative_error,
         ),
         "gain_bandwidth_product_hz": _relative_comparison(
             network_result.gain_bandwidth_product_hz,
-            _finite(metrics.get("gain_bandwidth_product_hz"), "EDA GBW"),
+            _finite(
+                metrics.get(metric_names["gain_bandwidth_product_hz"]),
+                "EDA GBW",
+            ),
             policy.thresholds.maximum_gbw_relative_error,
         ),
     }
@@ -1007,12 +1212,19 @@ def validate_common_source_small_signal_runs(
         and all(item.passed for item in device_validations)
         and all(item.passed for item in ac_validation.values())
     )
+    characterization_hashes = [item.run_sha256 for item in loaded_characterizations]
+    characterization_task_ids = [item.task_id for item in loaded_characterizations]
+    all_source_bound = all(
+        artifact.source_instance_binding is not None for artifact in artifacts
+    )
     return SmallSignalCircuitValidationResult(
         policy_id=policy.id,
         policy_sha256=_canonical_sha256(policy.model_dump(mode="json")),
-        characterization_run_sha256=characterization_run_sha256,
+        characterization_run_sha256=characterization_hashes[0],
+        characterization_run_sha256s=characterization_hashes,
         circuit_run_sha256=circuit_run_sha256,
-        characterization_task_id=characterization_run.task_id,
+        characterization_task_id=characterization_task_ids[0],
+        characterization_task_ids=characterization_task_ids,
         circuit_task_id=circuit_run.task_id,
         status=RunStatus.SUCCEEDED if gate_passed else RunStatus.PARTIAL,
         gate_passed=gate_passed,
@@ -1027,10 +1239,29 @@ def validate_common_source_small_signal_runs(
         ac_validation=ac_validation,
         network_result=network_result,
         raw_artifact_bindings={
-            "characterization_manifest_sha256": characterization_manifest_hash,
-            "characterization_remote_root": characterization_remote_root,
-            "characterization_remote_simulation_dir": characterization_remote_dir,
-            "characterization_spectre_tool_version": characterization_tool_version,
+            "characterizations": [
+                {
+                    "artifact_id": item.artifact.id,
+                    "run_sha256": item.run_sha256,
+                    "task_id": item.task_id,
+                    "manifest_sha256": item.manifest_sha256,
+                    "remote_root": item.remote_root,
+                    "remote_simulation_dir": item.remote_simulation_dir,
+                    "spectre_tool_version": item.tool_version,
+                    "characterized_width_um": item.artifact.characterized_width_um,
+                }
+                for item in loaded_characterizations
+            ],
+            "characterization_manifest_sha256": (
+                loaded_characterizations[0].manifest_sha256
+            ),
+            "characterization_remote_root": loaded_characterizations[0].remote_root,
+            "characterization_remote_simulation_dir": (
+                loaded_characterizations[0].remote_simulation_dir
+            ),
+            "characterization_spectre_tool_version": (
+                loaded_characterizations[0].tool_version
+            ),
             "si_netlist_sha256": netlist_hash,
             "testbench_sha256": testbench_hash,
             "ac_raw_sha256": raw_ac_hash,
@@ -1047,7 +1278,7 @@ def validate_common_source_small_signal_runs(
             "normalized_characterization": EvidenceSource.SOFTWARE_INFERENCE,
             "characterization_model_parameter_declaration": (
                 EvidenceSource.SOFTWARE_INFERENCE
-                if artifact.source_instance_binding is not None
+                if all_source_bound
                 else EvidenceSource.USER_INPUT
             ),
             "si_model_parameters": EvidenceSource.EDA_RESULT,
@@ -1059,7 +1290,7 @@ def validate_common_source_small_signal_runs(
                         EvidenceSource.SOFTWARE_INFERENCE
                     ),
                 }
-                if artifact.source_instance_binding is not None
+                if all_source_bound
                 else {}
             ),
             "bias_interpolation": EvidenceSource.SOFTWARE_INFERENCE,
@@ -1068,10 +1299,25 @@ def validate_common_source_small_signal_runs(
         },
         warnings=[
             "The validation binds a read-only OA/si graph and EDA DC bias to an "
-            "independent nominal MOS table; it does not write OA.",
+            "independent set of nominal MOS characterization planes; it does not "
+            "write OA.",
             "Passing this held-out circuit point bounds only the declared target, "
             "PDK/corner/temperature, geometry plane, bias domain, and metrics.",
             "Length interpolation and all bias extrapolation are rejected; the "
             "declared model-parameter signature must match the si instance.",
         ],
+    )
+
+
+def validate_common_source_small_signal_runs(
+    policy: SmallSignalCircuitValidationPolicy,
+    characterization_run_path: Path | Sequence[Path],
+    circuit_run_path: Path,
+) -> SmallSignalCircuitValidationResult:
+    """Backward-compatible name for the now topology-generic evidence binder."""
+
+    return validate_small_signal_runs(
+        policy,
+        characterization_run_path,
+        circuit_run_path,
     )

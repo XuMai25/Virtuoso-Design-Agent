@@ -2620,8 +2620,8 @@ def test_simulation_record_uses_actual_schematic_parameters_when_omitted() -> No
     record = TaskExecutor(adapter).execute(
         task, plan, token=plan.confirmation_token
     )
-    assert record.candidates[0].parameters["nmos_width_um"] == 0.5
-    assert record.candidates[0].parameters["pmos_width_um"] == 1.0
+    assert record.candidates[0].parameters["nmos_width_um"] == 0.6
+    assert record.candidates[0].parameters["pmos_width_um"] == 0.75
     assert record.candidates[0].parameters["length_um"] == 0.03
 
 
@@ -2638,8 +2638,8 @@ def test_infeasible_search_does_not_write_best_attempt_to_oa() -> None:
     assert not any(action.action == "parameters.apply.best" for action in record.actions)
     assert any(action.action == "parameters.restore" for action in record.actions)
     assert adapter.inspect_schematic(task).data["semantic_parameters"] == {
-        "nmos_width_um": 0.5,
-        "pmos_width_um": 1.0,
+        "nmos_width_um": 0.6,
+        "pmos_width_um": 0.75,
         "length_um": 0.03,
     }
     assert any("no feasible candidate was committed" in note for note in record.notes)
@@ -2712,8 +2712,8 @@ def test_interrupted_search_restores_initial_oa_parameters() -> None:
         executor.execute(task, plan, token=plan.confirmation_token)
 
     assert adapter.inspect_schematic(task).data["semantic_parameters"] == {
-        "nmos_width_um": 0.5,
-        "pmos_width_um": 1.0,
+        "nmos_width_um": 0.6,
+        "pmos_width_um": 0.75,
         "length_um": 0.03,
     }
     assert any(
@@ -2769,8 +2769,8 @@ def test_bridge_interruption_resumes_without_repeating_completed_prefix(
     assert checkpoint.next_candidate_index == 2
     assert [candidate.index for candidate in checkpoint.candidates] == [1]
     assert adapter.inspect_schematic(task).data["semantic_parameters"] == {
-        "nmos_width_um": 0.5,
-        "pmos_width_um": 1.0,
+        "nmos_width_um": 0.6,
+        "pmos_width_um": 0.75,
         "length_um": 0.03,
     }
 

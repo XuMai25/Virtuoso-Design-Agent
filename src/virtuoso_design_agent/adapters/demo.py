@@ -24,6 +24,7 @@ from ..models import (
     SchematicTransformAction,
     TaskSpec,
 )
+from ..profiles import load_pdk_profile
 from .base import AdapterResult, merge_analysis_bundle
 
 
@@ -74,10 +75,24 @@ class DeterministicDemoAdapter:
                     task.parameters.get("load_resistance_ohm", 20_000.0)
                 ),
             }
+        profile = load_pdk_profile(task.pdk_profile)
+        nmos_width_um = float(
+            task.parameters.get(
+                "nmos_width_um", profile.default_inverter_nmos_width_um
+            )
+        )
         return {
-            "nmos_width_um": float(task.parameters.get("nmos_width_um", 0.5)),
-            "pmos_width_um": float(task.parameters.get("pmos_width_um", 1.0)),
-            "length_um": float(task.parameters.get("length_um", 0.03)),
+            "nmos_width_um": nmos_width_um,
+            "pmos_width_um": float(
+                task.parameters.get(
+                    "pmos_width_um",
+                    nmos_width_um
+                    * profile.default_inverter_pmos_to_nmos_width_ratio,
+                )
+            ),
+            "length_um": float(
+                task.parameters.get("length_um", profile.default_length_um)
+            ),
         }
 
     @staticmethod

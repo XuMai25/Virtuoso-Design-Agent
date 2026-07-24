@@ -34,7 +34,7 @@ from .safety import SafetyViolation
 from .small_signal import SmallSignalNetworkRequest, analyze_small_signal_network
 from .small_signal_validation import (
     SmallSignalCircuitValidationPolicy,
-    validate_common_source_small_signal_runs,
+    validate_small_signal_runs,
 )
 from .theory import DifferentialPairTheoryRequest, size_differential_pair
 from .theory_calibration import calibrate_differential_pair_theory
@@ -144,9 +144,9 @@ def _cmd_small_signal_validate(args: argparse.Namespace) -> int:
     policy = SmallSignalCircuitValidationPolicy.model_validate_json(
         args.policy.read_text(encoding="utf-8")
     )
-    result = validate_common_source_small_signal_runs(
+    result = validate_small_signal_runs(
         policy,
-        args.characterization_run,
+        [args.characterization_run, *args.additional_characterization_run],
         args.circuit_run,
     )
     payload = result.model_dump_json(indent=2)
@@ -307,6 +307,16 @@ def build_parser() -> argparse.ArgumentParser:
     small_signal_validate.add_argument("policy", type=Path)
     small_signal_validate.add_argument("characterization_run", type=Path)
     small_signal_validate.add_argument("circuit_run", type=Path)
+    small_signal_validate.add_argument(
+        "--additional-characterization-run",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "add an independently evidenced MOS width/model plane; repeat once "
+            "for each additional si device signature"
+        ),
+    )
     small_signal_validate.add_argument("--output", type=Path)
     small_signal_validate.set_defaults(handler=_cmd_small_signal_validate)
 

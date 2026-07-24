@@ -67,6 +67,7 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     ParameterReadbackMismatch,
     _read_nonempty_text,
     _requested_instance_parameters,
+    _resolved_parameters,
     _schematic_exists,
     _signal,
     _simulate_common_source_operating_conditions,
@@ -4732,6 +4733,49 @@ MP0 (OUT IN VDD VDD) pch_lvt_mac l=30n w=1u nf=1 multi=1
         expected_label="OA readback",
         actual_label="si netlist",
     )
+
+
+def test_inverter_defaults_are_profile_calibrated_and_remain_overridable() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump()
+
+    defaults = _resolved_parameters({"profile": profile})
+    assert defaults["nmos_width_um"] == pytest.approx(0.6)
+    assert defaults["pmos_width_um"] == pytest.approx(0.75)
+
+    scaled = _resolved_parameters(
+        {"profile": profile, "parameters": {"nmos_width_um": 0.8}}
+    )
+    assert scaled["nmos_width_um"] == pytest.approx(0.8)
+    assert scaled["pmos_width_um"] == pytest.approx(1.0)
+
+    explicit = _resolved_parameters(
+        {
+            "profile": profile,
+            "parameters": {"nmos_width_um": 0.8, "pmos_width_um": 1.6},
+        }
+    )
+    assert explicit["pmos_width_um"] == pytest.approx(1.6)
+
+
+def test_inverter_parameter_resolution_preserves_existing_oa_geometry() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump()
+    existing = {
+        "nmos_width_um": 0.7,
+        "pmos_width_um": 1.4,
+        "length_um": 0.04,
+    }
+
+    unchanged = _resolved_parameters({"profile": profile}, existing)
+    assert unchanged["nmos_width_um"] == pytest.approx(0.7)
+    assert unchanged["pmos_width_um"] == pytest.approx(1.4)
+    assert unchanged["length_um"] == pytest.approx(0.04)
+
+    nmos_only = _resolved_parameters(
+        {"profile": profile, "parameters": {"nmos_width_um": 0.9}},
+        existing,
+    )
+    assert nmos_only["nmos_width_um"] == pytest.approx(0.9)
+    assert nmos_only["pmos_width_um"] == pytest.approx(1.4)
 
 
 def test_common_source_oa_netlist_parameters_and_topology_are_parsed() -> None:

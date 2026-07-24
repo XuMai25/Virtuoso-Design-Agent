@@ -67,6 +67,12 @@ class LinearExpression(_FiniteStrictModel):
 class MosSmallSignalInstance(_FiniteStrictModel):
     name: StrictStr = Field(min_length=1, max_length=96, pattern=_NAME_PATTERN)
     model: StrictStr = Field(min_length=1, max_length=96, pattern=_NAME_PATTERN)
+    characterization_id: StrictStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=96,
+        pattern=_NAME_PATTERN,
+    )
     point_id: StrictStr = Field(min_length=1, max_length=96)
     drain: StrictStr = Field(min_length=1, max_length=256)
     gate: StrictStr = Field(min_length=1, max_length=256)
@@ -99,6 +105,10 @@ class SmallSignalNetworkRequest(_FiniteStrictModel):
     schema_version: Literal[1] = 1
     id: StrictStr = Field(min_length=1, max_length=96, pattern=_NAME_PATTERN)
     characterization: MosCharacterizationArtifact
+    additional_characterizations: list[MosCharacterizationArtifact] = Field(
+        default_factory=list,
+        max_length=1023,
+    )
     mosfets: list[MosSmallSignalInstance] = Field(min_length=1, max_length=1024)
     resistors: list[ResistorSmallSignalInstance] = Field(
         default_factory=list, max_length=4096
@@ -140,13 +150,52 @@ class SmallSignalNetworkRequest(_FiniteStrictModel):
         if len(boundary_nodes) != len(set(boundary_nodes)):
             raise ValueError("boundary-voltage nodes must be unique")
 
-        point_by_id = {point.id: point for point in self.characterization.points}
+        artifacts = [self.characterization, *self.additional_characterizations]
+        artifact_by_id = {artifact.id: artifact for artifact in artifacts}
+        if len(artifact_by_id) != len(artifacts):
+            raise ValueError("small-signal characterization ids must be unique")
+        primary = self.characterization
+        for artifact in self.additional_characterizations:
+            if (
+                artifact.pdk_profile != primary.pdk_profile
+                or artifact.process_corner != primary.process_corner
+                or not math.isclose(
+                    artifact.temperature_c,
+                    primary.temperature_c,
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+            ):
+                raise ValueError(
+                    "all small-signal characterizations must share one PVT condition"
+                )
+            if (
+                artifact.source is not primary.source
+                or artifact.raw_data_evidence_source
+                is not primary.raw_data_evidence_source
+                or artifact.normalized_point_evidence_source
+                is not primary.normalized_point_evidence_source
+            ):
+                raise ValueError(
+                    "all small-signal characterizations must share one evidence boundary"
+                )
         circuit_nodes: set[str] = set()
+        referenced_artifact_ids: set[str] = set()
         for instance in self.mosfets:
+            artifact_id = instance.characterization_id or primary.id
+            artifact = artifact_by_id.get(artifact_id)
+            if artifact is None:
+                raise ValueError(
+                    f"MOS {instance.name} references unknown characterization "
+                    f"{artifact_id}"
+                )
+            referenced_artifact_ids.add(artifact_id)
+            point_by_id = {point.id: point for point in artifact.points}
             point = point_by_id.get(instance.point_id)
             if point is None:
                 raise ValueError(
-                    f"MOS {instance.name} references unknown point {instance.point_id}"
+                    f"MOS {instance.name} references unknown point {instance.point_id} "
+                    f"in characterization {artifact_id}"
                 )
             if instance.model != point.model:
                 raise ValueError(
@@ -178,6 +227,13 @@ class SmallSignalNetworkRequest(_FiniteStrictModel):
                     raise ValueError(
                         f"MOS {instance.name} {label} does not match point {point.id}"
                     )
+
+        unused_artifact_ids = set(artifact_by_id) - referenced_artifact_ids
+        if unused_artifact_ids:
+            raise ValueError(
+                "small-signal characterizations are not referenced by any MOS: "
+                f"{sorted(unused_artifact_ids)}"
+            )
 
         for instance in [*self.resistors, *self.capacitors]:
             if instance.positive == instance.negative:
@@ -212,6 +268,7 @@ class SmallSignalNetworkRequest(_FiniteStrictModel):
 
 class DerivedMosSmallSignal(_FiniteStrictModel):
     instance: str
+    characterization_id: str
     point_id: str
     polarity: MosPolarity
     drain_current_a: float = Field(gt=0.0)
@@ -249,6 +306,7 @@ class SmallSignalNetworkResult(_FiniteStrictModel):
     status: RunStatus
     topology_independent_core: Literal[True] = True
     characterization_id: str
+    characterization_ids: list[str] = Field(min_length=1, max_length=1024)
     characterization_source: DeviceDataSource
     pdk_profile: str
     process_corner: str
@@ -256,6 +314,7 @@ class SmallSignalNetworkResult(_FiniteStrictModel):
     characterization_artifact_sha256: str | None = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
+    characterization_artifact_sha256s: dict[str, str | None]
     characterization_raw_data_evidence_source: EvidenceSource
     characterization_point_evidence_source: EvidenceSource
     derived_metric_evidence_source: Literal[EvidenceSource.SOFTWARE_INFERENCE] = (
@@ -278,12 +337,15 @@ class SmallSignalNetworkResult(_FiniteStrictModel):
 
 
 def _derived_mos(
-    instance: MosSmallSignalInstance, point: MosSmallSignalPoint
+    instance: MosSmallSignalInstance,
+    point: MosSmallSignalPoint,
+    characterization_id: str,
 ) -> DerivedMosSmallSignal:
     scale_um = instance.width_um * instance.multiplicity
     current = point.drain_current_density_a_per_um * scale_um
     return DerivedMosSmallSignal(
         instance=instance.name,
+        characterization_id=characterization_id,
         point_id=point.id,
         polarity=point.polarity,
         drain_current_a=current,
@@ -374,9 +436,19 @@ def analyze_small_signal_network(
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    point_by_id = {point.id: point for point in request.characterization.points}
+    artifacts = [request.characterization, *request.additional_characterizations]
+    points_by_artifact_id = {
+        artifact.id: {point.id: point for point in artifact.points}
+        for artifact in artifacts
+    }
     derived_by_name = {
-        instance.name: _derived_mos(instance, point_by_id[instance.point_id])
+        instance.name: _derived_mos(
+            instance,
+            points_by_artifact_id[
+                instance.characterization_id or request.characterization.id
+            ][instance.point_id],
+            instance.characterization_id or request.characterization.id,
+        )
         for instance in request.mosfets
     }
     circuit_nodes: set[str] = set()
@@ -475,7 +547,10 @@ def analyze_small_signal_network(
         "layout-dependent effects require separately characterized points.",
         "A solved network is software_inference and still requires EDA validation.",
     ]
-    if request.characterization.source is DeviceDataSource.SYNTHETIC_EXAMPLE:
+    if any(
+        artifact.source is DeviceDataSource.SYNTHETIC_EXAMPLE
+        for artifact in artifacts
+    ):
         warnings.append(
             "Synthetic characterization is only for software-path verification."
         )
@@ -493,6 +568,7 @@ def analyze_small_signal_network(
             else RunStatus.PARTIAL
         ),
         characterization_id=request.characterization.id,
+        characterization_ids=[artifact.id for artifact in artifacts],
         characterization_source=request.characterization.source,
         pdk_profile=request.characterization.pdk_profile,
         process_corner=request.characterization.process_corner,
@@ -500,6 +576,9 @@ def analyze_small_signal_network(
         characterization_artifact_sha256=(
             request.characterization.source_artifact_sha256
         ),
+        characterization_artifact_sha256s={
+            artifact.id: artifact.source_artifact_sha256 for artifact in artifacts
+        },
         characterization_raw_data_evidence_source=(
             request.characterization.raw_data_evidence_source
         ),

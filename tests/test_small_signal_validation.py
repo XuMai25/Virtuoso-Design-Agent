@@ -389,6 +389,264 @@ def _write_inputs(
     return characterization_path, circuit_path
 
 
+def _role_characterization_run(
+    role: str,
+    *,
+    model: str,
+    polarity: str,
+    width_um: float,
+    model_parameters: dict[str, str],
+    hash_character: str,
+    current_density_a_per_um: float,
+    gm_over_id_per_v: float,
+    gds_over_id_per_v: float,
+) -> dict:
+    run = _characterization_run()
+    task_id = f"test-{role}-characterization"
+    artifact = run["actions"][1]["details"]["artifact"]
+    artifact["id"] = f"test-{role}-table"
+    artifact["source_artifact_sha256"] = hash_character * 64
+    artifact["characterized_width_um"] = width_um
+    artifact["model_parameters_by_polarity"] = {
+        polarity: copy.deepcopy(model_parameters)
+    }
+    for index, point in enumerate(artifact["points"]):
+        point["id"] = f"{role}-{index}"
+        point["model"] = model
+        point["polarity"] = polarity
+        point["vds_magnitude_v"] = 0.1 if index % 4 < 2 else 0.5
+        point["drain_current_density_a_per_um"] = current_density_a_per_um
+        point["gm_over_id_per_v"] = gm_over_id_per_v
+        point["gds_over_id_per_v"] = gds_over_id_per_v
+    raw = run["actions"][0]["details"]
+    run["task_id"] = task_id
+    raw["task_id"] = task_id
+    raw["width_um"] = width_um
+    raw["model_parameters_by_polarity"] = {
+        polarity: copy.deepcopy(model_parameters)
+    }
+    raw["evidence"]["manifest_sha256"] = hash_character * 64
+    raw["evidence"]["remote_run_root"] = f"/data/xum/{task_id}"
+    raw["evidence"]["remote_simulation_dir"] = (
+        f"/data/xum/{task_id}/simulator"
+    )
+    return run
+
+
+def _differential_characterizations() -> list[dict]:
+    return [
+        _role_characterization_run(
+            "input-nmos",
+            model="test_nmos",
+            polarity="nmos",
+            width_um=1.5,
+            model_parameters={"ad": "input"},
+            hash_character="1",
+            current_density_a_per_um=40e-6,
+            gm_over_id_per_v=10.0,
+            gds_over_id_per_v=0.5,
+        ),
+        _role_characterization_run(
+            "load-pmos",
+            model="test_pmos",
+            polarity="pmos",
+            width_um=2.4,
+            model_parameters={"ad": "load"},
+            hash_character="2",
+            current_density_a_per_um=25e-6,
+            gm_over_id_per_v=8.0,
+            gds_over_id_per_v=0.4,
+        ),
+        _role_characterization_run(
+            "tail-nmos",
+            model="test_nmos",
+            polarity="nmos",
+            width_um=0.8,
+            model_parameters={"ad": "tail"},
+            hash_character="3",
+            current_density_a_per_um=150e-6,
+            gm_over_id_per_v=8.0,
+            gds_over_id_per_v=0.6,
+        ),
+    ]
+
+
+def _differential_circuit_run() -> dict:
+    circuit = _circuit_run()
+    circuit["task_id"] = "test-differential-pair"
+    details = circuit["actions"][0]["details"]
+    evidence = details["evidence"]
+    target = {"library": "vda_test", "cell": "vda_diffpair", "view": "schematic"}
+    semantic = {
+        "input_width_um": 1.5,
+        "length_um": 0.03,
+        "pmos_load_width_um": 2.4,
+        "pmos_load_length_um": 0.03,
+        "tail_width_um": 0.8,
+        "tail_length_um": 0.03,
+    }
+    input_geometry = {
+        "finger_width_um": 1.5,
+        "fingers": 1.0,
+        "multiplicity": 1.0,
+        "total_width_um": 1.5,
+    }
+    topology = "pmos_current_mirror_load_nmos_differential_pair_with_tail_device"
+    details["parameters"] = {
+        **semantic,
+        "tail_bias_v": 0.4,
+        "common_mode_v": 0.5,
+        "vdd_v": 0.9,
+        "load_ff": 1.0,
+    }
+    details["metrics"] = {
+        "differential_low_frequency_gain_db": 10.0,
+        "differential_low_frequency_phase_deg": 0.0,
+        "differential_bandwidth_3db_hz": 1.0,
+        "differential_phase_at_bandwidth_deg": -45.0,
+        "differential_gain_bandwidth_product_hz": 1.0,
+    }
+    details["metric_sources"] = {
+        name: "eda_result" for name in details["metrics"]
+    }
+    evidence["schematic_readback"] = {
+        "source": "bridge_readback",
+        "target": target,
+        "semantic_parameters": copy.deepcopy(semantic),
+        "device_geometry": copy.deepcopy(input_geometry),
+        "topology_variant": topology,
+    }
+    instances = {
+        "MN0": {
+            "nodes": ["OUTP", "INP", "TAIL", "VSS"],
+            "model": "test_nmos",
+            "netlist_width_um": 1.5,
+            "finger_width_um": 1.5,
+            "fingers": 1.0,
+            "multiplicity": 1.0,
+            "total_width_um": 1.5,
+            "length_um": 0.03,
+            "model_parameters": {"ad": "input"},
+        },
+        "MN1": {
+            "nodes": ["OUTN", "INN", "TAIL", "VSS"],
+            "model": "test_nmos",
+            "netlist_width_um": 1.5,
+            "finger_width_um": 1.5,
+            "fingers": 1.0,
+            "multiplicity": 1.0,
+            "total_width_um": 1.5,
+            "length_um": 0.03,
+            "model_parameters": {"ad": "input"},
+        },
+        "MP0": {
+            "nodes": ["OUTP", "OUTP", "VDD", "VDD"],
+            "model": "test_pmos",
+            "netlist_width_um": 2.4,
+            "finger_width_um": 2.4,
+            "fingers": 1.0,
+            "multiplicity": 1.0,
+            "total_width_um": 2.4,
+            "length_um": 0.03,
+            "model_parameters": {"ad": "load"},
+        },
+        "MP1": {
+            "nodes": ["OUTN", "OUTP", "VDD", "VDD"],
+            "model": "test_pmos",
+            "netlist_width_um": 2.4,
+            "finger_width_um": 2.4,
+            "fingers": 1.0,
+            "multiplicity": 1.0,
+            "total_width_um": 2.4,
+            "length_um": 0.03,
+            "model_parameters": {"ad": "load"},
+        },
+        "MNTAIL": {
+            "nodes": ["TAIL", "BIAS", "VSS", "VSS"],
+            "model": "test_nmos",
+            "netlist_width_um": 0.8,
+            "finger_width_um": 0.8,
+            "fingers": 1.0,
+            "multiplicity": 1.0,
+            "total_width_um": 0.8,
+            "length_um": 0.03,
+            "model_parameters": {"ad": "tail"},
+        },
+    }
+    evidence["netlist"] = {
+        "source": "eda_result",
+        "generator": "Cadence si -batch",
+        "remote_path": "/data/xum/vda_diffpair/netlist",
+        "sha256": "4" * 64,
+        "semantic_parameters": copy.deepcopy(semantic),
+        "device_geometry": copy.deepcopy(input_geometry),
+        "topology_variant": topology,
+        "parameter_consistency": "matched",
+        "instances": instances,
+    }
+    evidence["testbench"]["remote_path"] = "/data/xum/vda_diffpair/input.scs"
+    evidence["testbench"]["sha256"] = "5" * 64
+    evidence["testbench"]["values"] = {
+        "analysis": "ac",
+        "tail_bias_v": 0.4,
+        "common_mode_v": 0.5,
+        "vdd_v": 0.9,
+        "load_ff": 1.0,
+    }
+    node_values = {
+        "INP": 0.5,
+        "INN": 0.5,
+        "OUTP": 0.5,
+        "OUTN": 0.5,
+        "TAIL": 0.1,
+        "BIAS": 0.4,
+        "VDD": 0.9,
+        "VSS": 0.0,
+    }
+    evidence["operating_point"] = {
+        "source": "eda_result",
+        "node_values_v": node_values,
+        "device_values": {
+            "MN0": {"ids_a": 60e-6, "vgs_v": 0.4, "vds_v": 0.4, "vdsat_v": 0.1, "gm_s": 600e-6, "gds_s": 30e-6},
+            "MN1": {"ids_a": 60e-6, "vgs_v": 0.4, "vds_v": 0.4, "vdsat_v": 0.1, "gm_s": 600e-6, "gds_s": 30e-6},
+            "MP0": {"ids_a": -60e-6, "vgs_v": -0.4, "vds_v": -0.4, "vdsat_v": -0.1, "gm_s": 480e-6, "gds_s": 24e-6},
+            "MP1": {"ids_a": -60e-6, "vgs_v": -0.4, "vds_v": -0.4, "vdsat_v": -0.1, "gm_s": 480e-6, "gds_s": 24e-6},
+            "MNTAIL": {"ids_a": 120e-6, "vgs_v": 0.4, "vds_v": 0.1, "vdsat_v": 0.1, "gm_s": 960e-6, "gds_s": 72e-6},
+        },
+        "node_device_consistency": "matched",
+        "kcl_consistency": "matched",
+    }
+    return circuit
+
+
+def _differential_policy() -> dict:
+    return {
+        "schema_version": 1,
+        "id": "test-differential-multi-plane",
+        "expected_target": {
+            "library": "vda_test",
+            "cell": "vda_diffpair",
+            "view": "schematic",
+        },
+        "expected_pdk_profile": "test_pdk",
+        "expected_process_corner": "test_tt",
+        "expected_temperature_c": 27.0,
+        "expected_vdd_v": 0.9,
+        "expected_topology_variant": (
+            "pmos_current_mirror_load_nmos_differential_pair_with_tail_device"
+        ),
+        "require_exact_characterization_width": True,
+        "require_exact_model_parameters": True,
+        "thresholds": {
+            "maximum_device_dc_relative_error": 1.0,
+            "maximum_gain_error_db": 20.0,
+            "maximum_phase_error_deg": 180.0,
+            "maximum_bandwidth_relative_error": 1.0,
+            "maximum_gbw_relative_error": 1.0,
+        },
+    }
+
+
 def _add_source_instance_binding(characterization: dict) -> None:
     model_parameters = characterization["actions"][1]["details"]["artifact"][
         "model_parameters_by_polarity"
@@ -483,6 +741,146 @@ def test_same_source_validation_binds_graph_bias_raw_files_and_ac_metrics(
     assert result.evidence_sources["network_prediction"].value == (
         "software_inference"
     )
+
+
+def test_differential_pair_binds_independent_non_one_to_one_width_planes(
+    tmp_path: Path,
+) -> None:
+    characterization_paths = []
+    for index, run in enumerate(_differential_characterizations()):
+        path = tmp_path / f"characterization-{index}.json"
+        path.write_text(json.dumps(run), encoding="utf-8")
+        characterization_paths.append(path)
+    circuit_path = tmp_path / "differential.json"
+    circuit_path.write_text(json.dumps(_differential_circuit_run()), encoding="utf-8")
+
+    result = validate_common_source_small_signal_runs(
+        SmallSignalCircuitValidationPolicy.model_validate(_differential_policy()),
+        characterization_paths,
+        circuit_path,
+    )
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert result.gate_passed is True
+    assert result.graph_binding["characterization_artifact_by_instance"] == {
+        "MN0": "test-input-nmos-table",
+        "MN1": "test-input-nmos-table",
+        "MP0": "test-load-pmos-table",
+        "MP1": "test-load-pmos-table",
+        "MNTAIL": "test-tail-nmos-table",
+    }
+    assert result.graph_binding["characterized_width_um_by_instance"] == {
+        "MN0": 1.5,
+        "MN1": 1.5,
+        "MP0": 2.4,
+        "MP1": 2.4,
+        "MNTAIL": 0.8,
+    }
+    assert result.network_result.characterization_ids == [
+        "test-input-nmos-table",
+        "test-load-pmos-table",
+        "test-tail-nmos-table",
+    ]
+    derived = {
+        item.instance: item.characterization_id
+        for item in result.network_result.derived_mos_values
+    }
+    assert derived == result.graph_binding["characterization_artifact_by_instance"]
+    assert len(result.raw_artifact_bindings["characterizations"]) == 3
+
+    policy_path = tmp_path / "differential-policy.json"
+    output_path = tmp_path / "differential-validation.json"
+    policy_path.write_text(json.dumps(_differential_policy()), encoding="utf-8")
+    assert (
+        main(
+            [
+                "small-signal-validate",
+                str(policy_path),
+                str(characterization_paths[0]),
+                str(circuit_path),
+                "--additional-characterization-run",
+                str(characterization_paths[1]),
+                "--additional-characterization-run",
+                str(characterization_paths[2]),
+                "--output",
+                str(output_path),
+            ]
+        )
+        == 0
+    )
+    saved = json.loads(output_path.read_text(encoding="utf-8"))
+    assert saved["characterization_task_ids"] == [
+        "test-input-nmos-characterization",
+        "test-load-pmos-characterization",
+        "test-tail-nmos-characterization",
+    ]
+
+
+def test_differential_pair_rejects_missing_ambiguous_and_mismatched_planes(
+    tmp_path: Path,
+) -> None:
+    circuit_path = tmp_path / "differential.json"
+    circuit_path.write_text(json.dumps(_differential_circuit_run()), encoding="utf-8")
+    policy = SmallSignalCircuitValidationPolicy.model_validate(_differential_policy())
+
+    runs = _differential_characterizations()
+    input_path = tmp_path / "input.json"
+    tail_path = tmp_path / "tail.json"
+    input_path.write_text(json.dumps(runs[0]), encoding="utf-8")
+    tail_path.write_text(json.dumps(runs[2]), encoding="utf-8")
+    with pytest.raises(ValueError, match="no characterization artifact.*MP0"):
+        validate_common_source_small_signal_runs(
+            policy,
+            [input_path, tail_path],
+            circuit_path,
+        )
+
+    duplicate = copy.deepcopy(runs[0])
+    duplicate["task_id"] = "test-input-duplicate-characterization"
+    duplicate["actions"][0]["details"]["task_id"] = duplicate["task_id"]
+    duplicate["actions"][1]["details"]["artifact"]["id"] = (
+        "test-input-duplicate-table"
+    )
+    duplicate_path = tmp_path / "duplicate.json"
+    duplicate_path.write_text(json.dumps(duplicate), encoding="utf-8")
+    pmos_path = tmp_path / "pmos.json"
+    pmos_path.write_text(json.dumps(runs[1]), encoding="utf-8")
+    with pytest.raises(ValueError, match="MN0 matches multiple"):
+        validate_common_source_small_signal_runs(
+            policy,
+            [input_path, duplicate_path, pmos_path, tail_path],
+            circuit_path,
+        )
+
+    wrong_width = copy.deepcopy(runs[1])
+    wrong_width["actions"][0]["details"]["width_um"] = 2.0
+    wrong_width["actions"][1]["details"]["artifact"][
+        "characterized_width_um"
+    ] = 2.0
+    wrong_width_path = tmp_path / "wrong-width.json"
+    wrong_width_path.write_text(json.dumps(wrong_width), encoding="utf-8")
+    with pytest.raises(ValueError, match="MP0 width 2.4um does not match"):
+        validate_common_source_small_signal_runs(
+            policy,
+            [input_path, wrong_width_path, tail_path],
+            circuit_path,
+        )
+
+    wrong_signature = copy.deepcopy(runs[1])
+    wrong_signature["actions"][0]["details"]["model_parameters_by_polarity"] = {
+        "pmos": {"ad": "other"}
+    }
+    wrong_signature["actions"][1]["details"]["artifact"][
+        "model_parameters_by_polarity"
+    ] = {"pmos": {"ad": "other"}}
+    wrong_signature_path = tmp_path / "wrong-signature.json"
+    wrong_signature_path.write_text(json.dumps(wrong_signature), encoding="utf-8")
+    with pytest.raises(ValueError, match="MP0 model parameter signature"):
+        validate_common_source_small_signal_runs(
+            policy,
+            [input_path, wrong_signature_path, tail_path],
+            circuit_path,
+        )
 
 
 def test_same_binder_and_characterization_plane_migrate_to_source_degeneration(

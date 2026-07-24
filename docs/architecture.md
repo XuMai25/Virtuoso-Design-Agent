@@ -168,6 +168,8 @@ MOS characterization 点不绑定“输入管/负载管/尾管”等电路角色
 
 Gate 7B 新增 `vda small-signal-validate` 作为 run-record 后处理入口。它只接受 real Bridge 的独立器件表记录和只读 OA/`si`/Spectre 电路记录；demo、OA 写 action、target/PVT 漂移、空 AC、缺失 raw hash 或 evidence source 降级都会拒绝。binder 从结构化 `si` 实例生成 MOS/R/C 图，以真实 DC OP 而非理论 DC 解确定 VGS/VDS/VSB，在 exact L 平面内做有角点权重记录的 VGS/VDS/VSB rectilinear interpolation，并拒绝所有 bias extrapolation。W 平面和除 `w/l/nf/m/multi` 外的模型参数集合/值必须与 `si` 完全相同；匹配集合另存 count 与 SHA-256。随后通用矩阵核心在原始 EDA 频率网格预测 gain、phase、−3 dB bandwidth 和 GBW，并按运行前固定 policy 同 Spectre OP/AC 比较。
 
+多 MOS 图不再被迫共享一张器件表。请求可以携带一个 primary 和多个 `additional_characterizations`，每个 MOS 实例显式保存 `characterization_id`；所有表必须属于同一 PDK profile/process corner/temperature 和证据边界，ID 唯一，并且每张表都至少被一个 `si` 实例实际使用。自动 binder 按实例 model、polarity、W/L、完整模型参数签名和可选来源实例绑定选择唯一表；缺表、重复匹配、几何或签名漂移、未使用表都会在矩阵求解前拒绝。结果同时保存全部 characterization run/task/artifact hash，避免只记录 primary 表而丢失 PMOS 或尾管来源。
+
 Gate 7C 没有增加源极退化专用 AC 公式。binder 遍历 `si` MOS/R instances，发现 MOS
 source 不是固定 `VSS` 时，必须从真实连接中找到唯一的 source-node→`VSS` 电阻，并把
 该内节点纳入同一个 `Y(f)`；`source_degenerated_common_source` policy 还要求 EDA DC
@@ -187,8 +189,7 @@ VGS/VDS 不一致、source-current 不匹配均在预测前拒绝。
 1 µm/31 参数表。最终图绑定 `MN0/ RD0/RS0/NSRC`，Id/gm/gds/VDSAT 误差为
 17.59%/17.69%/21.36%/2.82%，gain/BW/GBW 误差为 0.374 dB/13.52%/17.16%，全部
 通过未改变的 25%/0.5 dB/5° Gate。当前提升的是 single-MOS common-source readback
-schema；下一步扩到多 MOS、不同 polarity/角色的差分对。PVT 可选，Spectre 始终是
-最终规格证据。
+schema。当前本地 Gate 已进一步用三张独立 synthetic 表绑定非 1:1 的电流镜负载真实尾管差分对：输入 NMOS、PMOS 负载和 NMOS 尾管分别选择各自 W/签名的 artifact，差分输入固定为 `INP=+0.5/INN=-0.5`，输出沿 Gate 6 的单端 `OUTN` 契约。missing PMOS、重复匹配、W 漂移和签名漂移均有拒绝测试；CLI 以可重复 `--additional-characterization-run` 接收额外 real run。该阶段只完成 schema/binder/policy 的本地纵向实现，尚未取得三张真实 TSMC N28 表和 held-out 差分对 Spectre 对照，所以不得升级为 live 多 MOS 验证。PVT 可选，Spectre 始终是最终规格证据。
 
 ## ADE 人工介入与状态所有权
 
@@ -246,6 +247,8 @@ corner membership 使用正交的 `ade.corners.apply`，不塞进 variable patch
 ```
 
 这里的 wrapper 是 testbench 契约，不再重复 MOS 拓扑。显式给出的 `VDD/CL` 标为 `user_input`，省略时采用 profile 默认值并标为 `software_inference`；MOS 拓扑与尺寸来自 OA/`si`。`simulation.run` 只读 OA，省略器件尺寸时采用回读值，显式给出时必须匹配。调优任务则在已经授权 OA 写入时逐候选暂存并回读，最后提交最佳可行点；无可行点或可恢复中断时恢复初始尺寸。
+
+新建反相器缺少尺寸时也只从 PDK profile 取初始值。`nics4304_tsmc28` 当前使用 `default_inverter_nmos_width_um=0.6` 和 `default_inverter_pmos_to_nmos_width_ratio=1.25`；它来自 2026-07-24 在隔离 cell 上完成的四个简单比例 live 校准。解析优先级为“任务显式参数 > 已有 OA 回读 > profile 缺省”，所以只修改已有 OA 的 Wn 不会暗中联动 Wp，显式 Wp 也永远覆盖比例。该缺省只是 nominal 起点，不收窄 `parameters.apply`、raw CDF 或有限搜索的能力面，详见[验证记录](validation/2026-07-24-inverter-drive-ratio-calibration-live.md)。
 
 自动单点路径仍先选 `si`，因为反相器目标是 DUT-only schematic，未承诺已有 Maestro test/setup；强行创建 Maestro view 会给普通 `simulation.run` 引入额外 OA 配置写入。`ade.capture` 只接收一个显式存在的人工 Maestro 真源，不会让它与 wrapper 路径暗中混用。进入 VDA-managed sweep/corner 前，必须明确任务选择哪一个仿真状态、保存其指纹，并复用 Bridge 的 Maestro/netlist API；两条路径不能同时成为未声明的真源。
 

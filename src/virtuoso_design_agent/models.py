@@ -2470,6 +2470,8 @@ class PdkProfile(StrictModel):
     default_vdd_v: float = Field(gt=0)
     default_load_ff: float = Field(gt=0)
     default_length_um: float = Field(gt=0)
+    default_inverter_nmos_width_um: float = Field(gt=0)
+    default_inverter_pmos_to_nmos_width_ratio: float = Field(gt=0)
     default_common_source_width_um: float = Field(gt=0)
     default_common_source_bias_v: float = Field(gt=0)
     default_common_source_load_resistance_ohm: float = Field(gt=0)
