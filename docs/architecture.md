@@ -104,7 +104,13 @@ BW   = gout / (2*pi*Cout)
 GBW  = gm / (2*pi*Cout)
 ```
 
-这套解同时给出功耗、面积代理、三管 KVL 余量、频率寄生渐近上限、约束裕量、主导电流下界和固定表点下的局部对数敏感性。结果保存 canonical request SHA-256、器件 artifact id/hash 和 characterization 条件，使推荐能精确追溯输入。结果穷尽的是请求中声明的离散表域，不是 PDK 的连续 W/L/bias 空间；一阶输出极点还没有覆盖内部极点/零点、slew、settling、噪声、失真、mismatch、稳定性和 PVT。因此推荐只能作为 theory-seeded Spectre 候选，不能直接写回 OA 或宣称设计闭合。当前 synthetic 示例见 `examples/theory/differential-pair-gmid.synthetic.json`；下一 Gate 是生成并绑定真实 TSMC N28 characterization 表，再用同源 OA/`si`/Spectre 测量误差校准方程。
+这套解同时给出功耗、面积代理、三管 KVL 余量、频率寄生渐近上限、约束裕量、主导电流下界和固定表点下的局部对数敏感性。结果保存 canonical request SHA-256、器件 artifact id/hash 和 characterization 条件，使推荐能精确追溯输入。结果穷尽的是请求中声明的离散表域，不是 PDK 的连续 W/L/bias 空间；一阶输出极点还没有覆盖内部极点/零点、slew、settling、噪声、失真、mismatch、稳定性和 PVT。因此推荐只能作为 theory-seeded Spectre 候选，不能直接写回 OA 或宣称设计闭合。当前 synthetic 示例见 `examples/theory/differential-pair-gmid.synthetic.json`。
+
+`vda theory-calibrate` 是另一个纯本地、只消费既有 run record 的后处理入口。它不把命令成功当作 EDA 证据：训练与验证记录必须来自 real Bridge adapter；每点必须同时绑定 OA `bridge_readback`、匹配的 Gate 6 自动 `si` 网表、Spectre OP/AC `eda_result` 以及 netlist/wrapper/DC/OP SHA-256。校准器还要求训练点形成无重复的完整 Wn×Wp 矩形网格，目标 cell、profile/model include、L、BIAS、VCM、VDD、CL 全部相同，验证点不得越过训练宽度范围。任一证据降级或条件漂移都会拒绝。
+
+首个 nominal `top_tt` 校准用 `Wn=[1.5,2.0] µm × Wp=[1.5,2.0,2.5] µm` 六点真实数据拟合 `Ad=k*gm/(gdsn+gdsp)` 与 `Ceff=CL+Cn*Wn+Cp*Wp`，并逐点留一重拟合。输出绑定两个 run record 哈希、每点原始证据哈希、全部预测/误差、固定条件和禁止外推边界。新鲜同点只读 Spectre 复跑用于检查执行重复性；它不冒充几何外推验证。拟合及误差判定仍是 `software_inference`，OA 与 EDA 原始量分别保留 `bridge_readback`/`eda_result`。
+
+该 topology-local 校准已经量化当前一阶模型在小范围内的误差，但它不是独立 MOS characterization：`Cn/Cp` 是拓扑等效电容，不能冒充 PDK `Cgg/Cgd/Cdb`；每个校准预测仍消费该观测点由 Spectre 得到的 `gm/gds`，尚不能在 EDA 前预测一个从未仿真的新点。它也没有给 theory solver 提供跨 gm/Id、L、VDS/VSD 的 `Id/W`、`gds/Id` 和 `VDSAT` 表。因此校准产物目前不会自动注入 `vda theory` 或触发 OA 写入。下一 Gate 仍是生成并绑定真实 TSMC N28 独立器件 characterization 表，再用未参与拟合的同源电路点复核；只有通过该 Gate 才能用理论结果缩小 Spectre 搜索域。
 
 ## ADE 人工介入与状态所有权
 

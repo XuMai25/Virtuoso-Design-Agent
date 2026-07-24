@@ -28,6 +28,7 @@ from .models import (
 from .planner import build_plan
 from .safety import SafetyViolation
 from .theory import DifferentialPairTheoryRequest, size_differential_pair
+from .theory_calibration import calibrate_differential_pair_theory
 
 
 def _load_task(path: Path) -> TaskSpec:
@@ -101,6 +102,20 @@ def _cmd_theory(args: argparse.Namespace) -> int:
         args.output.write_text(payload, encoding="utf-8")
     print(payload)
     return 0
+
+
+def _cmd_theory_calibrate(args: argparse.Namespace) -> int:
+    result = calibrate_differential_pair_theory(
+        args.training_run,
+        args.validation_run,
+        calibration_id=args.id,
+    )
+    payload = result.model_dump_json(indent=2)
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(payload, encoding="utf-8")
+    print(payload)
+    return 0 if result.status is RunStatus.SUCCEEDED else 1
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -197,6 +212,19 @@ def build_parser() -> argparse.ArgumentParser:
     theory.add_argument("request", type=Path)
     theory.add_argument("--output", type=Path)
     theory.set_defaults(handler=_cmd_theory)
+
+    theory_calibrate = subparsers.add_parser(
+        "theory-calibrate",
+        help=(
+            "fit and cross-check the Gate-6 one-pole model from bound real-EDA "
+            "run records"
+        ),
+    )
+    theory_calibrate.add_argument("training_run", type=Path)
+    theory_calibrate.add_argument("--validation-run", type=Path, required=True)
+    theory_calibrate.add_argument("--id", default="gate6-one-pole-calibration")
+    theory_calibrate.add_argument("--output", type=Path)
+    theory_calibrate.set_defaults(handler=_cmd_theory_calibrate)
 
     run = subparsers.add_parser("run", help="plan or execute a task")
     run.add_argument("task", type=Path)

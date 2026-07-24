@@ -6,6 +6,8 @@ VDA 已加入第一版理论先导尺寸分析器，但当前只能称为：
 
 **Gate 6 theory sizing contract locally implemented; TSMC N28 characterization and Spectre calibration pending**
 
+后续状态：同日已完成[Gate 6 topology-local 一阶模型真实校准](2026-07-24-theory-calibration-live.md)。六点真实 Wn×Wp 数据的 gain/BW/GBW 最大留一误差为 `0.083%/0.373%/0.457%`，并完成一次不写 OA 的新鲜同点 Spectre 复跑。该结果量化了固定 `top_tt`、30 nm L 和单偏置下的局部模型误差，但独立 MOS gm/Id characterization 表仍未完成；本文件中的 synthetic sizing 边界和禁止 OA 写回结论保持不变。
+
 本 Gate 没有调用 Bridge、没有远端计算、没有写 OA，也没有修改第三方仓库。它解决的是“不能从几个人工随意列出的候选里选一个就称为最优”的契约与算法问题；它尚未提供真实 PDK 设计结论。
 
 ## 防止伪最优的实现
