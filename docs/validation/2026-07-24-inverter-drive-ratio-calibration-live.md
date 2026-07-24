@@ -1,5 +1,7 @@
 # 2026-07-24 反相器驱动比例校准 live Gate
 
+> 2026-07-25 follow-up 已完整实测 `1.20/1.25/1.30/1.35`，并在相同 nominal 条件下选择 1.20；profile 默认已相应更新。见[反相器 Wp/Wn 细化 live Gate](2026-07-25-inverter-ratio-refinement-live.md)。本页以下内容保留为 2026-07-24 粗网格的历史记录。
+
 ## 结论
 
 在 TSMC N28 `nics4304_tsmc28`、nominal `top_tt`、`Wn=0.6 µm`、`L=0.03 µm`、`VDD=0.9 V`、`CL=2 fF` 和当前固定 transient 激励下，完整执行预先声明的四个简单 `Wp/Wn` 比例。以满足 delay、skew、能量和过冲/欠冲约束为前提最小化 rise/fall skew，`Wp/Wn=1.25` 是声明离散域内的最佳可行点。

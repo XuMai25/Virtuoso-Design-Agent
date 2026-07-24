@@ -8,6 +8,7 @@ import re
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -730,6 +731,74 @@ def test_background_maestro_run_rejects_empty_structured_results_and_closes(
 
     assert "/data/xum/vda_runs/empty-output" in str(failure.value)
     assert calls == [("close", "fnxBackground9")]
+
+
+def test_background_maestro_keyboard_interrupt_restores_runtime_and_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+
+    class Client:
+        def execute_skill(self, expression, **kwargs):
+            if "ddGetObj" in expression:
+                return SimpleNamespace(output="t", errors=[])
+            if "maeGetSetup" in expression:
+                return SimpleNamespace(output='("AC")', errors=[])
+            raise AssertionError(expression)
+
+    runtime = {
+        "scratch_root": "/data/xum/vda_runs/vda_ade_run_interrupt_0123456789ab",
+        "tests": [],
+        "evidence_source": "bridge_readback",
+    }
+    _install_fake_maestro_module(
+        monkeypatch,
+        open_session=lambda *_args: "fnxInterrupted1",
+        close_session=lambda _client, session: calls.append(("close", session)),
+        run_and_wait=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            KeyboardInterrupt()
+        ),
+        read_results=lambda *_args, **_kwargs: pytest.fail(
+            "interrupted run must not read results"
+        ),
+    )
+    monkeypatch.setattr(bridge_worker, "_client", Client)
+    monkeypatch.setattr(
+        bridge_worker,
+        "_configure_background_ade_runtime",
+        lambda *_args, **_kwargs: runtime,
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_restore_background_ade_runtime",
+        lambda _client, *, session, runtime: calls.append(
+            ("restore", session, runtime["scratch_root"])
+        ),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        bridge_worker.run_background_maestro(
+            {
+                "task_id": "interrupt-saved-maestro",
+                "target": {
+                    "library": "vda_test",
+                    "cell": "vda_manual_tb",
+                    "view": "maestro",
+                },
+                "profile": {"remote_run_root": "/data/xum/vda_runs"},
+                "ade_run": {},
+                "timeout_seconds": 30,
+            }
+        )
+
+    assert calls == [
+        (
+            "restore",
+            "fnxInterrupted1",
+            "/data/xum/vda_runs/vda_ade_run_interrupt_0123456789ab",
+        ),
+        ("close", "fnxInterrupted1"),
+    ]
 
 
 def test_remote_ade_manifest_rejects_a_different_history_path() -> None:
@@ -4809,13 +4878,13 @@ def test_inverter_defaults_are_profile_calibrated_and_remain_overridable() -> No
 
     defaults = _resolved_parameters({"profile": profile})
     assert defaults["nmos_width_um"] == pytest.approx(0.6)
-    assert defaults["pmos_width_um"] == pytest.approx(0.75)
+    assert defaults["pmos_width_um"] == pytest.approx(0.72)
 
     scaled = _resolved_parameters(
         {"profile": profile, "parameters": {"nmos_width_um": 0.8}}
     )
     assert scaled["nmos_width_um"] == pytest.approx(0.8)
-    assert scaled["pmos_width_um"] == pytest.approx(1.0)
+    assert scaled["pmos_width_um"] == pytest.approx(0.96)
 
     explicit = _resolved_parameters(
         {
@@ -6829,11 +6898,12 @@ def test_subprocess_boundary_converts_timeout(tmp_path, monkeypatch) -> None:
         FakeJob,
     )
     monkeypatch.setattr(
-        "virtuoso_design_agent.adapters.subprocess_bridge._terminate_process_tree",
+        "virtuoso_design_agent.adapters.subprocess_bridge._cancel_then_terminate_process_tree",
         lambda observed, **_kwargs: (
             cleanup_calls.append(observed),
             setattr(observed, "returncode", -9),
-        ),
+            False,
+        )[-1],
     )
     with pytest.raises(BridgeWorkerError, match="timed out"):
         SubprocessBridgeAdapter(bridge_python).probe("nics4304_tsmc28")
@@ -6880,20 +6950,36 @@ def test_subprocess_timeout_stops_worker_descendant_tree(
     (package / "__init__.py").write_text("", encoding="utf-8")
     (package / "bridge_worker.py").write_text(
         """
+import _thread
 import os
 import pathlib
 import subprocess
 import sys
+import threading
 import time
 
 child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
 pathlib.Path(os.environ["VDA_TEST_CHILD_PID"]).write_text(str(child.pid))
-time.sleep(120)
+cancel_file = pathlib.Path(os.environ["VDA_WORKER_CANCEL_FILE"])
+
+def watch_cancel():
+    while not cancel_file.is_file():
+        time.sleep(0.02)
+    _thread.interrupt_main()
+
+threading.Thread(target=watch_cancel, daemon=True).start()
+try:
+    while True:
+        time.sleep(0.1)
+finally:
+    pathlib.Path(os.environ["VDA_TEST_WORKER_FINALLY"]).write_text("cleaned")
 """.strip(),
         encoding="utf-8",
     )
     child_pid_path = tmp_path / "child.pid"
+    cleanup_marker = tmp_path / "worker-finally.txt"
     monkeypatch.setenv("VDA_TEST_CHILD_PID", str(child_pid_path))
+    monkeypatch.setenv("VDA_TEST_WORKER_FINALLY", str(cleanup_marker))
     adapter = SubprocessBridgeAdapter(sys.executable)
     adapter.source_root = tmp_path
 
@@ -6906,6 +6992,7 @@ time.sleep(120)
     while _process_is_running(child_pid) and time.monotonic() < deadline:
         time.sleep(0.05)
     assert not _process_is_running(child_pid)
+    assert cleanup_marker.read_text(encoding="utf-8") == "cleaned"
 
 
 def test_subprocess_keyboard_interrupt_stops_worker_tree_and_reraises(
@@ -6951,7 +7038,7 @@ def test_subprocess_keyboard_interrupt_stops_worker_tree_and_reraises(
         make_job,
     )
     monkeypatch.setattr(
-        "virtuoso_design_agent.adapters.subprocess_bridge._terminate_process_tree",
+        "virtuoso_design_agent.adapters.subprocess_bridge._cancel_then_terminate_process_tree",
         cleanup,
     )
 
@@ -6960,6 +7047,39 @@ def test_subprocess_keyboard_interrupt_stops_worker_tree_and_reraises(
 
     assert cleanup_calls == [process]
     assert len(job_holder) == 1 and job_holder[0].closed is True
+
+
+def test_worker_parent_watchdog_interrupts_on_cancel_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    interrupted = threading.Event()
+    cancel_file = tmp_path / "cancel.flag"
+    monkeypatch.setenv("VDA_WORKER_PARENT_PID", str(os.getpid()))
+    monkeypatch.setenv("VDA_WORKER_CANCEL_FILE", str(cancel_file))
+    monkeypatch.setattr(bridge_worker._thread, "interrupt_main", interrupted.set)
+
+    watchdog = bridge_worker._start_worker_parent_watchdog()
+    assert watchdog is not None
+    cancel_file.touch()
+    assert interrupted.wait(timeout=2.0)
+    watchdog[0].set()
+    watchdog[1].join(timeout=1.0)
+
+
+def test_worker_parent_watchdog_interrupts_when_parent_disappears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    interrupted = threading.Event()
+    monkeypatch.setenv("VDA_WORKER_PARENT_PID", str(os.getpid()))
+    monkeypatch.setenv("VDA_WORKER_CANCEL_FILE", str(tmp_path / "cancel.flag"))
+    monkeypatch.setattr(bridge_worker, "_worker_parent_is_alive", lambda _pid: False)
+    monkeypatch.setattr(bridge_worker._thread, "interrupt_main", interrupted.set)
+
+    watchdog = bridge_worker._start_worker_parent_watchdog()
+    assert watchdog is not None
+    assert interrupted.wait(timeout=2.0)
+    watchdog[0].set()
+    watchdog[1].join(timeout=1.0)
 
 
 def test_process_tree_cleanup_terminates_job_after_worker_parent_exits() -> None:
@@ -6985,6 +7105,36 @@ def test_process_tree_cleanup_terminates_job_after_worker_parent_exits() -> None
 
     assert calls[0] == ("terminate", None)
     assert calls[1][0] == "wait"
+
+
+def test_remote_resource_inventory_parser_keeps_review_separate_from_delete() -> None:
+    directories, processes, host = bridge_worker._parse_remote_resource_inventory(
+        "\n".join(
+            [
+                "VDA_RESOURCE_DIRECTORY\t1000.0\t2048\t/data/xum/vda_runs/vda_old",
+                "VDA_RESOURCE_PROCESS\tspectre\t0",
+                "VDA_RESOURCE_PROCESS\tsi\t1",
+                "VDA_RESOURCE_PROCESS\tvirtuoso\t1",
+                "VDA_RESOURCE_HOST\tcad52.example.edu\t192.0.2.52",
+            ]
+        ),
+        now=1000.0 + 8 * 86400,
+        older_than_days=7,
+    )
+
+    assert directories == [
+        {
+            "path": "/data/xum/vda_runs/vda_old",
+            "modified_epoch": 1000.0,
+            "age_days": 8.0,
+            "size_bytes": 2048,
+            "review_candidate": True,
+            "delete_authorized": False,
+            "evidence_source": "bridge_readback",
+        }
+    ]
+    assert processes == {"spectre": 0, "si": 1, "virtuoso": 1}
+    assert host == {"hostname": "cad52.example.edu", "ip_address": "192.0.2.52"}
 
 
 def test_worker_resource_cleanup_is_reverse_order_and_not_short_circuited() -> None:

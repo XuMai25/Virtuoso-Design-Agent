@@ -252,7 +252,7 @@ corner membership 使用正交的 `ade.corners.apply`，不塞进 variable patch
 
 这里的 wrapper 是 testbench 契约，不再重复 MOS 拓扑。显式给出的 `VDD/CL` 标为 `user_input`，省略时采用 profile 默认值并标为 `software_inference`；MOS 拓扑与尺寸来自 OA/`si`。`simulation.run` 只读 OA，省略器件尺寸时采用回读值，显式给出时必须匹配。调优任务则在已经授权 OA 写入时逐候选暂存并回读，最后提交最佳可行点；无可行点或可恢复中断时恢复初始尺寸。
 
-新建反相器缺少尺寸时也只从 PDK profile 取初始值。`nics4304_tsmc28` 当前使用 `default_inverter_nmos_width_um=0.6` 和 `default_inverter_pmos_to_nmos_width_ratio=1.25`；它来自 2026-07-24 在隔离 cell 上完成的四个简单比例 live 校准。常见经验比 `1.30:1` 没有出现在该 `[1,1.25,1.5,2]` 稀疏网格里，所以现有证据只能说 1.25 是已声明离散域最佳，不能说它优于 1.30 或是连续最优。仓库保留独立的 `1.20/1.25/1.30/1.35` 细化任务，待重新授权 OA 暂存/恢复后再跑；在此之前不改变已实测 profile 默认。解析优先级为“任务显式参数 > 已有 OA 回读 > profile 缺省”，所以只修改已有 OA 的 Wn 不会暗中联动 Wp，显式 Wp 也永远覆盖比例。该缺省只是 nominal 起点，不收窄 `parameters.apply`、raw CDF 或有限搜索的能力面，详见[验证记录](validation/2026-07-24-inverter-drive-ratio-calibration-live.md)。
+新建反相器缺少尺寸时也只从 PDK profile 取初始值。`nics4304_tsmc28` 当前使用 `default_inverter_nmos_width_um=0.6` 和 `default_inverter_pmos_to_nmos_width_ratio=1.2`。2026-07-25 在隔离 cell 上完整实测 `1.20/1.25/1.30/1.35`；相同 nominal `top_tt`、0.9 V、2 fF、5 ps input edge 下，1.20 的 rise/fall skew 为 0.0394 ps，优于 1.25 的 0.2119 ps 和 1.30 的 0.3639 ps，因此替代前一天粗网格选出的 1.25。解析优先级仍为“任务显式参数 > 已有 OA 回读 > profile 缺省”，所以只修改已有 OA 的 Wn 不会暗中联动 Wp，显式 Wp 也永远覆盖比例。该缺省只是一个负载/slew/PVT 尚未扩展的 nominal 起点，不收窄 `parameters.apply`、raw CDF 或有限搜索的能力面，详见[粗网格记录](validation/2026-07-24-inverter-drive-ratio-calibration-live.md)和[细化记录](validation/2026-07-25-inverter-ratio-refinement-live.md)。
 
 自动单点路径仍先选 `si`，因为反相器目标是 DUT-only schematic，未承诺已有 Maestro test/setup；强行创建 Maestro view 会给普通 `simulation.run` 引入额外 OA 配置写入。`ade.capture` 只接收一个显式存在的人工 Maestro 真源，不会让它与 wrapper 路径暗中混用。进入 VDA-managed sweep/corner 前，必须明确任务选择哪一个仿真状态、保存其指纹，并复用 Bridge 的 Maestro/netlist API；两条路径不能同时成为未声明的真源。
 
@@ -379,13 +379,13 @@ live 首版曾把 PMOS 实例命名为 `PM0/PM1`；OA 和 `si` 一致，但 Spec
 
 ## 进程与资源生命周期
 
-Bridge subprocess adapter 的本地进程边界是一个请求一个 Python worker，不经过 PowerShell。Windows worker 使用隐藏窗口和独立进程组，并在创建后立即加入本次请求专属的 Job Object。Job Object 正常关闭时不带 `KILL_ON_JOB_CLOSE`，因此 Bridge 已建立并写入共享 state 的 tunnel 可以按 Bridge 原语跨 worker 复用；请求超时、`KeyboardInterrupt` 或其他调用方异常时则调用 `TerminateJobObject`，等待并回收 worker、SSH/SCP/tar 等全部后代。若 Job Object 无法建立，请求在执行 payload 前失败，而不是以无法证明清理的方式继续。POSIX 路径使用独立 session/process group，并按 TERM→KILL 顺序收敛。
+Bridge subprocess adapter 的本地进程边界是一个请求一个 Python worker，不经过 PowerShell。Windows worker 使用隐藏窗口和独立进程组，并在创建后立即加入本次请求专属的 Job Object。Job Object 正常关闭时不带 `KILL_ON_JOB_CLOSE`，因此 Bridge 已建立并写入共享 state 的 tunnel 可以按 Bridge 原语跨 worker 复用。每个请求另有唯一 cancel marker 和调用方 PID；timeout、`KeyboardInterrupt` 或调用方消失时，worker watchdog 先中断主线程，让 action/worker `finally` 恢复 Maestro runtime、关闭 session/client 并删除 marker。协作窗口最多 30 秒，随后仍以 `TerminateJobObject` 回收 worker、SSH/SCP/tar 等全部本地后代。若 Job Object 无法建立，请求在执行 payload 前失败。POSIX 路径使用同一协作信号，再以独立 session/process group TERM→KILL 收敛。
 
 worker 内部把本次创建的 `VirtuosoClient`/`SSHClient` 注册为资源，action 无论成功还是异常都逆序显式 `close()`；资源对象向外抛出的关闭异常会使 worker 结构化失败，不会静默吞掉。这里的 `close()` 只释放本次 runner/persistent shell，遵守 Bridge 的共享 tunnel 语义，不调用会影响其他脚本的 `stop()`。Maestro action 另在各自 `finally` 中关闭 background session；direct Spectre 使用 `TemporaryDirectory`，正常/异常 Python 展开时清理本地网表与下载目录。
 
 远端进程不能只靠关闭本地 SSH 来证明结束。direct inverter/common-source/differential-pair/device-characterization 在各自唯一 `/data/xum` 根下上传小型 `vda_spectre_guard.sh`，执行位和 SHA-256 都通过 Bridge 独立回读。guard 以任务 timeout 运行 Spectre，先发 TERM，10 秒后仍未结束则 KILL；Bridge transport 等待比该上限多 15 秒。SpectreSimulator 的 `remote_work_dir` 同时固定到该 VDA 根，因此子运行目录不会散落成无所属的顶层 nonce；成功下载后 Bridge 清理子目录，失败诊断和同源 netlist 根按证据策略保留。
 
-资源分成两类，不能混淆：本地 `vda_*` temp、worker 和一次性 SSH/SCP 是退出时必须归零的临时资源；`artifacts/runs`、远端 `si` 网表/wrapper/guard、characterization raw bundle 和 ADE exact-history manifest 是有意保留的证据。后者会占磁盘，删除必须按精确路径和保留策略显式执行，不能在 worker 退出时广泛 `rm -rf`。当前尚无通用 retention/garbage-collection CLI；ADE/Maestro 硬中断后的远端 session/process 清理也尚未完成等价故障注入。详见[2026-07-25 生命周期审计](validation/2026-07-25-process-resource-lifecycle.md)。
+资源分成两类，不能混淆：本地 `vda_*` temp、worker 和一次性 SSH/SCP 是退出时必须归零的临时资源；`artifacts/runs`、远端 `si` 网表/wrapper/guard、characterization raw bundle 和 ADE exact-history manifest 是有意保留的证据。后者会占磁盘，删除必须按精确路径和保留策略显式执行，不能在 worker 退出时广泛 `rm -rf`。`vda resources [--remote]` 现在提供只读 age/size/process/session inventory；可选 schema-v1 pin manifest 只接受 artifact-root 顶层名称或 `/data/xum/...` 精确路径，只抑制 review candidate，永远不设置 delete authorization。真实 Maestro timeout 故障注入已经证明 runtime restore 与 session close，随后独立 inventory 为 0；用于注入的私有 action 已从产品代码删除。详见[首轮生命周期审计](validation/2026-07-25-process-resource-lifecycle.md)和[follow-up Gate](validation/2026-07-25-resource-cancellation-retention.md)。
 
 ## 证据链
 

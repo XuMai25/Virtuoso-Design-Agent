@@ -6,15 +6,21 @@ result. It intentionally keeps Bridge imports out of the main VDA environment.
 
 from __future__ import annotations
 
+import _thread
+import base64
 import csv
 import hashlib
+import ipaddress
 import io
 import json
 import math
+import os
 import re
 import shlex
 import sys
 import tempfile
+import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -49,6 +55,7 @@ _WORKER_RESOURCES: list[Any] = []
 _WORKER_RESOURCE_TRACKING = False
 _SPECTRE_REMOTE_CLEANUP_GRACE_SECONDS = 15
 _SPECTRE_REMOTE_KILL_AFTER_SECONDS = 10
+_WORKER_PARENT_POLL_SECONDS = 0.2
 
 _DIFFERENTIAL_PAIR_BASE_VARIANT = "resistive_load_nmos_differential_pair"
 _DIFFERENTIAL_PAIR_TAIL_VARIANT = (
@@ -96,6 +103,66 @@ def _close_worker_resources() -> list[str]:
         except Exception as exc:
             errors.append(f"{type(resource).__name__}: {type(exc).__name__}: {exc}")
     return errors
+
+
+def _worker_parent_is_alive(parent_pid: int) -> bool:
+    if os.name != "nt":
+        try:
+            os.kill(parent_pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    import ctypes
+    from ctypes import wintypes
+
+    synchronize = 0x00100000
+    wait_timeout = 0x00000102
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(synchronize, False, parent_pid)
+    if not handle:
+        return False
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == wait_timeout
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _start_worker_parent_watchdog() -> tuple[threading.Event, threading.Thread] | None:
+    """Interrupt the main thread if its caller cancels or disappears."""
+
+    raw_parent_pid = os.getenv("VDA_WORKER_PARENT_PID")
+    raw_cancel_file = os.getenv("VDA_WORKER_CANCEL_FILE")
+    if not raw_parent_pid or not raw_cancel_file:
+        return None
+    try:
+        parent_pid = int(raw_parent_pid)
+    except ValueError:
+        return None
+    cancel_file = Path(raw_cancel_file)
+    stopped = threading.Event()
+
+    def watch_parent() -> None:
+        while not stopped.wait(_WORKER_PARENT_POLL_SECONDS):
+            if cancel_file.is_file() or not _worker_parent_is_alive(parent_pid):
+                _thread.interrupt_main()
+                return
+
+    watcher = threading.Thread(
+        target=watch_parent,
+        name="vda-worker-parent-watchdog",
+        daemon=True,
+    )
+    watcher.start()
+    return stopped, watcher
 
 
 def _client():
@@ -10126,6 +10193,212 @@ def _ssh_command_result(runner: Any, command: str, label: str) -> str:
     return str(getattr(result, "stdout", ""))
 
 
+_RESOURCE_DIRECTORY_PREFIX = "VDA_RESOURCE_DIRECTORY\t"
+_RESOURCE_PROCESS_PREFIX = "VDA_RESOURCE_PROCESS\t"
+_RESOURCE_HOST_PREFIX = "VDA_RESOURCE_HOST\t"
+
+
+def _parse_remote_resource_inventory(
+    text: str, *, now: float, older_than_days: float
+) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, str]]:
+    directories: list[dict[str, Any]] = []
+    processes: dict[str, int] = {}
+    host: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        if raw_line.startswith(_RESOURCE_DIRECTORY_PREFIX):
+            parts = raw_line.split("\t", 3)
+            if len(parts) != 4:
+                raise RuntimeError(f"invalid remote resource directory row: {raw_line!r}")
+            modified_epoch = float(parts[1])
+            size_bytes = int(parts[2])
+            path = _validated_ade_remote_path(parts[3], "remote resource path")
+            age_days = max(0.0, (now - modified_epoch) / 86400.0)
+            directories.append(
+                {
+                    "path": path,
+                    "modified_epoch": modified_epoch,
+                    "age_days": age_days,
+                    "size_bytes": size_bytes,
+                    "review_candidate": age_days >= older_than_days,
+                    "delete_authorized": False,
+                    "evidence_source": "bridge_readback",
+                }
+            )
+        elif raw_line.startswith(_RESOURCE_PROCESS_PREFIX):
+            parts = raw_line.split("\t", 2)
+            if len(parts) != 3 or parts[1] not in {"spectre", "si", "virtuoso"}:
+                raise RuntimeError(f"invalid remote resource process row: {raw_line!r}")
+            processes[parts[1]] = int(parts[2])
+        elif raw_line.startswith(_RESOURCE_HOST_PREFIX):
+            parts = raw_line.split("\t", 2)
+            if len(parts) != 3 or not re.fullmatch(r"[A-Za-z0-9_.-]+", parts[1]):
+                raise RuntimeError(f"invalid remote resource host row: {raw_line!r}")
+            ipaddress.ip_address(parts[2])
+            host = {"hostname": parts[1], "ip_address": parts[2]}
+    return directories, processes, host
+
+
+def _audit_maestro_sessions(client: Any, *, run_root: str) -> list[dict[str, Any]]:
+    readback = client.execute_skill("maeGetSessions()", timeout=30)
+    errors = getattr(readback, "errors", None) or []
+    if errors:
+        raise RuntimeError(f"Maestro session inventory failed: {errors[0]}")
+    sessions = re.findall(r'"([^"\\]+)"', str(getattr(readback, "output", "") or ""))
+    inventory: list[dict[str, Any]] = []
+    prefix = f"{run_root}/vda_ade_run_"
+    for session in sessions:
+        tests = _maestro_tests_readback(client, session)
+        runtime_paths = [
+            {
+                "test": test,
+                **_maestro_test_runtime_path_state(client, session=session, test=test),
+            }
+            for test in tests
+        ]
+        vda_managed = any(
+            str(item[field]).startswith(prefix)
+            for item in runtime_paths
+            for field in ("project_dir", "results_dir", "analog_run_dir")
+        )
+        inventory.append(
+            {
+                "session": session,
+                "tests": runtime_paths,
+                "vda_managed_runtime": vda_managed,
+                "read_only_inventory": True,
+                "evidence_source": "bridge_readback",
+            }
+        )
+    return inventory
+
+
+def _remote_resource_inventory_via_skill(
+    client: Any, *, command: str, manifest_path: str
+) -> str:
+    """Run a read-only host probe through the live Virtuoso SKILL channel."""
+
+    from virtuoso_bridge.virtuoso.ops import escape_skill_string
+
+    path = _validated_ade_remote_path(manifest_path, "resource audit manifest")
+    encoded_command = base64.b64encode(command.encode("utf-8")).decode("ascii")
+    shell_command = (
+        f"printf %s {encoded_command} | base64 -d | /bin/bash "
+        f"> {shlex.quote(path)} 2>&1"
+    )
+    escaped_command = escape_skill_string(shell_command)
+    escaped_path = escape_skill_string(path)
+    try:
+        result = client.execute_skill(f'system("{escaped_command}")', timeout=300)
+        _require_bridge_result(result, "remote resource inventory via SKILL")
+        return _read_remote_text_via_skill(
+            client,
+            path,
+            page_lines=64,
+            max_lines=8192,
+        )
+    finally:
+        cleanup = client.execute_skill(
+            f'system("rm -f -- {escape_skill_string(shlex.quote(path))}")',
+            timeout=30,
+        )
+        _require_bridge_result(cleanup, "resource audit manifest cleanup")
+        verification = client.execute_skill(
+            f'if(isFile("{escaped_path}") then "present" else "absent")',
+            timeout=30,
+        )
+        _require_bridge_result(verification, "resource audit manifest cleanup verify")
+        if str(getattr(verification, "output", "") or "").strip('"') != "absent":
+            raise RuntimeError(f"resource audit manifest remained after cleanup: {path}")
+
+
+def audit_resources(payload: dict[str, Any]) -> dict[str, Any]:
+    """Inventory retained remote evidence, EDA processes, and Maestro sessions."""
+
+    from virtuoso_bridge.transport.tunnel import SSHClient
+
+    profile = payload.get("profile") or {}
+    run_root = _validated_ade_remote_path(
+        profile.get("remote_run_root"), "resource audit run root"
+    ).rstrip("/")
+    older_than_days = float(payload.get("older_than_days", 7.0))
+    if older_than_days < 0:
+        raise ValueError("older_than_days must be non-negative")
+    if not SSHClient.is_running():
+        raise RuntimeError("no default virtuoso-bridge connection is running")
+    ssh_client = _register_worker_resource(SSHClient.from_env(keep_remote_files=True))
+    runner = ssh_client.ssh_runner
+    runner._persistent_shell_enabled = False
+    root_q = shlex.quote(run_root)
+    command = f"""
+if [ -d {root_q} ]; then
+  find {root_q} -mindepth 1 -maxdepth 1 -type d -printf '%T@\\t%p\\n' |
+  while IFS="$(printf '\\t')" read -r modified path; do
+    bytes=$(du -sb -- "$path" | cut -f1)
+    printf 'VDA_RESOURCE_DIRECTORY\\t%s\\t%s\\t%s\\n' "$modified" "$bytes" "$path"
+  done
+fi
+for name in spectre si virtuoso; do
+  count=$(pgrep -u "$(id -u)" -x "$name" 2>/dev/null | wc -l)
+  printf 'VDA_RESOURCE_PROCESS\\t%s\\t%s\\n' "$name" "$count"
+done
+host_name=$(hostname -f 2>/dev/null || hostname)
+host_ip=$(hostname -I | awk '{{print $1}}')
+printf 'VDA_RESOURCE_HOST\t%s\t%s\n' "$host_name" "$host_ip"
+""".strip()
+    client = _client()
+    direct_ssh_error: str | None = None
+    try:
+        raw = _ssh_command_result(runner, command, "remote resource inventory")
+        inventory_transport = "bridge_public_ssh"
+    except Exception as exc:
+        direct_ssh_error = f"{type(exc).__name__}: {exc}"
+        manifest_path = f"{run_root}/vda_resource_audit_{uuid.uuid4().hex[:12]}.tsv"
+        raw = _remote_resource_inventory_via_skill(
+            client,
+            command=command,
+            manifest_path=manifest_path,
+        )
+        inventory_transport = "bridge_skill_system_transient_manifest"
+    directories, process_counts, host = _parse_remote_resource_inventory(
+        raw,
+        now=time.time(),
+        older_than_days=older_than_days,
+    )
+    if set(process_counts) != {"spectre", "si", "virtuoso"}:
+        raise RuntimeError(
+            f"remote resource inventory omitted process counts: {process_counts!r}"
+        )
+    if not host:
+        raise RuntimeError("remote resource inventory omitted host identity")
+    maestro_sessions: list[dict[str, Any]] = []
+    maestro_session_error: str | None = None
+    try:
+        maestro_sessions = _audit_maestro_sessions(client, run_root=run_root)
+    except Exception as exc:
+        maestro_session_error = f"{type(exc).__name__}: {exc}"
+    return {
+        "remote_run_root": run_root,
+        "directories": directories,
+        "directory_count": len(directories),
+        "total_size_bytes": sum(item["size_bytes"] for item in directories),
+        "review_candidate_count": sum(
+            item["review_candidate"] for item in directories
+        ),
+        "process_counts": process_counts,
+        "host": host,
+        "inventory_transport": inventory_transport,
+        "direct_ssh_transport_error": direct_ssh_error,
+        "maestro_sessions": maestro_sessions,
+        "vda_managed_maestro_session_count": sum(
+            item["vda_managed_runtime"] for item in maestro_sessions
+        ),
+        "maestro_session_inventory_error": maestro_session_error,
+        "older_than_days": older_than_days,
+        "deletion_performed": False,
+        "evidence_source": "bridge_readback",
+    }
+
+
 def characterize_mos_devices(payload: dict[str, Any]) -> dict[str, Any]:
     """Run one standalone Spectre deck; this path never opens an OA object."""
 
@@ -13368,6 +13641,7 @@ def simulate_differential_pair(
 
 
 _ACTIONS = {
+    "audit_resources": audit_resources,
     "probe": probe,
     "characterize_mos_devices": characterize_mos_devices,
     "prepare_maestro": prepare_maestro,
@@ -13409,6 +13683,7 @@ def main() -> int:
 
     result: dict[str, Any]
     _WORKER_RESOURCE_TRACKING = True
+    watchdog = _start_worker_parent_watchdog()
     try:
         request = json.loads(sys.stdin.read())
         action = request.get("action")
@@ -13421,8 +13696,13 @@ def main() -> int:
         result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         return_code = 1
     finally:
+        if watchdog is not None:
+            watchdog[0].set()
         cleanup_errors = _close_worker_resources()
         _WORKER_RESOURCE_TRACKING = False
+        cancel_file = os.getenv("VDA_WORKER_CANCEL_FILE")
+        if cancel_file:
+            Path(cancel_file).unlink(missing_ok=True)
     if cleanup_errors:
         cleanup_detail = "; ".join(cleanup_errors)
         if result.get("ok", False):

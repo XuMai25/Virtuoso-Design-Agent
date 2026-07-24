@@ -23,7 +23,7 @@ PDK 路线默认按晶圆厂 CMOS 工艺推进：当前以 TSMC N28 为基线，
 
 当前实现状态：`OA schematic -> si -> Spectre -> metrics`、供电能量积分、失败注入和候选级 checkpoint/resume 已通过本地测试。2026-07-19 live 结果覆盖 OA/`si` 参数一致性、非空 timing/current 波形、收紧规格、不可行 + 预算耗尽恢复，以及一个经历 3 次 tunnel 中断后仍完成 9/9 候选、最佳参数写回和独立 OA 回读的恢复任务。反相器 L5A 的同源有限闭环与显式恢复 Gate 已通过；Bridge 本地隔离补丁又通过强制断链只读 smoke，闭合 Windows stale state 与调用边界自动重建。运行中传输的随机 reset/timeout 仍是跨 Gate 的底层可靠性债务。
 
-2026-07-24 又在隔离的 `vda_inv_ratio_calibration_001` 上固定 `Wn=0.6 µm`，完整比较 `Wp/Wn=1/1.25/1.5/2`。在预声明的 delay/skew/能量/过冲门限下，1.25 以 `0.212 ps` skew 成为离散域最佳可行点，并写回后独立 OA 回读；原 Gate 1 cell 保持 `Wn/Wp=0.6/0.8 µm`。因此 TSMC N28 profile 暂把 `0.6 µm + 1.25` 作为新建缺省，而不是硬编码 1:1 或 2:1。常见经验值 1.30 没有在该稀疏网格中实测，现有证据不能判定 1.25 优于 1.30；已新增 `1.20/1.25/1.30/1.35` 细化任务，后续结合多个 CL/input slew 和可选 PVT 决定是否改默认。显式任务值和已有 OA 值始终优先。
+2026-07-24 又在隔离的 `vda_inv_ratio_calibration_001` 上固定 `Wn=0.6 µm`，完整比较 `Wp/Wn=1/1.25/1.5/2`，粗网格以 0.212 ps skew 选择 1.25。2026-07-25 follow-up 在相同 nominal `top_tt`、0.9 V、2 fF、5 ps input edge 下完整实测 `1.20/1.25/1.30/1.35`；1.25 的 hash/指标精确复现，1.30 skew 为 0.364 ps，而 1.20 以 0.0394 ps 成为新离散域最佳。checkpoint 还真实恢复了一次 raw 下载 timeout，最终 OA 独立回读为 `Wn/Wp=0.60/0.72 µm`。因此 profile 的简单可覆盖缺省更新为 `0.6 µm + 1.20`；多个 CL/input slew 和可选 PVT 仍待鲁棒性复核。显式任务值和已有 OA 值始终优先。
 
 Gate 2A 又把相同执行语义扩展到电阻负载 NMOS 共源级：新 OA cellview 的 MN0/RD0 结构、W/L/R 回读和 `si` 网表一致性通过；显式保存的 Spectre DC OP 提供 Id/VGS/VDS/VDSAT/gm/gds，6 点 W/Vbias 搜索完成 3 个可行点、3 个线性区点、最佳 W 写回和最终独立紧规格复核。该结果只闭合 common-source nominal DC；当时 AC、source degeneration、noise 和 corner 均未验证。
 
@@ -93,7 +93,7 @@ Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发�
 
 需要用户操作 Virtuoso/ADE 的验证已按用户决定延期，并集中记录在 [`deferred-manual-gates.md`](deferred-manual-gates.md)：包括人工修改/保存/重跑后的双向交接、旧 ADE L state 备份后迁移与重开，以及相同 history/output 的人工数值交叉检查。这些项目不阻塞后台自动化实现，但在真实完成前仍保留为未验证边界；延期记录本身不构成远端授权。
 
-2026-07-25 又完成 direct Bridge/Spectre 资源生命周期 Gate。重复 10 次真实只读 worker 请求没有新增本地 Python/Spectre/SSH、句柄或 `vda_*` temp；合成超时先证伪 `taskkill /T`，随后 Windows Job Object 真实杀净 worker 的 120 秒后代进程，`KeyboardInterrupt` 和 action-error 也进入测试。远端探针进一步证明“本地 SSH 超时”本身会留下仍运行的远端 child，因此 direct Spectre 现在使用已哈希回读的远端 timeout guard，并把 Bridge 子运行目录约束到唯一 VDA root。最小 Spectre 和现有 Gate 6 差分对 DC 均 live 成功，独立延迟复查无 Spectre/si/Virtuoso 残留；两次启动前失败的精确 smoke root 已清理，本地失败 record 保留。状态升级为 **direct Bridge worker and Spectre process lifecycle bounded and live-verified**。这不覆盖 ADE/Maestro 硬中断，也不解决持久证据的长期 retention；二者仍是资源可靠性后续 Gate。
+2026-07-25 又完成 Bridge/Spectre/ADE 资源生命周期 Gate。重复 10 次真实只读 worker 请求没有新增本地 Python/Spectre/SSH、句柄或 `vda_*` temp；合成超时先证伪 `taskkill /T`，随后 Windows Job Object 真实杀净 worker 的 120 秒后代进程。远端 direct Spectre 使用已哈希回读的 timeout guard。follow-up 再加入 cancel marker/父进程 watchdog，让 Python `finally` 在强杀前有 30 秒恢复 Maestro runtime、关闭 session/client；既有 Maestro view 的真实 timeout 故障注入后，独立 inventory 得到 Spectre/si/Maestro session 均为 0，空诊断 root 经逐层检查后精确删除。`vda resources [--remote]` 现可只读盘点本地 temp、持久 evidence、远端 EDA process/session、age/size 和 exact pin；默认不删除。状态升级为 **known VDA-owned process lifecycles bounded, Maestro cancellation live-verified, and retained evidence inventory available**。硬件/OS 崩溃与历史 evidence 的用户确认删除仍不是自动 GC。
 
 ## L5B：单模块设计代理（产品目标）
 
@@ -125,7 +125,7 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
 
 ```text
 反相器 L5A
-  -> nominal 反相器简单驱动比例校准（1/1.25/1.5/2 已 live；1.25 仅作可覆盖缺省；1.20/1.25/1.30/1.35 细化待授权执行）
+  -> nominal 反相器驱动比例校准（粗网格与 1.20/1.25/1.30/1.35 细化均 live；1.20 为可覆盖缺省；多 CL/input slew/PVT 鲁棒性可选）
   -> 共源 nominal DC (Gate 2A 已通过)
   -> 显式实例参数面 (可持久化字段 live 双重回读已验证)
   -> 受控拓扑小变更（同一既有 cellview 原位增加 source degeneration）

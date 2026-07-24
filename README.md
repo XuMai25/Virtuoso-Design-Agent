@@ -8,7 +8,7 @@ Virtuoso Design Agent 是 `virtuoso-bridge-lite` 之上的受控设计编排层�
 
 PDK 默认面向晶圆厂 CMOS 设计。当前缺省 profile 为 `nics4304_tsmc28`，对应 TSMC N28/`tsmcN28`；后续 TSMC、SMIC 等工艺使用独立 profile 和各自验证证据。TSV、hybrid-bonding 等封装/3D PDK 只有任务显式选择时才使用，不会成为自动 fallback，也不会改变普通晶体管级模板的默认假设。详见[决策 0002](docs/decisions/0002-foundry-cmos-pdk-default.md)。
 
-反相器的新建缺省尺寸现为 `Wn=0.6 µm、Wp/Wn=1.25`。该比例来自 TSMC N28 nominal `top_tt` 下四个简单比例的完整 OA→`si`→Spectre transient 校准，选中点的 rise/fall skew 为 `0.212 ps`；它只用于缺省初始化。常见经验值 `1.30:1` 与它只差 4%，但上一轮没有实测 1.30，稀疏的 `[1,1.25,1.5,2]` 网格也不足以判定连续最优。当前保留 1.25 作为已实测离散默认，并新增 `1.20/1.25/1.30/1.35` 细化任务；在多负载、输入 slew 和可选 PVT 实测前，不宣称 1.25 优于 1.30。用户显式尺寸和已有 OA 尺寸始终优先，故不会限制手工参数修改或 Bridge 原有能力。边界和逐点结果见[反相器驱动比例校准](docs/validation/2026-07-24-inverter-drive-ratio-calibration-live.md)。
+反相器的新建缺省尺寸现为 `Wn=0.6 µm、Wp/Wn=1.20`。2026-07-25 在 TSMC N28 nominal `top_tt`、0.9 V、2 fF 和固定 5 ps input edge 下完整实测 `1.20/1.25/1.30/1.35`；四点都可行，以 rise/fall skew 为 objective 时 1.20 得到 `0.0394 ps`，优于 1.25 的 `0.2119 ps` 和经验值 1.30 的 `0.3639 ps`，且能量和面积代理更低。1.25 的网表 hash 与指标和前一天粗扫完全相同。1.20 只作为简单、可覆盖的 nominal 初始化值；多个负载、input slew 和可选 PVT 尚未证明，显式尺寸和已有 OA 尺寸始终优先，也不会限制 `parameters.apply`、原始 CDF 或 Bridge 原有能力。见[粗网格记录](docs/validation/2026-07-24-inverter-drive-ratio-calibration-live.md)和[细化 live Gate](docs/validation/2026-07-25-inverter-ratio-refinement-live.md)。
 
 2026-07-24 又完成 Gate 7A 独立器件表征：正式 `device.characterize` 在没有 OA target、没有 OA 写权限的情况下，复用 Bridge 默认连接和 TSMC N28 `top_tt` 模型，以一个 Spectre DC deck 生成 240 点 NMOS/PMOS 训练表和 4 个真实留出点。原始 signed OP、deck/PSF/log manifest 与 SHA-256 属于 `eda_result`，width-normalized `Id/W、gm/Id、gds/Id、gmb/Id`、五类电容密度和插值审计属于 `software_inference`。最终最坏留出归一化误差为 `13.70% < 25%`；没有打开或写入 OA。
 
@@ -250,11 +250,11 @@ C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe 
 .\.venv\Scripts\vda.exe doctor --adapter bridge
 ```
 
-VDA 的 Bridge adapter 不会为每次请求启动 PowerShell。主进程直接启动 Bridge 虚拟环境中的 `python.exe -m virtuoso_design_agent.adapters.bridge_worker`，worker 再复用 Bridge 的原生 `ssh.exe`/`scp.exe`/`tar.exe` 路径。Windows worker 以隐藏窗口运行，并绑定 Job Object；正常或失败返回时显式关闭本次 Bridge client，超时或用户中断时终止整个本地 worker 子树。Bridge 的一条共享 SSH tunnel/jump chain 会有意跨请求保留，用固定进程数换取连接复用；它不是每次请求新增的 PowerShell 或无限增长的 session。
+VDA 的 Bridge adapter 不会为每次请求启动 PowerShell。主进程直接启动 Bridge 虚拟环境中的 `python.exe -m virtuoso_design_agent.adapters.bridge_worker`，worker 再复用 Bridge 的原生 `ssh.exe`/`scp.exe`/`tar.exe` 路径。Windows worker 以隐藏窗口运行，并绑定 Job Object；正常或失败返回时显式关闭本次 Bridge client，超时、用户中断或调用方消失时先用 cancel marker/父进程 watchdog 展开清理，随后再以 Job Object 清理整个本地 worker 子树。Bridge 的一条共享 SSH tunnel/jump chain 会有意跨请求保留，用固定进程数换取连接复用；它不是每次请求新增的 PowerShell 或无限增长的 session。
 
-direct `si`/Spectre 路径还会在每个唯一 `/data/xum/.../vda_<task>_<nonce>/` 根下安装并回读 SHA-256 匹配的 `vda_spectre_guard.sh`。远端 Spectre 受任务 timeout 和二级 TERM/KILL 限制，即使本地 SSH/worker 断开也不会无限运行；Bridge 等待预算比远端仿真预算多 15 秒，给远端清理留出窗口。Spectre 子运行目录被约束在该 VDA root 内，成功下载后由 Bridge 清理；`si` 网表、wrapper、guard 与失败诊断仍作为持久证据保留，不会被当作临时垃圾自动删除。ADE/Maestro 后台运行仍使用其独立 session/history 生命周期，尚未用同一故障注入证明远端硬中断清理。
+direct `si`/Spectre 路径还会在每个唯一 `/data/xum/.../vda_<task>_<nonce>/` 根下安装并回读 SHA-256 匹配的 `vda_spectre_guard.sh`。远端 Spectre 受任务 timeout 和二级 TERM/KILL 限制，即使本地 SSH/worker 断开也不会无限运行；Bridge 等待预算比远端仿真预算多 15 秒，给远端清理留出窗口。Spectre 子运行目录被约束在该 VDA root 内，成功下载后由 Bridge 清理；`si` 网表、wrapper、guard 与失败诊断仍作为持久证据保留，不会被当作临时垃圾自动删除。ADE/Maestro 后台 session 现在也经过真实 timeout 故障注入：cancel marker/父进程 watchdog 先让 Python `finally` 恢复 runtime path 并关闭 session，30 秒后仍未退出才由 Job Object/进程组强制清理本地树。
 
-2026-07-25 的真实资源审计覆盖重复只读 Bridge 调用、真实后代进程超时、用户中断单测、SSH 超时后的远端孤儿探针、最小 guarded Spectre 和现有差分对单点 DC。详情、磁盘快照和未验证边界见[进程与资源生命周期审计](docs/validation/2026-07-25-process-resource-lifecycle.md)。
+2026-07-25 的真实资源审计覆盖重复只读 Bridge 调用、真实后代进程超时、用户中断、调用方消失、SSH 超时后的远端孤儿探针、最小 guarded Spectre、现有差分对单点 DC 和既有 Maestro view 的 hard-timeout session 清理。`vda resources [--remote]` 只读报告本地 temp、持久 evidence、远端 EDA 进程/Maestro session 与 age/size review candidate；`--pin-manifest` 只接受精确路径并只阻止列入 review，不授权删除。示例见 `examples/resource-retention-pins.example.json`。详情见[首轮 direct 生命周期审计](docs/validation/2026-07-25-process-resource-lifecycle.md)和[资源取消/retention follow-up](docs/validation/2026-07-25-resource-cancellation-retention.md)。
 
 真实任务仍必须先 `plan`，再使用同一个 token 执行。任务文件还要显式允许远端计算或写入。默认 profile `nics4304_tsmc28` 的反相器 transient 与共源 DC OP 均已有 OA/`si` 单点和有限搜索 live 证据，包括逐候选暂存、最佳参数提交、不可行/预算耗尽恢复与 checkpoint；共源 nominal/退化 AC、相干 transient 线性度和 ordinary noise PSF 也已有只读 live 证据，专用 cell 的 W/RD/RS `design.tune` 已真实执行。调优默认在 run record 旁生成 `*.checkpoint.json`；Bridge 外部恢复后用 `--resume <checkpoint>` 续跑。恢复会重新核对 task、plan token、adapter 和当前 OA 参数，已完成 checkpoint 或不属于基线/已确认写入/待确认写入/声明候选的 OA 状态都会被拒绝。换 library、cell 模板、PDK、analysis 或服务器也必须重新验证，不能从既有 smoke 外推。
 
@@ -365,4 +365,6 @@ direct `si`/Spectre 路径还会在每个唯一 `/data/xum/.../vda_<task>_<nonce
 - [2026-07-24 Gate 7C 源极退化共源小信号迁移](docs/validation/2026-07-24-source-degenerated-small-signal-migration-live.md)
 - [2026-07-24 反相器驱动比例校准 live Gate](docs/validation/2026-07-24-inverter-drive-ratio-calibration-live.md)
 - [2026-07-25 进程与资源生命周期审计](docs/validation/2026-07-25-process-resource-lifecycle.md)
+- [2026-07-25 资源取消、盘点与保留策略 follow-up Gate](docs/validation/2026-07-25-resource-cancellation-retention.md)
+- [2026-07-25 反相器 Wp/Wn 细化 live Gate](docs/validation/2026-07-25-inverter-ratio-refinement-live.md)
 - [延期的人工 ADE Gate](docs/deferred-manual-gates.md)

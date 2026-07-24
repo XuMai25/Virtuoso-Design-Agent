@@ -30,6 +30,7 @@ from .models import (
     TaskSpec,
 )
 from .planner import build_plan
+from .resource_audit import audit_local_resources, load_retention_pins
 from .safety import SafetyViolation
 from .small_signal import SmallSignalNetworkRequest, analyze_small_signal_network
 from .small_signal_validation import (
@@ -252,6 +253,89 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_resources(args: argparse.Namespace) -> int:
+    pins = load_retention_pins(args.pin_manifest)
+    local = audit_local_resources(
+        args.artifact_root,
+        older_than_days=args.older_than_days,
+        pins=pins,
+    )
+    remote = None
+    if args.remote:
+        result = SubprocessBridgeAdapter(
+            bridge_python=args.bridge_python
+        ).audit_resources(
+            args.pdk_profile,
+            older_than_days=args.older_than_days,
+        )
+        remote = result.data
+        for entry in remote.get("directories", []):
+            reason = pins.get(str(entry.get("path") or ""))
+            entry["pinned"] = reason is not None
+            entry["pin_reason"] = reason
+            entry["review_candidate"] = bool(entry["review_candidate"] and not reason)
+            entry["delete_authorized"] = False
+        remote["review_candidate_count"] = sum(
+            item["review_candidate"] for item in remote.get("directories", [])
+        )
+    payload = {
+        "mode": "read_only_dry_run",
+        "deletion_performed": False,
+        "pins": [
+            {"path": path, "reason": reason}
+            for path, reason in sorted(pins.items())
+        ],
+        "local": local,
+        "remote": remote,
+        "evidence_sources": {
+            "local_inventory": "software_inference",
+            "remote_inventory": "bridge_readback" if remote is not None else None,
+            "retention_pins": "user_input" if args.pin_manifest else None,
+        },
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(serialized + "\n", encoding="utf-8")
+    if args.json:
+        print(serialized)
+    else:
+        print("Mode: read-only dry-run (no deletion)")
+        print(
+            "Local evidence: "
+            f"{local['entry_count']} entries, {local['total_size_bytes']} bytes, "
+            f"{local['review_candidate_count']} review candidates"
+        )
+        print(
+            "Local transient VDA resources: "
+            f"{local['transient_entry_count']} entries, "
+            f"{local['transient_total_size_bytes']} bytes "
+            f"({local['transient_cancel_marker_count']} cancel markers)"
+        )
+        if remote is not None:
+            print(
+                "Remote evidence: "
+                f"{remote['directory_count']} directories, "
+                f"{remote['total_size_bytes']} bytes, "
+                f"{remote['review_candidate_count']} review candidates"
+            )
+            print(
+                "Remote EDA processes: "
+                + json.dumps(remote["process_counts"], sort_keys=True)
+            )
+            print(
+                "Remote Maestro sessions: "
+                f"{len(remote['maestro_sessions'])} total, "
+                f"{remote['vda_managed_maestro_session_count']} VDA-managed"
+            )
+            if remote.get("maestro_session_inventory_error"):
+                print(
+                    "Maestro inventory warning: "
+                    f"{remote['maestro_session_inventory_error']}"
+                )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vda",
@@ -369,6 +453,20 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--bridge-python")
     doctor.add_argument("--pdk-profile", default=DEFAULT_PDK_PROFILE)
     doctor.set_defaults(handler=_cmd_doctor)
+
+    resources = subparsers.add_parser(
+        "resources",
+        help="inventory retained evidence and transient VDA resources without deletion",
+    )
+    resources.add_argument("--artifact-root", type=Path, default=Path("artifacts/runs"))
+    resources.add_argument("--older-than-days", type=float, default=7.0)
+    resources.add_argument("--pin-manifest", type=Path)
+    resources.add_argument("--remote", action="store_true")
+    resources.add_argument("--bridge-python")
+    resources.add_argument("--pdk-profile", default=DEFAULT_PDK_PROFILE)
+    resources.add_argument("--output", type=Path)
+    resources.add_argument("--json", action="store_true")
+    resources.set_defaults(handler=_cmd_resources)
     return parser
 
 

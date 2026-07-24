@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "pins": [
+    {
+      "path": "resource-lifecycle-audit",
+      "reason": "published local validation evidence"
+    },
+    {
+      "path": "/data/xum/virtuoso_bridge_smoke/vda_example_gate_001",
+      "reason": "exact remote Gate root retained for independent review"
+    }
+  ]
+}

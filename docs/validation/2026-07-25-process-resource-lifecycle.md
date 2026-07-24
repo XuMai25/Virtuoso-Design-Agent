@@ -1,5 +1,7 @@
 # 2026-07-25 进程与资源生命周期审计
 
+> 同日 follow-up 已完成 ADE/Maestro 硬中断实机故障注入，并新增只读 retention/pin/age/size 盘点。见[资源取消、盘点与保留策略 follow-up Gate](2026-07-25-resource-cancellation-retention.md)。本页以下“未闭合”条目保留为首轮 direct Gate 当时的状态。
+
 ## 结论
 
 本 Gate 修复并真实验证了 direct Bridge worker 与 direct Spectre 的进程边界。VDA 每次 Bridge request 直接启动 Bridge Python worker，不启动 PowerShell；正常路径只复用一条固定的 SSH tunnel/jump chain。Windows 超时或调用方中断现在由 Job Object 清理完整本地后代树，worker 正常或 action-error 退出时显式关闭本次 Bridge client。远端 Spectre 由哈希匹配的 timeout guard 限定最大运行时间，子运行目录归属到唯一 VDA root。

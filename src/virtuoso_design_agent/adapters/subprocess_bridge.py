@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ DEFAULT_BRIDGE_PYTHON = Path(
 )
 _MARKER = "VDA_RESULT="
 _PROCESS_TREE_GRACE_SECONDS = 3.0
+_WORKER_COOPERATIVE_CLEANUP_SECONDS = 30.0
 
 _WORKER_ACTIONS = {
     CircuitKind.EXISTING_SCHEMATIC: {
@@ -180,6 +182,27 @@ def _terminate_process_tree(
         ) from cleanup_error
 
 
+def _cancel_then_terminate_process_tree(
+    process: subprocess.Popen[str],
+    *,
+    cancel_file: Path,
+    windows_job: _WindowsProcessJob | None = None,
+    cooperative_timeout: float = _WORKER_COOPERATIVE_CLEANUP_SECONDS,
+) -> bool:
+    """Let worker ``finally`` blocks run, then clear any local descendants."""
+
+    cooperative_cleanup = False
+    if process.poll() is None:
+        try:
+            cancel_file.touch(exist_ok=True)
+            process.wait(timeout=cooperative_timeout)
+            cooperative_cleanup = True
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    _terminate_process_tree(process, windows_job=windows_job)
+    return cooperative_cleanup
+
+
 def _drain_worker_pipes(process: subprocess.Popen[str]) -> None:
     try:
         process.communicate(timeout=_PROCESS_TREE_GRACE_SECONDS)
@@ -215,6 +238,12 @@ class SubprocessBridgeAdapter:
         env = os.environ.copy()
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = str(self.source_root) + (os.pathsep + existing if existing else "")
+        cancel_file = (
+            Path(tempfile.gettempdir())
+            / f"vda_bridge_cancel_{uuid.uuid4().hex}.flag"
+        )
+        env["VDA_WORKER_CANCEL_FILE"] = str(cancel_file)
+        env["VDA_WORKER_PARENT_PID"] = str(os.getpid())
         process = subprocess.Popen(
             [
                 str(self.bridge_python),
@@ -236,6 +265,7 @@ class SubprocessBridgeAdapter:
                 process.kill()
                 process.wait(timeout=_PROCESS_TREE_GRACE_SECONDS)
                 _drain_worker_pipes(process)
+                cancel_file.unlink(missing_ok=True)
                 raise BridgeWorkerError(
                     "Bridge worker was not started because Windows process-tree "
                     f"containment failed: {type(exc).__name__}: {exc}"
@@ -246,8 +276,13 @@ class SubprocessBridgeAdapter:
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
+            cooperative_cleanup = False
             try:
-                _terminate_process_tree(process, windows_job=windows_job)
+                cooperative_cleanup = _cancel_then_terminate_process_tree(
+                    process,
+                    cancel_file=cancel_file,
+                    windows_job=windows_job,
+                )
             except Exception as cleanup_exc:
                 raise BridgeWorkerError(
                     f"Bridge worker timed out after {timeout}s during {action}; "
@@ -258,19 +293,28 @@ class SubprocessBridgeAdapter:
                 _drain_worker_pipes(process)
                 if windows_job is not None:
                     windows_job.close()
+                cancel_file.unlink(missing_ok=True)
             raise BridgeWorkerError(
-                f"Bridge worker timed out after {timeout}s during {action}"
+                f"Bridge worker timed out after {timeout}s during {action}; "
+                "cooperative cleanup "
+                + ("completed" if cooperative_cleanup else "was not confirmed")
             ) from exc
         except BaseException:
             try:
-                _terminate_process_tree(process, windows_job=windows_job)
+                _cancel_then_terminate_process_tree(
+                    process,
+                    cancel_file=cancel_file,
+                    windows_job=windows_job,
+                )
             finally:
                 _drain_worker_pipes(process)
                 if windows_job is not None:
                     windows_job.close()
+                cancel_file.unlink(missing_ok=True)
             raise
         if windows_job is not None:
             windows_job.close()
+        cancel_file.unlink(missing_ok=True)
         result_line = next(
             (line for line in reversed(stdout.splitlines()) if line.startswith(_MARKER)),
             None,
@@ -385,6 +429,20 @@ class SubprocessBridgeAdapter:
         profile = load_pdk_profile(pdk_profile)
         data = self._request(
             "probe", {"profile": profile.model_dump(mode="json")}, timeout=30
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
+
+    def audit_resources(
+        self, pdk_profile: str, *, older_than_days: float = 7.0
+    ) -> AdapterResult:
+        profile = load_pdk_profile(pdk_profile)
+        data = self._request(
+            "audit_resources",
+            {
+                "profile": profile.model_dump(mode="json"),
+                "older_than_days": older_than_days,
+            },
+            timeout=300,
         )
         return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
 
