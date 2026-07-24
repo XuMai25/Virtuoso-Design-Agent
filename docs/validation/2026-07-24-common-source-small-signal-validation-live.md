@@ -166,6 +166,7 @@ OA 结构是 `bridge_readback`；`si` netlist、OP、raw AC 与 Spectre metrics 
 5. PVT 是可选后续，不默认增加成本；切换 PDK/corner/temperature 时旧证据失效。
 6. Spectre 仍是最终规格证据；本 Gate 不授权自动 OA 写回。
 
-下一道 Gate 7C 先复用同一 common-source parser/binder/solver 到已有源极退化 cell，
-只增加 RS0/NSRC 图差异和对应 exact-geometry 表。通过后再扩到含多个 MOS 和不同
-polarity/角色的差分对。
+Gate 7C 随后已复用同一 parser/binder/solver 到已有源极退化 cell，并增加从 real-si
+实例生成绑定 characterization task 的窄接口；结果见
+`2026-07-24-source-degenerated-small-signal-migration-live.md`。下一道理论 Gate 扩到含
+多个 MOS 和不同 polarity/角色的差分对。

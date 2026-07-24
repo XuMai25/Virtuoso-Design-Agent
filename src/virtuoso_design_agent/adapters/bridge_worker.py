@@ -9992,6 +9992,11 @@ def characterize_mos_devices(payload: dict[str, Any]) -> dict[str, Any]:
             "temperature_c": settings.temperature_c,
             "width_um": settings.width_um,
             "model_parameters_by_polarity": settings.model_parameters_by_polarity,
+            "source_instance_binding": (
+                settings.source_instance_binding.model_dump(mode="json")
+                if settings.source_instance_binding is not None
+                else None
+            ),
             "raw_point_evidence_source": "eda_result",
             "points": returned_points,
             "tool_version": tool_version,

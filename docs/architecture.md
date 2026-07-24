@@ -119,6 +119,16 @@ small-signal schema 相同，能直接被本地矩阵核心消费。Gate 7B 又�
 完全一致。artifact 仍嵌在 run record，没有引入 registry/database；PVT、不同 finger/
 multiplicity 参数面、多维边缘留出仍需按任务显式表征，不能授权理论值直接写 OA。
 
+Gate 7C 增加 `vda characterization-task-from-run`，解决跨 cell/几何迁移时人工复制
+扩散/LDE 参数的问题。它只接受成功的 real Bridge read-only OA + compute run，从选定
+operating condition 的结构化 `si` 实例提取 model、exact W/L 和完整 numeric parameter
+signature，再与单独的用户审查 bias-grid template 合成普通 `device.characterize` task。
+生成任务内保留 source run、task/action、netlist、instance、PVT、topology、model/W/L 和
+signature 的 SHA-256 binding；来源实例是 `eda_result`，任务推导是
+`software_inference`。当前自动路径保守限制 `nf=1、multiplicity=1`，多指/并联器件必须
+另立证据，不按线性宽度缩放猜测。下游复用按 model/W/L/signature 匹配，不要求其他
+cell 沿用来源实例名；来源名只用于追溯。
+
 ## 理论先导尺寸分析
 
 `vda theory` 是 Bridge 之前的纯本地分析面，不属于远端 task operation，也不生成计划 token、OA 写入或 Spectre 结果。首版只支持已经进入 Gate 6 的固定拓扑 `nmos_differential_pair_pmos_current_mirror_load_with_tail_device`，不把一个通用方程求解器伪装成任意电路综合。
@@ -158,12 +168,27 @@ MOS characterization 点不绑定“输入管/负载管/尾管”等电路角色
 
 Gate 7B 新增 `vda small-signal-validate` 作为 run-record 后处理入口。它只接受 real Bridge 的独立器件表记录和只读 OA/`si`/Spectre 电路记录；demo、OA 写 action、target/PVT 漂移、空 AC、缺失 raw hash 或 evidence source 降级都会拒绝。binder 从结构化 `si` 实例生成 MOS/R/C 图，以真实 DC OP 而非理论 DC 解确定 VGS/VDS/VSB，在 exact L 平面内做有角点权重记录的 VGS/VDS/VSB rectilinear interpolation，并拒绝所有 bias extrapolation。W 平面和除 `w/l/nf/m/multi` 外的模型参数集合/值必须与 `si` 完全相同；匹配集合另存 count 与 SHA-256。随后通用矩阵核心在原始 EDA 频率网格预测 gain、phase、−3 dB bandwidth 和 GBW，并按运行前固定 policy 同 Spectre OP/AC 比较。
 
+Gate 7C 没有增加源极退化专用 AC 公式。binder 遍历 `si` MOS/R instances，发现 MOS
+source 不是固定 `VSS` 时，必须从真实连接中找到唯一的 source-node→`VSS` 电阻，并把
+该内节点纳入同一个 `Y(f)`；`source_degenerated_common_source` policy 还要求 EDA DC
+`source_degeneration_consistency=matched`。因此 `RS0` 数值、`NSRC` 电位与 body effect
+都来自图和 OP，不是 topology 名称触发的硬编码增益修正式。RS 接错、内节点电压与
+VGS/VDS 不一致、source-current 不匹配均在预测前拒绝。
+
 该严格签名只属于理论验证 policy，不收窄 Bridge 仿真面。common-source parser 对普通
 `simulation.run` 仍保留无法结构化的未知 Spectre parameter token 并继续原流程；只有
 `require_exact_model_parameters=true` 的 Gate 才因签名不完整而拒绝。探索性 policy 可
-显式关闭 exact signature，但这种结果不能作为 Gate 7B exact-geometry 证据。
+显式关闭 exact signature，但这种结果不能作为 Gate 7B/7C exact-geometry 证据。
 
-首个 nominal `top_tt` 共源 held-out circuit 已通过：DC Id/gm/gds/VDSAT 误差分别为 7.57%/9.78%/11.04%/0.78%，增益误差 0.464 dB，BW/GBW 相对误差 10.38%/15.05%，相位门也通过。中间的 W=1 µm 表和未携带 LDE 的 W=0.5 µm 表均按原门限保留为 partial，促成了完整 31 项 `si` 参数签名而不是放宽门限。当前自动 binder 只提升了已验证的 common-source readback schema；矩阵核心本身仍拓扑无关。下一步是让源极退化复用同一 binder/solver 并建立自己的 held-out Spectre 证据，再处理多 MOS 的差分对；PVT 可选，Spectre 始终是最终规格证据。
+首个 nominal `top_tt` 共源 held-out circuit 已通过：DC Id/gm/gds/VDSAT 误差分别为 7.57%/9.78%/11.04%/0.78%，增益误差 0.464 dB，BW/GBW 相对误差 10.38%/15.05%，相位门也通过。中间的 W=1 µm 表和未携带 LDE 的 W=0.5 µm 表均按原门限保留为 partial，促成了完整 31 项 `si` 参数签名而不是放宽门限。
+
+随后源极退化 `vda_cs_ac_tradeoff_001` 也通过相同 policy 阈值。旧任务声明 W=0.5 µm
+而当前 OA 为 1 µm 的第一次执行在 Spectre 前拒绝；刷新 `si` 后由上述生成器建立新的
+1 µm/31 参数表。最终图绑定 `MN0/ RD0/RS0/NSRC`，Id/gm/gds/VDSAT 误差为
+17.59%/17.69%/21.36%/2.82%，gain/BW/GBW 误差为 0.374 dB/13.52%/17.16%，全部
+通过未改变的 25%/0.5 dB/5° Gate。当前提升的是 single-MOS common-source readback
+schema；下一步扩到多 MOS、不同 polarity/角色的差分对。PVT 可选，Spectre 始终是
+最终规格证据。
 
 ## ADE 人工介入与状态所有权
 

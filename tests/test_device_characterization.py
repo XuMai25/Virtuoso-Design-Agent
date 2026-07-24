@@ -141,6 +141,11 @@ def _raw_result(task: TaskSpec) -> dict:
         "model_parameters_by_polarity": deepcopy(
             settings.model_parameters_by_polarity
         ),
+        "source_instance_binding": (
+            settings.source_instance_binding.model_dump(mode="json")
+            if settings.source_instance_binding is not None
+            else None
+        ),
         "raw_point_evidence_source": "eda_result",
         "points": points,
         "tool_version": "test-spectre",
@@ -298,6 +303,35 @@ def test_normalization_builds_real_pdk_artifact_and_passes_linear_holdouts() -> 
     assert artifact["normalized_point_evidence_source"] == "software_inference"
     assert normalized["holdout_audit"]["passed"] is True
     assert normalized["bias_and_sign_consistency"] == "matched"
+
+
+def test_normalization_preserves_source_instance_derivation_binding() -> None:
+    payload = _task().model_dump(mode="json")
+    payload["device_characterization"]["source_instance_binding"] = {
+        "source_run_sha256": "a" * 64,
+        "source_task_id": "source-circuit",
+        "source_action": "simulation.candidate.1",
+        "source_instance": "MN0",
+        "source_netlist_sha256": "b" * 64,
+        "source_pdk_profile": "nics4304_tsmc28",
+        "source_process_corner": "top_tt",
+        "source_temperature_c": 27.0,
+        "source_topology_variant": "source_degenerated_common_source",
+        "source_model": "nch_lvt_mac",
+        "source_width_um": 1.0,
+        "source_length_um": 0.03,
+        "source_model_parameter_count": 2,
+        "source_model_parameters_sha256": "c" * 64,
+    }
+    task = TaskSpec.model_validate(payload)
+
+    normalized = normalize_mos_characterization(task, _raw_result(task))
+
+    binding = normalized["artifact"]["source_instance_binding"]
+    assert binding["source_run_sha256"] == "a" * 64
+    assert binding["source_instance"] == "MN0"
+    assert binding["source_evidence_source"] == "eda_result"
+    assert binding["derivation_evidence_source"] == "software_inference"
 
 
 def test_normalized_real_artifact_is_consumed_by_generic_small_signal_core() -> None:

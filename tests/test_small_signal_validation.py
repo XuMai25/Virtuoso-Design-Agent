@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -27,27 +28,28 @@ def _artifact() -> dict:
     points = []
     for vgs in (0.3, 0.5):
         for vds in (0.4, 0.6):
-            points.append(
-                {
-                    "id": f"n-{vgs}-{vds}",
-                    "model": "test_nmos",
-                    "polarity": "nmos",
-                    "length_um": 0.03,
-                    "vgs_magnitude_v": vgs,
-                    "vds_magnitude_v": vds,
-                    "vsb_magnitude_v": 0.0,
-                    "vdsat_magnitude_v": 0.1,
-                    "drain_current_density_a_per_um": 40e-6,
-                    "gm_over_id_per_v": 10.0,
-                    "gds_over_id_per_v": 0.5,
-                    "gmb_over_id_per_v": 0.0,
-                    "cgs_f_per_um": 0.0,
-                    "cgd_f_per_um": 0.0,
-                    "cgb_f_per_um": 0.0,
-                    "cdb_f_per_um": 1e-12,
-                    "csb_f_per_um": 0.0,
-                }
-            )
+            for vsb in (0.0, 0.16):
+                points.append(
+                    {
+                        "id": f"n-{vgs}-{vds}-{vsb}",
+                        "model": "test_nmos",
+                        "polarity": "nmos",
+                        "length_um": 0.03,
+                        "vgs_magnitude_v": vgs,
+                        "vds_magnitude_v": vds,
+                        "vsb_magnitude_v": vsb,
+                        "vdsat_magnitude_v": 0.1,
+                        "drain_current_density_a_per_um": 40e-6,
+                        "gm_over_id_per_v": 10.0,
+                        "gds_over_id_per_v": 0.5,
+                        "gmb_over_id_per_v": 0.0,
+                        "cgs_f_per_um": 0.0,
+                        "cgd_f_per_um": 0.0,
+                        "cgb_f_per_um": 0.0,
+                        "cdb_f_per_um": 1e-12,
+                        "csb_f_per_um": 0.0,
+                    }
+                )
     return {
         "schema_version": 1,
         "id": "test-mos-table",
@@ -282,6 +284,75 @@ def _circuit_run() -> dict:
     }
 
 
+def _source_degenerated_circuit_run() -> dict:
+    circuit = _circuit_run()
+    details = circuit["actions"][0]["details"]
+    evidence = details["evidence"]
+    source_resistance_ohm = 2_000.0
+    source_voltage_v = 0.08
+    drain_voltage_v = 0.5
+
+    details["parameters"]["bias_v"] = 0.48
+    details["parameters"]["source_resistance_ohm"] = source_resistance_ohm
+    for section in (evidence["schematic_readback"], evidence["netlist"]):
+        section["semantic_parameters"][
+            "source_resistance_ohm"
+        ] = source_resistance_ohm
+        section["topology_variant"] = "source_degenerated_common_source"
+    evidence["netlist"]["instances"]["MN0"]["nodes"] = [
+        "OUT",
+        "IN",
+        "NSRC",
+        "VSS",
+    ]
+    evidence["netlist"]["instances"]["RS0"] = {
+        "nodes": ["NSRC", "VSS"],
+        "model": "resistor",
+        "resistance_ohm": source_resistance_ohm,
+    }
+    evidence["testbench"]["values"]["bias_v"] = 0.48
+    operating_point = evidence["operating_point"]
+    operating_point["node_values_v"] = {
+        "IN": 0.48,
+        "OUT": drain_voltage_v,
+        "VDD": 0.9,
+        "VSS": 0.0,
+        "NSRC": source_voltage_v,
+    }
+    operating_point["device_values"]["vgs_v"] = 0.4
+    operating_point["device_values"]["vds_v"] = (
+        drain_voltage_v - source_voltage_v
+    )
+    operating_point["source_degeneration_consistency"] = "matched"
+
+    gm_s = operating_point["device_values"]["gm_s"]
+    gds_s = operating_point["device_values"]["gds_s"]
+    load_resistance_ohm = details["parameters"]["load_resistance_ohm"]
+    gain = gm_s * load_resistance_ohm / (
+        1.0
+        + gm_s * source_resistance_ohm
+        + gds_s * (load_resistance_ohm + source_resistance_ohm)
+    )
+    effective_gds_s = gds_s / (
+        1.0 + (gm_s + gds_s) * source_resistance_ohm
+    )
+    output_conductance_s = 1.0 / load_resistance_ohm + effective_gds_s
+    load_capacitance_f = 1e-12 + 1e-15
+    bandwidth_hz = output_conductance_s / (
+        2.0 * math.pi * load_capacitance_f
+    )
+    details["metrics"].update(
+        {
+            "low_frequency_gain_db": 20.0 * math.log10(gain),
+            "low_frequency_phase_deg": 180.0,
+            "bandwidth_3db_hz": bandwidth_hz,
+            "phase_at_bandwidth_deg": 135.0,
+            "gain_bandwidth_product_hz": gain * bandwidth_hz,
+        }
+    )
+    return circuit
+
+
 def _policy() -> dict:
     return {
         "schema_version": 1,
@@ -316,6 +387,43 @@ def _write_inputs(
     )
     circuit_path.write_text(json.dumps(circuit or _circuit_run()), encoding="utf-8")
     return characterization_path, circuit_path
+
+
+def _add_source_instance_binding(characterization: dict) -> None:
+    model_parameters = characterization["actions"][1]["details"]["artifact"][
+        "model_parameters_by_polarity"
+    ]["nmos"]
+    signature = hashlib.sha256(
+        json.dumps(
+            model_parameters,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    binding = {
+        "source_evidence_source": "eda_result",
+        "derivation_evidence_source": "software_inference",
+        "source_run_sha256": "e" * 64,
+        "source_task_id": "source-characterization-seed",
+        "source_action": "simulation.candidate.1",
+        "source_instance": "MN0",
+        "source_netlist_sha256": "f" * 64,
+        "source_pdk_profile": "test_pdk",
+        "source_process_corner": "test_tt",
+        "source_temperature_c": 27.0,
+        "source_topology_variant": "common_source",
+        "source_model": "test_nmos",
+        "source_width_um": 1.0,
+        "source_length_um": 0.03,
+        "source_model_parameter_count": len(model_parameters),
+        "source_model_parameters_sha256": signature,
+    }
+    characterization["actions"][0]["details"][
+        "source_instance_binding"
+    ] = copy.deepcopy(binding)
+    characterization["actions"][1]["details"]["artifact"][
+        "source_instance_binding"
+    ] = binding
 
 
 def test_rectilinear_interpolation_records_corners_and_rejects_length_guessing() -> None:
@@ -375,6 +483,166 @@ def test_same_source_validation_binds_graph_bias_raw_files_and_ac_metrics(
     assert result.evidence_sources["network_prediction"].value == (
         "software_inference"
     )
+
+
+def test_same_binder_and_characterization_plane_migrate_to_source_degeneration(
+    tmp_path: Path,
+) -> None:
+    circuit = _source_degenerated_circuit_run()
+    policy = _policy()
+    policy["id"] = "test-gate7c-source-degenerated"
+    policy["expected_topology_variant"] = "source_degenerated_common_source"
+    characterization_path, circuit_path = _write_inputs(tmp_path, circuit)
+
+    result = validate_common_source_small_signal_runs(
+        SmallSignalCircuitValidationPolicy.model_validate(policy),
+        characterization_path,
+        circuit_path,
+    )
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert result.gate_passed is True
+    assert result.graph_binding["topology_equation_hardcoded"] is False
+    assert result.graph_binding["resistor_instances"] == ["RD0", "RS0"]
+    assert result.graph_binding["source_degeneration_bindings"] == [
+        {
+            "mos_instance": "MN0",
+            "source_node": "NSRC",
+            "reference_node": "VSS",
+            "resistor_instance": "RS0",
+            "resistance_ohm": 2_000.0,
+        }
+    ]
+    assert result.graph_binding["model_parameter_signatures"]["MN0"][
+        "parameter_count"
+    ] == 2
+
+
+def test_validation_can_require_a_reusable_source_instance_binding(
+    tmp_path: Path,
+) -> None:
+    characterization = _characterization_run()
+    _add_source_instance_binding(characterization)
+    policy = _policy()
+    policy["require_characterization_source_instance_binding"] = True
+    characterization_path, circuit_path = _write_inputs(
+        tmp_path,
+        characterization=characterization,
+    )
+
+    result = validate_common_source_small_signal_runs(
+        SmallSignalCircuitValidationPolicy.model_validate(policy),
+        characterization_path,
+        circuit_path,
+    )
+
+    assert result.gate_passed is True
+    assert result.graph_binding["characterization_source_instance_binding"][
+        "source_instance"
+    ] == "MN0"
+    assert result.graph_binding["characterization_source_matching_instances"] == [
+        "MN0"
+    ]
+    assert (
+        result.graph_binding["characterization_source_run_is_current_circuit_run"]
+        is False
+    )
+    assert result.evidence_sources["characterization_source_instance"].value == (
+        "eda_result"
+    )
+
+
+def test_source_instance_binding_reuses_identity_across_instance_names(
+    tmp_path: Path,
+) -> None:
+    characterization = _characterization_run()
+    _add_source_instance_binding(characterization)
+    circuit = _circuit_run()
+    instances = circuit["actions"][0]["details"]["evidence"]["netlist"][
+        "instances"
+    ]
+    instances["MCORE"] = instances.pop("MN0")
+    policy = _policy()
+    policy["require_characterization_source_instance_binding"] = True
+    characterization_path, circuit_path = _write_inputs(
+        tmp_path,
+        circuit=circuit,
+        characterization=characterization,
+    )
+
+    result = validate_common_source_small_signal_runs(
+        SmallSignalCircuitValidationPolicy.model_validate(policy),
+        characterization_path,
+        circuit_path,
+    )
+
+    assert result.gate_passed is True
+    assert result.graph_binding["mos_instances"] == ["MCORE"]
+    assert result.graph_binding["characterization_source_matching_instances"] == [
+        "MCORE"
+    ]
+
+
+def test_required_source_instance_binding_rejects_signature_drift(
+    tmp_path: Path,
+) -> None:
+    characterization = _characterization_run()
+    _add_source_instance_binding(characterization)
+    characterization["actions"][0]["details"]["source_instance_binding"][
+        "source_model_parameters_sha256"
+    ] = "0" * 64
+    characterization["actions"][1]["details"]["artifact"][
+        "source_instance_binding"
+    ]["source_model_parameters_sha256"] = "0" * 64
+    policy = _policy()
+    policy["require_characterization_source_instance_binding"] = True
+    characterization_path, circuit_path = _write_inputs(
+        tmp_path,
+        characterization=characterization,
+    )
+
+    with pytest.raises(ValueError, match="source-instance signature"):
+        validate_common_source_small_signal_runs(
+            SmallSignalCircuitValidationPolicy.model_validate(policy),
+            characterization_path,
+            circuit_path,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("wrong_source_resistor_node", "must connect to VSS"),
+        ("missing_dc_consistency", "source-degeneration consistency"),
+        ("inconsistent_source_voltage", "VGS does not match DC node voltages"),
+    ],
+)
+def test_source_degenerated_binding_rejects_broken_graph_or_dc_evidence(
+    tmp_path: Path, mutation: str, message: str
+) -> None:
+    circuit = _source_degenerated_circuit_run()
+    details = circuit["actions"][0]["details"]
+    if mutation == "wrong_source_resistor_node":
+        details["evidence"]["netlist"]["instances"]["RS0"]["nodes"] = [
+            "NSRC",
+            "VDD",
+        ]
+    elif mutation == "missing_dc_consistency":
+        details["evidence"]["operating_point"].pop(
+            "source_degeneration_consistency"
+        )
+    else:
+        details["evidence"]["operating_point"]["node_values_v"]["NSRC"] = 0.1
+    policy = _policy()
+    policy["expected_topology_variant"] = "source_degenerated_common_source"
+    characterization_path, circuit_path = _write_inputs(tmp_path, circuit)
+
+    with pytest.raises(ValueError, match=message):
+        validate_common_source_small_signal_runs(
+            SmallSignalCircuitValidationPolicy.model_validate(policy),
+            characterization_path,
+            circuit_path,
+        )
 
 
 def test_validation_selects_one_explicit_operating_condition(tmp_path: Path) -> None:

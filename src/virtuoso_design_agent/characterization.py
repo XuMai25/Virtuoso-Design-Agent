@@ -12,6 +12,7 @@ from typing import Any, Literal
 from pydantic import ConfigDict, Field, StrictStr, model_validator
 
 from .models import (
+    DeviceCharacterizationSourceBinding,
     DeviceCharacterizationSpec,
     EvidenceSource,
     StrictModel,
@@ -87,6 +88,7 @@ class MosCharacterizationArtifact(_FiniteStrictModel):
     model_parameters_by_polarity: dict[
         Literal["nmos", "pmos"], dict[StrictStr, StrictStr]
     ] = Field(default_factory=dict)
+    source_instance_binding: DeviceCharacterizationSourceBinding | None = None
     raw_data_evidence_source: EvidenceSource
     normalized_point_evidence_source: EvidenceSource
     points: list[MosSmallSignalPoint] = Field(min_length=1, max_length=4096)
@@ -582,6 +584,11 @@ def normalize_mos_characterization(
         "temperature_c": settings.temperature_c,
         "width_um": settings.width_um,
         "model_parameters_by_polarity": settings.model_parameters_by_polarity,
+        "source_instance_binding": (
+            settings.source_instance_binding.model_dump(mode="json")
+            if settings.source_instance_binding is not None
+            else None
+        ),
         "raw_point_evidence_source": EvidenceSource.EDA_RESULT.value,
     }
     for name, expected in expected_header.items():
@@ -639,6 +646,7 @@ def normalize_mos_characterization(
         temperature_c=settings.temperature_c,
         characterized_width_um=settings.width_um,
         model_parameters_by_polarity=settings.model_parameters_by_polarity,
+        source_instance_binding=settings.source_instance_binding,
         raw_data_evidence_source=EvidenceSource.EDA_RESULT,
         normalized_point_evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
         points=training,

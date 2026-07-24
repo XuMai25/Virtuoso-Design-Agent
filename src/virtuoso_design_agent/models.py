@@ -1427,6 +1427,46 @@ class MosCharacterizationHoldout(StrictModel):
         return self
 
 
+class DeviceCharacterizationSourceBinding(StrictModel):
+    """Trace one generated MOS task back to a structured real-si instance."""
+
+    source_evidence_source: Literal["eda_result"] = "eda_result"
+    derivation_evidence_source: Literal["software_inference"] = "software_inference"
+    source_run_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    source_task_id: StrictStr = Field(
+        min_length=1,
+        max_length=96,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
+    source_action: StrictStr = Field(min_length=1, max_length=128)
+    source_instance: StrictStr = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_$.-]*$",
+    )
+    source_netlist_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    source_pdk_profile: StrictStr = Field(min_length=1, max_length=96)
+    source_process_corner: StrictStr = Field(min_length=1, max_length=64)
+    source_temperature_c: float = Field(ge=-273.15, le=300.0)
+    source_topology_variant: StrictStr = Field(min_length=1, max_length=96)
+    source_model: StrictStr = Field(
+        min_length=1,
+        max_length=96,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_$.-]*$",
+    )
+    source_width_um: float = Field(gt=0.0)
+    source_length_um: float = Field(gt=0.0)
+    source_model_parameter_count: int = Field(ge=0, le=64)
+    source_model_parameters_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_finite_values(self) -> "DeviceCharacterizationSourceBinding":
+        for name in ("source_temperature_c", "source_width_um", "source_length_um"):
+            if not math.isfinite(float(getattr(self, name))):
+                raise ValueError(f"{name} must be finite")
+        return self
+
+
 class DeviceCharacterizationSpec(StrictModel):
     """Finite, topology-independent MOS operating-point characterization."""
 
@@ -1438,6 +1478,7 @@ class DeviceCharacterizationSpec(StrictModel):
     model_parameters_by_polarity: dict[
         Literal["nmos", "pmos"], dict[StrictStr, StrictStr]
     ] = Field(default_factory=dict)
+    source_instance_binding: DeviceCharacterizationSourceBinding | None = None
     lengths_um: list[float] = Field(min_length=1, max_length=8)
     vgs_magnitudes_v: list[float] = Field(min_length=1, max_length=16)
     vds_magnitudes_v: list[float] = Field(min_length=1, max_length=16)

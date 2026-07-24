@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "id": "mos-device-characterize-cs-degenerated-mn0-top-tt",
+  "operation": "device.characterize",
+  "circuit": "mos_device",
+  "pdk_profile": "nics4304_tsmc28",
+  "device_characterization": {
+    "polarities": [
+      "nmos"
+    ],
+    "width_um": 1.0,
+    "model_parameters_by_polarity": {
+      "nmos": {
+        "ad": "7.5e-14",
+        "as": "7.5e-14",
+        "dfm_flag": "0",
+        "nrd": "0.289519",
+        "nrs": "0.289519",
+        "pd": "2.15u",
+        "ps": "2.15u",
+        "sa": "75.0n",
+        "sa1": "75.0n",
+        "sa2": "75.0n",
+        "sa3": "75.0n",
+        "sa4": "75.0n",
+        "sap": "91.9776n",
+        "sapb": "114.444n",
+        "sb": "75.0n",
+        "sb1": "75.0n",
+        "sb2": "75.0n",
+        "sb3": "75.0n",
+        "sd": "100n",
+        "spa": "100n",
+        "spa1": "100n",
+        "spa2": "100n",
+        "spa3": "100n",
+        "spba": "115.715n",
+        "spba1": "117.043n",
+        "spmb": "1.11111e+15",
+        "spmt": "1.11111e+15",
+        "spomb": "0",
+        "spomb1": "1.11111e+60",
+        "spomt": "0",
+        "spomt1": "1.11111e+60"
+      }
+    },
+    "source_instance_binding": {
+      "source_evidence_source": "eda_result",
+      "derivation_evidence_source": "software_inference",
+      "source_run_sha256": "b20be4b3636b813cd320722bfe280c875ca1606df983e319f997c5fe10139f16",
+      "source_task_id": "common-source-small-signal-degenerated-heldout",
+      "source_action": "simulation.candidate.1",
+      "source_instance": "MN0",
+      "source_netlist_sha256": "cdddb1f631d4baaec731c6c4567077ea2c330be5efdbc9156e6f02289e8d91f4",
+      "source_pdk_profile": "nics4304_tsmc28",
+      "source_process_corner": "top_tt",
+      "source_temperature_c": 27.0,
+      "source_topology_variant": "source_degenerated_common_source",
+      "source_model": "nch_lvt_mac",
+      "source_width_um": 1.0,
+      "source_length_um": 0.03,
+      "source_model_parameter_count": 31,
+      "source_model_parameters_sha256": "9efdaa2cd4f40504a92aafc155b7a74dda3d04ddf001c82707c04680a22a690b"
+    },
+    "lengths_um": [
+      0.03
+    ],
+    "vgs_magnitudes_v": [
+      0.3,
+      0.4,
+      0.5,
+      0.6
+    ],
+    "vds_magnitudes_v": [
+      0.15,
+      0.3,
+      0.45,
+      0.6,
+      0.75
+    ],
+    "vsb_magnitudes_v": [
+      0.0,
+      0.075,
+      0.15
+    ],
+    "holdout_points": [
+      {
+        "polarity": "nmos",
+        "length_um": 0.03,
+        "vgs_magnitude_v": 0.35,
+        "vds_magnitude_v": 0.375,
+        "vsb_magnitude_v": 0.075
+      }
+    ],
+    "temperature_c": 27.0,
+    "maximum_holdout_normalized_error": 0.25
+  },
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "replace_existing": false
+  },
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 900
+  }
+}

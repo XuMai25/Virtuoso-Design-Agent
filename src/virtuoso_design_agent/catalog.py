@@ -72,7 +72,9 @@ OA_SEMANTIC_PARAMETER_NAMES: dict[CircuitKind, frozenset[str]] = {
 CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     CircuitKind.MOS_DEVICE: CircuitCapability(
         circuit=CircuitKind.MOS_DEVICE,
-        stage="Gate 7A characterization + Gate 7B common-source validation",
+        stage=(
+            "Gate 7A characterization + Gate 7B/7C common-source validation"
+        ),
         executable=True,
         operations=(Operation.DEVICE_CHARACTERIZE,),
         parameters=(),
@@ -82,9 +84,10 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "SHA-256 manifest + finite NMOS/PMOS sign-normalized gm/gds/gmb and "
             "terminal-capacitance table + declared interpolation holdout audit; "
             "240-point nominal TSMC N28 top_tt table and four real holdouts live; "
-            "exact-width and 31-parameter si signature common-source held-out "
-            "DC/gain/phase/BW/GBW validation live; source-degenerated and "
-            "multi-MOS topology migration plus optional PVT pending"
+            "exact-width and 31-parameter si signature nominal/source-degenerated "
+            "common-source held-out DC/gain/phase/BW/GBW validation live; "
+            "real-si-derived characterization task binding live; multi-MOS "
+            "topology migration plus optional PVT pending"
         ),
     ),
     CircuitKind.EXISTING_SCHEMATIC: CircuitCapability(
@@ -165,7 +168,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     ),
     CircuitKind.SOURCE_DEGENERATED_COMMON_SOURCE: CircuitCapability(
         circuit=CircuitKind.SOURCE_DEGENERATED_COMMON_SOURCE,
-        stage="Gate 2",
+        stage="Gate 7C verified through the common_source topology variant",
         executable=False,
         operations=(),
         parameters=(
@@ -176,7 +179,11 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "load_ff",
         ),
         explicit_instance_parameters=False,
-        evidence_gate="DC operating point + AC gain/bandwidth + degeneration check",
+        evidence_gate=(
+            "no separate executor or duplicated template; use common_source plus "
+            "the reversible source-degeneration transform. OA/si/DC/AC, bounded "
+            "tuning, and exact-signature small-signal migration are live"
+        ),
     ),
     CircuitKind.DIFFERENTIAL_PAIR: CircuitCapability(
         circuit=CircuitKind.DIFFERENTIAL_PAIR,

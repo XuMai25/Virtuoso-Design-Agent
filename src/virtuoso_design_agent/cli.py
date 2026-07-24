@@ -13,6 +13,10 @@ from pydantic import ValidationError
 from .adapters import DeterministicDemoAdapter, SubprocessBridgeAdapter
 from .adapters.subprocess_bridge import BridgeWorkerError
 from .catalog import UnsupportedCapability, catalog_as_dicts
+from .characterization_seed import (
+    DeviceCharacterizationGridTemplate,
+    derive_device_characterization_task,
+)
 from .executor import (
     TaskExecutor,
     load_execution_checkpoint,
@@ -153,6 +157,30 @@ def _cmd_small_signal_validate(args: argparse.Namespace) -> int:
     return 0 if result.status is RunStatus.SUCCEEDED else 1
 
 
+def _cmd_characterization_task_from_run(args: argparse.Namespace) -> int:
+    template = DeviceCharacterizationGridTemplate.model_validate_json(
+        args.template.read_text(encoding="utf-8")
+    )
+    task = derive_device_characterization_task(
+        template,
+        args.circuit_run,
+        task_id=args.id,
+        instance_name=args.instance,
+        polarity=args.polarity,
+        source_action=args.source_action,
+        operating_condition_name=args.operating_condition,
+    )
+    payload = task.model_dump_json(
+        indent=2,
+        exclude_none=True,
+        exclude_unset=True,
+    )
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(payload + "\n", encoding="utf-8")
+    print(payload)
+    return 0
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     task = _load_task(args.task)
     plan = build_plan(task)
@@ -281,6 +309,30 @@ def build_parser() -> argparse.ArgumentParser:
     small_signal_validate.add_argument("circuit_run", type=Path)
     small_signal_validate.add_argument("--output", type=Path)
     small_signal_validate.set_defaults(handler=_cmd_small_signal_validate)
+
+    characterization_task = subparsers.add_parser(
+        "characterization-task-from-run",
+        help=(
+            "derive a bounded standalone MOS characterization task from one "
+            "structured real-si instance"
+        ),
+    )
+    characterization_task.add_argument("template", type=Path)
+    characterization_task.add_argument("circuit_run", type=Path)
+    characterization_task.add_argument("--id", required=True)
+    characterization_task.add_argument("--instance", required=True)
+    characterization_task.add_argument(
+        "--polarity",
+        choices=("nmos", "pmos"),
+        required=True,
+    )
+    characterization_task.add_argument(
+        "--source-action",
+        default="simulation.candidate.1",
+    )
+    characterization_task.add_argument("--operating-condition")
+    characterization_task.add_argument("--output", type=Path, required=True)
+    characterization_task.set_defaults(handler=_cmd_characterization_task_from_run)
 
     run = subparsers.add_parser("run", help="plan or execute a task")
     run.add_argument("task", type=Path)

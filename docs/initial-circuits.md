@@ -100,7 +100,7 @@ Gate 4 的真实尾管能力继续保留；Gate 5 不替换它，而是在其上
 
 为避免上述几何小网格退化成随意试值，Gate 6 已增加本地 theory-first 尺寸入口。它对声明的输入 NMOS/PMOS 负载/尾管 gm/Id 表域逐组合解析求解最小支路电流与 W，而不是把人工 W 列表重新排序；增益、BW、GBW、功耗、面积代理和三管 KVL 余量都保留公式、裕量与证据来源。只有完整穷尽声明表域时才报告 `best_in_declared_discrete_domain`，从不报告连续或全局最优。六点真实 Wn×Wp 同源数据现已把固定 `top_tt`/30 nm L/单偏置下的一阶增益与带宽模型校准到最大留一误差小于 `0.46%`，并由一次新鲜只读同点 Spectre 复跑确认执行重复性；这只证明 topology-local 表内模型。独立 TSMC N28 MOS gm/Id 表、L/VDS/BIAS/VCM/CL/PVT 范围和未参与拟合的电路点仍未闭合，因此 synthetic 推荐与该局部校准都不得直接写回 OA。
 
-该固定拓扑尺寸器之下现已增加通用 MOS/R/C 小信号矩阵核心。它不识别 Gate 2/3/4/5/6 名称，同一套器件点和节点 stamping 已覆盖共源、源退化共源、NMOS 差分对与 PMOS 共源本地解析测试。后续新电路不应复制一套 AC 方程；应先由 OA/`si` 图绑定通用网络，再由少量 topology-aware 层定义设计意图、约束和允许的结构变换。对于尚未进入正式 JSON 契约的特殊受控源、激励或辅助方程，电路脚本可复用公开的 `ComplexNodalSystem` 系数/RHS 接口或 raw complex MNA solver；重复出现并通过 Spectre 对照后才提升为正式 element/metric。Gate 7A 已补上 nominal TSMC N28 独立器件表，Gate 7B 又完成首个 exact-geometry 共源 OA/`si` 图、真实 DC 偏置和 held-out AC 对照；源退化与差分对尚未取得同等级 live 证据，所以该通过不能外推到所有电路 Gate。
+该固定拓扑尺寸器之下现已增加通用 MOS/R/C 小信号矩阵核心。它不识别 Gate 2/3/4/5/6 名称，同一套器件点和节点 stamping 已覆盖共源、源退化共源、NMOS 差分对与 PMOS 共源本地解析测试。后续新电路不应复制一套 AC 方程；应先由 OA/`si` 图绑定通用网络，再由少量 topology-aware 层定义设计意图、约束和允许的结构变换。对于尚未进入正式 JSON 契约的特殊受控源、激励或辅助方程，电路脚本可复用公开的 `ComplexNodalSystem` 系数/RHS 接口或 raw complex MNA solver；重复出现并通过 Spectre 对照后才提升为正式 element/metric。Gate 7A 已补上 nominal TSMC N28 独立器件表，Gate 7B/7C 又分别完成 exact-signature nominal 与源极退化共源 OA/`si` 图、真实 DC 偏置和 held-out AC 对照；多 MOS 差分对尚未取得同等级 live 证据，所以这些通过不能外推到所有电路 Gate。
 
 ## Gate 7A：独立 TSMC N28 MOS 表征
 
@@ -125,7 +125,23 @@ Gate 4 的真实尾管能力继续保留；Gate 5 不替换它，而是在其上
 - held-out circuit 的 Id/gm/gds/VDSAT 相对误差为 7.57%/9.78%/11.04%/0.78%；低频增益绝对误差 0.464 dB，BW/GBW 相对误差 10.38%/15.05%，低频与带宽处相位均通过 5° 门。
 - raw OP/AC 与网表文件属于 `eda_result`，OA 结构属于 `bridge_readback`；归一化、插值、矩阵预测、签名比较和误差门属于 `software_inference`。该点不构成任意偏置、几何、拓扑或 PVT 的保证。
 
-下一道 Gate 7C 复用同一 common-source parser/binder/solver 到已有源极退化 cell，只增加 RS0/NSRC 图差异和该实例自己的 exact-geometry 表。通过后再处理含多个 MOS、不同 polarity/角色的差分对。PVT 是可选扩展，不作为迁移前置条件；任何理论 seed 仍需 Spectre 验证后才可能进入受控 OA 写回。
+## Gate 7C：源极退化共源迁移
+
+状态：2026-07-24 已完成 **source-degenerated common-source same-source
+small-signal migration verified at nominal top_tt**。目标为既有
+`vb_pdk_smoke/vda_cs_ac_tradeoff_001/schematic`，全过程只读 OA；没有新建或修改
+cellview。
+
+- 第一次 run 用旧的 W=0.5 µm 声明访问当前 W=1 µm OA，参数门在 Spectre 前拒绝，证明旧 run record 不会代替新鲜回读。
+- `vda characterization-task-from-run` 从刷新后的 real `si` MN0 自动提取 model、W/L 和 31 项参数，绑定 source run/netlist/signature hash，再与显式 N28 bias-grid template 生成普通 `device.characterize` 任务；当前只自动支持 nf=1/m=1。
+- 新 standalone 表在 W=1 µm、L=30 nm、VGS=0.3–0.6 V、VDS=0.15–0.75 V、VSB=0–0.15 V 上完成 60+1 点，留出最坏误差 15.61% < 25%。
+- binder 从实例图而非拓扑公式识别 `MN0.S=NSRC` 和 `RS0(NSRC,VSS)=2 kΩ`，要求 EDA DC source-current consistency、node/device 和 KCL 均 matched。
+- 实际 VGS/VDS/VSB 为 0.34391/0.28300/0.05609 V；Id/gm/gds/VDSAT 误差 17.59%/17.69%/21.36%/2.82%，gain 误差 0.374 dB，BW/GBW 误差 13.52%/17.16%，相位误差也通过。Gate 7B 的固定门限没有改变。
+- OA 为 `bridge_readback`；`si`/OP/raw AC 与表征 raw OP 为 `eda_result`；任务推导、归一化、插值、矩阵预测和误差门为 `software_inference`。
+
+下一道理论 Gate 扩到含多个 MOS、不同 polarity/角色的差分对。每个实例必须匹配自己的
+model/W/L/signature 与偏置域；PVT 是可选扩展，不作为迁移前置条件。任何理论 seed 仍需
+Spectre 验证后才可能进入受控 OA 写回。
 
 ## 升级原则
 

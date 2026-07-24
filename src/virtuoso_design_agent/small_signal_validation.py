@@ -78,6 +78,7 @@ class SmallSignalCircuitValidationPolicy(_FiniteStrictModel):
     )
     require_exact_characterization_width: bool = True
     require_exact_model_parameters: bool = True
+    require_characterization_source_instance_binding: bool = False
     thresholds: SmallSignalValidationThresholds
 
 
@@ -479,6 +480,37 @@ def _bound_network(
                 ),
             )
         )
+    source_degeneration_bindings: list[dict[str, Any]] = []
+    for mosfet in mosfets:
+        if mosfet.source in {"0", "VSS"}:
+            continue
+        matching_resistors = [
+            resistor
+            for resistor in resistors
+            if {resistor.positive, resistor.negative} == {mosfet.source, "VSS"}
+        ]
+        if len(matching_resistors) != 1:
+            raise ValueError(
+                f"{mosfet.name} source node {mosfet.source} must connect to VSS "
+                "through exactly one si resistor"
+            )
+        resistor = matching_resistors[0]
+        source_degeneration_bindings.append(
+            {
+                "mos_instance": mosfet.name,
+                "source_node": mosfet.source,
+                "reference_node": "VSS",
+                "resistor_instance": resistor.name,
+                "resistance_ohm": resistor.resistance_ohm,
+            }
+        )
+    if (
+        policy.expected_topology_variant == "source_degenerated_common_source"
+        and not source_degeneration_bindings
+    ):
+        raise ValueError(
+            "source-degenerated common-source topology has no bound source resistor"
+        )
     testbench_values = _mapping(testbench.get("values"), "testbench values")
     capacitors: list[CapacitorSmallSignalInstance] = []
     if "load_ff" in testbench_values:
@@ -541,6 +573,7 @@ def _bound_network(
         "exact_width_plane_required": policy.require_exact_characterization_width,
         "exact_model_parameters_required": policy.require_exact_model_parameters,
         "model_parameter_signatures": model_parameter_signatures,
+        "source_degeneration_bindings": source_degeneration_bindings,
         "node_device_consistency": operating_point.get("node_device_consistency"),
         "kcl_consistency": operating_point.get("kcl_consistency"),
     }
@@ -556,11 +589,15 @@ def validate_common_source_small_signal_runs(
 
     characterization_run = _load_run(characterization_run_path, "characterization")
     circuit_run = _load_run(circuit_run_path, "circuit")
+    characterization_run_sha256 = _file_sha256(characterization_run_path)
+    circuit_run_sha256 = _file_sha256(circuit_run_path)
     if (
         characterization_run.adapter != "virtuoso-bridge-subprocess"
         or circuit_run.adapter != "virtuoso-bridge-subprocess"
     ):
-        raise ValueError("Gate 7B requires bridge run records, not demo evidence")
+        raise ValueError(
+            "small-signal validation requires bridge run records, not demo evidence"
+        )
     if characterization_run.status is not RunStatus.SUCCEEDED:
         raise ValueError("characterization run did not succeed")
     if circuit_run.status is not RunStatus.SUCCEEDED:
@@ -629,6 +666,23 @@ def validate_common_source_small_signal_runs(
         raise ValueError(
             "raw characterization model parameters do not match its artifact"
         )
+    artifact_source_binding = (
+        artifact.source_instance_binding.model_dump(mode="json")
+        if artifact.source_instance_binding is not None
+        else None
+    )
+    if (
+        raw_characterization_details.get("source_instance_binding")
+        != artifact_source_binding
+    ):
+        raise ValueError(
+            "raw characterization source-instance binding does not match its artifact"
+        )
+    if (
+        policy.require_characterization_source_instance_binding
+        and artifact.source_instance_binding is None
+    ):
+        raise ValueError("characterization has no source-instance binding")
     if raw_characterization_details.get("raw_point_evidence_source") != "eda_result":
         raise ValueError("raw characterization points are not eda_result")
     raw_characterization_points = raw_characterization_details.get("points")
@@ -724,6 +778,13 @@ def validate_common_source_small_signal_runs(
         raise ValueError("operating-point node/device consistency is not matched")
     if operating_point.get("kcl_consistency") != "matched":
         raise ValueError("operating-point KCL consistency is not matched")
+    if (
+        policy.expected_topology_variant == "source_degenerated_common_source"
+        and operating_point.get("source_degeneration_consistency") != "matched"
+    ):
+        raise ValueError(
+            "operating-point source-degeneration consistency is not matched"
+        )
     if schematic.get("topology_variant") != policy.expected_topology_variant:
         raise ValueError("OA topology does not match the validation policy")
     if netlist.get("topology_variant") != policy.expected_topology_variant:
@@ -772,6 +833,65 @@ def validate_common_source_small_signal_runs(
     ):
         raise ValueError("characterization conditions do not match the policy")
     netlist_hash = _valid_hash(netlist.get("sha256"), "si netlist hash")
+    source_binding_matching_instances: list[str] = []
+    if artifact.source_instance_binding is not None:
+        binding = artifact.source_instance_binding
+        if (
+            binding.source_pdk_profile != policy.expected_pdk_profile
+            or binding.source_process_corner != policy.expected_process_corner
+            or not math.isclose(
+                binding.source_temperature_c,
+                policy.expected_temperature_c,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+        ):
+            raise ValueError(
+                "characterization source-instance PVT does not match the policy"
+            )
+        bound_instances = _mapping(netlist.get("instances"), "si netlist instances")
+        for name, raw_instance in bound_instances.items():
+            bound_instance = _mapping(raw_instance, f"si instance {name}")
+            if bound_instance.get("model") != binding.source_model:
+                continue
+            bound_width_um = _finite(
+                bound_instance.get(
+                    "netlist_width_um",
+                    bound_instance.get("width_um"),
+                ),
+                f"si instance {name} width",
+            )
+            bound_length_um = _finite(
+                bound_instance.get("length_um"),
+                f"si instance {name} length",
+            )
+            bound_model_parameters = _mapping(
+                bound_instance.get("model_parameters"),
+                f"si instance {name} model parameters",
+            )
+            if (
+                math.isclose(
+                    bound_width_um,
+                    binding.source_width_um,
+                    rel_tol=1e-9,
+                    abs_tol=1e-12,
+                )
+                and math.isclose(
+                    bound_length_um,
+                    binding.source_length_um,
+                    rel_tol=1e-9,
+                    abs_tol=1e-12,
+                )
+                and len(bound_model_parameters)
+                == binding.source_model_parameter_count
+                and _canonical_sha256(bound_model_parameters)
+                == binding.source_model_parameters_sha256
+            ):
+                source_binding_matching_instances.append(str(name))
+        if not source_binding_matching_instances:
+            raise ValueError(
+                "characterization source-instance signature does not match the circuit"
+            )
     testbench_hash = _valid_hash(testbench.get("sha256"), "testbench hash")
     raw_files = _mapping(ac_response.get("raw_files"), "AC raw-file evidence")
     raw_ac = _mapping(raw_files.get("ac"), "AC raw file")
@@ -797,6 +917,16 @@ def validate_common_source_small_signal_runs(
 
     request, interpolations, device_ops, graph_binding = _bound_network(
         policy, artifact, simulation_details
+    )
+    graph_binding["characterization_source_instance_binding"] = (
+        artifact_source_binding
+    )
+    graph_binding["characterization_source_matching_instances"] = (
+        source_binding_matching_instances
+    )
+    graph_binding["characterization_source_run_is_current_circuit_run"] = (
+        artifact.source_instance_binding is not None
+        and artifact.source_instance_binding.source_run_sha256 == circuit_run_sha256
     )
     network_result = analyze_small_signal_network(request)
     derived_by_name = {item.instance: item for item in network_result.derived_mos_values}
@@ -880,8 +1010,8 @@ def validate_common_source_small_signal_runs(
     return SmallSignalCircuitValidationResult(
         policy_id=policy.id,
         policy_sha256=_canonical_sha256(policy.model_dump(mode="json")),
-        characterization_run_sha256=_file_sha256(characterization_run_path),
-        circuit_run_sha256=_file_sha256(circuit_run_path),
+        characterization_run_sha256=characterization_run_sha256,
+        circuit_run_sha256=circuit_run_sha256,
         characterization_task_id=characterization_run.task_id,
         circuit_task_id=circuit_run.task_id,
         status=RunStatus.SUCCEEDED if gate_passed else RunStatus.PARTIAL,
@@ -915,9 +1045,23 @@ def validate_common_source_small_signal_runs(
             "operating_point": EvidenceSource.EDA_RESULT,
             "ac_raw_and_metrics": EvidenceSource.EDA_RESULT,
             "normalized_characterization": EvidenceSource.SOFTWARE_INFERENCE,
-            "characterization_model_parameter_declaration": EvidenceSource.USER_INPUT,
+            "characterization_model_parameter_declaration": (
+                EvidenceSource.SOFTWARE_INFERENCE
+                if artifact.source_instance_binding is not None
+                else EvidenceSource.USER_INPUT
+            ),
             "si_model_parameters": EvidenceSource.EDA_RESULT,
             "model_parameter_signature_match": EvidenceSource.SOFTWARE_INFERENCE,
+            **(
+                {
+                    "characterization_source_instance": EvidenceSource.EDA_RESULT,
+                    "characterization_task_derivation": (
+                        EvidenceSource.SOFTWARE_INFERENCE
+                    ),
+                }
+                if artifact.source_instance_binding is not None
+                else {}
+            ),
             "bias_interpolation": EvidenceSource.SOFTWARE_INFERENCE,
             "network_prediction": EvidenceSource.SOFTWARE_INFERENCE,
             "error_gate": EvidenceSource.SOFTWARE_INFERENCE,
