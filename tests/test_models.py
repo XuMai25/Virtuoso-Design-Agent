@@ -76,6 +76,37 @@ def test_common_source_simulation_accepts_explicit_finite_pvt_conditions() -> No
     assert task.operating_conditions[1].temperature_c == 125.0
 
 
+def test_differential_pair_simulation_accepts_optional_explicit_condition() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "diffpair-explicit-nominal",
+            "operation": "simulation.run",
+            "circuit": "differential_pair",
+            "target": {"library": "vda_test", "cell": "vda_diffpair"},
+            "analysis": "ac",
+            "ac_sweep": {"start_hz": 1e3, "stop_hz": 1e12},
+            "parameters": {
+                "tail_bias_v": 0.32,
+                "common_mode_v": 0.55,
+                "vdd_v": 0.9,
+                "load_ff": 0.5,
+            },
+            "operating_conditions": [
+                {
+                    "name": "top_tt_27c_0p90v",
+                    "process_corner": "top_tt",
+                    "temperature_c": 27.0,
+                }
+            ],
+            "safety": {"allow_remote_compute": True},
+        }
+    )
+
+    assert task.operating_conditions[0].name == "top_tt_27c_0p90v"
+    assert task.operating_conditions[0].vdd_v is None
+    assert task.parameters["vdd_v"] == pytest.approx(0.9)
+
+
 @pytest.mark.parametrize(
     ("conditions", "message"),
     [

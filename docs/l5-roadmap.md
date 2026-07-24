@@ -23,7 +23,7 @@ PDK 路线默认按晶圆厂 CMOS 工艺推进：当前以 TSMC N28 为基线，
 
 当前实现状态：`OA schematic -> si -> Spectre -> metrics`、供电能量积分、失败注入和候选级 checkpoint/resume 已通过本地测试。2026-07-19 live 结果覆盖 OA/`si` 参数一致性、非空 timing/current 波形、收紧规格、不可行 + 预算耗尽恢复，以及一个经历 3 次 tunnel 中断后仍完成 9/9 候选、最佳参数写回和独立 OA 回读的恢复任务。反相器 L5A 的同源有限闭环与显式恢复 Gate 已通过；Bridge 本地隔离补丁又通过强制断链只读 smoke，闭合 Windows stale state 与调用边界自动重建。运行中传输的随机 reset/timeout 仍是跨 Gate 的底层可靠性债务。
 
-2026-07-24 又在隔离的 `vda_inv_ratio_calibration_001` 上固定 `Wn=0.6 µm`，完整比较 `Wp/Wn=1/1.25/1.5/2`。在预声明的 delay/skew/能量/过冲门限下，1.25 以 `0.212 ps` skew 成为离散域最佳可行点，并写回后独立 OA 回读；原 Gate 1 cell 保持 `Wn/Wp=0.6/0.8 µm`。因此 TSMC N28 profile 把 `0.6 µm + 1.25` 作为新建缺省，而不是硬编码 1:1 或 2:1。显式任务值和已有 OA 值优先，且该 nominal 单负载结果不构成跨 PVT 全局最优声明。
+2026-07-24 又在隔离的 `vda_inv_ratio_calibration_001` 上固定 `Wn=0.6 µm`，完整比较 `Wp/Wn=1/1.25/1.5/2`。在预声明的 delay/skew/能量/过冲门限下，1.25 以 `0.212 ps` skew 成为离散域最佳可行点，并写回后独立 OA 回读；原 Gate 1 cell 保持 `Wn/Wp=0.6/0.8 µm`。因此 TSMC N28 profile 暂把 `0.6 µm + 1.25` 作为新建缺省，而不是硬编码 1:1 或 2:1。常见经验值 1.30 没有在该稀疏网格中实测，现有证据不能判定 1.25 优于 1.30；已新增 `1.20/1.25/1.30/1.35` 细化任务，后续结合多个 CL/input slew 和可选 PVT 决定是否改默认。显式任务值和已有 OA 值始终优先。
 
 Gate 2A 又把相同执行语义扩展到电阻负载 NMOS 共源级：新 OA cellview 的 MN0/RD0 结构、W/L/R 回读和 `si` 网表一致性通过；显式保存的 Spectre DC OP 提供 Id/VGS/VDS/VDSAT/gm/gds，6 点 W/Vbias 搜索完成 3 个可行点、3 个线性区点、最佳 W 写回和最终独立紧规格复核。该结果只闭合 common-source nominal DC；当时 AC、source degeneration、noise 和 corner 均未验证。
 
@@ -65,7 +65,7 @@ Gate 7B 已闭合首个纵向共源点。`vda small-signal-validate` 从 real Br
 
 Gate 7C 随后完成源极退化迁移。旧任务的 W=0.5 µm 与当前 OA W=1 µm 不一致时在 Spectre 前被拒绝；新增 `vda characterization-task-from-run` 从新鲜 real-si MN0 自动提取 exact model/W/L/31 参数签名，并把来源 run/netlist/signature hash 与用户审查的安全偏置网格一起写入 standalone 表征任务。1 µm 表完成 60+1 点，留出最坏 `15.61% < 25%`。同一 binder 从结构化图绑定 `MN0.S=NSRC` 和 `RS0(NSRC,VSS)=2 kΩ`，要求 DC source-current consistency matched；未增加源退化专用 AC 公式。held-out Id/gm/gds/VDSAT 误差为 `17.59%/17.69%/21.36%/2.82%`，gain/BW/GBW 误差为 `0.374 dB/13.52%/17.16%`，全部通过 Gate 7B 原固定门限。状态升级为 **source-degenerated common-source same-source small-signal migration verified at nominal top_tt**。下一步扩到多 MOS、不同 polarity/角色的差分对。自动表征任务生成当前只支持 nf=1/m=1；每种新签名仍需对应表，PVT 可选，理论结果不授权 OA 写回。
 
-多 MOS 迁移的本地基础现已完成。small-signal 请求可携带多张同 PVT/证据边界的 characterization artifact，MOS 实例显式绑定 artifact ID；run-record validator 又按 real `si` 的 model、polarity、W/L、完整参数签名和来源实例自动选择唯一表，并在输出保留全部 run/task/artifact hash。非 1:1 电流镜负载真实尾管差分对用三张独立 synthetic 表通过，missing PMOS、重复匹配、宽度漂移、签名漂移和未使用表均拒绝。CLI 以重复 `--additional-characterization-run` 接受额外表。这仍是本地 schema/binder/policy Gate；三张真实 TSMC N28 表和 held-out OA→`si`→Spectre 差分对对照尚未执行，不能称为 live 多 MOS 验证。
+多 MOS 迁移的本地基础先完成后，Gate 7D 已执行三张真实 TSMC N28 表和 held-out OA→`si`→Spectre 差分对对照。输入 NMOS、PMOS 负载和尾 NMOS 表各自绑定 exact W/L、31 项 `si` 参数签名、来源实例、同一电路 run/netlist hash；missing/ambiguous/W/signature/source drift 和未使用表均拒绝。legacy 五电容模型的 BW 预测约 `5.27 GHz`，完整 signed 4×4 `dQi/dVj` 后仍为 `5.2356 GHz`；电路内实际 `cxx` 与三表最坏只差 `0.74%`，因而没有靠加密网格或抬高门限掩盖问题。补入与本征电荷矩阵分开的 `cjd/cjs` 后，预测/实际 BW 为 `3.0987/2.9756 GHz`，GBW 为 `11.6800/11.1351 GHz`，误差 `3.97%/4.67%`；增益误差 `0.063 dB`，相位及五个器件的 DC/电容检查全部通过原 policy。全过程只读 OA、Bridge 未修改。状态升级为 **differential-pair exact three-plane same-source small-signal validation verified at nominal top_tt**。多指/多重器件、其他 PVT、mismatch/noise 和不同输出表达式仍是后续边界。
 
 Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发送前的 tunnel 自愈。新的 9 点压力任务仍在候选 8 发生一次本地端口拒绝，但 OA 恢复、候选前缀和续跑均正确，最终 9/9 与最佳写回成功；确定性同-client smoke 已覆盖 pre-send 自愈。payload 发送后的不确定错误仍不自动重放，这是保留的可靠性边界而不是跳过的工作。
 
@@ -123,7 +123,7 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
 
 ```text
 反相器 L5A
-  -> nominal 反相器简单驱动比例校准（1/1.25/1.5/2 已 live；1.25 仅作可覆盖缺省）
+  -> nominal 反相器简单驱动比例校准（1/1.25/1.5/2 已 live；1.25 仅作可覆盖缺省；1.20/1.25/1.30/1.35 细化待授权执行）
   -> 共源 nominal DC (Gate 2A 已通过)
   -> 显式实例参数面 (可持久化字段 live 双重回读已验证)
   -> 受控拓扑小变更（同一既有 cellview 原位增加 source degeneration）
@@ -140,7 +140,8 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> 差分对对称源极退化 + 全分析迁移 + RS 写回 + 精确 remove/restore（已 live）
   -> 差分对 active-load/current-mirror exact-template Gate（nominal OA/si/DC/AC/CMRR/ICMR/transient/noise/有限搜索/恢复已 live）
   -> theory-first gm/Id 尺寸估算（本地方程/离散域穷尽/最优性边界已实现；Gate 6 topology-local Spectre 校准与独立 TSMC N28 MOS 表已过）
-  -> 通用 MOS 小信号网络（矩阵、stamp/MNA、独立器件表、nominal/源退化共源 held-out 已 live；多 artifact 差分对 binder 已本地实现，真实三表 Spectre Gate 待执行）
+  -> 通用 MOS 小信号网络（矩阵、stamp/MNA、独立器件表、nominal/源退化共源 held-out 已 live；Gate 7D 三表 signed cxx+cjd/cjs 差分对已通过）
+  -> theory-seeded 差分对有限优化与 Spectre 复核（下一自动 Gate；PVT 可选）
   -> 差分对 PSRR+/PSRR- 三次同网表 AC（nominal、bias/load 只读与三种 L 的 OA 八点搜索已 live；临时 20 dB 门仍未闭合）
   -> L5B 单模块闭环
   -> layout/DRC/LVS/PEX Gate

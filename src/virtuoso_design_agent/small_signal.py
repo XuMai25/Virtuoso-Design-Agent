@@ -12,6 +12,7 @@ from pydantic import ConfigDict, Field, StrictStr, model_validator
 
 from .characterization import (
     DeviceDataSource,
+    MOS_CHARGE_DERIVATIVE_NAMES,
     MosCharacterizationArtifact,
     MosPolarity,
     MosSmallSignalPoint,
@@ -280,6 +281,12 @@ class DerivedMosSmallSignal(_FiniteStrictModel):
     cgb_f: float = Field(ge=0.0)
     cdb_f: float = Field(ge=0.0)
     csb_f: float = Field(ge=0.0)
+    cjd_f: float = Field(ge=0.0)
+    cjs_f: float = Field(ge=0.0)
+    capacitance_model: Literal[
+        "legacy_pairwise", "terminal_charge_derivative_matrix"
+    ] = "legacy_pairwise"
+    charge_derivative_matrix_f: dict[str, float] = Field(default_factory=dict)
     evidence_source: Literal[EvidenceSource.SOFTWARE_INFERENCE] = (
         EvidenceSource.SOFTWARE_INFERENCE
     )
@@ -343,6 +350,11 @@ def _derived_mos(
 ) -> DerivedMosSmallSignal:
     scale_um = instance.width_um * instance.multiplicity
     current = point.drain_current_density_a_per_um * scale_um
+    charge_matrix = {
+        name: point.charge_derivative_matrix_f_per_um[name] * scale_um
+        for name in MOS_CHARGE_DERIVATIVE_NAMES
+        if name in point.charge_derivative_matrix_f_per_um
+    }
     return DerivedMosSmallSignal(
         instance=instance.name,
         characterization_id=characterization_id,
@@ -357,6 +369,14 @@ def _derived_mos(
         cgb_f=point.cgb_f_per_um * scale_um,
         cdb_f=point.cdb_f_per_um * scale_um,
         csb_f=point.csb_f_per_um * scale_um,
+        cjd_f=point.cjd_f_per_um * scale_um,
+        cjs_f=point.cjs_f_per_um * scale_um,
+        capacitance_model=(
+            "terminal_charge_derivative_matrix"
+            if charge_matrix
+            else "legacy_pairwise"
+        ),
+        charge_derivative_matrix_f=charge_matrix,
     )
 
 
@@ -384,17 +404,40 @@ def _stamp_mos(
     system.add_coefficient(source, source, values.gds_s + signed_gm + signed_gmb)
     system.add_coefficient(source, gate, -signed_gm)
     system.add_coefficient(source, bulk, -signed_gmb)
-    for first, second, capacitance in (
-        (gate, source, values.cgs_f),
-        (gate, drain, values.cgd_f),
-        (gate, bulk, values.cgb_f),
-        (drain, bulk, values.cdb_f),
-        (source, bulk, values.csb_f),
-    ):
-        if capacitance > 0.0:
-            system.stamp_admittance(
-                first, second, complex(0.0, omega * capacitance)
+    if values.capacitance_model == "terminal_charge_derivative_matrix":
+        terminal_nodes = {"d": drain, "g": gate, "s": source, "b": bulk}
+        if set(values.charge_derivative_matrix_f) != set(
+            MOS_CHARGE_DERIVATIVE_NAMES
+        ):
+            raise ValueError(
+                f"MOS {instance.name} has an incomplete terminal charge matrix"
             )
+        for name, capacitance in values.charge_derivative_matrix_f.items():
+            system.add_coefficient(
+                terminal_nodes[name[1]],
+                terminal_nodes[name[2]],
+                complex(0.0, omega * capacitance),
+            )
+        for terminal, capacitance in (
+            (drain, values.cjd_f),
+            (source, values.cjs_f),
+        ):
+            if capacitance > 0.0:
+                system.stamp_admittance(
+                    terminal, bulk, complex(0.0, omega * capacitance)
+                )
+    else:
+        for first, second, capacitance in (
+            (gate, source, values.cgs_f),
+            (gate, drain, values.cgd_f),
+            (gate, bulk, values.cgb_f),
+            (drain, bulk, values.cdb_f),
+            (source, bulk, values.csb_f),
+        ):
+            if capacitance > 0.0:
+                system.stamp_admittance(
+                    first, second, complex(0.0, omega * capacitance)
+                )
 
 
 def _expression_value(expression: LinearExpression, voltages: dict[str, complex]) -> complex:
@@ -547,6 +590,14 @@ def analyze_small_signal_network(
         "layout-dependent effects require separately characterized points.",
         "A solved network is software_inference and still requires EDA validation.",
     ]
+    capacitance_models = {
+        value.capacitance_model for value in derived_by_name.values()
+    }
+    if "legacy_pairwise" in capacitance_models:
+        warnings.append(
+            "At least one MOS uses the legacy reciprocal five-capacitance "
+            "approximation; GHz-band predictions require a held-out EDA gate."
+        )
     if any(
         artifact.source is DeviceDataSource.SYNTHETIC_EXAMPLE
         for artifact in artifacts
@@ -603,6 +654,7 @@ def analyze_small_signal_network(
         equations=[
             "Id = (Id/W) * W * multiplicity",
             "gm = (gm/Id) * Id; gds = (gds/Id) * Id",
+            "Icharge_i(f) = j*2*pi*f*sum_j(dQi/dVj * Vj)",
             "Y(f) * V(f) = 0 with fixed boundary-node voltages",
             "transfer(f) = output_expression(V) / input_expression(V)",
             "GBW = low_frequency_gain_v_per_v * bandwidth_3db_hz",
@@ -610,6 +662,10 @@ def analyze_small_signal_network(
         assumptions=[
             "MOS parameters are linearized at the declared characterization bias.",
             "Each MOS uses the physical drain/source order of its normal-mode point.",
+            "A complete Spectre terminal charge-derivative matrix is stamped "
+            "directionally when present, with cjd/cjs stamped separately as "
+            "source/drain junction capacitances; legacy artifacts retain the "
+            "prior reciprocal five-capacitance fallback.",
             "Independent supplies and bias sources are represented as fixed AC nodes.",
             "The network contains MOS, resistor, and capacitor small-signal stamps only.",
         ],

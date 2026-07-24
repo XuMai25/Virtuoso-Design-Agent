@@ -1729,9 +1729,13 @@ class TaskSpec(StrictModel):
                 raise ValueError(
                     "operating_conditions require a simulation or tuning operation"
                 )
-            if self.circuit is not CircuitKind.COMMON_SOURCE:
+            if self.circuit not in {
+                CircuitKind.COMMON_SOURCE,
+                CircuitKind.DIFFERENTIAL_PAIR,
+            }:
                 raise ValueError(
-                    "operating_conditions currently support only common_source"
+                    "operating_conditions currently support only common_source "
+                    "and differential_pair"
                 )
             names = [condition.name for condition in self.operating_conditions]
             if len(names) != len(set(names)):

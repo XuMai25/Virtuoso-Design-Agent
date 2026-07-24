@@ -152,13 +152,13 @@ GBW  = gm / (2*pi*Cout)
 
 首个 nominal `top_tt` 校准用 `Wn=[1.5,2.0] µm × Wp=[1.5,2.0,2.5] µm` 六点真实数据拟合 `Ad=k*gm/(gdsn+gdsp)` 与 `Ceff=CL+Cn*Wn+Cp*Wp`，并逐点留一重拟合。输出绑定两个 run record 哈希、每点原始证据哈希、全部预测/误差、固定条件和禁止外推边界。新鲜同点只读 Spectre 复跑用于检查执行重复性；它不冒充几何外推验证。拟合及误差判定仍是 `software_inference`，OA 与 EDA 原始量分别保留 `bridge_readback`/`eda_result`。
 
-该 topology-local 校准已经量化当前一阶模型在小范围内的误差，但它不是独立 MOS characterization：`Cn/Cp` 是拓扑等效电容，不能冒充 PDK `Cgg/Cgd/Cdb`；每个校准预测仍消费该观测点由 Spectre 得到的 `gm/gds`。Gate 7A 现已提供独立 TSMC N28 `Id/W`、`gm/Id`、`gds/Id`、`gmb/Id`、VDSAT 和端口电容表，但尚未把 Gate 6 三种器件角色和各自真实 DC 偏置自动绑定到该表，也没有用未参与建表的完整电路点验证 theory 误差。因此 topology-local 校准不会自动注入 `vda theory` 或触发 OA 写入；下一 Gate 改为 `si` 图/偏置绑定和 held-out circuit Spectre 复核。
+该 topology-local 校准已经量化当前一阶模型在小范围内的误差，但它不是独立 MOS characterization：`Cn/Cp` 是拓扑等效电容，不能冒充 PDK 的端子电荷导数或结耗尽电容；每个校准预测仍消费该观测点由 Spectre 得到的 `gm/gds`。Gate 7A–7D 现已提供独立 TSMC N28 表，并把 Gate 6 三种器件角色及各自真实 DC 偏置绑定到三张 exact-signature artifact，再以未参与建表的完整电路点验证。topology-local 校准仍不会自动注入 `vda theory` 或触发 OA 写入；它与通用器件表/矩阵路径是两条证据边界不同的先导工具。
 
 ### 通用小信号网络核心
 
 `vda small-signal` 补充的是 `vda theory` 下方的拓扑无关计算层，而不是第二套仿真器。请求没有 topology 枚举，只包含 width-normalized MOS characterization、MOS/R/C 实例与节点、固定 AC 边界、输入/输出节点线性表达式和频率点。共源、源极退化、差分连接和电流镜的差异由图连接表达；同一个 stamping 路径组装复数 `Y(f)`，分块求解未知节点，再计算 transfer、低频参考、相位和首个 −3 dB 交点。
 
-MOS characterization 点不绑定“输入管/负载管/尾管”等电路角色，而是绑定 model、polarity、L、VGS/VDS/VSB、`Id/W`、`gm/Id`、`gds/Id`、`gmb/Id` 和端子电容密度。实例必须声明相同 model/L 和容差内偏置，随后才按 W/multiplicity 缩放；真实 PDK/EDA 表必须绑定原始 `eda_result` artifact SHA-256，归一化点值明确标为 `software_inference`。矩阵组装和指标也始终是 `software_inference`。这使器件数据可跨拓扑复用，同时避免把一个 Gate 6 拟合系数推广到其他电路。
+MOS characterization 点不绑定“输入管/负载管/尾管”等电路角色，而是绑定 model、polarity、L、VGS/VDS/VSB、`Id/W`、`gm/Id`、`gds/Id`、`gmb/Id`、完整 signed 4×4 `dQi/dVj` 本征电荷导数矩阵，以及与它分开的 drain/source-to-bulk 结耗尽电容 `cjd/cjs`。`cgs=dQg/dVs` 与 `csg=dQs/dVg` 等交叉导数不假定相等、也不取绝对值；矩阵按方向直接贡献 `jω dQi/dVj`。`cjd/cjs` 不在该本征矩阵中，必须作为额外的 drain/body 与 source/body 二端电容 stamp。实例必须声明相同 model/L 和容差内偏置，随后才按 W/multiplicity 缩放；真实 PDK/EDA 表必须绑定原始 `eda_result` artifact SHA-256，归一化点值明确标为 `software_inference`。矩阵组装和指标也始终是 `software_inference`。旧 artifact 缺少完整矩阵时保留显式五电容兼容路径，不能冒充 Gate 7D 证据。
 
 为了保留面向后续复杂电路的可修改性，数值层与正式请求契约进一步分开。`ComplexNodalSystem` 公开最小的复数 KCL 系数、RHS、二端导纳和电流注入接口；电路专属脚本可以在这些接口上增加局部 VCCS/CCCS、频率相关等效项或特殊激励，而不复制节点分块和高斯求解。若普通节点法不足，`solve_complex_linear_system` 允许脚本自行组装带支路电流等辅助未知量的 MNA 方程。节点 API 的 pivot tolerance 也是显式参数，默认仍保持保守值。
 
@@ -188,8 +188,12 @@ VGS/VDS 不一致、source-current 不匹配均在预测前拒绝。
 而当前 OA 为 1 µm 的第一次执行在 Spectre 前拒绝；刷新 `si` 后由上述生成器建立新的
 1 µm/31 参数表。最终图绑定 `MN0/ RD0/RS0/NSRC`，Id/gm/gds/VDSAT 误差为
 17.59%/17.69%/21.36%/2.82%，gain/BW/GBW 误差为 0.374 dB/13.52%/17.16%，全部
-通过未改变的 25%/0.5 dB/5° Gate。当前提升的是 single-MOS common-source readback
-schema。当前本地 Gate 已进一步用三张独立 synthetic 表绑定非 1:1 的电流镜负载真实尾管差分对：输入 NMOS、PMOS 负载和 NMOS 尾管分别选择各自 W/签名的 artifact，差分输入固定为 `INP=+0.5/INN=-0.5`，输出沿 Gate 6 的单端 `OUTN` 契约。missing PMOS、重复匹配、W 漂移和签名漂移均有拒绝测试；CLI 以可重复 `--additional-characterization-run` 接收额外 real run。该阶段只完成 schema/binder/policy 的本地纵向实现，尚未取得三张真实 TSMC N28 表和 held-out 差分对 Spectre 对照，所以不得升级为 live 多 MOS 验证。PVT 可选，Spectre 始终是最终规格证据。
+通过未改变的 25%/0.5 dB/5° Gate。这完成了 single-MOS common-source readback
+迁移。
+
+Gate 7D 随后用三张独立真实表绑定非 1:1 的电流镜负载真实尾管差分对：输入 NMOS、PMOS 负载和 NMOS 尾管分别选择各自 exact W/L、31 项 `si` 参数签名及来源实例的 artifact，差分输入固定为 `INP=+0.5/INN=-0.5`，输出沿 Gate 6 的单端 `OUTN` 契约。三张表的 `source_run_sha256` 都必须等于当前 held-out 电路 run，电路 netlist hash 也必须一致；missing PMOS、重复匹配、W/签名/来源漂移和未使用表均拒绝。
+
+第一版 legacy 五电容模型把实际 `2.9756 GHz` BW 预测为约 `5.27 GHz`。加入完整 signed 4×4 电荷导数后仍为 `5.2356 GHz`，所以不能把误差简单归因于非互易电容方向。验证器随即从同一电路 OP 独立提取每管实际 `cxx`；三张表的最坏矩阵误差仅 `0.74%`，排除了 bias 插值/表绑定作为主因。最后把此前遗漏、且与本征 `cxx` 分开报告的 `cjd/cjs` 纳入表征、逐器件比较和网络 stamp 后，预测/实际增益为 `11.5254/11.4623 dB`，BW 为 `3.0987/2.9756 GHz`，GBW 为 `11.6800/11.1351 GHz`；误差 `0.063 dB/3.97%/4.67%`，相位与五管 DC/电容也全部通过原 policy。全过程只读 OA、没有修改 Bridge。状态为 **differential-pair exact three-plane same-source small-signal validation verified at nominal top_tt**。多指/多重器件、其他 PVT、mismatch、noise 和不同输出表达式仍需独立 Gate；Spectre 始终是最终规格证据。
 
 ## ADE 人工介入与状态所有权
 
@@ -248,7 +252,7 @@ corner membership 使用正交的 `ade.corners.apply`，不塞进 variable patch
 
 这里的 wrapper 是 testbench 契约，不再重复 MOS 拓扑。显式给出的 `VDD/CL` 标为 `user_input`，省略时采用 profile 默认值并标为 `software_inference`；MOS 拓扑与尺寸来自 OA/`si`。`simulation.run` 只读 OA，省略器件尺寸时采用回读值，显式给出时必须匹配。调优任务则在已经授权 OA 写入时逐候选暂存并回读，最后提交最佳可行点；无可行点或可恢复中断时恢复初始尺寸。
 
-新建反相器缺少尺寸时也只从 PDK profile 取初始值。`nics4304_tsmc28` 当前使用 `default_inverter_nmos_width_um=0.6` 和 `default_inverter_pmos_to_nmos_width_ratio=1.25`；它来自 2026-07-24 在隔离 cell 上完成的四个简单比例 live 校准。解析优先级为“任务显式参数 > 已有 OA 回读 > profile 缺省”，所以只修改已有 OA 的 Wn 不会暗中联动 Wp，显式 Wp 也永远覆盖比例。该缺省只是 nominal 起点，不收窄 `parameters.apply`、raw CDF 或有限搜索的能力面，详见[验证记录](validation/2026-07-24-inverter-drive-ratio-calibration-live.md)。
+新建反相器缺少尺寸时也只从 PDK profile 取初始值。`nics4304_tsmc28` 当前使用 `default_inverter_nmos_width_um=0.6` 和 `default_inverter_pmos_to_nmos_width_ratio=1.25`；它来自 2026-07-24 在隔离 cell 上完成的四个简单比例 live 校准。常见经验比 `1.30:1` 没有出现在该 `[1,1.25,1.5,2]` 稀疏网格里，所以现有证据只能说 1.25 是已声明离散域最佳，不能说它优于 1.30 或是连续最优。仓库保留独立的 `1.20/1.25/1.30/1.35` 细化任务，待重新授权 OA 暂存/恢复后再跑；在此之前不改变已实测 profile 默认。解析优先级为“任务显式参数 > 已有 OA 回读 > profile 缺省”，所以只修改已有 OA 的 Wn 不会暗中联动 Wp，显式 Wp 也永远覆盖比例。该缺省只是 nominal 起点，不收窄 `parameters.apply`、raw CDF 或有限搜索的能力面，详见[验证记录](validation/2026-07-24-inverter-drive-ratio-calibration-live.md)。
 
 自动单点路径仍先选 `si`，因为反相器目标是 DUT-only schematic，未承诺已有 Maestro test/setup；强行创建 Maestro view 会给普通 `simulation.run` 引入额外 OA 配置写入。`ade.capture` 只接收一个显式存在的人工 Maestro 真源，不会让它与 wrapper 路径暗中混用。进入 VDA-managed sweep/corner 前，必须明确任务选择哪一个仿真状态、保存其指纹，并复用 Bridge 的 Maestro/netlist API；两条路径不能同时成为未声明的真源。
 

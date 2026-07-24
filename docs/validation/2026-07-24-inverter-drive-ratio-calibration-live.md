@@ -11,6 +11,8 @@
 
 这是方便记忆的 nominal 初始值，不是跨 PVT、跨负载、跨输入 slew 的连续或全局最优解。任务显式尺寸和已有 OA 回读尺寸均优先，VDA 不限制用户或 Bridge 可写入的参数范围。
 
+常见经验比例 `Wp/Wn=1.30` 没有出现在本次四点网格中；它与 1.25 仅相差 4%。因此本记录只支持“1.25 是 `[1,1.25,1.5,2]` 声明离散域内最佳”，不支持“1.25 优于 1.30”。在 1.25 与 1.50 两个实测点之间做线性插值，只能得到 1.30 可能仍可行的粗略 `software_inference`，不能代替一次 transient。仓库另存 `1.20/1.25/1.30/1.35` 的细化任务；执行它仍需要新的 OA 写入/远端计算授权和计划 token。
+
 ## 授权与隔离范围
 
 - 新目标：`vb_pdk_smoke/vda_inv_ratio_calibration_001/schematic`
@@ -81,9 +83,10 @@ OA 参数暂存并回读
 
 - 只验证 nominal `top_tt`；没有显式 temperature sweep、TT/SS/FF、mismatch 或 Monte Carlo。
 - 只固定一个 Wn、L、VDD、CL 和输入 slew/周期；默认比例应被视为良好起点，不是所有负载条件的最终尺寸。
+- 没有实测 1.30；1.25 与经验值 1.30 的差异尚不能由现有稀疏网格判胜负。
 - run record 当前保存网表与 wrapper SHA，但本条旧反相器路径的 `tool_version` 为 null，且没有像较新的 AC Gate 一样保存原始 transient 文件 manifest/hash 和显式 `analysis_complete` 字段。Spectre 日志保留 `0 errors, 3 warnings, 8 notices`，其中三条是 `scalefactor` scope warning。这是证据完整度债务，不影响本次四点的相对比较，但下一次升级该路径时应补齐。
 - 比例只作为 profile 缺省：已有 OA 尺寸、`parameters.apply`、semantic 搜索和原始实例参数写入能力保持开放。
 
 ## 下一道 Gate
 
-如需把 1.25 从 nominal 初始值升级成更强的工艺默认，应对少量 CL/input-slew 和可选 TT/SS/FF 条件做鲁棒性复核，并补齐 transient artifact manifest。它不阻塞继续推进多 MOS、多 polarity 的差分对 small-signal 绑定 Gate。
+如需把 1.25 从 nominal 初始值升级成更强的工艺默认，先执行 `1.20/1.25/1.30/1.35` 细化，再对少量 CL/input-slew 和可选 TT/SS/FF 条件做鲁棒性复核，并补齐 transient artifact manifest。它不阻塞继续推进其他 Gate。

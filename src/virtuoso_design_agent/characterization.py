@@ -33,6 +33,20 @@ class MosPolarity(str, Enum):
     PMOS = "pmos"
 
 
+ChargeDerivativeName = Literal[
+    "cgg", "cgd", "cgs", "cgb",
+    "cdg", "cdd", "cds", "cdb",
+    "csg", "csd", "css", "csb",
+    "cbg", "cbd", "cbs", "cbb",
+]
+MOS_CHARGE_DERIVATIVE_NAMES: tuple[ChargeDerivativeName, ...] = (
+    "cgg", "cgd", "cgs", "cgb",
+    "cdg", "cdd", "cds", "cdb",
+    "csg", "csd", "css", "csb",
+    "cbg", "cbd", "cbs", "cbb",
+)
+
+
 class _FiniteStrictModel(StrictModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
@@ -65,6 +79,21 @@ class MosSmallSignalPoint(_FiniteStrictModel):
     cgb_f_per_um: float = Field(default=0.0, ge=0.0)
     cdb_f_per_um: float = Field(default=0.0, ge=0.0)
     csb_f_per_um: float = Field(default=0.0, ge=0.0)
+    cjd_f_per_um: float = Field(default=0.0, ge=0.0)
+    cjs_f_per_um: float = Field(default=0.0, ge=0.0)
+    charge_derivative_matrix_f_per_um: dict[ChargeDerivativeName, float] = Field(
+        default_factory=dict
+    )
+
+    @model_validator(mode="after")
+    def validate_charge_derivative_matrix(self) -> "MosSmallSignalPoint":
+        if self.charge_derivative_matrix_f_per_um and set(
+            self.charge_derivative_matrix_f_per_um
+        ) != set(MOS_CHARGE_DERIVATIVE_NAMES):
+            raise ValueError(
+                "charge-derivative matrix must contain the complete 4x4 terminal set"
+            )
+        return self
 
 
 class MosCharacterizationArtifact(_FiniteStrictModel):
@@ -122,6 +151,13 @@ class MosCharacterizationArtifact(_FiniteStrictModel):
         point_ids = [point.id for point in self.points]
         if len(point_ids) != len(set(point_ids)):
             raise ValueError("characterization contains duplicate point ids")
+        matrix_modes = {
+            bool(point.charge_derivative_matrix_f_per_um) for point in self.points
+        }
+        if len(matrix_modes) != 1:
+            raise ValueError(
+                "characterization cannot mix legacy and charge-matrix points"
+            )
         return self
 
 
@@ -178,6 +214,8 @@ _INTERPOLATED_QUANTITIES = (
     "cgb_f_per_um",
     "cdb_f_per_um",
     "csb_f_per_um",
+    "cjd_f_per_um",
+    "cjs_f_per_um",
 )
 
 _ERROR_FLOORS = {
@@ -191,7 +229,12 @@ _ERROR_FLOORS = {
     "cgb_f_per_um": 1e-17,
     "cdb_f_per_um": 1e-17,
     "csb_f_per_um": 1e-17,
+    "cjd_f_per_um": 1e-17,
+    "cjs_f_per_um": 1e-17,
 }
+_ERROR_FLOORS.update(
+    {f"{name}_f_per_um": 1e-17 for name in MOS_CHARGE_DERIVATIVE_NAMES}
+)
 
 
 def enumerate_mos_characterization_points(
@@ -273,6 +316,36 @@ def _normalized_point(
         name: _finite_float(raw.get(name), f"{declared['id']}.{name}")
         for name in _RAW_QUANTITIES
     }
+    charge_matrix: dict[ChargeDerivativeName, float] = {}
+    if "cgg_f" in raw:
+        charge_matrix = {
+            name: _finite_float(
+                raw.get(f"{name}_f"), f"{declared['id']}.{name}_f"
+            )
+            / width_um
+            for name in MOS_CHARGE_DERIVATIVE_NAMES
+        }
+    junction_values_present = {
+        name for name in ("cjd_f", "cjs_f") if name in raw
+    }
+    if junction_values_present and junction_values_present != {"cjd_f", "cjs_f"}:
+        raise RuntimeError(
+            f"MOS characterization {declared['id']} must return both cjd_f and cjs_f"
+        )
+    cjd_f = (
+        _finite_float(raw["cjd_f"], f"{declared['id']}.cjd_f")
+        if junction_values_present
+        else 0.0
+    )
+    cjs_f = (
+        _finite_float(raw["cjs_f"], f"{declared['id']}.cjs_f")
+        if junction_values_present
+        else 0.0
+    )
+    if cjd_f < 0.0 or cjs_f < 0.0:
+        raise RuntimeError(
+            f"MOS characterization {declared['id']} has a negative junction capacitance"
+        )
     polarity = MosPolarity(str(declared["polarity"]))
     sign = 1.0 if polarity is MosPolarity.NMOS else -1.0
     bias_checks = {
@@ -325,6 +398,9 @@ def _normalized_point(
         cgb_f_per_um=abs(values["cgb_f"]) / width_um,
         cdb_f_per_um=abs(values["cdb_f"]) / width_um,
         csb_f_per_um=abs(values["csb_f"]) / width_um,
+        cjd_f_per_um=cjd_f / width_um,
+        cjs_f_per_um=cjs_f / width_um,
+        charge_derivative_matrix_f_per_um=charge_matrix,
     )
 
 
@@ -406,6 +482,19 @@ def interpolate_mos_characterization_point(
         for point in plane
     }
     predicted = {name: 0.0 for name in _INTERPOLATED_QUANTITIES}
+    matrix_available = bool(plane[0].charge_derivative_matrix_f_per_um)
+    if any(
+        bool(point.charge_derivative_matrix_f_per_um) != matrix_available
+        for point in plane
+    ):
+        raise RuntimeError(
+            "characterization plane mixes legacy and charge-matrix points"
+        )
+    predicted_matrix = (
+        {name: 0.0 for name in MOS_CHARGE_DERIVATIVE_NAMES}
+        if matrix_available
+        else {}
+    )
     corners: list[MosInterpolationCorner] = []
     total_weight = 0.0
     for corner in itertools.product(*axes):
@@ -430,6 +519,10 @@ def interpolate_mos_characterization_point(
         )
         for name in predicted:
             predicted[name] += weight * float(getattr(source, name))
+        for name in predicted_matrix:
+            predicted_matrix[name] += weight * float(
+                source.charge_derivative_matrix_f_per_um[name]
+            )
     if not _matches(total_weight, 1.0, tolerance=1e-9):
         raise RuntimeError(
             f"interpolation weights for {point_id} sum to {total_weight}"
@@ -444,6 +537,7 @@ def interpolate_mos_characterization_point(
             vds_magnitude_v=vds_magnitude_v,
             vsb_magnitude_v=vsb_magnitude_v,
             **predicted,
+            charge_derivative_matrix_f_per_um=predicted_matrix,
         ),
         corners=corners,
         source_artifact_id=artifact.id,
@@ -456,7 +550,7 @@ def _interpolate_holdout(
     settings: DeviceCharacterizationSpec,
     training: list[MosSmallSignalPoint],
     holdout: MosSmallSignalPoint,
-) -> dict[str, float]:
+) -> tuple[dict[str, float], dict[ChargeDerivativeName, float]]:
     axes = (
         _axis_bracket(settings.lengths_um, holdout.length_um),
         _axis_bracket(settings.vgs_magnitudes_v, holdout.vgs_magnitude_v),
@@ -474,6 +568,19 @@ def _interpolate_holdout(
         for point in training
     }
     predicted = {name: 0.0 for name in _INTERPOLATED_QUANTITIES}
+    matrix_available = bool(holdout.charge_derivative_matrix_f_per_um)
+    if any(
+        bool(point.charge_derivative_matrix_f_per_um) != matrix_available
+        for point in training
+    ):
+        raise RuntimeError(
+            "holdout and training points use different capacitance models"
+        )
+    predicted_matrix = (
+        {name: 0.0 for name in MOS_CHARGE_DERIVATIVE_NAMES}
+        if matrix_available
+        else {}
+    )
     total_weight = 0.0
     for corner in itertools.product(*axes):
         coordinates = tuple(item[0] for item in corner)
@@ -486,11 +593,15 @@ def _interpolate_holdout(
         total_weight += weight
         for name in predicted:
             predicted[name] += weight * float(getattr(point, name))
+        for name in predicted_matrix:
+            predicted_matrix[name] += weight * float(
+                point.charge_derivative_matrix_f_per_um[name]
+            )
     if not _matches(total_weight, 1.0, tolerance=1e-9):
         raise RuntimeError(
             f"holdout {holdout.id} interpolation weights sum to {total_weight}"
         )
-    return predicted
+    return predicted, predicted_matrix
 
 
 def _validate_manifest(raw_data: dict[str, Any]) -> str:
@@ -654,11 +765,24 @@ def normalize_mos_characterization(
 
     audits: list[dict[str, Any]] = []
     for holdout in holdouts:
-        predicted = _interpolate_holdout(settings, training, holdout)
+        predicted, predicted_matrix = _interpolate_holdout(
+            settings, training, holdout
+        )
+        predicted_audit = dict(predicted)
+        actual_audit = {
+            name: float(getattr(holdout, name))
+            for name in _INTERPOLATED_QUANTITIES
+        }
+        for name, value in predicted_matrix.items():
+            label = f"{name}_f_per_um"
+            predicted_audit[label] = value
+            actual_audit[label] = float(
+                holdout.charge_derivative_matrix_f_per_um[name]
+            )
         absolute_errors: dict[str, float] = {}
         normalized_errors: dict[str, float] = {}
-        for name, predicted_value in predicted.items():
-            actual_value = float(getattr(holdout, name))
+        for name, predicted_value in predicted_audit.items():
+            actual_value = actual_audit[name]
             absolute_errors[name] = abs(predicted_value - actual_value)
             normalized_errors[name] = absolute_errors[name] / max(
                 abs(predicted_value),
@@ -670,11 +794,8 @@ def normalize_mos_characterization(
             {
                 "id": holdout.id,
                 "polarity": holdout.polarity.value,
-                "predicted": predicted,
-                "actual": {
-                    name: float(getattr(holdout, name))
-                    for name in _INTERPOLATED_QUANTITIES
-                },
+                "predicted": predicted_audit,
+                "actual": actual_audit,
                 "absolute_errors": absolute_errors,
                 "normalization_floors": dict(_ERROR_FLOORS),
                 "normalized_errors": normalized_errors,

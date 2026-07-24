@@ -15,6 +15,7 @@ from virtuoso_design_agent.adapters.bridge_worker import (
 from virtuoso_design_agent.adapters.demo import DeterministicDemoAdapter
 from virtuoso_design_agent.adapters.subprocess_bridge import SubprocessBridgeAdapter
 from virtuoso_design_agent.characterization import (
+    MOS_CHARGE_DERIVATIVE_NAMES,
     enumerate_mos_characterization_points,
     normalize_mos_characterization,
 )
@@ -166,6 +167,30 @@ def _raw_result(task: TaskSpec) -> dict:
     }
 
 
+def _add_pairwise_charge_matrices(raw_result: dict) -> None:
+    """Add a complete signed dQi/dVj matrix equivalent to the five legacy caps."""
+
+    terminal_pairs = (
+        ("g", "s", "cgs_f"),
+        ("g", "d", "cgd_f"),
+        ("g", "b", "cgb_f"),
+        ("d", "b", "cdb_f"),
+        ("s", "b", "csb_f"),
+    )
+    for point in raw_result["points"]:
+        raw = point["raw"]
+        matrix = {name: 0.0 for name in MOS_CHARGE_DERIVATIVE_NAMES}
+        for first, second, quantity in terminal_pairs:
+            capacitance = float(raw[quantity])
+            matrix[f"c{first}{first}"] += capacitance
+            matrix[f"c{second}{second}"] += capacitance
+            matrix[f"c{first}{second}"] -= capacitance
+            matrix[f"c{second}{first}"] -= capacitance
+        raw.update({f"{name}_f": value for name, value in matrix.items()})
+        raw["cjd_f"] = abs(float(raw["cdb_f"])) * 2.0
+        raw["cjs_f"] = abs(float(raw["csb_f"])) * 2.0
+
+
 def test_device_characterization_contract_has_no_fake_oa_target() -> None:
     task = _task()
     plan = build_plan(task)
@@ -303,6 +328,34 @@ def test_normalization_builds_real_pdk_artifact_and_passes_linear_holdouts() -> 
     assert artifact["normalized_point_evidence_source"] == "software_inference"
     assert normalized["holdout_audit"]["passed"] is True
     assert normalized["bias_and_sign_consistency"] == "matched"
+
+
+def test_normalization_preserves_complete_signed_charge_derivative_matrix() -> None:
+    task = _task()
+    raw_result = _raw_result(task)
+    _add_pairwise_charge_matrices(raw_result)
+
+    normalized = normalize_mos_characterization(task, raw_result)
+
+    point = normalized["artifact"]["points"][0]
+    matrix = point["charge_derivative_matrix_f_per_um"]
+    assert set(matrix) == set(MOS_CHARGE_DERIVATIVE_NAMES)
+    assert matrix["cgg"] > 0.0
+    assert matrix["cgs"] < 0.0
+    assert matrix["csg"] < 0.0
+    assert point["cjd_f_per_um"] > 0.0
+    assert point["cjs_f_per_um"] > 0.0
+    assert normalized["holdout_audit"]["passed"] is True
+
+
+def test_normalization_rejects_an_incomplete_charge_derivative_matrix() -> None:
+    task = _task()
+    raw_result = _raw_result(task)
+    _add_pairwise_charge_matrices(raw_result)
+    del raw_result["points"][0]["raw"]["cdd_f"]
+
+    with pytest.raises(RuntimeError, match=r"tr-0-0-0-0-0\.cdd_f is not numeric"):
+        normalize_mos_characterization(task, raw_result)
 
 
 def test_normalization_preserves_source_instance_derivation_binding() -> None:

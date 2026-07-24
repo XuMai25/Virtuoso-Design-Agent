@@ -143,6 +143,24 @@ cellview。
 model/W/L/signature 与偏置域；PVT 是可选扩展，不作为迁移前置条件。任何理论 seed 仍需
 Spectre 验证后才可能进入受控 OA 写回。
 
+## Gate 7D：三表差分对小信号迁移
+
+状态：2026-07-25 已完成 **differential-pair exact three-plane same-source
+small-signal validation verified at nominal top_tt**。目标仍是既有
+`vb_pdk_smoke/vda_diffpair_active_gate6_001/schematic`；只读 OA、自动 `si` 并运行
+Spectre，没有新建、修改或覆盖 cellview。
+
+- 输入 NMOS、PMOS 电流镜负载和 NMOS 尾管分别使用一张 standalone 表；每张表都匹配目标实例的 exact W/L、31 项 `si` 参数签名、来源实例、同一个电路 run SHA-256 和 netlist SHA-256。
+- 器件表现保存完整 signed 4×4 `dQi/dVj` 本征电荷导数矩阵，方向性不对称项不取绝对值；drain/source 结耗尽电容 `cjd/cjs` 分开保存和 stamp。
+- 只加入 `dQi/dVj` 时，BW/GBW 仍约错 43%；从同一电路 OP 提取实际 `cxx` 后，三表最坏只差 0.74%，排除了 bias 插值/表绑定主因。补齐 `cjd/cjs` 后才闭合，不是靠放宽 policy。
+- 最终预测/实际 gain 为 11.5254/11.4623 dB，BW 为 3.0987/2.9756 GHz，GBW 为 11.6800/11.1351 GHz；误差为 0.063 dB、3.97% 和 4.67%，相位与五管 DC/电容门也全部通过。
+- 原始 `si`、OP、AC 和器件表 Spectre 结果是 `eda_result`；OA 结构是 `bridge_readback`；归一化、插值、矩阵预测和误差判定是 `software_inference`；固定 policy 是 `user_input`。
+
+这条 Gate 只证明 nominal `top_tt`、`nf=m=1`、当前五管电流镜负载和单端 `OUTN`
+观察点。PVT 是可选扩展；多指/多重器件、mismatch、noise 和其他输出表达式仍需单独
+证据。下一自动 Gate 使用该器件表/矩阵能力产生 theory seed，再以有限 Spectre 搜索复核，
+不会把理论预测直接写回 OA。
+
 ## 升级原则
 
 每个 Gate 都要同时通过结构创建与回读、参数写入与回读、非空仿真和指标重算、可行/不可行规格判定，以及中断恢复。凡是声明支持人工 ADE 介入，还必须证明保存后的 setup 可由人工重开、修改和重跑，VDA 能在不覆盖改动的前提下重新捕获同一个 history/网表/结果关系。

@@ -60,6 +60,21 @@ def _artifact(point: dict | None = None) -> dict:
     }
 
 
+def _pairwise_charge_matrix(**capacitances: float) -> dict[str, float]:
+    matrix = {
+        f"c{row}{column}": 0.0
+        for row in ("g", "d", "s", "b")
+        for column in ("g", "d", "s", "b")
+    }
+    for terminals, capacitance in capacitances.items():
+        first, second = terminals
+        matrix[f"c{first}{first}"] += capacitance
+        matrix[f"c{second}{second}"] += capacitance
+        matrix[f"c{first}{second}"] -= capacitance
+        matrix[f"c{second}{first}"] -= capacitance
+    return matrix
+
+
 def _mos(name: str, drain: str, gate: str, source: str, point_id: str) -> dict:
     return {
         "name": name,
@@ -123,6 +138,36 @@ def test_same_solver_analyzes_a_common_source_gain_and_pole() -> None:
     assert result.characterization_raw_data_evidence_source.value == "user_input"
     assert result.characterization_point_evidence_source.value == "user_input"
     assert result.derived_metric_evidence_source.value == "software_inference"
+
+
+def test_terminal_charge_matrix_matches_equivalent_legacy_pairwise_capacitance() -> None:
+    legacy_payload = _common_source_payload()
+    matrix_payload = copy.deepcopy(legacy_payload)
+    matrix_payload["id"] = "common-source-terminal-charge-matrix"
+    matrix_payload["characterization"]["points"][0][
+        "charge_derivative_matrix_f_per_um"
+    ] = _pairwise_charge_matrix(db=5e-13)
+    matrix_payload["characterization"]["points"][0]["cjd_f_per_um"] = 5e-13
+
+    legacy = analyze_small_signal_network(
+        SmallSignalNetworkRequest.model_validate(legacy_payload)
+    )
+    matrix = analyze_small_signal_network(
+        SmallSignalNetworkRequest.model_validate(matrix_payload)
+    )
+
+    assert matrix.derived_mos_values[0].capacitance_model == (
+        "terminal_charge_derivative_matrix"
+    )
+    assert matrix.derived_mos_values[0].cjd_f == pytest.approx(5e-13)
+    assert matrix.bandwidth_3db_hz == pytest.approx(
+        legacy.bandwidth_3db_hz, rel=1e-12
+    )
+    for matrix_point, legacy_point in zip(matrix.points, legacy.points):
+        assert matrix_point.transfer.as_complex() == pytest.approx(
+            legacy_point.transfer.as_complex(), rel=1e-12, abs=1e-15
+        )
+    assert not any("legacy reciprocal" in warning for warning in matrix.warnings)
 
 
 def test_same_solver_analyzes_source_degeneration_without_a_topology_formula() -> None:

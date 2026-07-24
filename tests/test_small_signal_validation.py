@@ -68,6 +68,19 @@ def _artifact() -> dict:
     }
 
 
+def _drain_bulk_charge_matrix(capacitance_f: float) -> dict[str, float]:
+    matrix = {
+        f"c{row}{column}": 0.0
+        for row in ("g", "d", "s", "b")
+        for column in ("g", "d", "s", "b")
+    }
+    matrix["cdd"] = capacitance_f
+    matrix["cdb"] = -capacitance_f
+    matrix["cbd"] = -capacitance_f
+    matrix["cbb"] = capacitance_f
+    return matrix
+
+
 def _characterization_run() -> dict:
     return {
         "schema_version": 1,
@@ -743,6 +756,48 @@ def test_same_source_validation_binds_graph_bias_raw_files_and_ac_metrics(
     )
 
 
+def test_same_source_validation_gates_direct_circuit_charge_derivatives(
+    tmp_path: Path,
+) -> None:
+    characterization = _characterization_run()
+    matrix = _drain_bulk_charge_matrix(1e-12)
+    for point in characterization["actions"][1]["details"]["artifact"]["points"]:
+        point["charge_derivative_matrix_f_per_um"] = copy.deepcopy(matrix)
+    circuit = _circuit_run()
+    device_values = circuit["actions"][0]["details"]["evidence"][
+        "operating_point"
+    ]["device_values"]
+    device_values["charge_derivative_matrix_f"] = copy.deepcopy(matrix)
+    device_values["cjd_f"] = 0.0
+    device_values["cjs_f"] = 0.0
+    characterization_path, circuit_path = _write_inputs(
+        tmp_path, circuit, characterization
+    )
+
+    result = validate_common_source_small_signal_runs(
+        SmallSignalCircuitValidationPolicy.model_validate(_policy()),
+        characterization_path,
+        circuit_path,
+    )
+
+    comparisons = result.device_dc_validation[0].comparisons
+    assert comparisons["cdd_f"].error_kind == "normalized_relative"
+    assert comparisons["cdd_f"].passed is True
+    assert result.gate_passed is True
+
+    device_values["charge_derivative_matrix_f"]["cdd"] = 2e-12
+    characterization_path, circuit_path = _write_inputs(
+        tmp_path, circuit, characterization
+    )
+    failed = validate_common_source_small_signal_runs(
+        SmallSignalCircuitValidationPolicy.model_validate(_policy()),
+        characterization_path,
+        circuit_path,
+    )
+    assert failed.device_dc_validation[0].comparisons["cdd_f"].passed is False
+    assert failed.gate_passed is False
+
+
 def test_differential_pair_binds_independent_non_one_to_one_width_planes(
     tmp_path: Path,
 ) -> None:
@@ -1055,7 +1110,7 @@ def test_validation_selects_one_explicit_operating_condition(tmp_path: Path) -> 
                     "name": "test_tt_27c",
                     "process_corner": "test_tt",
                     "temperature_c": 27.0,
-                    "vdd_v": 0.9,
+                    "vdd_v": None,
                 },
                 "result": selected,
             }

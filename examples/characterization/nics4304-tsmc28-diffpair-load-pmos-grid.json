@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "nics4304-tsmc28-diffpair-load-pmos-grid",
+  "pdk_profile": "nics4304_tsmc28",
+  "vgs_magnitudes_v": [0.24, 0.27, 0.3, 0.33],
+  "vds_magnitudes_v": [0.24, 0.27, 0.3, 0.33],
+  "vsb_magnitudes_v": [0.0],
+  "holdout_biases": [
+    {
+      "vgs_magnitude_v": 0.28,
+      "vds_magnitude_v": 0.28,
+      "vsb_magnitude_v": 0.0
+    }
+  ],
+  "temperature_c": 27.0,
+  "maximum_holdout_normalized_error": 0.25,
+  "timeout_seconds": 900
+}

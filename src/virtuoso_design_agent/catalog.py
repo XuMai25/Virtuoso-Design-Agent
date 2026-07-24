@@ -73,7 +73,8 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     CircuitKind.MOS_DEVICE: CircuitCapability(
         circuit=CircuitKind.MOS_DEVICE,
         stage=(
-            "Gate 7A characterization + Gate 7B/7C common-source validation"
+            "Gate 7A characterization + Gate 7B/7C common-source + "
+            "Gate 7D differential-pair validation"
         ),
         executable=True,
         operations=(Operation.DEVICE_CHARACTERIZE,),
@@ -81,14 +82,16 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
         explicit_instance_parameters=False,
         evidence_gate=(
             "standalone foundry-model Spectre operating points + complete raw-file "
-            "SHA-256 manifest + finite NMOS/PMOS sign-normalized gm/gds/gmb and "
-            "terminal-capacitance table + declared interpolation holdout audit; "
+            "SHA-256 manifest + finite NMOS/PMOS sign-normalized gm/gds/gmb, signed "
+            "4x4 terminal-charge derivatives, and separate cjd/cjs table + declared "
+            "interpolation holdout audit; "
             "240-point nominal TSMC N28 top_tt table and four real holdouts live; "
             "exact-width and 31-parameter si signature nominal/source-degenerated "
             "common-source held-out DC/gain/phase/BW/GBW validation live; "
-            "real-si-derived characterization task binding live; multi-artifact "
-            "active-load differential-pair binder locally verified, while its "
-            "real three-plane Spectre gate and optional PVT remain pending"
+            "real-si-derived characterization task binding live; three exact-width "
+            "and exact-signature artifacts bound to one active-load differential-pair "
+            "OA/si/Spectre run with held-out DC/gain/phase/BW/GBW validation live; "
+            "multi-finger/multiplicity and optional PVT remain pending"
         ),
     ),
     CircuitKind.EXISTING_SCHEMATIC: CircuitCapability(

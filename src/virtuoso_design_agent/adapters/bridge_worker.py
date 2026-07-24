@@ -21,6 +21,7 @@ from typing import Any
 
 from virtuoso_design_agent.adapters.base import merge_analysis_bundle
 from virtuoso_design_agent.characterization import (
+    MOS_CHARGE_DERIVATIVE_NAMES,
     enumerate_mos_characterization_points,
 )
 from virtuoso_design_agent.models import DeviceCharacterizationSpec
@@ -9020,6 +9021,30 @@ def _parse_inverter_netlist(
     }
 
 
+def _parse_si_instance_parameters(
+    parameter_text: str, instance_name: str
+) -> tuple[dict[str, str], list[str]]:
+    parameters: dict[str, str] = {}
+    unparsed_parameter_tokens: list[str] = []
+    for token in parameter_text.split():
+        parameter_match = re.fullmatch(
+            r"([A-Za-z_][A-Za-z0-9_$]*)=([^\s\\]+)", token
+        )
+        if parameter_match is None:
+            unparsed_parameter_tokens.append(token)
+            continue
+        parameter_name, parameter_value = parameter_match.groups()
+        if parameter_name in parameters:
+            raise RuntimeError(
+                f"si netlist repeats parameter {parameter_name!r} for "
+                f"{instance_name}"
+            )
+        parameters[parameter_name] = parameter_value
+        if _ENGINEERING_VALUE.fullmatch(parameter_value) is None:
+            unparsed_parameter_tokens.append(token)
+    return parameters, unparsed_parameter_tokens
+
+
 def _parse_common_source_netlist(
     text: str, profile: dict[str, Any]
 ) -> dict[str, Any]:
@@ -9065,23 +9090,9 @@ def _parse_common_source_netlist(
         nodes = match.group(1).split()
         model = match.group(2)
         parameter_text = match.group(3)
-        parameters: dict[str, str] = {}
-        unparsed_parameter_tokens: list[str] = []
-        for token in parameter_text.split():
-            parameter_match = re.fullmatch(
-                r"([A-Za-z_][A-Za-z0-9_$]*)=([^\s\\]+)", token
-            )
-            if parameter_match is None:
-                unparsed_parameter_tokens.append(token)
-                continue
-            parameter_name, parameter_value = parameter_match.groups()
-            if parameter_name in parameters:
-                raise RuntimeError(
-                    f"si netlist repeats parameter {parameter_name!r} for {name}"
-                )
-            parameters[parameter_name] = parameter_value
-            if _ENGINEERING_VALUE.fullmatch(parameter_value) is None:
-                unparsed_parameter_tokens.append(token)
+        parameters, unparsed_parameter_tokens = _parse_si_instance_parameters(
+            parameter_text, name
+        )
         if nodes != expected_item["nodes"]:
             raise RuntimeError(
                 f"si netlist topology mismatch for {name}: nodes={nodes}, "
@@ -9268,6 +9279,9 @@ def _parse_differential_pair_netlist(
         nodes = match.group(1).split()
         model = match.group(2)
         parameter_text = match.group(3)
+        parameters, unparsed_parameter_tokens = _parse_si_instance_parameters(
+            parameter_text, name
+        )
         if nodes != expected_item["nodes"]:
             raise RuntimeError(
                 f"si netlist topology mismatch for {name}: nodes={nodes}, "
@@ -9280,23 +9294,20 @@ def _parse_differential_pair_netlist(
             )
         instances[name] = {"nodes": nodes, "model": model}
         if name in {"MN0", "MN1", "MNTAIL", "MP0", "MP1"}:
-            width_match = re.search(r"(?:^|\s)w=([^\s\\]+)", parameter_text)
-            length_match = re.search(r"(?:^|\s)l=([^\s\\]+)", parameter_text)
-            if width_match is None or length_match is None:
+            if "w" not in parameters or "l" not in parameters:
                 raise RuntimeError(f"si netlist is missing w/l for {name}")
-            fingers_match = re.search(r"(?:^|\s)nf=([^\s\\]+)", parameter_text)
-            multiplicity_match = re.search(
-                r"(?:^|\s)multi=([^\s\\]+)", parameter_text
-            )
             fingers = _positive_device_count(
-                fingers_match.group(1) if fingers_match else 1,
+                parameters.get("nf", 1),
                 f"si {name}.nf",
             )
+            if "multi" in parameters and "m" in parameters:
+                raise RuntimeError(f"si netlist {name} declares both multi and m")
             multiplicity = _positive_device_count(
-                multiplicity_match.group(1) if multiplicity_match else 1,
+                parameters.get("multi", parameters.get("m", 1)),
                 f"si {name}.multi",
             )
-            netlist_width_um = _length_um(width_match.group(1))
+            netlist_width_um = _length_um(parameters["w"])
+            controlled = {"w", "l", "nf", "m", "multi"}
             instances[name].update(
                 {
                     "netlist_width_um": netlist_width_um,
@@ -9304,15 +9315,23 @@ def _parse_differential_pair_netlist(
                     "fingers": fingers,
                     "multiplicity": multiplicity,
                     "total_width_um": netlist_width_um * multiplicity,
-                    "length_um": _length_um(length_match.group(1)),
+                    "length_um": _length_um(parameters["l"]),
+                    "model_parameters": {
+                        parameter_name: parameter_value
+                        for parameter_name, parameter_value in sorted(
+                            parameters.items()
+                        )
+                        if parameter_name.lower() not in controlled
+                        and _ENGINEERING_VALUE.fullmatch(parameter_value) is not None
+                    },
+                    "unparsed_model_parameter_tokens": unparsed_parameter_tokens,
                 }
             )
         else:
-            resistance_match = re.search(r"(?:^|\s)r=([^\s\\]+)", parameter_text)
-            if resistance_match is None:
+            if "r" not in parameters:
                 raise RuntimeError(f"si netlist is missing resistance for {name}")
             instances[name]["resistance_ohm"] = _resistance_ohm(
-                resistance_match.group(1)
+                parameters["r"]
             )
 
     mos_geometry_fields = (
@@ -9658,6 +9677,52 @@ def _operating_point_scalar(
     )
 
 
+def _has_operating_point_scalar(
+    data: dict[str, Any], instance: str, quantity: str
+) -> bool:
+    lowered_instance = instance.lower()
+    suffixes = (
+        f"{lowered_instance}:{quantity.lower()}",
+        f"{lowered_instance}.{quantity.lower()}",
+        f"{lowered_instance}/{quantity.lower()}",
+    )
+    return any(str(key).lower().endswith(suffixes) for key in data)
+
+
+def _optional_mos_small_signal_operating_point(
+    data: dict[str, Any], instance: str
+) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    if _has_operating_point_scalar(data, instance, "gmb"):
+        values["gmb_s"] = _operating_point_scalar(data, instance, "gmb", "gmbs")
+    if not _has_operating_point_scalar(data, instance, "cgg"):
+        return values
+    values["charge_derivative_matrix_f"] = {
+        name: _operating_point_scalar(data, instance, name)
+        for name in MOS_CHARGE_DERIVATIVE_NAMES
+    }
+    junction_presence = {
+        name
+        for name in ("cjd", "cjs")
+        if _has_operating_point_scalar(data, instance, name)
+    }
+    if junction_presence and junction_presence != {"cjd", "cjs"}:
+        raise RuntimeError(
+            f"operating point for {instance} returned an incomplete junction-cap set"
+        )
+    if junction_presence:
+        values["cjd_f"] = _operating_point_scalar(data, instance, "cjd")
+        values["cjs_f"] = _operating_point_scalar(data, instance, "cjs")
+    return values
+
+
+def _mos_small_signal_operating_point_save(instance: str) -> str:
+    quantities = ("gmb", *MOS_CHARGE_DERIVATIVE_NAMES, "cjd", "cjs")
+    return "save " + " ".join(
+        f"{instance}:{quantity}" for quantity in quantities
+    ) + "\n"
+
+
 def _select_shallow_psf_file(
     output_dir: Path, names: tuple[str, ...], *, label: str
 ) -> Path:
@@ -9792,11 +9857,11 @@ def _mos_characterization_deck(
                     "gm",
                     "gds",
                     "gmb",
-                    "cgs",
-                    "cgd",
-                    "cgb",
-                    "cdb",
-                    "csb",
+                    "cgg", "cgd", "cgs", "cgb",
+                    "cdg", "cdd", "cds", "cdb",
+                    "csg", "csd", "css", "csb",
+                    "cbg", "cbd", "cbs", "cbb",
+                    "cjd", "cjs",
                 )
             )
         )
@@ -9840,11 +9905,24 @@ def _mos_characterization_points_from_result(
         "gm_s": ("gm",),
         "gds_s": ("gds",),
         "gmb_s": ("gmb", "gmbs"),
-        "cgs_f": ("cgs",),
+        "cgg_f": ("cgg",),
         "cgd_f": ("cgd",),
+        "cgs_f": ("cgs",),
         "cgb_f": ("cgb",),
+        "cdg_f": ("cdg",),
+        "cdd_f": ("cdd",),
+        "cds_f": ("cds",),
         "cdb_f": ("cdb",),
+        "csg_f": ("csg",),
+        "csd_f": ("csd",),
+        "css_f": ("css",),
         "csb_f": ("csb",),
+        "cbg_f": ("cbg",),
+        "cbd_f": ("cbd",),
+        "cbs_f": ("cbs",),
+        "cbb_f": ("cbb",),
+        "cjd_f": ("cjd",),
+        "cjs_f": ("cjs",),
     }
     returned: list[dict[str, Any]] = []
     for index, point in enumerate(points):
@@ -10200,6 +10278,7 @@ def _differential_pair_metrics_from_result(
             "vdsat_v": _operating_point_scalar(data, instance, "vdsat"),
             "gm_s": _operating_point_scalar(data, instance, "gm"),
             "gds_s": _operating_point_scalar(data, instance, "gds"),
+            **_optional_mos_small_signal_operating_point(data, instance),
         }
     load_values: dict[str, dict[str, float]] = {}
     if current_mirror_load:
@@ -10211,6 +10290,7 @@ def _differential_pair_metrics_from_result(
                 "vdsat_v": _operating_point_scalar(data, instance, "vdsat"),
                 "gm_s": _operating_point_scalar(data, instance, "gm"),
                 "gds_s": _operating_point_scalar(data, instance, "gds"),
+                **_optional_mos_small_signal_operating_point(data, instance),
             }
     tail_device_values: dict[str, float] | None = None
     tail_output_resistance = parameters.get("tail_output_resistance_ohm")
@@ -10222,6 +10302,7 @@ def _differential_pair_metrics_from_result(
             "vdsat_v": _operating_point_scalar(data, "MNTAIL", "vdsat"),
             "gm_s": _operating_point_scalar(data, "MNTAIL", "gm"),
             "gds_s": _operating_point_scalar(data, "MNTAIL", "gds"),
+            **_optional_mos_small_signal_operating_point(data, "MNTAIL"),
         }
         expected_tail_current_a = abs(tail_device_values["ids_a"])
         source_values = {
@@ -10547,8 +10628,9 @@ def _differential_pair_ac_metrics_from_result(
     ac_sweep: dict[str, Any],
     topology_variant: str = _DIFFERENTIAL_PAIR_BASE_VARIANT,
 ) -> tuple[dict[str, float], dict[str, Any]]:
-    return extract_differential_pair_ac_metrics(
-        _signal(data, "ac_freq"),
+    frequency_hz = _signal(data, "ac_freq")
+    metrics, diagnostics = extract_differential_pair_ac_metrics(
+        frequency_hz,
         _complex_signal(data, "ac_INP"),
         _complex_signal(data, "ac_INN"),
         _complex_signal(data, "ac_OUTP"),
@@ -10563,6 +10645,8 @@ def _differential_pair_ac_metrics_from_result(
             else "differential"
         ),
     )
+    diagnostics["frequency_hz"] = [float(value) for value in frequency_hz]
+    return metrics, diagnostics
 
 
 def _differential_pair_common_mode_ac_metrics_from_result(
@@ -11106,9 +11190,13 @@ def _differential_pair_testbench_deck(
     noise_sweep: dict[str, Any] | None = None,
     ac_mode: str = "differential",
     topology_variant: str = "resistive_load_nmos_differential_pair",
+    operating_condition: dict[str, Any] | None = None,
 ) -> str:
     if '"' in remote_netlist_path:
         raise ValueError("netlist path contains an unsupported quote")
+    model_configuration, temperature_c = _common_source_model_configuration(
+        profile, operating_condition
+    )
     if analysis not in {"dc", "ac", "transient", "noise"}:
         raise ValueError(f"unsupported differential-pair analysis: {analysis}")
     if ac_mode not in {
@@ -11248,7 +11336,18 @@ def _differential_pair_testbench_deck(
             "save MP0:ids MP0:vgs MP0:vds MP0:vdsat MP0:gm MP0:gds\n"
             "save MP1:ids MP1:vgs MP1:vds MP1:vdsat MP1:gm MP1:gds\n"
         )
-    model_configuration, _ = _common_source_model_configuration(profile, None)
+    small_signal_op_instances = ["MN0", "MN1"]
+    if real_tail:
+        small_signal_op_instances.append("MNTAIL")
+    if current_mirror_load:
+        small_signal_op_instances.extend(["MP0", "MP1"])
+    small_signal_op_save = "".join(
+        _mos_small_signal_operating_point_save(instance)
+        for instance in small_signal_op_instances
+    )
+    temperature_option = (
+        "" if temperature_c is None else f" temp={temperature_c:.12g}"
+    )
     return f'''simulator lang=spectre
 {model_configuration}
 include "{remote_netlist_path}"
@@ -11262,13 +11361,13 @@ VSS_SRC (VSS 0) vsource dc=0{vss_ac}
 {tail_resistance_element}
 {load}
 
-simulatorOptions options psfversion="1.4.0" reltol=1e-4 vabstol=1e-6 iabstol=1e-12
+simulatorOptions options{temperature_option} psfversion="1.4.0" reltol=1e-4 vabstol=1e-6 iabstol=1e-12
 dcOp dc write="spectre.dc" maxiters=150 maxsteps=10000 annotate=status
 dcOpInfo info what=oppoint where=rawfile
 {analysis_statement}save {saved_nodes} VDD_SRC:p
 save MN0:ids MN0:vgs MN0:vds MN0:vdsat MN0:gm MN0:gds
 save MN1:ids MN1:vgs MN1:vds MN1:vdsat MN1:gm MN1:gds
-{tail_save}{load_save}saveOptions options save=allpub
+{tail_save}{load_save}{small_signal_op_save}saveOptions options save=allpub
 '''
 
 
@@ -11525,9 +11624,9 @@ def _merge_common_source_operating_condition_results(
                 abs_tol=1e-12,
             ):
                 common_parameters.pop(parameter)
-        effective_vdd = condition.get(
-            "vdd_v", payload.get("parameters", {}).get("vdd_v")
-        )
+        effective_vdd = condition.get("vdd_v")
+        if effective_vdd is None:
+            effective_vdd = payload.get("parameters", {}).get("vdd_v")
         if effective_vdd is None or not math.isclose(
             parameters.get("vdd_v", float("nan")),
             float(effective_vdd),
@@ -11607,6 +11706,37 @@ def _simulate_common_source_operating_conditions(
             (
                 condition,
                 simulate_common_source(
+                    condition_payload,
+                    _bundle_cache=cache,
+                ),
+            )
+        )
+    return _merge_common_source_operating_condition_results(payload, rows)
+
+
+def _simulate_differential_pair_operating_conditions(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    raw_conditions = payload.get("operating_conditions")
+    if not isinstance(raw_conditions, list) or not raw_conditions:
+        raise RuntimeError("operating_conditions must contain at least one case")
+    cache: dict[str, Any] = {}
+    rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for raw_condition in raw_conditions:
+        if not isinstance(raw_condition, dict):
+            raise RuntimeError("operating condition is not structured")
+        condition = dict(raw_condition)
+        condition_payload = dict(payload)
+        condition_payload.pop("operating_conditions", None)
+        condition_payload["operating_condition"] = condition
+        condition_parameters = dict(payload.get("parameters", {}))
+        if condition.get("vdd_v") is not None:
+            condition_parameters["vdd_v"] = float(condition["vdd_v"])
+        condition_payload["parameters"] = condition_parameters
+        rows.append(
+            (
+                condition,
+                simulate_differential_pair(
                     condition_payload,
                     _bundle_cache=cache,
                 ),
@@ -12026,10 +12156,15 @@ def simulate_common_source(
         }
 
 
-def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
+def simulate_differential_pair(
+    payload: dict[str, Any], *, _bundle_cache: dict[str, Any] | None = None
+) -> dict[str, Any]:
     from virtuoso_bridge.spectre.runner import SpectreSimulator
 
     analysis = str(payload.get("analysis", "dc"))
+    raw_conditions = payload.get("operating_conditions")
+    if raw_conditions is not None and payload.get("operating_condition") is None:
+        return _simulate_differential_pair_operating_conditions(payload)
     if analysis not in {"dc", "ac", "transient", "noise", "psrr"}:
         raise RuntimeError(f"unsupported differential-pair analysis: {analysis}")
     ac_sweep = payload.get("ac_sweep")
@@ -12047,10 +12182,57 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("differential-pair noise simulation requires noise_sweep")
     profile = payload["profile"]
     timeout = int(payload.get("timeout_seconds", 600))
-    client = _client()
-    library, cell = _target(payload)
-    schematic = _read_schematic(client, library, cell)
-    topology_variant = _assert_differential_pair(schematic, profile)
+    if _bundle_cache is not None and "client" in _bundle_cache:
+        client = _bundle_cache["client"]
+        topology_variant = str(_bundle_cache["topology_variant"])
+        oa_parameters = dict(_bundle_cache["oa_parameters"])
+        oa_geometry = dict(_bundle_cache["oa_geometry"])
+        cached_tail_geometry = _bundle_cache["oa_tail_geometry"]
+        oa_tail_geometry = (
+            dict(cached_tail_geometry)
+            if isinstance(cached_tail_geometry, dict)
+            else None
+        )
+        cached_mirror_geometry = _bundle_cache["oa_current_mirror_geometry"]
+        oa_current_mirror_geometry = (
+            dict(cached_mirror_geometry)
+            if isinstance(cached_mirror_geometry, dict)
+            else None
+        )
+    else:
+        client = _client()
+        library, cell = _target(payload)
+        schematic = _read_schematic(client, library, cell)
+        topology_variant = _assert_differential_pair(schematic, profile)
+        oa_parameters = _differential_pair_semantic_parameters_from_schematic(
+            schematic
+        )
+        oa_geometry = _differential_pair_device_geometry_from_schematic(schematic)
+        oa_tail_geometry = _differential_pair_tail_device_geometry_from_schematic(
+            schematic
+        )
+        oa_current_mirror_geometry = (
+            _differential_pair_current_mirror_geometry_from_schematic(schematic)
+        )
+        if _bundle_cache is not None:
+            _bundle_cache.update(
+                {
+                    "client": client,
+                    "topology_variant": topology_variant,
+                    "oa_parameters": dict(oa_parameters),
+                    "oa_geometry": dict(oa_geometry),
+                    "oa_tail_geometry": (
+                        dict(oa_tail_geometry)
+                        if isinstance(oa_tail_geometry, dict)
+                        else None
+                    ),
+                    "oa_current_mirror_geometry": (
+                        dict(oa_current_mirror_geometry)
+                        if isinstance(oa_current_mirror_geometry, dict)
+                        else None
+                    ),
+                }
+            )
     if analysis == "psrr" and not _differential_pair_has_real_tail(
         topology_variant
     ):
@@ -12058,14 +12240,6 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
             "differential-pair PSRR requires an OA tail device so VSS injection "
             "does not use the ideal-tail wrapper as a substitute circuit"
         )
-    oa_parameters = _differential_pair_semantic_parameters_from_schematic(schematic)
-    oa_geometry = _differential_pair_device_geometry_from_schematic(schematic)
-    oa_tail_geometry = _differential_pair_tail_device_geometry_from_schematic(
-        schematic
-    )
-    oa_current_mirror_geometry = (
-        _differential_pair_current_mirror_geometry_from_schematic(schematic)
-    )
     requested_oa_parameters = {
         name: float(payload.get("parameters", {})[name])
         for name in (
@@ -12092,9 +12266,14 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
 
     with tempfile.TemporaryDirectory(prefix="vda_differential_pair_") as temp_dir:
         work_dir = Path(temp_dir)
-        netlist_evidence = _generate_oa_netlist(
-            client, payload, work_dir, timeout=timeout
-        )
+        if _bundle_cache is not None and "netlist_evidence" in _bundle_cache:
+            netlist_evidence = _bundle_cache["netlist_evidence"]
+        else:
+            netlist_evidence = _generate_oa_netlist(
+                client, payload, work_dir, timeout=timeout
+            )
+            if _bundle_cache is not None:
+                _bundle_cache["netlist_evidence"] = netlist_evidence
         netlist_parameters = netlist_evidence["parsed"]["semantic_parameters"]
         netlist_geometry = netlist_evidence["parsed"]["device_geometry"]
         netlist_tail_geometry = netlist_evidence["parsed"].get(
@@ -12163,11 +12342,18 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
             linearity_sweep=linearity_sweep,
             noise_sweep=noise_sweep,
             topology_variant=topology_variant,
+            operating_condition=payload.get("operating_condition"),
         )
         wrapper.write_text(deck, encoding="utf-8")
-        remote_wrapper = (
-            f"{netlist_evidence['remote_run_dir']}/input_from_oa.scs"
+        condition_slug = _operating_condition_slug(
+            payload.get("operating_condition")
         )
+        wrapper_name = (
+            f"input_from_oa_{condition_slug}_{analysis}.scs"
+            if condition_slug is not None
+            else "input_from_oa.scs"
+        )
+        remote_wrapper = f"{netlist_evidence['remote_run_dir']}/{wrapper_name}"
         _upload_file(client, wrapper, remote_wrapper, timeout=min(timeout, 60))
         simulator = SpectreSimulator.from_env(
             timeout=timeout,
@@ -12183,6 +12369,9 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
         if not result.ok:
             detail = _spectre_failure_detail(result, work_dir)
             raise RuntimeError(f"Spectre simulation failed: {detail}")
+        tool_version = str(result.tool_version or "").strip()
+        if not tool_version:
+            tool_version = _spectre_version_from_log(work_dir)
         dc_data, dc_psf_evidence = _common_source_dc_data_from_result(result)
         metrics, operating_point = _differential_pair_metrics_from_result(
             dc_data, parameters, topology_variant
@@ -12228,8 +12417,7 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
             )
         if analysis in {"ac", "psrr"}:
             assert isinstance(ac_sweep, dict)
-            if analysis == "psrr":
-                ac_psf_evidence = _spectre_ac_file_evidence_from_result(result)
+            ac_psf_evidence = _spectre_ac_file_evidence_from_result(result)
             ac_metrics, ac_diagnostics = _differential_pair_ac_metrics_from_result(
                 result.data, ac_sweep, topology_variant
             )
@@ -12268,13 +12456,18 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                     ac_sweep=ac_sweep,
                     ac_mode="common_mode",
                     topology_variant=topology_variant,
+                    operating_condition=payload.get("operating_condition"),
                 )
                 common_mode_wrapper.write_text(
                     common_mode_deck, encoding="utf-8"
                 )
                 common_mode_remote_wrapper = (
                     f"{netlist_evidence['remote_run_dir']}/"
-                    "input_from_oa_ac_common_mode.scs"
+                    + (
+                        f"input_from_oa_{condition_slug}_ac_common_mode.scs"
+                        if condition_slug is not None
+                        else "input_from_oa_ac_common_mode.scs"
+                    )
                 )
                 _upload_file(
                     client,
@@ -12440,11 +12633,16 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                         ac_sweep=ac_sweep,
                         ac_mode=ac_mode,
                         topology_variant=topology_variant,
+                        operating_condition=payload.get("operating_condition"),
                     )
                     supply_wrapper.write_text(supply_deck, encoding="utf-8")
                     supply_remote_wrapper = (
                         f"{netlist_evidence['remote_run_dir']}/"
-                        f"input_from_oa_ac_{label}_supply.scs"
+                        + (
+                            f"input_from_oa_{condition_slug}_ac_{label}_supply.scs"
+                            if condition_slug is not None
+                            else f"input_from_oa_ac_{label}_supply.scs"
+                        )
                     )
                     _upload_file(
                         client,
@@ -12610,6 +12808,16 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                 for name in (tail_testbench_name, "common_mode_v", "vdd_v")
             },
         }
+        operating_condition = payload.get("operating_condition")
+        model_manifest = _common_source_model_manifest(
+            profile,
+            operating_condition if isinstance(operating_condition, dict) else None,
+        )
+        if isinstance(operating_condition, dict):
+            testbench_values["operating_condition"] = dict(operating_condition)
+            testbench_value_sources["operating_condition"] = {
+                name: "user_input" for name in operating_condition
+            }
         if "tail_output_resistance_ohm" in parameters:
             testbench_values["tail_output_resistance_ohm"] = parameters[
                 "tail_output_resistance_ohm"
@@ -12789,9 +12997,14 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                 else 0
             )
             + sum(len(value.data) for value in psrr_results.values()),
-            "tool_version": result.tool_version,
+            "tool_version": tool_version,
             "warnings": simulation_warnings[:20],
             "evidence": {
+                "side_effects": {
+                    "oa_access_performed": True,
+                    "oa_write_performed": False,
+                    "remote_compute_performed": True,
+                },
                 "schematic_readback": {
                     "source": "bridge_readback",
                     "target": payload["target"],
@@ -12847,9 +13060,7 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
                         }
                     ),
                     "model_resolution_source": "pdk_profile",
-                    "model_configuration": _common_source_model_manifest(
-                        profile, None
-                    ),
+                    "model_configuration": model_manifest,
                     "common_mode_pair": (
                         {
                             "remote_path": common_mode_remote_wrapper,

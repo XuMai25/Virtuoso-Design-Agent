@@ -13,6 +13,7 @@ from typing import Any, Literal, Sequence
 from pydantic import ConfigDict, Field, StrictStr
 
 from .characterization import (
+    MOS_CHARGE_DERIVATIVE_NAMES,
     MosCharacterizationArtifact,
     MosInterpolationResult,
     MosPolarity,
@@ -47,6 +48,9 @@ class _FiniteStrictModel(StrictModel):
 
 class SmallSignalValidationThresholds(_FiniteStrictModel):
     maximum_device_dc_relative_error: float = Field(gt=0.0, le=1.0)
+    maximum_charge_derivative_normalized_error: float = Field(
+        default=0.25, gt=0.0, le=1.0
+    )
     maximum_gain_error_db: float = Field(gt=0.0, le=20.0)
     maximum_phase_error_deg: float = Field(gt=0.0, le=180.0)
     maximum_bandwidth_relative_error: float = Field(gt=0.0, le=1.0)
@@ -89,7 +93,9 @@ class ScalarValidationComparison(_FiniteStrictModel):
     predicted: float
     actual: float
     error: float = Field(ge=0.0)
-    error_kind: Literal["absolute", "relative", "wrapped_degrees"]
+    error_kind: Literal[
+        "absolute", "relative", "normalized_relative", "wrapped_degrees"
+    ]
     threshold: float = Field(gt=0.0)
     passed: bool
 
@@ -221,14 +227,20 @@ def _select_operating_condition_result(
         abs_tol=1e-9,
     ):
         raise ValueError("operating-condition temperature does not match the policy")
+    result = _mapping(matches[0]["result"], "operating-condition result")
+    effective_vdd = condition.get("vdd_v")
+    if effective_vdd is None:
+        effective_vdd = _mapping(
+            result.get("parameters"), "operating-condition parameters"
+        ).get("vdd_v")
     if not math.isclose(
-        _finite(condition.get("vdd_v"), "operating-condition VDD"),
+        _finite(effective_vdd, "operating-condition VDD"),
         policy.expected_vdd_v,
         rel_tol=0.0,
         abs_tol=1e-9,
     ):
         raise ValueError("operating-condition VDD does not match the policy")
-    return _mapping(matches[0]["result"], "operating-condition result")
+    return result
 
 
 def _assert_matching_values(
@@ -275,6 +287,24 @@ def _absolute_comparison(
         actual=actual,
         error=error,
         error_kind="absolute",
+        threshold=threshold,
+        passed=error <= threshold,
+    )
+
+
+def _normalized_relative_comparison(
+    predicted: float,
+    actual: float,
+    threshold: float,
+    *,
+    floor: float,
+) -> ScalarValidationComparison:
+    error = abs(predicted - actual) / max(abs(predicted), abs(actual), floor)
+    return ScalarValidationComparison(
+        predicted=predicted,
+        actual=actual,
+        error=error,
+        error_kind="normalized_relative",
         threshold=threshold,
         passed=error <= threshold,
     )
@@ -1150,6 +1180,43 @@ def validate_small_signal_runs(
                 threshold,
             ),
         }
+        actual_charge_matrix = device_op.get("charge_derivative_matrix_f")
+        if actual_charge_matrix is not None:
+            actual_charge_matrix = _mapping(
+                actual_charge_matrix, f"{name} charge-derivative matrix"
+            )
+            if set(actual_charge_matrix) != set(MOS_CHARGE_DERIVATIVE_NAMES):
+                raise ValueError(
+                    f"{name} charge-derivative matrix is incomplete"
+                )
+            if set(derived.charge_derivative_matrix_f) != set(
+                MOS_CHARGE_DERIVATIVE_NAMES
+            ):
+                raise ValueError(
+                    f"{name} characterization has no complete charge matrix"
+                )
+            for quantity in MOS_CHARGE_DERIVATIVE_NAMES:
+                comparisons[f"{quantity}_f"] = _normalized_relative_comparison(
+                    derived.charge_derivative_matrix_f[quantity],
+                    _finite(
+                        actual_charge_matrix[quantity],
+                        f"{name}.{quantity}_f",
+                    ),
+                    policy.thresholds.maximum_charge_derivative_normalized_error,
+                    floor=1e-17,
+                )
+            for quantity in ("cjd", "cjs"):
+                actual_key = f"{quantity}_f"
+                if actual_key not in device_op:
+                    raise ValueError(
+                        f"{name} operating point has no {actual_key} junction evidence"
+                    )
+                comparisons[actual_key] = _normalized_relative_comparison(
+                    getattr(derived, actual_key),
+                    _finite(device_op[actual_key], f"{name}.{actual_key}"),
+                    policy.thresholds.maximum_charge_derivative_normalized_error,
+                    floor=1e-17,
+                )
         device_validations.append(
             DeviceDcValidation(
                 instance=name,
