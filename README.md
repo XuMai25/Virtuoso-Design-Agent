@@ -8,13 +8,15 @@ Virtuoso Design Agent 是 `virtuoso-bridge-lite` 之上的受控设计编排层�
 
 PDK 默认面向晶圆厂 CMOS 设计。当前缺省 profile 为 `nics4304_tsmc28`，对应 TSMC N28/`tsmcN28`；后续 TSMC、SMIC 等工艺使用独立 profile 和各自验证证据。TSV、hybrid-bonding 等封装/3D PDK 只有任务显式选择时才使用，不会成为自动 fallback，也不会改变普通晶体管级模板的默认假设。详见[决策 0002](docs/decisions/0002-foundry-cmos-pdk-default.md)。
 
+2026-07-24 又完成 Gate 7A 独立器件表征：正式 `device.characterize` 在没有 OA target、没有 OA 写权限的情况下，复用 Bridge 默认连接和 TSMC N28 `top_tt` 模型，以一个 Spectre DC deck 生成 240 点 NMOS/PMOS 训练表和 4 个真实留出点。原始 signed OP、deck/PSF/log manifest 与 SHA-256 属于 `eda_result`，width-normalized `Id/W、gm/Id、gds/Id、gmb/Id`、五类电容密度和插值审计属于 `software_inference`。最终最坏留出归一化误差为 `13.70% < 25%`；没有打开或写入 OA。真实表已能直接进入通用 small-signal schema，但 `si` 图自动映射和完整 held-out circuit 的 Spectre 误差验证仍待 Gate 7B。
+
 ## 当前能做什么
 
 - 将任务编译为带副作用标记的稳定执行计划。
-- 单独规划或执行：`schematic.create`、`schematic.inspect`、`schematic.transform`、`parameters.apply`、`ade.prepare`、`ade.capture`、`ade.corners.apply`、`ade.variables.apply`、`ade.setup.apply`、`ade.run`、`simulation.run`、`design.tune`、`design.close_loop`。当前 `schematic.transform` 开放共源级源极退化的受控 add/remove、反相器 core→ADE source/load testbench、差分对 core→`MNTAIL/BIAS`、真实尾管差分对的对称源极退化 add/remove，以及无源退化真实尾管差分对的 `RD0/RD1 ↔ MP0/MP1` 电流镜负载可逆变换。
+- 单独规划或执行：`device.characterize`、`schematic.create`、`schematic.inspect`、`schematic.transform`、`parameters.apply`、`ade.prepare`、`ade.capture`、`ade.corners.apply`、`ade.variables.apply`、`ade.setup.apply`、`ade.run`、`simulation.run`、`design.tune`、`design.close_loop`。`device.characterize` 只有远端 scratch/compute，不接受 OA target；当前 `schematic.transform` 开放共源级源极退化的受控 add/remove、反相器 core→ADE source/load testbench、差分对 core→`MNTAIL/BIAS`、真实尾管差分对的对称源极退化 add/remove，以及无源退化真实尾管差分对的 `RD0/RD1 ↔ MP0/MP1` 电流镜负载可逆变换。
 - 用确定性 demo adapter 离线验证闭环、规格判定和参数选择；结果明确标为 `software_inference`。
-- 用独立本地命令 `vda theory` 对 Gate 6 电流镜负载差分对做理论先导尺寸估算。它不接收一份任意手列的 W 候选，而是遍历声明且有来源绑定的有限 gm/Id 表域，对每个输入管/PMOS 负载/尾管工作点组合用 KCL、小信号和一阶极点方程反解满足 BW/GBW 的最小支路电流与三组 W，再检查增益、余量、功耗、面积和宽度边界。输出包括约束裕量、主导电流下界、寄生渐近上限和局部对数敏感性；只称为 `best_in_declared_discrete_characterization_domain`，`continuous_optimum_claim` 与 `global_optimum_claim` 永远为 false。`vda theory-calibrate` 又能从绑定的真实 Bridge run records 拟合并留一验证 topology-local 增益修正和等效输出电容模型；首个 TSMC N28 六点 Gate 的 gain/BW/GBW 最大留一误差为 `0.083%/0.373%/0.457%`，新鲜只读同点复跑误差为 `0.069%/0.320%/0.390%`。该结果只适用于当前 `top_tt`、固定偏置/30 nm L 和 Wn/Wp 表内区间；独立 MOS gm/Id 表仍未建立，所以 synthetic 推荐不能写 OA。
-- 用 `vda small-signal` 对 characterization-bound MOS/R/C 实例图做不依赖拓扑名称的复数矩阵分析。器件点按 model/polarity/L/VGS/VDS/VSB 绑定 `Id/W、gm/Id、gds/Id、gmb/Id` 和五类电容密度；实例 model、L 和偏置不匹配即拒绝。求解器统一组装 `Y(f)`，支持固定 AC 边界、差分输入/输出线性表达式、低频增益、相位和 −3 dB 带宽；同一核心已用 NMOS/PMOS 共源、源极退化共源和差分对解析值测试。数值层另公开 `ComplexNodalSystem` 的系数/RHS stamping 接口和 `solve_complex_linear_system`，电路专属脚本可增加局部受控源、独立电流探针，或自行组装带辅助未知量的 MNA 方程，而无需复制求解器。一次性脚本不会自动升级为 VDA 正式能力；重复使用的 element/metric 仍须进入严格 schema、证据记录和 Spectre 对照测试。它不求非线性 DC，也尚未自动读取 `si` 网表或真实 TSMC N28 器件表，因此当前只证明通用求解契约，不能替代 Spectre。
+- 用独立本地命令 `vda theory` 对 Gate 6 电流镜负载差分对做理论先导尺寸估算。它不接收一份任意手列的 W 候选，而是遍历声明且有来源绑定的有限 gm/Id 表域，对每个输入管/PMOS 负载/尾管工作点组合用 KCL、小信号和一阶极点方程反解满足 BW/GBW 的最小支路电流与三组 W，再检查增益、余量、功耗、面积和宽度边界。输出包括约束裕量、主导电流下界、寄生渐近上限和局部对数敏感性；只称为 `best_in_declared_discrete_characterization_domain`，`continuous_optimum_claim` 与 `global_optimum_claim` 永远为 false。`vda theory-calibrate` 又能从绑定的真实 Bridge run records 拟合并留一验证 topology-local 增益修正和等效输出电容模型；首个 TSMC N28 六点 Gate 的 gain/BW/GBW 最大留一误差为 `0.083%/0.373%/0.457%`，新鲜只读同点复跑误差为 `0.069%/0.320%/0.390%`。Gate 7A 已建立独立 nominal MOS 表，但尚未把任意 OA/`si` 电路角色和实际 DC 偏置自动绑定到该表；synthetic 或尚未经 held-out circuit 复核的推荐仍不能写 OA。
+- 用 `vda small-signal` 对 characterization-bound MOS/R/C 实例图做不依赖拓扑名称的复数矩阵分析。器件点按 model/polarity/L/VGS/VDS/VSB 绑定 `Id/W、gm/Id、gds/Id、gmb/Id` 和五类电容密度；实例 model、L 和偏置不匹配即拒绝。求解器统一组装 `Y(f)`，支持固定 AC 边界、差分输入/输出线性表达式、低频增益、相位和 −3 dB 带宽；同一核心已用 NMOS/PMOS 共源、源极退化共源和差分对解析值测试。数值层另公开 `ComplexNodalSystem` 的系数/RHS stamping 接口和 `solve_complex_linear_system`，电路专属脚本可增加局部受控源、独立电流探针，或自行组装带辅助未知量的 MNA 方程，而无需复制求解器。Gate 7A 的真实 artifact 已直接通过该 schema 与求解器；它仍不求非线性 DC，也尚未自动读取 `si` 网表或用完整 held-out topology 对照 Spectre，因此不能替代最终仿真。
 - 通过独立 worker 调用本机 `virtuoso-bridge-lite` 环境。反相器支持 `OA -> si -> Spectre transient` 的 timing、过冲/欠冲和周期供电能量；共源级支持同一 `OA -> si` 网表上的 DC OP、复数 AC、相干正弦 transient 幅度 sweep 和普通 noise sweep。可提取 `Id/VGS/VDS/VDSAT/gm/gds`、真实 VDD 功耗与 KCL、低频增益、首个 −3 dB 带宽、GBW、unity、HD2/HD3、THD、P1dB，以及频带积分的输出/输入参考噪声；单项执行与提取均有 live 证据。`analysis: "quality"` 已在一次 OA/`si` 核对后依次运行 AC、linearity、noise，并完成 bias/load、W/RD/RS、L/VDD 搜索、固定设计 TT/SS/FF 验证和显式启用的 PVT-aware bias 调优；每个 PVT 条件保留原始 `eda_result`，跨条件约束和最坏值聚合标为 `software_inference`。
 - Gate 3/4/5/6 差分对复用同一 worker 与 executor，不复制 Bridge。Gate 3 保留外部理想尾源能力；Gate 4 只新增 `MNTAIL(TAIL,BIAS,VSS,VSS)` 与 `BIAS` pin；Gate 5 再把 `MN0.S/MN1.S` 从 `TAIL` 分离到 `NSP/NSN`，只新增对称 `RS0(NSP,TAIL)`、`RS1(NSN,TAIL)`。Gate 6 从未退化的 Gate 4 拓扑删除 `RD0/RD1` 并加入 `MP0(OUTP,OUTP,VDD,VDD)`、`MP1(OUTN,OUTP,VDD,VDD)`，反向操作可按声明电阻值恢复原负载和可选 placement 指纹。`tail_width_um/tail_length_um/source_resistance_ohm/pmos_load_width_um/pmos_load_length_um` 属于 OA semantic 参数，`tail_bias_v` 只属于 wrapper；真实尾管路径拒绝理想 `tail_current_ua/tail_output_resistance_ohm`。Gate 3–6 的 OA→`si` 证据链均已有 live 结果；Gate 6 还真实覆盖 ICMR、多种有限搜索、预算、不可行和 transport checkpoint/resume。新增 `analysis: "psrr"` 在同一自动 `si` 网表上分别运行平衡差模、VDD 注入和 VSS 注入，并核对三次 DC 与频率网格；`evaluation_stop_hz` 提供声明频带内最差 PSRR，三份下载根 AC 文件各自绑定大小与 SHA-256。nominal 单点、四点 bias/load 只读搜索和三种沟道长度的八点 OA 搜索已经 live。后者把带内最差 PSRR 从 `11.5125 dB` 提高到 `19.7438 dB`，但临时 `20 dB` 门仍不可行，故自动恢复基线；下一步应固定对 PSRR 几乎无益且严重损失带宽的尾管 `L=0.03 µm`，再在显式小网格内验证输入对/PMOS L，并对任何可行点补做 CMRR、线性度和噪声复核。不得把“最大值”包装成规格闭合。可选 PVT、mismatch、更多质量指标和 ADE handoff 仍是边界。
 - 源极退化不新建第二套模板或仿真器：add 在同一 common-source cellview 中把 `MN0.S: VSS -> NSRC`，只新增 `RS0(NSRC,VSS)`；remove 只删除 VDA 创建的 RS0 两条端子 stub/标签、恢复 `MN0.S: NSRC -> VSS`。同一 inspect、参数应用、`si` 网表解析、DC/AC 指标和有限搜索路径动态识别两种变体。
@@ -74,6 +76,18 @@ py -3.13 -m venv .venv
 真实 PDK characterization 必须绑定 raw `eda_result` artifact SHA-256；归一化点值
 和网络推导分别保持 `software_inference`。详见
 [通用小信号本地 Gate](docs/validation/2026-07-24-generic-small-signal-local.md)。
+
+生成独立 MOS 表征计划（真实运行仍需 `--execute`、本次 plan token 和
+`allow_remote_compute=true`）：
+
+```powershell
+.\.venv\Scripts\vda.exe plan `
+  examples\tasks\mos-device-characterize-top-tt.bridge.json
+```
+
+该任务没有 OA target，最终 `MosCharacterizationArtifact` 位于 run record 的
+`device.characterize.validate` action 下；完整 live 证据见
+[TSMC N28 独立 MOS characterization](docs/validation/2026-07-24-tsmc28-mos-characterization-live.md)。
 
 查看能力目录并生成计划：
 
@@ -300,4 +314,5 @@ C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe 
 - [2026-07-24 theory-first gm/Id 尺寸分析本地 Gate](docs/validation/2026-07-24-theory-first-sizing-local.md)
 - [2026-07-24 Gate 6 theory 一阶模型真实校准](docs/validation/2026-07-24-theory-calibration-live.md)
 - [2026-07-24 通用 MOS 小信号网络本地 Gate](docs/validation/2026-07-24-generic-small-signal-local.md)
+- [2026-07-24 TSMC N28 独立 MOS characterization 真实 Gate](docs/validation/2026-07-24-tsmc28-mos-characterization-live.md)
 - [延期的人工 ADE Gate](docs/deferred-manual-gates.md)

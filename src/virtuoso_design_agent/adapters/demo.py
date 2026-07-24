@@ -43,6 +43,12 @@ class DeterministicDemoAdapter:
             evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
         )
 
+    def characterize_devices(self, task: TaskSpec) -> AdapterResult:
+        raise RuntimeError(
+            "device.characterize requires real Spectre/PDK evidence and is not "
+            "available through the demo adapter"
+        )
+
     def _key(self, task: TaskSpec) -> tuple[str, str]:
         return task.target.library, task.target.cell
 

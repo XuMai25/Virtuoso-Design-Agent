@@ -116,7 +116,6 @@ class SubprocessBridgeAdapter:
             "task_id": task.id,
             "operation": task.operation.value,
             "circuit": task.circuit.value,
-            "target": task.target.model_dump(mode="json"),
             "profile": load_pdk_profile(task.pdk_profile).model_dump(mode="json"),
             "parameters": task.parameters,
             "schematic_transform": (
@@ -135,7 +134,14 @@ class SubprocessBridgeAdapter:
             "replace_existing": task.safety.replace_existing,
             "timeout_seconds": task.limits.timeout_seconds,
         }
+        if task.target is not None:
+            payload["target"] = task.target.model_dump(mode="json")
+        if task.device_characterization is not None:
+            payload["device_characterization"] = (
+                task.device_characterization.model_dump(mode="json")
+            )
         if task.operation not in {
+            Operation.DEVICE_CHARACTERIZE,
             Operation.ADE_PREPARE,
             Operation.ADE_CAPTURE,
             Operation.ADE_RUN,
@@ -206,6 +212,14 @@ class SubprocessBridgeAdapter:
             "probe", {"profile": profile.model_dump(mode="json")}, timeout=30
         )
         return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
+
+    def characterize_devices(self, task: TaskSpec) -> AdapterResult:
+        data = self._request(
+            "characterize_mos_devices",
+            self._task_payload(task),
+            timeout=task.limits.timeout_seconds + 240,
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.EDA_RESULT)
 
     def create_schematic(self, task: TaskSpec) -> AdapterResult:
         data = self._request(

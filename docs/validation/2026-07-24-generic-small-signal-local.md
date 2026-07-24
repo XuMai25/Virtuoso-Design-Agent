@@ -6,6 +6,8 @@ VDA 已增加不依赖电路拓扑名称的 MOS/R/C 线性网络求解核心。�
 
 **topology-independent small-signal matrix core locally verified; live PDK characterization and OA/si graph binding pending**
 
+后续状态：同日已完成[TSMC N28 独立 MOS characterization 真实 Gate](2026-07-24-tsmc28-mos-characterization-live.md)。240 点 nominal `top_tt` NMOS/PMOS artifact 与四个真实留出点已通过，并能直接进入本页的 schema/kernel。故当前剩余边界已收窄为 OA/`si` 图与 DC 偏置自动绑定、正式表内插值接口和完整 held-out circuit 的同源 Spectre 对照；本页以下 synthetic 解析测试仍作为数值层基线。
+
 这项实现把“适当通用性”限定在可验证范围：同一器件表和矩阵 stamping 核心可以
 分析不同连接图，但不宣称任意模拟拓扑自动综合，也不绕过 Spectre 做最终规格判定。
 
@@ -47,7 +49,8 @@ Cgs/W, Cgd/W, Cgb/W, Cdb/W, Csb/W
 另标为 `software_inference`。
 
 这比 topology-local 拟合更可迁移：同一个器件点可以被不同电路图中的实例引用。
-但当前还没有真实 TSMC N28 表，所以示例值不能作为设计证据。
+Gate 7A 现已有真实 TSMC N28 表；本页 synthetic 示例值仍不能作为设计证据，而真实
+artifact 也必须先绑定实际电路 DC 偏置并通过 held-out Spectre 对照。
 
 ## 通用网络求解
 
@@ -110,7 +113,7 @@ solver 也不宣称适用于大型或强病态网络。
 
 ```text
 python -m pytest
-493 passed
+512 passed
 
 vda small-signal examples\theory\common-source-small-signal.synthetic.json
 exit 0；complex response 和 -3 dB bandwidth resolved
@@ -127,18 +130,18 @@ exit 0；complex response 和 -3 dB bandwidth resolved
 3. 正式 JSON 只实现 normal-mode MOS、R、C 和固定电压边界；低层脚本 API 已能表达
    电流注入、自定义受控源 stamp 和 raw MNA，但这些还不是带 schema/evidence record
    的正式 BJT、inductor、transmission line、开关或 hierarchy flattening 能力。
-4. 没有真实 TSMC N28/SMIC characterization、插值、corner、noise、distortion、
-   slew、settling、mismatch 或大信号预测。
+4. 已有 nominal TSMC N28 characterization 和 operation 内局部留出审计，但没有 SMIC、
+   PVT/corner、正式任意偏置插值、noise、distortion、slew、settling、mismatch 或大信号预测。
 5. 当前 W/multiplicity 采用线性缩放；`nf`、finger width、窄宽效应、扩散共享和
    layout-dependent effect 必须作为独立 characterization 维度，不能由本模型猜测。
 6. 求解成功不等于设计完成；真实指标仍必须进入 OA→`si`→Spectre 证据链。
 
 ## 下一 Gate
 
-下一步应先做只读 TSMC N28 独立 NMOS/PMOS characterization，覆盖显式的 L、VGS、
-VDS、VSB 和可选 corner/temperature，保存原始 Spectre 文件清单与 SHA-256；随后把
-现有 `si` 结构网表转换为本网络契约，并把一个完整拓扑留出、不参与建表或调参，
-用于检验跨拓扑预测误差。只有这个 held-out topology Gate 通过后，通用理论结果才
-可以作为 Spectre 搜索种子。
+下一步是 Gate 7B：把现有 `si` 结构网表和真实 DC OP 转换为本网络契约，在已验证表域
+内选择/插值器件点，并把一个完整 nominal 共源拓扑留出、不参与建表或调参，用同一网表
+Spectre AC 检验 gain、phase、BW 和 GBW 预测误差。通过后通用理论结果才可作为 Spectre
+搜索种子；源极退化、差分对和可选 PVT 依次后置。
 
-该下一 Gate 涉及真实远端计算，本地实现记录不构成新的远端授权。
+Gate 7A 的授权不自动扩展到 Gate 7B 的新远端运行；届时仍按目标、OA/compute 副作用和
+远端路径重新列明范围。

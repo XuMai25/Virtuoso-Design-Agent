@@ -30,6 +30,47 @@ def _step(
 
 
 def _steps_for(task: TaskSpec) -> list[PlanStep]:
+    if task.operation is Operation.DEVICE_CHARACTERIZE:
+        settings = task.device_characterization
+        if settings is None:  # TaskSpec validation owns the user-facing error.
+            raise ValueError("device characterization settings are missing")
+        return [
+            _step(
+                "01-probe",
+                "bridge.probe",
+                "只读核对 Bridge、Spectre 与声明的 foundry PDK profile；不打开或写入 OA",
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "02-characterize",
+                "device.characterize",
+                (
+                    f"在独立远端 scratch 中用 PDK 模型运行 {settings.training_point_count} "
+                    f"个训练点和 {len(settings.holdout_points)} 个留出点的 Spectre "
+                    "operating-point 表征；保留输入 deck、原始 PSF、日志、大小与 "
+                    "SHA-256 清单，不创建或修改 OA cellview"
+                ),
+                SideEffect.REMOTE_COMPUTE,
+            ),
+            _step(
+                "03-validate",
+                "device.characterize.validate",
+                (
+                    "核对声明偏置、器件极性、有限标量和文件清单，按宽度归一化 "
+                    "Id/gm/gds/gmb/电容，并用未进入网格的真实 Spectre 点审计插值误差"
+                ),
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "04-persist",
+                "evidence.persist",
+                (
+                    "保存 raw operating point=eda_result、归一化与插值审计="
+                    "software_inference；return code 0 单独不能构成有效表征"
+                ),
+                SideEffect.LOCAL_WRITE,
+            ),
+        ]
     common_source = task.circuit is CircuitKind.COMMON_SOURCE
     differential_pair = task.circuit is CircuitKind.DIFFERENTIAL_PAIR
     analysis = task.resolved_analysis()

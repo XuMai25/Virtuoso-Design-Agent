@@ -20,6 +20,10 @@ from pathlib import Path
 from typing import Any
 
 from virtuoso_design_agent.adapters.base import merge_analysis_bundle
+from virtuoso_design_agent.characterization import (
+    enumerate_mos_characterization_points,
+)
+from virtuoso_design_agent.models import DeviceCharacterizationSpec
 from virtuoso_design_agent.metrics import (
     aggregate_common_source_linearity_metrics,
     aggregate_differential_pair_linearity_metrics,
@@ -9699,6 +9703,297 @@ def _common_source_dc_data_from_result(
     }
 
 
+def _mos_characterization_deck(
+    profile: dict[str, Any],
+    settings: DeviceCharacterizationSpec,
+    points: list[dict[str, Any]],
+) -> str:
+    model_path = str(profile["model_include"])
+    model_section = str(profile["model_section"])
+    if '"' in model_path or not re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_]*", model_section
+    ):
+        raise ValueError("invalid MOS characterization model include")
+    models = {
+        "nmos": str(profile["nmos_cell"]),
+        "pmos": str(profile["pmos_cell"]),
+    }
+    if any(
+        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$.-]*", model) is None
+        for model in models.values()
+    ):
+        raise ValueError("invalid MOS characterization model name")
+
+    elements: list[str] = []
+    saves: list[str] = []
+    for index, point in enumerate(points):
+        instance = f"MCHAR{index:04d}"
+        suffix = f"P{index:04d}"
+        polarity = str(point["polarity"])
+        sign = 1.0 if polarity == "nmos" else -1.0
+        gate_v = sign * float(point["vgs_magnitude_v"])
+        drain_v = sign * float(point["vds_magnitude_v"])
+        bulk_v = -sign * float(point["vsb_magnitude_v"])
+        elements.extend(
+            (
+                f"VG{suffix} (G{suffix} 0) vsource dc={gate_v:.12g}",
+                f"VD{suffix} (D{suffix} 0) vsource dc={drain_v:.12g}",
+                f"VB{suffix} (B{suffix} 0) vsource dc={bulk_v:.12g}",
+                (
+                    f"{instance} (D{suffix} G{suffix} 0 B{suffix}) "
+                    f"{models[polarity]} w={settings.width_um:.12g}u "
+                    f"l={float(point['length_um']):.12g}u nf=1 m=1"
+                ),
+            )
+        )
+        saves.append(
+            "save "
+            + " ".join(
+                f"{instance}:{quantity}"
+                for quantity in (
+                    "ids",
+                    "vgs",
+                    "vds",
+                    "vbs",
+                    "vdsat",
+                    "gm",
+                    "gds",
+                    "gmb",
+                    "cgs",
+                    "cgd",
+                    "cgb",
+                    "cdb",
+                    "csb",
+                )
+            )
+        )
+    return "\n".join(
+        (
+            "simulator lang=spectre",
+            f'include "{model_path}" section={model_section}',
+            "",
+            *elements,
+            "",
+            (
+                "simulatorOptions options psfversion=\"1.4.0\" "
+                f"temp={settings.temperature_c:.12g} reltol=1e-5 "
+                "vabstol=1e-8 iabstol=1e-15"
+            ),
+            "dcOp dc write=\"spectre.dc\" maxiters=150 maxsteps=10000 annotate=status",
+            "dcOpInfo info what=oppoint where=rawfile",
+            *saves,
+            "saveOptions options save=allpub",
+            "",
+        )
+    )
+
+
+def _mos_characterization_points_from_result(
+    result: Any,
+    profile: dict[str, Any],
+    points: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    merged, root_evidence = _common_source_dc_data_from_result(result)
+    models = {
+        "nmos": str(profile["nmos_cell"]),
+        "pmos": str(profile["pmos_cell"]),
+    }
+    quantities: dict[str, tuple[str, ...]] = {
+        "ids_a": ("ids", "id"),
+        "vgs_v": ("vgs",),
+        "vds_v": ("vds",),
+        "vbs_v": ("vbs",),
+        "vdsat_v": ("vdsat",),
+        "gm_s": ("gm",),
+        "gds_s": ("gds",),
+        "gmb_s": ("gmb", "gmbs"),
+        "cgs_f": ("cgs",),
+        "cgd_f": ("cgd",),
+        "cgb_f": ("cgb",),
+        "cdb_f": ("cdb",),
+        "csb_f": ("csb",),
+    }
+    returned: list[dict[str, Any]] = []
+    for index, point in enumerate(points):
+        instance = f"MCHAR{index:04d}"
+        raw = {
+            name: _operating_point_scalar(merged, instance, *aliases)
+            for name, aliases in quantities.items()
+        }
+        if any(not math.isfinite(float(value)) for value in raw.values()):
+            raise RuntimeError(
+                f"MOS characterization point {point['id']} contains a non-finite OP value"
+            )
+        returned.append(
+            {
+                **point,
+                "model": models[str(point["polarity"])],
+                "instance": instance,
+                "raw": raw,
+                "raw_evidence_source": "eda_result",
+            }
+        )
+    return returned, root_evidence
+
+
+def _mos_characterization_manifest(work_dir: Path) -> tuple[list[dict[str, Any]], str]:
+    entries: list[dict[str, Any]] = []
+    for path in sorted(item for item in work_dir.rglob("*") if item.is_file()):
+        relative = path.relative_to(work_dir).as_posix()
+        entries.append(
+            {
+                "path": relative,
+                "size_bytes": path.stat().st_size,
+                "sha256": _sha256_path(path),
+            }
+        )
+    if not entries:
+        raise RuntimeError("MOS characterization produced no simulator artifacts")
+    canonical = json.dumps(
+        entries,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return entries, hashlib.sha256(canonical).hexdigest()
+
+
+def _spectre_version_from_log(work_dir: Path) -> str:
+    log_path = work_dir / "spectre.out"
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise RuntimeError("MOS characterization Spectre log is missing") from exc
+    match = re.search(r"(?im)^\s*Version\s+([^\s]+)", text)
+    if match is None:
+        raise RuntimeError("MOS characterization Spectre log has no version marker")
+    return match.group(1)
+
+
+def _ssh_command_result(runner: Any, command: str, label: str) -> str:
+    result = runner.run_command(command)
+    returncode = int(getattr(result, "returncode", -1))
+    if returncode != 0:
+        detail = str(getattr(result, "stderr", "")).strip()
+        raise RuntimeError(f"{label} failed (rc={returncode}): {detail}")
+    return str(getattr(result, "stdout", ""))
+
+
+def characterize_mos_devices(payload: dict[str, Any]) -> dict[str, Any]:
+    """Run one standalone Spectre deck; this path never opens an OA object."""
+
+    from virtuoso_bridge.spectre.runner import SpectreSimulator
+    from virtuoso_bridge.transport.tunnel import SSHClient
+
+    profile = payload["profile"]
+    settings = DeviceCharacterizationSpec.model_validate(
+        payload.get("device_characterization")
+    )
+    points = enumerate_mos_characterization_points(settings)
+    timeout = int(payload.get("timeout_seconds", 600))
+    run_root = str(profile["remote_run_root"]).rstrip("/")
+    if not run_root.startswith("/data/xum/"):
+        raise RuntimeError("MOS characterization remote root must stay under /data/xum")
+    task_slug = re.sub(
+        r"[^A-Za-z0-9_.-]",
+        "_",
+        str(payload.get("task_id", "task")),
+    )[:48]
+    remote_run_root = (
+        f"{run_root}/vda_mos_characterization_{task_slug}_{uuid.uuid4().hex[:12]}"
+    )
+    # The VDA PDK profile selects foundry models.  It is intentionally not
+    # treated as a Bridge tunnel-profile name; all established VDA adapters
+    # reuse the already-running default Bridge connection.
+    if not SSHClient.is_running():
+        raise RuntimeError("no default virtuoso-bridge connection is running")
+    ssh_client = SSHClient.from_env(
+        keep_remote_files=True,
+    )
+    runner = ssh_client.ssh_runner
+    runner._persistent_shell_enabled = False
+    remote_q = shlex.quote(remote_run_root)
+    _ssh_command_result(
+        runner,
+        f"test ! -e {remote_q}",
+        "MOS characterization non-overwrite preflight",
+    )
+
+    with tempfile.TemporaryDirectory(prefix="vda_mos_characterization_") as temp_dir:
+        work_dir = Path(temp_dir)
+        deck_path = work_dir / "mos_characterization.scs"
+        deck = _mos_characterization_deck(profile, settings, points)
+        deck_path.write_text(deck, encoding="utf-8")
+        simulator = SpectreSimulator(
+            timeout=timeout,
+            work_dir=work_dir,
+            output_format="psfascii",
+            keep_remote_files=True,
+            remote=True,
+            ssh_runner=runner,
+            remote_work_dir=remote_run_root,
+        )
+        result = simulator.run_simulation(deck_path, {})
+        if not result.ok:
+            detail = _spectre_failure_detail(result, work_dir)
+            raise RuntimeError(
+                "Spectre MOS characterization failed; retained remote root "
+                f"{remote_run_root}: {detail}"
+            )
+        returned_points, root_evidence = _mos_characterization_points_from_result(
+            result,
+            profile,
+            points,
+        )
+        manifest, manifest_sha256 = _mos_characterization_manifest(work_dir)
+        tool_version = str(result.tool_version or "").strip()
+        if not tool_version:
+            tool_version = _spectre_version_from_log(work_dir)
+        remote_children = [
+            line.strip()
+            for line in _ssh_command_result(
+                runner,
+                f"find {remote_q} -mindepth 1 -maxdepth 1 -type d -print",
+                "MOS characterization remote artifact discovery",
+            ).splitlines()
+            if line.strip()
+        ]
+        if len(remote_children) != 1:
+            raise RuntimeError(
+                "MOS characterization expected exactly one remote simulator directory; "
+                f"found {remote_children}"
+            )
+        return {
+            "task_id": str(payload["task_id"]),
+            "pdk_profile": str(profile["name"]),
+            "process_corner": str(profile["model_section"]),
+            "temperature_c": settings.temperature_c,
+            "width_um": settings.width_um,
+            "raw_point_evidence_source": "eda_result",
+            "points": returned_points,
+            "tool_version": tool_version,
+            "warnings": list(result.warnings[:20]),
+            "evidence": {
+                "source": "eda_result",
+                "bridge_connection_profile": "default",
+                "pdk_profile": str(profile["name"]),
+                "remote_run_root": remote_run_root,
+                "remote_simulation_dir": remote_children[0],
+                "non_overwrite_preflight": "absent",
+                "artifact_manifest_scope": (
+                    "downloaded simulator input, raw PSF result, and run-log bundle"
+                ),
+                "artifact_manifest_complete": True,
+                "artifact_manifest": manifest,
+                "manifest_sha256": manifest_sha256,
+                "root_psf_selection": root_evidence,
+                "deck_sha256": hashlib.sha256(deck.encode("utf-8")).hexdigest(),
+                "spectre_tool_version": tool_version,
+                "oa_access_performed": False,
+                "oa_write_performed": False,
+            },
+        }
+
+
 def _spectre_ac_file_evidence_from_result(result: Any) -> dict[str, Any]:
     raw_output_dir = getattr(result, "metadata", {}).get("output_dir")
     if not raw_output_dir:
@@ -12646,6 +12941,7 @@ def simulate_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
 
 _ACTIONS = {
     "probe": probe,
+    "characterize_mos_devices": characterize_mos_devices,
     "prepare_maestro": prepare_maestro,
     "capture_focused_maestro": capture_focused_maestro,
     "run_background_maestro": run_background_maestro,

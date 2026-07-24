@@ -27,6 +27,7 @@ class StrictModel(BaseModel):
 
 
 class Operation(str, Enum):
+    DEVICE_CHARACTERIZE = "device.characterize"
     SCHEMATIC_CREATE = "schematic.create"
     SCHEMATIC_INSPECT = "schematic.inspect"
     SCHEMATIC_TRANSFORM = "schematic.transform"
@@ -43,6 +44,7 @@ class Operation(str, Enum):
 
 
 class CircuitKind(str, Enum):
+    MOS_DEVICE = "mos_device"
     EXISTING_SCHEMATIC = "existing_schematic"
     INVERTER = "inverter"
     COMMON_SOURCE = "common_source"
@@ -1403,6 +1405,142 @@ class SafetyPolicy(StrictModel):
         return value
 
 
+class MosCharacterizationHoldout(StrictModel):
+    """One simulated point withheld from the rectilinear interpolation grid."""
+
+    polarity: Literal["nmos", "pmos"]
+    length_um: float = Field(gt=0.0)
+    vgs_magnitude_v: float = Field(ge=0.0)
+    vds_magnitude_v: float = Field(gt=0.0)
+    vsb_magnitude_v: float = Field(ge=0.0)
+
+    @model_validator(mode="after")
+    def validate_finite_values(self) -> "MosCharacterizationHoldout":
+        for name in (
+            "length_um",
+            "vgs_magnitude_v",
+            "vds_magnitude_v",
+            "vsb_magnitude_v",
+        ):
+            if not math.isfinite(float(getattr(self, name))):
+                raise ValueError(f"{name} must be finite")
+        return self
+
+
+class DeviceCharacterizationSpec(StrictModel):
+    """Finite, topology-independent MOS operating-point characterization."""
+
+    polarities: list[Literal["nmos", "pmos"]] = Field(
+        min_length=1,
+        max_length=2,
+    )
+    width_um: float = Field(gt=0.0)
+    lengths_um: list[float] = Field(min_length=1, max_length=8)
+    vgs_magnitudes_v: list[float] = Field(min_length=1, max_length=16)
+    vds_magnitudes_v: list[float] = Field(min_length=1, max_length=16)
+    vsb_magnitudes_v: list[float] = Field(min_length=1, max_length=8)
+    holdout_points: list[MosCharacterizationHoldout] = Field(
+        default_factory=list,
+        max_length=64,
+    )
+    temperature_c: float = Field(default=27.0, ge=-273.15, le=300.0)
+    maximum_holdout_normalized_error: float = Field(default=0.25, gt=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_grid(self) -> "DeviceCharacterizationSpec":
+        axes = {
+            "lengths_um": self.lengths_um,
+            "vgs_magnitudes_v": self.vgs_magnitudes_v,
+            "vds_magnitudes_v": self.vds_magnitudes_v,
+            "vsb_magnitudes_v": self.vsb_magnitudes_v,
+        }
+        if len(self.polarities) != len(set(self.polarities)):
+            raise ValueError("polarities cannot contain duplicates")
+        if not math.isfinite(self.width_um):
+            raise ValueError("width_um must be finite")
+        if not math.isfinite(self.temperature_c):
+            raise ValueError("temperature_c must be finite")
+        if not math.isfinite(self.maximum_holdout_normalized_error):
+            raise ValueError("maximum_holdout_normalized_error must be finite")
+        for name, values in axes.items():
+            if any(not math.isfinite(float(value)) for value in values):
+                raise ValueError(f"{name} must contain only finite values")
+            if len(values) != len(set(values)):
+                raise ValueError(f"{name} cannot contain duplicates")
+        if any(value <= 0.0 for value in self.lengths_um):
+            raise ValueError("lengths_um must contain positive values")
+        if any(value < 0.0 for value in self.vgs_magnitudes_v):
+            raise ValueError("vgs_magnitudes_v cannot contain negative values")
+        if any(value <= 0.0 for value in self.vds_magnitudes_v):
+            raise ValueError("vds_magnitudes_v must contain positive values")
+        if any(value < 0.0 for value in self.vsb_magnitudes_v):
+            raise ValueError("vsb_magnitudes_v cannot contain negative values")
+        if self.training_point_count > 256:
+            raise ValueError("MOS characterization grid exceeds 256 training points")
+
+        training = {
+            (polarity, length, vgs, vds, vsb)
+            for polarity in self.polarities
+            for length in self.lengths_um
+            for vgs in self.vgs_magnitudes_v
+            for vds in self.vds_magnitudes_v
+            for vsb in self.vsb_magnitudes_v
+        }
+        holdouts: set[tuple[str, float, float, float, float]] = set()
+        bounds = {
+            "length_um": (min(self.lengths_um), max(self.lengths_um)),
+            "vgs_magnitude_v": (
+                min(self.vgs_magnitudes_v),
+                max(self.vgs_magnitudes_v),
+            ),
+            "vds_magnitude_v": (
+                min(self.vds_magnitudes_v),
+                max(self.vds_magnitudes_v),
+            ),
+            "vsb_magnitude_v": (
+                min(self.vsb_magnitudes_v),
+                max(self.vsb_magnitudes_v),
+            ),
+        }
+        for holdout in self.holdout_points:
+            identity = (
+                holdout.polarity,
+                holdout.length_um,
+                holdout.vgs_magnitude_v,
+                holdout.vds_magnitude_v,
+                holdout.vsb_magnitude_v,
+            )
+            if holdout.polarity not in self.polarities:
+                raise ValueError("holdout polarity must be present in polarities")
+            if identity in training:
+                raise ValueError("holdout point must not duplicate the training grid")
+            if identity in holdouts:
+                raise ValueError("holdout_points cannot contain duplicates")
+            holdouts.add(identity)
+            for name, (lower, upper) in bounds.items():
+                value = float(getattr(holdout, name))
+                if value < lower or value > upper:
+                    raise ValueError(
+                        f"holdout {name}={value} is outside the training grid "
+                        f"[{lower}, {upper}]"
+                    )
+        return self
+
+    @property
+    def training_point_count(self) -> int:
+        return (
+            len(self.polarities)
+            * len(self.lengths_um)
+            * len(self.vgs_magnitudes_v)
+            * len(self.vds_magnitudes_v)
+            * len(self.vsb_magnitudes_v)
+        )
+
+    @property
+    def total_point_count(self) -> int:
+        return self.training_point_count + len(self.holdout_points)
+
+
 _TUNING_OPERATIONS = {Operation.DESIGN_TUNE, Operation.DESIGN_CLOSE_LOOP}
 _SIMULATION_OPERATIONS = _TUNING_OPERATIONS | {Operation.SIMULATION_RUN}
 
@@ -1412,7 +1550,7 @@ class TaskSpec(StrictModel):
     id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
     operation: Operation
     circuit: CircuitKind
-    target: DesignTarget
+    target: DesignTarget | None = None
     pdk_profile: str = Field(default=DEFAULT_PDK_PROFILE, min_length=1)
     analysis: AnalysisKind | None = None
     ac_sweep: AcSweep | None = None
@@ -1425,6 +1563,7 @@ class TaskSpec(StrictModel):
     ade_corners: AdeCornersApplySpec | None = None
     ade_setup: AdeSetupApplySpec | None = None
     schematic_transform: SchematicTransformSpec | None = None
+    device_characterization: DeviceCharacterizationSpec | None = None
     operating_conditions: list[OperatingCondition] = Field(
         default_factory=list,
         max_length=5,
@@ -1468,6 +1607,51 @@ class TaskSpec(StrictModel):
 
     @model_validator(mode="after")
     def validate_operation_inputs(self) -> "TaskSpec":
+        if self.operation is Operation.DEVICE_CHARACTERIZE:
+            if self.circuit is not CircuitKind.MOS_DEVICE:
+                raise ValueError("device.characterize requires circuit='mos_device'")
+            if self.target is not None:
+                raise ValueError("device.characterize does not accept an OA target")
+            if self.device_characterization is None:
+                raise ValueError(
+                    "device.characterize requires device_characterization settings"
+                )
+            if (
+                self.analysis is not None
+                or self.ac_sweep is not None
+                or self.linearity_sweep is not None
+                or self.noise_sweep is not None
+                or self.ade_capture is not None
+                or self.ade_prepare is not None
+                or self.ade_run is not None
+                or self.ade_variables is not None
+                or self.ade_corners is not None
+                or self.ade_setup is not None
+                or self.schematic_transform is not None
+                or self.operating_conditions
+                or self.parameters
+                or self.instance_parameter_updates
+                or self.parameter_space
+                or self.instance_parameter_space
+                or self.constraints
+                or self.objective is not None
+                or self.create_if_missing
+            ):
+                raise ValueError(
+                    "device.characterize accepts only device_characterization, "
+                    "PDK, limits, and safety settings"
+                )
+            if self.safety.allow_remote_write or self.safety.replace_existing:
+                raise ValueError("device.characterize cannot request remote OA writes")
+            return self
+        if self.circuit is CircuitKind.MOS_DEVICE:
+            raise ValueError("mos_device supports only operation='device.characterize'")
+        if self.target is None:
+            raise ValueError(f"{self.operation.value} requires an OA target")
+        if self.device_characterization is not None:
+            raise ValueError(
+                "device_characterization settings require operation='device.characterize'"
+            )
         if self.operating_conditions:
             if self.operation not in _SIMULATION_OPERATIONS:
                 raise ValueError(

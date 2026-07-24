@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
+import itertools
+import json
+import math
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import ConfigDict, Field, StrictStr, model_validator
 
-from .models import EvidenceSource, StrictModel
+from .models import (
+    DeviceCharacterizationSpec,
+    EvidenceSource,
+    StrictModel,
+    TaskSpec,
+)
 
 
 class DeviceDataSource(str, Enum):
@@ -108,3 +117,441 @@ class MosCharacterizationArtifact(_FiniteStrictModel):
         if len(point_ids) != len(set(point_ids)):
             raise ValueError("characterization contains duplicate point ids")
         return self
+
+
+_RAW_QUANTITIES = (
+    "ids_a",
+    "vgs_v",
+    "vds_v",
+    "vbs_v",
+    "vdsat_v",
+    "gm_s",
+    "gds_s",
+    "gmb_s",
+    "cgs_f",
+    "cgd_f",
+    "cgb_f",
+    "cdb_f",
+    "csb_f",
+)
+
+_INTERPOLATED_QUANTITIES = (
+    "vdsat_magnitude_v",
+    "drain_current_density_a_per_um",
+    "gm_over_id_per_v",
+    "gds_over_id_per_v",
+    "gmb_over_id_per_v",
+    "cgs_f_per_um",
+    "cgd_f_per_um",
+    "cgb_f_per_um",
+    "cdb_f_per_um",
+    "csb_f_per_um",
+)
+
+_ERROR_FLOORS = {
+    "vdsat_magnitude_v": 1e-3,
+    "drain_current_density_a_per_um": 1e-9,
+    "gm_over_id_per_v": 1e-3,
+    "gds_over_id_per_v": 1e-4,
+    "gmb_over_id_per_v": 1e-4,
+    "cgs_f_per_um": 1e-17,
+    "cgd_f_per_um": 1e-17,
+    "cgb_f_per_um": 1e-17,
+    "cdb_f_per_um": 1e-17,
+    "csb_f_per_um": 1e-17,
+}
+
+
+def enumerate_mos_characterization_points(
+    settings: DeviceCharacterizationSpec,
+) -> list[dict[str, Any]]:
+    """Expand the declared grid and holdouts into stable simulation identities."""
+
+    points: list[dict[str, Any]] = []
+    for polarity_index, polarity in enumerate(settings.polarities):
+        for length_index, length_um in enumerate(settings.lengths_um):
+            for vgs_index, vgs_v in enumerate(settings.vgs_magnitudes_v):
+                for vds_index, vds_v in enumerate(settings.vds_magnitudes_v):
+                    for vsb_index, vsb_v in enumerate(settings.vsb_magnitudes_v):
+                        points.append(
+                            {
+                                "id": (
+                                    f"tr-{polarity_index}-{length_index}-"
+                                    f"{vgs_index}-{vds_index}-{vsb_index}"
+                                ),
+                                "set": "training",
+                                "polarity": polarity,
+                                "length_um": float(length_um),
+                                "vgs_magnitude_v": float(vgs_v),
+                                "vds_magnitude_v": float(vds_v),
+                                "vsb_magnitude_v": float(vsb_v),
+                            }
+                        )
+    for index, holdout in enumerate(settings.holdout_points, start=1):
+        points.append(
+            {
+                "id": f"ho-{index:03d}-{holdout.polarity}",
+                "set": "holdout",
+                **holdout.model_dump(mode="json"),
+            }
+        )
+    return points
+
+
+def _finite_float(value: Any, label: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"MOS characterization {label} is not numeric") from exc
+    if not math.isfinite(number):
+        raise RuntimeError(f"MOS characterization {label} is not finite")
+    return number
+
+
+def _matches(left: float, right: float, *, tolerance: float = 1e-6) -> bool:
+    return math.isclose(left, right, rel_tol=tolerance, abs_tol=tolerance)
+
+
+def _normalized_point(
+    declared: dict[str, Any],
+    returned: dict[str, Any],
+    *,
+    width_um: float,
+) -> MosSmallSignalPoint:
+    for name in (
+        "id",
+        "set",
+        "polarity",
+        "length_um",
+        "vgs_magnitude_v",
+        "vds_magnitude_v",
+        "vsb_magnitude_v",
+    ):
+        if returned.get(name) != declared[name]:
+            raise RuntimeError(
+                f"MOS characterization point {declared['id']} field {name} "
+                "does not match the declared request"
+            )
+    raw = returned.get("raw")
+    if not isinstance(raw, dict):
+        raise RuntimeError(
+            f"MOS characterization point {declared['id']} has no raw OP values"
+        )
+    values = {
+        name: _finite_float(raw.get(name), f"{declared['id']}.{name}")
+        for name in _RAW_QUANTITIES
+    }
+    polarity = MosPolarity(str(declared["polarity"]))
+    sign = 1.0 if polarity is MosPolarity.NMOS else -1.0
+    bias_checks = {
+        "vgs_v": sign * float(declared["vgs_magnitude_v"]),
+        "vds_v": sign * float(declared["vds_magnitude_v"]),
+        "vbs_v": -sign * float(declared["vsb_magnitude_v"]),
+    }
+    for name, expected in bias_checks.items():
+        if not _matches(values[name], expected):
+            raise RuntimeError(
+                f"MOS characterization {declared['id']} measured {name}="
+                f"{values[name]!r}, expected {expected!r}"
+            )
+    if values["ids_a"] * sign <= 0.0:
+        raise RuntimeError(
+            f"MOS characterization {declared['id']} drain-current sign is invalid"
+        )
+    for name in ("gm_s", "gds_s", "gmb_s"):
+        if values[name] < 0.0:
+            raise RuntimeError(
+                f"MOS characterization {declared['id']} {name} is negative"
+            )
+    current = abs(values["ids_a"])
+    if current <= 0.0:
+        raise RuntimeError(
+            f"MOS characterization {declared['id']} has zero drain current"
+        )
+    if values["gm_s"] <= 0.0:
+        raise RuntimeError(f"MOS characterization {declared['id']} has zero gm")
+    model = returned.get("model")
+    if not isinstance(model, str) or not model:
+        raise RuntimeError(
+            f"MOS characterization point {declared['id']} has no model identity"
+        )
+    return MosSmallSignalPoint(
+        id=str(declared["id"]),
+        model=model,
+        polarity=polarity,
+        length_um=float(declared["length_um"]),
+        vgs_magnitude_v=float(declared["vgs_magnitude_v"]),
+        vds_magnitude_v=float(declared["vds_magnitude_v"]),
+        vsb_magnitude_v=float(declared["vsb_magnitude_v"]),
+        vdsat_magnitude_v=abs(values["vdsat_v"]),
+        drain_current_density_a_per_um=current / width_um,
+        gm_over_id_per_v=values["gm_s"] / current,
+        gds_over_id_per_v=values["gds_s"] / current,
+        gmb_over_id_per_v=values["gmb_s"] / current,
+        cgs_f_per_um=abs(values["cgs_f"]) / width_um,
+        cgd_f_per_um=abs(values["cgd_f"]) / width_um,
+        cgb_f_per_um=abs(values["cgb_f"]) / width_um,
+        cdb_f_per_um=abs(values["cdb_f"]) / width_um,
+        csb_f_per_um=abs(values["csb_f"]) / width_um,
+    )
+
+
+def _axis_bracket(values: list[float], target: float) -> tuple[tuple[float, float], ...]:
+    ordered = sorted(values)
+    for value in ordered:
+        if _matches(value, target, tolerance=1e-12):
+            return ((value, 1.0),)
+    lower = max((value for value in ordered if value < target), default=None)
+    upper = min((value for value in ordered if value > target), default=None)
+    if lower is None or upper is None:
+        raise RuntimeError(f"holdout value {target} is not bracketed by training data")
+    span = upper - lower
+    return ((lower, (upper - target) / span), (upper, (target - lower) / span))
+
+
+def _interpolate_holdout(
+    settings: DeviceCharacterizationSpec,
+    training: list[MosSmallSignalPoint],
+    holdout: MosSmallSignalPoint,
+) -> dict[str, float]:
+    axes = (
+        _axis_bracket(settings.lengths_um, holdout.length_um),
+        _axis_bracket(settings.vgs_magnitudes_v, holdout.vgs_magnitude_v),
+        _axis_bracket(settings.vds_magnitudes_v, holdout.vds_magnitude_v),
+        _axis_bracket(settings.vsb_magnitudes_v, holdout.vsb_magnitude_v),
+    )
+    lookup = {
+        (
+            point.polarity,
+            point.length_um,
+            point.vgs_magnitude_v,
+            point.vds_magnitude_v,
+            point.vsb_magnitude_v,
+        ): point
+        for point in training
+    }
+    predicted = {name: 0.0 for name in _INTERPOLATED_QUANTITIES}
+    total_weight = 0.0
+    for corner in itertools.product(*axes):
+        coordinates = tuple(item[0] for item in corner)
+        weight = math.prod(item[1] for item in corner)
+        point = lookup.get((holdout.polarity, *coordinates))
+        if point is None:
+            raise RuntimeError(
+                f"holdout {holdout.id} is missing interpolation corner {coordinates}"
+            )
+        total_weight += weight
+        for name in predicted:
+            predicted[name] += weight * float(getattr(point, name))
+    if not _matches(total_weight, 1.0, tolerance=1e-9):
+        raise RuntimeError(
+            f"holdout {holdout.id} interpolation weights sum to {total_weight}"
+        )
+    return predicted
+
+
+def _validate_manifest(raw_data: dict[str, Any]) -> str:
+    evidence = raw_data.get("evidence")
+    if not isinstance(evidence, dict):
+        raise RuntimeError("MOS characterization result has no evidence bundle")
+    manifest = evidence.get("artifact_manifest")
+    if not isinstance(manifest, list) or not manifest:
+        raise RuntimeError("MOS characterization artifact manifest is empty")
+    normalized: list[dict[str, Any]] = []
+    paths: set[str] = set()
+    for item in manifest:
+        if not isinstance(item, dict):
+            raise RuntimeError("MOS characterization manifest entry is invalid")
+        path = item.get("path")
+        size = item.get("size_bytes")
+        digest = item.get("sha256")
+        if (
+            not isinstance(path, str)
+            or not path
+            or path.startswith("/")
+            or ".." in _path_parts(path)
+            or path in paths
+        ):
+            raise RuntimeError("MOS characterization manifest path is invalid")
+        if not isinstance(size, int) or size < 0:
+            raise RuntimeError(
+                f"MOS characterization manifest {path} has an invalid size"
+            )
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise RuntimeError(
+                f"MOS characterization manifest {path} has an invalid SHA-256"
+            )
+        paths.add(path)
+        normalized.append({"path": path, "size_bytes": size, "sha256": digest})
+    required_suffixes = (".scs", "dcOp.dc", "dcOpInfo.info", "spectre.out")
+    for suffix in required_suffixes:
+        if not any(
+            item["path"].endswith(suffix) and item["size_bytes"] > 0
+            for item in normalized
+        ):
+            raise RuntimeError(
+                f"MOS characterization manifest is missing a nonempty {suffix} artifact"
+            )
+    canonical = json.dumps(
+        sorted(normalized, key=lambda item: item["path"]),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    calculated = hashlib.sha256(canonical).hexdigest()
+    if evidence.get("manifest_sha256") != calculated:
+        raise RuntimeError("MOS characterization manifest fingerprint does not match")
+    remote_root = evidence.get("remote_run_root")
+    remote_dir = evidence.get("remote_simulation_dir")
+    if (
+        not isinstance(remote_root, str)
+        or not remote_root.startswith("/data/xum/")
+        or not isinstance(remote_dir, str)
+        or not remote_dir.startswith(remote_root.rstrip("/") + "/")
+    ):
+        raise RuntimeError("MOS characterization remote artifact path is invalid")
+    return calculated
+
+
+def _path_parts(path: str) -> tuple[str, ...]:
+    """Return portable manifest components without interpreting a host path."""
+
+    return tuple(part for part in path.replace("\\", "/").split("/") if part)
+
+
+def normalize_mos_characterization(
+    task: TaskSpec,
+    raw_data: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate raw EDA output and build the reusable MOS table plus holdout audit."""
+
+    settings = task.device_characterization
+    if settings is None:
+        raise RuntimeError("device characterization settings are missing")
+    from .profiles import load_pdk_profile
+
+    profile = load_pdk_profile(task.pdk_profile)
+    expected_header = {
+        "task_id": task.id,
+        "pdk_profile": profile.name,
+        "process_corner": profile.model_section,
+        "temperature_c": settings.temperature_c,
+        "width_um": settings.width_um,
+        "raw_point_evidence_source": EvidenceSource.EDA_RESULT.value,
+    }
+    for name, expected in expected_header.items():
+        actual = raw_data.get(name)
+        if isinstance(expected, float):
+            if not _matches(_finite_float(actual, name), expected):
+                raise RuntimeError(
+                    f"MOS characterization header {name} does not match the task"
+                )
+        elif actual != expected:
+            raise RuntimeError(
+                f"MOS characterization header {name} does not match the task"
+            )
+    tool_version = raw_data.get("tool_version")
+    if not isinstance(tool_version, str) or not tool_version.strip():
+        raise RuntimeError("MOS characterization result has no Spectre tool version")
+    manifest_sha256 = _validate_manifest(raw_data)
+    declared = enumerate_mos_characterization_points(settings)
+    returned = raw_data.get("points")
+    if not isinstance(returned, list) or not returned:
+        raise RuntimeError("MOS characterization returned no operating points")
+    if len(returned) != len(declared):
+        raise RuntimeError(
+            "MOS characterization point count does not match the declared grid"
+        )
+    returned_by_id: dict[str, dict[str, Any]] = {}
+    for point in returned:
+        if not isinstance(point, dict) or not isinstance(point.get("id"), str):
+            raise RuntimeError("MOS characterization returned an invalid point")
+        if point["id"] in returned_by_id:
+            raise RuntimeError("MOS characterization returned duplicate point ids")
+        returned_by_id[point["id"]] = point
+    if set(returned_by_id) != {str(point["id"]) for point in declared}:
+        raise RuntimeError("MOS characterization point identities do not match the task")
+
+    normalized = [
+        (
+            item["set"],
+            _normalized_point(
+                item,
+                returned_by_id[str(item["id"])],
+                width_um=settings.width_um,
+            ),
+        )
+        for item in declared
+    ]
+    training = [point for point_set, point in normalized if point_set == "training"]
+    holdouts = [point for point_set, point in normalized if point_set == "holdout"]
+    artifact = MosCharacterizationArtifact(
+        id=f"{task.id}-table",
+        source=DeviceDataSource.PDK_CHARACTERIZATION,
+        source_artifact_sha256=manifest_sha256,
+        pdk_profile=profile.name,
+        process_corner=profile.model_section,
+        temperature_c=settings.temperature_c,
+        raw_data_evidence_source=EvidenceSource.EDA_RESULT,
+        normalized_point_evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+        points=training,
+    )
+
+    audits: list[dict[str, Any]] = []
+    for holdout in holdouts:
+        predicted = _interpolate_holdout(settings, training, holdout)
+        absolute_errors: dict[str, float] = {}
+        normalized_errors: dict[str, float] = {}
+        for name, predicted_value in predicted.items():
+            actual_value = float(getattr(holdout, name))
+            absolute_errors[name] = abs(predicted_value - actual_value)
+            normalized_errors[name] = absolute_errors[name] / max(
+                abs(predicted_value),
+                abs(actual_value),
+                _ERROR_FLOORS[name],
+            )
+        maximum_error = max(normalized_errors.values())
+        audits.append(
+            {
+                "id": holdout.id,
+                "polarity": holdout.polarity.value,
+                "predicted": predicted,
+                "actual": {
+                    name: float(getattr(holdout, name))
+                    for name in _INTERPOLATED_QUANTITIES
+                },
+                "absolute_errors": absolute_errors,
+                "normalization_floors": dict(_ERROR_FLOORS),
+                "normalized_errors": normalized_errors,
+                "maximum_normalized_error": maximum_error,
+                "passed": maximum_error
+                <= settings.maximum_holdout_normalized_error,
+                "evidence_source": EvidenceSource.SOFTWARE_INFERENCE.value,
+                "actual_point_evidence_source": EvidenceSource.EDA_RESULT.value,
+            }
+        )
+    gate_passed = all(item["passed"] for item in audits)
+    return {
+        "artifact": artifact.model_dump(mode="json"),
+        "point_counts": {
+            "training": len(training),
+            "holdout": len(holdouts),
+            "total": len(normalized),
+        },
+        "bias_and_sign_consistency": "matched",
+        "manifest_consistency": "matched",
+        "holdout_audit": {
+            "threshold": settings.maximum_holdout_normalized_error,
+            "error_definition": (
+                "abs(predicted-actual) / max(abs(predicted), abs(actual), "
+                "metric_normalization_floor)"
+            ),
+            "passed": gate_passed,
+            "points": audits,
+        },
+        "raw_data_evidence_source": EvidenceSource.EDA_RESULT.value,
+        "normalization_evidence_source": EvidenceSource.SOFTWARE_INFERENCE.value,
+    }

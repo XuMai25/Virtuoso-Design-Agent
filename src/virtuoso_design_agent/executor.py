@@ -16,6 +16,7 @@ from typing import Any, TypeVar
 from .adapters.base import AdapterInterrupted, AdapterResult, DesignAdapter
 from .calculator_expressions import calculator_expressions_equal
 from .catalog import task_requests_oa_parameter_write
+from .characterization import normalize_mos_characterization
 from .metrics import evaluate_constraints
 from .models import (
     ActionRecord,
@@ -3146,7 +3147,43 @@ class TaskExecutor:
             )
             operation = task.operation
 
-            if operation is Operation.SCHEMATIC_CREATE:
+            if operation is Operation.DEVICE_CHARACTERIZE:
+                raw_characterization = self._action(
+                    "device.characterize",
+                    lambda: self.adapter.characterize_devices(task),
+                )
+                normalized_characterization = self._action(
+                    "device.characterize.validate",
+                    lambda: AdapterResult(
+                        data=normalize_mos_characterization(
+                            task,
+                            raw_characterization.data,
+                        ),
+                        evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+                    ),
+                )
+                holdout_audit = normalized_characterization.data["holdout_audit"]
+                if not holdout_audit["passed"]:
+                    status = RunStatus.PARTIAL
+                    failed = [
+                        item["id"]
+                        for item in holdout_audit["points"]
+                        if not item["passed"]
+                    ]
+                    notes.append(
+                        "raw PDK characterization completed, but the declared "
+                        "interpolation holdout gate failed: " + ", ".join(failed)
+                    )
+                notes.append(
+                    "device characterization ran in standalone Spectre scratch; "
+                    "no OA library, cell, or view was opened or modified"
+                )
+                notes.append(
+                    "raw operating points and artifact hashes are eda_result; "
+                    "width normalization and interpolation audit are "
+                    "software_inference"
+                )
+            elif operation is Operation.SCHEMATIC_CREATE:
                 self._action(
                     "schematic.create", lambda: self.adapter.create_schematic(task)
                 )

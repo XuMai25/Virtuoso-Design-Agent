@@ -7,11 +7,12 @@ VDA 已用真实 TSMC N28 OA→`si`→Spectre 数据校准并交叉检查 Gate 6
 
 **Gate 6 topology-local one-pole calibration verified at nominal top_tt; standalone PDK gm/Id characterization and broader-domain validation pending**
 
-后续状态：同日已增加[通用 MOS 小信号网络本地 Gate](2026-07-24-generic-small-signal-local.md)。本文件中的系数继续只作为 Gate 6 regression benchmark；跨拓扑能力由独立器件表和节点矩阵核心承载，不再尝试推广本页的 topology-local 系数。
+后续状态：同日已增加[通用 MOS 小信号网络本地 Gate](2026-07-24-generic-small-signal-local.md)，并完成[TSMC N28 独立 MOS characterization 真实 Gate](2026-07-24-tsmc28-mos-characterization-live.md)。本文件中的系数继续只作为 Gate 6 regression benchmark；跨拓扑能力由独立器件表和节点矩阵核心承载，不再尝试推广本页的 topology-local 系数。下一步是 `si` 图/真实 DC 偏置绑定与 held-out circuit 对照，而不是继续把本页局部系数外推。
 
 这不是完整 PDK 器件模型，也不是连续或全局最优证明。校准只允许在已测的
 `Wn=1.5–2.0 µm`、`Wp=1.5–2.5 µm` 区间内解释固定条件下的局部趋势；在真实
-gm/Id characterization 表建立前，校准产物不会自动驱动 OA 写回。
+即使 nominal gm/Id characterization 表已建立，在完成角色/偏置绑定和 held-out circuit
+Spectre 误差验证前，校准产物仍不会自动驱动 OA 写回。
 
 ## 执行边界
 

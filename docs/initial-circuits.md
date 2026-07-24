@@ -100,7 +100,21 @@ Gate 4 的真实尾管能力继续保留；Gate 5 不替换它，而是在其上
 
 为避免上述几何小网格退化成随意试值，Gate 6 已增加本地 theory-first 尺寸入口。它对声明的输入 NMOS/PMOS 负载/尾管 gm/Id 表域逐组合解析求解最小支路电流与 W，而不是把人工 W 列表重新排序；增益、BW、GBW、功耗、面积代理和三管 KVL 余量都保留公式、裕量与证据来源。只有完整穷尽声明表域时才报告 `best_in_declared_discrete_domain`，从不报告连续或全局最优。六点真实 Wn×Wp 同源数据现已把固定 `top_tt`/30 nm L/单偏置下的一阶增益与带宽模型校准到最大留一误差小于 `0.46%`，并由一次新鲜只读同点 Spectre 复跑确认执行重复性；这只证明 topology-local 表内模型。独立 TSMC N28 MOS gm/Id 表、L/VDS/BIAS/VCM/CL/PVT 范围和未参与拟合的电路点仍未闭合，因此 synthetic 推荐与该局部校准都不得直接写回 OA。
 
-该固定拓扑尺寸器之下现已增加通用 MOS/R/C 小信号矩阵核心。它不识别 Gate 2/3/4/5/6 名称，同一套器件点和节点 stamping 已覆盖共源、源退化共源、NMOS 差分对与 PMOS 共源本地解析测试。后续新电路不应复制一套 AC 方程；应先由 OA/`si` 图绑定通用网络，再由少量 topology-aware 层定义设计意图、约束和允许的结构变换。对于尚未进入正式 JSON 契约的特殊受控源、激励或辅助方程，电路脚本可复用公开的 `ComplexNodalSystem` 系数/RHS 接口或 raw complex MNA solver；重复出现并通过 Spectre 对照后才提升为正式 element/metric。当前真实 PDK 表和自动图绑定尚未完成，所以这仍是本地分析基础，不改变各 Gate 的 live 证据状态。
+该固定拓扑尺寸器之下现已增加通用 MOS/R/C 小信号矩阵核心。它不识别 Gate 2/3/4/5/6 名称，同一套器件点和节点 stamping 已覆盖共源、源退化共源、NMOS 差分对与 PMOS 共源本地解析测试。后续新电路不应复制一套 AC 方程；应先由 OA/`si` 图绑定通用网络，再由少量 topology-aware 层定义设计意图、约束和允许的结构变换。对于尚未进入正式 JSON 契约的特殊受控源、激励或辅助方程，电路脚本可复用公开的 `ComplexNodalSystem` 系数/RHS 接口或 raw complex MNA solver；重复出现并通过 Spectre 对照后才提升为正式 element/metric。Gate 7A 已补上 nominal TSMC N28 独立器件表，但自动图/偏置绑定和 held-out topology Spectre 对照尚未完成，所以理论输出仍不改变各电路 Gate 的最终证据状态。
+
+## Gate 7A：独立 TSMC N28 MOS 表征
+
+状态：2026-07-24 已完成 **standalone TSMC N28 MOS characterization live Gate at nominal top_tt**。这是跨电路的器件数据 Gate，不新建 OA cellview，也不替换 Gate 1–6 的同源仿真。
+
+- 正式 operation 为 `device.characterize`，circuit 为 `mos_device`；任务不接受 OA target、remote write、ADE 或 design-search 字段，只允许显式远端计算。
+- Bridge 默认连接负责 SSH、Cadence 环境、Spectre 和下载；VDA PDK profile 独立绑定 `nch_lvt_mac/pch_lvt_mac`、model include 和 `top_tt`。没有修改第三方 Bridge。
+- 一个 DC deck 完成 W=1 µm、L=30/60 nm、四个 VGS、五个 VDS、三个 VSB、双 polarity 共 240 个训练点，另跑 4 个真实 VGS 留出点。
+- 每点保存 signed Id/VGS/VDS/VBS/VDSAT/gm/gds/gmb 和 Cgs/Cgd/Cgb/Cdb/Csb。原始量为 `eda_result`；width-normalized `Id/W`、gm/Id、gds/Id、gmb/Id、电容密度和插值审计为 `software_inference`。
+- 最终 Spectre `21.1.0.612.isr15` 记录包含 244 个 OP、六项文件 manifest、deck 和聚合 SHA-256；OA access/write 均为 false。四个留出点全部通过 25% 门，最坏为 PMOS Id/W 的 13.70%。
+- 45 nm 留出几何被当前 PDK 拒绝，96 点粗网格又有 3/4 留出失败；两类失败都保留，最终使用已验证合法 L、加密 VDS/VSB 采样并为近零电容记录 mixed normalization floor，没有抬高 25% 门。
+- artifact 已直接通过通用 small-signal schema，但简单节点图推导的 gain/BW 仍是理论量，不是完整 OA 电路的 Spectre 证据。
+
+下一道 Gate 7B 不再继续盲目扩表：先从一个既有共源 cell 的只读 OA→`si` 网表和真实 DC OP 自动构图/绑定表点，再用同一网表 Spectre AC 对照理论 gain、phase、−3 dB bandwidth 和 GBW。通过完全 held-out 的 nominal 共源后，才迁移到源极退化和差分对；PVT 可选，不作为默认前置条件。
 
 ## 升级原则
 

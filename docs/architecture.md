@@ -42,6 +42,7 @@ VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PD
 
 | operation | 作用 | 远端副作用 |
 | --- | --- | --- |
+| `device.characterize` | 在声明的 foundry PDK/model section、温度、合法几何和有限偏置域内运行独立 NMOS/PMOS OP 表征，保存 raw manifest/hash 并审计留出点；没有 OA target | scratch/计算，不写 OA |
 | `schematic.create` | 建图并结构回读 | OA 写入 |
 | `schematic.inspect` | 读取拓扑、参数、pins | 只读 |
 | `schematic.transform` | 对已知拓扑应用可审计的小变更；当前覆盖共源源极退化、反相器 core→ADE testbench、差分对真实尾管、对称源极退化与 PMOS 电流镜负载可逆变换 | OA 写入 |
@@ -87,6 +88,33 @@ CDF 的 `display` 和 `editable` 元数据不是写入 allowlist。2026-07-20 �
 
 有限搜索的结果不能简称为“最优解”。所有 tuning run record 都带 `search_audit`：分别记录声明、尝试和分析完整的候选数，只有全部声明点都完整完成时才允许 `best_in_declared_discrete_domain`；预算截断、transport 失败或缺指标只能是 `best_evaluated`。即使声明离散域穷尽，`continuous_optimum_claim` 和 `global_optimum_claim` 仍固定为 false；全不可行也只证明声明离散域内没有可行点。
 
+## 独立 MOS 器件表征
+
+`device.characterize` 是远端 task operation，但不是 OA operation。其 `TaskSpec` 必须使用
+`circuit: mos_device`、省略 target，并只声明 polarity、W、有限 L/VGS/VDS/VSB 网格、
+留出点、温度、limits 和 remote-compute safety。任何 OA target、remote-write 权限、
+analysis、ADE 状态、参数写入或设计搜索字段都会拒绝；其他 operation 仍强制要求 target。
+
+worker 复用 Bridge 已运行的默认 SSH 连接和公开 `SpectreSimulator`，但 PDK profile 仍由
+VDA 独立选择 model include/section；两者不能混成同一个 profile 名。每次运行先确认唯一
+`/data/xum/.../vda_mos_characterization_<task>_<nonce>` 根不存在，随后由 Bridge 在根下
+上传 deck、运行 Spectre、下载 PSF/log 并保留远端文件。VDA 没有复制 SSH、Cadence 环境
+初始化、Spectre runner 或传输，也没有修改第三方 Bridge。
+
+同一个 DC deck 为每个 MOS 点配置独立 D/G/B 理想源，直接保存 signed
+`ids/vgs/vds/vbs/vdsat/gm/gds/gmb/cgs/cgd/cgb/cdb/csb`。worker 只返回原始 OP 与输入/结果/log 的大小和
+SHA-256，action 标为 `eda_result`；executor 另行检查 NMOS/PMOS bias/IDS 符号、有限性、
+点身份和 manifest 指纹，再生成 width-normalized `MosCharacterizationArtifact` 和多线性
+留出审计，标为 `software_inference`。raw 成功而留出门失败时 run 为 `partial`，空 OP、
+NaN、偏置/符号漂移、清单缺失或 transport 中断为 `failed/system_event`，不能变成“器件
+不可行”。
+
+首个 live Gate 在 TSMC N28 `top_tt`/27 ℃、W=1 µm、L=30/60 nm、240 个训练点和
+4 个真实 VGS 留出点上通过，最坏归一化误差为 13.70%，门为 25%。输出 artifact 与通用
+small-signal schema 相同，能直接被本地矩阵核心消费。当前 artifact 仍嵌在 run record；
+没有引入 registry/database。PVT、nf/m/LDE、多维边缘留出、`si` 图绑定和 held-out circuit
+Spectre 对照均未完成，故不能授权理论值直接写 OA。
+
 ## 理论先导尺寸分析
 
 `vda theory` 是 Bridge 之前的纯本地分析面，不属于远端 task operation，也不生成计划 token、OA 写入或 Spectre 结果。首版只支持已经进入 Gate 6 的固定拓扑 `nmos_differential_pair_pmos_current_mirror_load_with_tail_device`，不把一个通用方程求解器伪装成任意电路综合。
@@ -110,7 +138,7 @@ GBW  = gm / (2*pi*Cout)
 
 首个 nominal `top_tt` 校准用 `Wn=[1.5,2.0] µm × Wp=[1.5,2.0,2.5] µm` 六点真实数据拟合 `Ad=k*gm/(gdsn+gdsp)` 与 `Ceff=CL+Cn*Wn+Cp*Wp`，并逐点留一重拟合。输出绑定两个 run record 哈希、每点原始证据哈希、全部预测/误差、固定条件和禁止外推边界。新鲜同点只读 Spectre 复跑用于检查执行重复性；它不冒充几何外推验证。拟合及误差判定仍是 `software_inference`，OA 与 EDA 原始量分别保留 `bridge_readback`/`eda_result`。
 
-该 topology-local 校准已经量化当前一阶模型在小范围内的误差，但它不是独立 MOS characterization：`Cn/Cp` 是拓扑等效电容，不能冒充 PDK `Cgg/Cgd/Cdb`；每个校准预测仍消费该观测点由 Spectre 得到的 `gm/gds`，尚不能在 EDA 前预测一个从未仿真的新点。它也没有给 theory solver 提供跨 gm/Id、L、VDS/VSD 的 `Id/W`、`gds/Id` 和 `VDSAT` 表。因此校准产物目前不会自动注入 `vda theory` 或触发 OA 写入。下一 Gate 仍是生成并绑定真实 TSMC N28 独立器件 characterization 表，再用未参与拟合的同源电路点复核；只有通过该 Gate 才能用理论结果缩小 Spectre 搜索域。
+该 topology-local 校准已经量化当前一阶模型在小范围内的误差，但它不是独立 MOS characterization：`Cn/Cp` 是拓扑等效电容，不能冒充 PDK `Cgg/Cgd/Cdb`；每个校准预测仍消费该观测点由 Spectre 得到的 `gm/gds`。Gate 7A 现已提供独立 TSMC N28 `Id/W`、`gm/Id`、`gds/Id`、`gmb/Id`、VDSAT 和端口电容表，但尚未把 Gate 6 三种器件角色和各自真实 DC 偏置自动绑定到该表，也没有用未参与建表的完整电路点验证 theory 误差。因此 topology-local 校准不会自动注入 `vda theory` 或触发 OA 写入；下一 Gate 改为 `si` 图/偏置绑定和 held-out circuit Spectre 复核。
 
 ### 通用小信号网络核心
 
@@ -122,7 +150,7 @@ MOS characterization 点不绑定“输入管/负载管/尾管”等电路角色
 
 这不是运行时加载任意代码的任务插件系统。正式 `vda small-signal` JSON 仍只接受已经验证的 MOS/R/C 与固定电压边界，以维持确定性、可序列化和证据可审计性。电路专属脚本负责局部构图、观测量和约束；某种新 element、激励或 metric 只有在重复需要、补齐 strict schema、失败测试和 Spectre 对照后，才提升到正式任务契约。底层当前仍是纯 Python dense solver，适合 theory seed 和有界本地网络；大规模、强病态、noise/nonlinear 或精确 foundry 模型继续交给 Spectre，未来确有证据时再替换成稀疏数值后端。
 
-首个本地 Gate 用同一核心验证 NMOS 共源、源退化共源、对称 NMOS 差分对和 PMOS 共源，并注入浮空矩阵、偏置漂移、缺失 artifact hash 等失败。当前没有非线性 DC 解、characterization 插值或 `si`→network 自动转换，所以实例偏置和图仍需显式提供；W/multiplicity 也只按线性缩放，真实 `nf`、finger width、窄宽效应和 LDE 必须成为表的独立几何维度。该核心不支持任意拓扑综合。下一纵向 Gate 是生成真实 TSMC N28 独立器件表，把现有 `si` 结构网表映射到该网络契约，并用完全留出的电路拓扑验证误差。Spectre 仍是最终规格证据。
+首个本地 Gate 用同一核心验证 NMOS 共源、源退化共源、对称 NMOS 差分对和 PMOS 共源，并注入浮空矩阵、偏置漂移、缺失 artifact hash 等失败。Gate 7A 的真实 TSMC N28 artifact 又直接进入同一 schema 和矩阵核心；表征 operation 内部已有局部留出审计，但正式 `vda small-signal` 仍按 exact point 绑定，没有公开的任意偏置插值/外推入口。当前也没有非线性 DC 解或 `si`→network 自动转换，所以实例偏置和图仍需显式提供；W/multiplicity 只按线性缩放，真实 `nf`、finger width、窄宽效应和 LDE 必须成为独立表征维度。下一纵向 Gate 是把现有 `si` 结构网表和真实 DC OP 映射到该网络契约，并用完全留出的共源电路对照同源 Spectre AC。Spectre 仍是最终规格证据。
 
 ## ADE 人工介入与状态所有权
 

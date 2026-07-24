@@ -70,6 +70,21 @@ OA_SEMANTIC_PARAMETER_NAMES: dict[CircuitKind, frozenset[str]] = {
 }
 
 CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
+    CircuitKind.MOS_DEVICE: CircuitCapability(
+        circuit=CircuitKind.MOS_DEVICE,
+        stage="Gate 7A topology-independent nominal MOS characterization",
+        executable=True,
+        operations=(Operation.DEVICE_CHARACTERIZE,),
+        parameters=(),
+        explicit_instance_parameters=False,
+        evidence_gate=(
+            "standalone foundry-model Spectre operating points + complete raw-file "
+            "SHA-256 manifest + finite NMOS/PMOS sign-normalized gm/gds/gmb and "
+            "terminal-capacitance table + declared interpolation holdout audit; "
+            "240-point nominal TSMC N28 top_tt table and four real holdouts live; "
+            "PVT, si graph binding, and held-out circuit validation pending"
+        ),
+    ),
     CircuitKind.EXISTING_SCHEMATIC: CircuitCapability(
         circuit=CircuitKind.EXISTING_SCHEMATIC,
         stage="Bridge-preserving manual OA surface",
