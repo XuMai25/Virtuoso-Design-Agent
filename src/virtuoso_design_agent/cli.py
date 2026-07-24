@@ -27,6 +27,7 @@ from .models import (
 )
 from .planner import build_plan
 from .safety import SafetyViolation
+from .theory import DifferentialPairTheoryRequest, size_differential_pair
 
 
 def _load_task(path: Path) -> TaskSpec:
@@ -89,6 +90,19 @@ def _cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_theory(args: argparse.Namespace) -> int:
+    request = DifferentialPairTheoryRequest.model_validate_json(
+        args.request.read_text(encoding="utf-8")
+    )
+    result = size_differential_pair(request)
+    payload = result.model_dump_json(indent=2)
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(payload, encoding="utf-8")
+    print(payload)
+    return 0
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     task = _load_task(args.task)
     plan = build_plan(task)
@@ -141,6 +155,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "Selected metrics: "
             + json.dumps(record.selected_metrics, ensure_ascii=False, sort_keys=True)
         )
+    if record.search_audit is not None:
+        print(f"Selection scope: {record.search_audit.selection_scope.value}")
+        print(f"Selection boundary: {record.search_audit.statement}")
     for note in record.notes:
         print(f"Note: {note}")
     if checkpoint_path is not None:
@@ -172,6 +189,14 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("task", type=Path)
     plan.add_argument("--json", action="store_true")
     plan.set_defaults(handler=_cmd_plan)
+
+    theory = subparsers.add_parser(
+        "theory",
+        help="derive and rank one topology over a declared gm/Id domain locally",
+    )
+    theory.add_argument("request", type=Path)
+    theory.add_argument("--output", type=Path)
+    theory.set_defaults(handler=_cmd_theory)
 
     run = subparsers.add_parser("run", help="plan or execute a task")
     run.add_argument("task", type=Path)

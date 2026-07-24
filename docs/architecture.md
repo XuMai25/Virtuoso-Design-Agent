@@ -85,6 +85,27 @@ CDF 的 `display` 和 `editable` 元数据不是写入 allowlist。2026-07-20 �
 
 任务请求及原始值标为 `user_input`；真实 OA 确认标为 `bridge_readback`；demo 只能产生 `software_inference`。完整 inspect 会保留 callback 导致的旁路参数变化，但 VDA 只对任务显式列出的字段宣称确认。`instance_parameter_updates` 不会隐式进入搜索；调优必须用 `instance_parameter_space` 逐维声明 exact instance、未过滤 OA inspect 中真实存在的 CDF 字段名和有限原始字符串集合。executor 将固定实例字段、raw sweep 与 semantic space 组合成一个受 `max_iterations` 截断的确定性笛卡尔积，不把所有 CDF 自动扩成搜索空间。每个 candidate 只把具体点交给 Bridge，要求请求、实际应用映射、立即定向回读一致；candidate/checkpoint 分别保存原始字段与 canonical OA semantic 状态，最佳值或初始值写回后再独立定向回读。独立 `parameters.apply` 继续保留 Bridge 的别名和更广字符串能力；有限搜索为保证初始值恢复而只接受可在完整 readback 中精确定位的实际字段名。
 
+有限搜索的结果不能简称为“最优解”。所有 tuning run record 都带 `search_audit`：分别记录声明、尝试和分析完整的候选数，只有全部声明点都完整完成时才允许 `best_in_declared_discrete_domain`；预算截断、transport 失败或缺指标只能是 `best_evaluated`。即使声明离散域穷尽，`continuous_optimum_claim` 和 `global_optimum_claim` 仍固定为 false；全不可行也只证明声明离散域内没有可行点。
+
+## 理论先导尺寸分析
+
+`vda theory` 是 Bridge 之前的纯本地分析面，不属于远端 task operation，也不生成计划 token、OA 写入或 Spectre 结果。首版只支持已经进入 Gate 6 的固定拓扑 `nmos_differential_pair_pmos_current_mirror_load_with_tail_device`，不把一个通用方程求解器伪装成任意电路综合。
+
+输入不是人工列出的 W 候选，而是三个明确角色的有限器件 characterization 域。每个点包含 `gm/Id`、`gds/Id`、`Id/W`、输出电容密度、`VDSAT` 和 L；PDK characterization 或 EDA OP 来源还必须声明 artifact id 与 SHA-256。请求同时固定 characterization 的 corner、温度和三类 VDS/VSD，并分开声明电流镜二极管节点 `OUTP` 与单端输出 `OUTN` 的 DC 电压；两支路任一实际工作电压超出 characterization 容差即拒绝。该哈希目前仍由请求提供，本地分析器不自行下载或验证远端 artifact，所以器件表值的证据是 `user_input`；所有推导指标是 `software_inference`。
+
+对每个输入 NMOS、PMOS 负载和尾管表点的笛卡尔组合，分析器不扫描 W，而是从以下关系解析反解满足 BW/GBW 与最小宽度的最小支路电流，再由 `W=Id/(Id/W)` 得到 W：
+
+```text
+gm   = Id * (gm/Id)n
+gout = Id * ((gds/Id)n + (gds/Id)p)
+Cout = CL + Id * (Cout_density_n/Jn + Cout_density_p/Jp)
+Ad0  = gm / gout
+BW   = gout / (2*pi*Cout)
+GBW  = gm / (2*pi*Cout)
+```
+
+这套解同时给出功耗、面积代理、三管 KVL 余量、频率寄生渐近上限、约束裕量、主导电流下界和固定表点下的局部对数敏感性。结果保存 canonical request SHA-256、器件 artifact id/hash 和 characterization 条件，使推荐能精确追溯输入。结果穷尽的是请求中声明的离散表域，不是 PDK 的连续 W/L/bias 空间；一阶输出极点还没有覆盖内部极点/零点、slew、settling、噪声、失真、mismatch、稳定性和 PVT。因此推荐只能作为 theory-seeded Spectre 候选，不能直接写回 OA 或宣称设计闭合。当前 synthetic 示例见 `examples/theory/differential-pair-gmid.synthetic.json`；下一 Gate 是生成并绑定真实 TSMC N28 characterization 表，再用同源 OA/`si`/Spectre 测量误差校准方程。
+
 ## ADE 人工介入与状态所有权
 
 ADE 兼容是当前架构约束，不是 UI 附加项。VDA 可以规划、搜索、判规格和选优，但可复核的 ADE setup/history 必须继续允许人类打开、调整、运行和保存；VDA 不能把唯一真源藏在一次性 wrapper 或内存状态里。自动路径和人工路径通过显式 operation 交接，不能在一次运行中暗中互相覆盖。
@@ -267,7 +288,7 @@ live 首版曾把 PMOS 实例命名为 `PM0/PM1`；OA 和 `si` 一致，但 Spec
 
 ## 证据链
 
-每次运行至少保存任务和计划 token、adapter 与证据来源、动作状态、候选参数、仿真指标、逐条规格判定、最终选择、OA 回读摘要，以及错误和未验证边界。显式实例写入还保存请求、写入前目标字段、立即确认和独立 inspect 的完整参数表。ADE `prepare` 保存 design/test/simulator 请求、持久化 view/test 回读、未覆盖既有 view 以及没有设置 analysis/sweep 的范围；`capture` 保存焦点目标、是否已保存、setup/simulation 聚合指纹、逐文件 manifest、history 选择来源以及可用时的逐点 output/spec；变量/setup patch 保存声明目标、全部旧值、即时值、独立重开值、targeted 前后指纹及未覆盖范围，并明确记录没有运行仿真；严格 sweep run 还保存 setup 前后 scope 指纹、每个 point 的 Detail 参数/非空 output、逐 test input/result hash、OA/input comparison hash 和逐点绑定指纹。存在显式 legacy output evaluation-error 契约时，还保存任务期望、RDB 实际错误单元格、completion-log 数量、逐项匹配和零未解释错误；启用 result mapping 时再保存 output expression 前后状态/指纹、显式 scale、映射后的候选、逐条 constraint 与 selection。调优 checkpoint 保留历史失败 actions，但恢复后只有完成的候选证据参与选择；最终 run 可以在完整证据和最终回读成立时成功，同时仍显式留下已恢复的 transport 事件。自动 netlisting 还保存远端网表/wrapper 路径、SHA-256、解析后的实例参数和一致性结论。
+每次运行至少保存任务和计划 token、adapter 与证据来源、动作状态、候选参数、仿真指标、逐条规格判定、最终选择、结构化 `search_audit`、OA 回读摘要，以及错误和未验证边界。显式实例写入还保存请求、写入前目标字段、立即确认和独立 inspect 的完整参数表。ADE `prepare` 保存 design/test/simulator 请求、持久化 view/test 回读、未覆盖既有 view 以及没有设置 analysis/sweep 的范围；`capture` 保存焦点目标、是否已保存、setup/simulation 聚合指纹、逐文件 manifest、history 选择来源以及可用时的逐点 output/spec；变量/setup patch 保存声明目标、全部旧值、即时值、独立重开值、targeted 前后指纹及未覆盖范围，并明确记录没有运行仿真；严格 sweep run 还保存 setup 前后 scope 指纹、每个 point 的 Detail 参数/非空 output、逐 test input/result hash、OA/input comparison hash 和逐点绑定指纹。存在显式 legacy output evaluation-error 契约时，还保存任务期望、RDB 实际错误单元格、completion-log 数量、逐项匹配和零未解释错误；启用 result mapping 时再保存 output expression 前后状态/指纹、显式 scale、映射后的候选、逐条 constraint 与 selection。调优 checkpoint 保留历史失败 actions，但恢复后只有完成的候选证据参与选择；最终 run 可以在完整证据和最终回读成立时成功，同时仍显式留下已恢复的 transport 事件。自动 netlisting 还保存远端网表/wrapper 路径、SHA-256、解析后的实例参数和一致性结论。
 
 有限 PVT 还保存每个原始 condition 的完整 `CandidateEvaluation`、同一 OA/netlist identity、每个 analysis 的 testbench/model manifest、独立 noise PSF，以及跨条件 `all_conditions_required`/worst-case 聚合。缺一个条件、条件顺序或值与任务不一致、任一 analysis 不完整、netlist 漂移或 model corner 未映射都直接失败，不会降级为 nominal 结果。
 

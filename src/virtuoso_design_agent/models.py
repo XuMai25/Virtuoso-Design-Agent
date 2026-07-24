@@ -6,7 +6,7 @@ import math
 import re
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -127,6 +127,18 @@ class RunStatus(str, Enum):
     SUCCEEDED = "succeeded"
     PARTIAL = "partial"
     FAILED = "failed"
+
+
+class SelectionScope(str, Enum):
+    NOT_APPLICABLE = "not_applicable"
+    BEST_EVALUATED = "best_evaluated"
+    BEST_IN_DECLARED_DISCRETE_DOMAIN = "best_in_declared_discrete_domain"
+    NO_FEASIBLE_IN_DECLARED_DISCRETE_DOMAIN = (
+        "no_feasible_in_declared_discrete_domain"
+    )
+    NO_RECOMMENDATION_FROM_EVALUATED_POINTS = (
+        "no_recommendation_from_evaluated_points"
+    )
 
 
 class DesignTarget(StrictModel):
@@ -2128,6 +2140,19 @@ class ActionRecord(StrictModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+class SearchAudit(StrictModel):
+    """Explicitly bounds what a finite candidate selection can claim."""
+
+    declared_candidate_count: int = Field(ge=1)
+    attempted_candidate_count: int = Field(ge=0)
+    completed_candidate_count: int = Field(ge=0)
+    domain_exhausted: bool
+    selection_scope: SelectionScope
+    continuous_optimum_claim: Literal[False] = False
+    global_optimum_claim: Literal[False] = False
+    statement: str = Field(min_length=1)
+
+
 class RunRecord(StrictModel):
     schema_version: int = 1
     task_id: str
@@ -2141,6 +2166,7 @@ class RunRecord(StrictModel):
     selected_parameters: dict[str, float] | None = None
     selected_instance_parameters: dict[str, dict[str, str]] | None = None
     selected_metrics: dict[str, float] | None = None
+    search_audit: SearchAudit | None = None
     notes: list[str] = Field(default_factory=list)
 
 

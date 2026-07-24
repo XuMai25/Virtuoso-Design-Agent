@@ -13,13 +13,14 @@ PDK 默认面向晶圆厂 CMOS 设计。当前缺省 profile 为 `nics4304_tsmc2
 - 将任务编译为带副作用标记的稳定执行计划。
 - 单独规划或执行：`schematic.create`、`schematic.inspect`、`schematic.transform`、`parameters.apply`、`ade.prepare`、`ade.capture`、`ade.corners.apply`、`ade.variables.apply`、`ade.setup.apply`、`ade.run`、`simulation.run`、`design.tune`、`design.close_loop`。当前 `schematic.transform` 开放共源级源极退化的受控 add/remove、反相器 core→ADE source/load testbench、差分对 core→`MNTAIL/BIAS`、真实尾管差分对的对称源极退化 add/remove，以及无源退化真实尾管差分对的 `RD0/RD1 ↔ MP0/MP1` 电流镜负载可逆变换。
 - 用确定性 demo adapter 离线验证闭环、规格判定和参数选择；结果明确标为 `software_inference`。
+- 用独立本地命令 `vda theory` 对 Gate 6 电流镜负载差分对做理论先导尺寸估算。它不接收一份任意手列的 W 候选，而是遍历声明且有来源绑定的有限 gm/Id 表域，对每个输入管/PMOS 负载/尾管工作点组合用 KCL、小信号和一阶极点方程反解满足 BW/GBW 的最小支路电流与三组 W，再检查增益、余量、功耗、面积和宽度边界。输出包括约束裕量、主导电流下界、寄生渐近上限和局部对数敏感性；只称为 `best_in_declared_discrete_characterization_domain`，`continuous_optimum_claim` 与 `global_optimum_claim` 永远为 false。当前示例是 synthetic `software_inference`，尚无 TSMC N28 gm/Id 表证据，不能替代 OA→`si`→Spectre。
 - 通过独立 worker 调用本机 `virtuoso-bridge-lite` 环境。反相器支持 `OA -> si -> Spectre transient` 的 timing、过冲/欠冲和周期供电能量；共源级支持同一 `OA -> si` 网表上的 DC OP、复数 AC、相干正弦 transient 幅度 sweep 和普通 noise sweep。可提取 `Id/VGS/VDS/VDSAT/gm/gds`、真实 VDD 功耗与 KCL、低频增益、首个 −3 dB 带宽、GBW、unity、HD2/HD3、THD、P1dB，以及频带积分的输出/输入参考噪声；单项执行与提取均有 live 证据。`analysis: "quality"` 已在一次 OA/`si` 核对后依次运行 AC、linearity、noise，并完成 bias/load、W/RD/RS、L/VDD 搜索、固定设计 TT/SS/FF 验证和显式启用的 PVT-aware bias 调优；每个 PVT 条件保留原始 `eda_result`，跨条件约束和最坏值聚合标为 `software_inference`。
 - Gate 3/4/5/6 差分对复用同一 worker 与 executor，不复制 Bridge。Gate 3 保留外部理想尾源能力；Gate 4 只新增 `MNTAIL(TAIL,BIAS,VSS,VSS)` 与 `BIAS` pin；Gate 5 再把 `MN0.S/MN1.S` 从 `TAIL` 分离到 `NSP/NSN`，只新增对称 `RS0(NSP,TAIL)`、`RS1(NSN,TAIL)`。Gate 6 从未退化的 Gate 4 拓扑删除 `RD0/RD1` 并加入 `MP0(OUTP,OUTP,VDD,VDD)`、`MP1(OUTN,OUTP,VDD,VDD)`，反向操作可按声明电阻值恢复原负载和可选 placement 指纹。`tail_width_um/tail_length_um/source_resistance_ohm/pmos_load_width_um/pmos_load_length_um` 属于 OA semantic 参数，`tail_bias_v` 只属于 wrapper；真实尾管路径拒绝理想 `tail_current_ua/tail_output_resistance_ohm`。Gate 3–6 的 OA→`si` 证据链均已有 live 结果；Gate 6 还真实覆盖 ICMR、多种有限搜索、预算、不可行和 transport checkpoint/resume。新增 `analysis: "psrr"` 在同一自动 `si` 网表上分别运行平衡差模、VDD 注入和 VSS 注入，并核对三次 DC 与频率网格；`evaluation_stop_hz` 提供声明频带内最差 PSRR，三份下载根 AC 文件各自绑定大小与 SHA-256。nominal 单点、四点 bias/load 只读搜索和三种沟道长度的八点 OA 搜索已经 live。后者把带内最差 PSRR 从 `11.5125 dB` 提高到 `19.7438 dB`，但临时 `20 dB` 门仍不可行，故自动恢复基线；下一步应固定对 PSRR 几乎无益且严重损失带宽的尾管 `L=0.03 µm`，再在显式小网格内验证输入对/PMOS L，并对任何可行点补做 CMRR、线性度和噪声复核。不得把“最大值”包装成规格闭合。可选 PVT、mismatch、更多质量指标和 ADE handoff 仍是边界。
 - 源极退化不新建第二套模板或仿真器：add 在同一 common-source cellview 中把 `MN0.S: VSS -> NSRC`，只新增 `RS0(NSRC,VSS)`；remove 只删除 VDA 创建的 RS0 两条端子 stub/标签、恢复 `MN0.S: NSRC -> VSS`。同一 inspect、参数应用、`si` 网表解析、DC/AC 指标和有限搜索路径动态识别两种变体。
 - `existing_schematic` 提供不依赖固定电路模板的 Bridge 能力面：`schematic.inspect` 保留 Bridge 的完整结构结果和所有可回读 CDF 参数；`parameters.apply` 可按实例透传 Bridge 接受的参数字符串，写入后用定向 CDF 读取再次核对。反相器/共源模板仍可在同一任务中组合 semantic parameters 与原始实例参数。对已有真实仿真 adapter 的固定模板，`design.tune`/`design.close_loop` 还可用 `instance_parameter_space` 声明有限的 `instance.parameter -> [raw strings]` 搜索维度；它与 semantic space 组成同一个有预算上限的笛卡尔积，每点写入、回读、自动 netlist 和仿真，最终最佳值再次写回并独立定向回读。搜索字段名必须来自未过滤 OA inspect 的实际 CDF 名，不猜 Bridge 别名；这不收窄独立 `parameters.apply` 的原有 Bridge 能力。
 - `ade.prepare` 与 `ade.capture` 保留显式人工介入边界。`prepare` 只在目标 Maestro view 不存在时新建持久化 Spectre test，可显式指向另一个既有 design schematic；已有 view 一律拒绝，也不预设 analysis/stimulus/sweep/output。`capture` 核对人工聚焦的目标，捕获 setup、history、真实 Spectre netlist/PSF/log 哈希和逐点 output/spec。自动分支中，`ade.corners.apply` 只在 exact tests 与旧 corner 有序列表匹配时 add-only 新增 corner；`ade.variables.apply` 只有在 expected tests、可选 enabled corners、全部声明 scope 旧值和目标 global-selection 状态匹配时才更新变量或 selection；`ade.setup.apply` 对声明 analysis 做旧状态 CAS，并只新增不存在的命名 net/point output 与可选 spec。三个 setup 写 operation 都只保存一次并独立重开回读，已有已配置 session 时拒绝。`ade.run` 为每个 test 临时把 background session 的 project/results dir 定向到唯一 `/data/xum` scratch，运行或按显式 history/scratch 恢复后还原原值；它读取逐点 output/spec，并对 exact-history companion 与唯一 runtime input 根生成大小/SHA-256 清单。任务可显式要求把哈希绑定的 `input.scs` 或 `input.scs`+sibling `netlist` 输入束的 design header、实例、节点和已知 primitive raw 参数映射与 Maestro/OA 回读核对；原生 sweep 又可严格绑定 setup、global-variable selections、共享符号输入束、RDB point/corner 和 completion log。corner 模式通过 Bridge 公开 `include_raw=True` 取得原始 Detail CSV，在 VDA 层保留 Bridge 0.7.0 尚未结构化的正交 corner 列；不会修改 Bridge。若 Bridge completion wait 超时，只有运行前后恰好新增一个名称且其 log 已 completed 时才继续，多个新 history、同名覆盖或未完成日志均拒绝。配置/OA 回读属于 `bridge_readback`，运行输入与结果属于 `eda_result`，兼容性归一化、history 选择和一致性判断属于 `software_inference`。可选 `result_mapping` 再固定 exact scalar output expression、单位 scale 和 VDA constraints/objective。若人工旧 output 在声明点必然产生 calculator `eval err`，`expected_output_evaluation_errors` 只能按 exact test/output/point selector 声明未映射项；worker 与 executor 都要求 RDB 单元格和 log error 数完全相等、未解释错误为零，不能作为通用忽略开关。未声明时保持普通 Bridge-preserving run。它不能证明 history 名称此前不存在。旧 ADE L state 的非破坏迁移尚未纳入已验证 VDA operation。
 - 对远端计算和 OA 写入分别授权；真实执行还需要计划 token，避免一句模糊指令直接改库。
-- 将动作、候选点、指标、约束判定、最终选择和证据来源写入本地 JSON run record；调优任务还会在候选边界原子保存 checkpoint，并可在独立 OA 回读后续跑。
+- 将动作、候选点、指标、约束判定、最终选择和证据来源写入本地 JSON run record；调优任务还会结构化记录声明/尝试/完整候选数、是否穷尽声明离散域和 `best_evaluated`/`best_in_declared_discrete_domain` 选择范围，连续与全局最优声明固定为 false。候选边界原子保存 checkpoint，并可在独立 OA 回读后续跑。
 
 2026-07-19 已在 nics4304 完成首轮真实远端 smoke：Bridge doctor、反相器单点 Spectre、OA 建图与结构回读、局部参数写入与前后回读、9 点有限搜索和最佳参数写回，以及不可行规格下的禁止写回均通过。该轮 live smoke 使用的仍是手写 Spectre deck。
 
@@ -38,6 +39,14 @@ cd "H:\Virtuoso Design Agent"
 py -3.13 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
+
+先做完全本地、无 Bridge/OA 副作用的理论尺寸估算：
+
+```powershell
+.\.venv\Scripts\vda.exe theory examples\theory\differential-pair-gmid.synthetic.json
+```
+
+该示例故意标为 `synthetic_example`，只验证方程、设计域穷尽和最优性边界。真实 PDK 表必须绑定 characterization artifact 的标识与 SHA-256；即使输入来自 PDK，推导指标仍是 `software_inference`，推荐尺寸还要进入同源 Spectre 验证。
 
 查看能力目录并生成计划：
 
@@ -261,4 +270,5 @@ C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\virtuoso-bridge.exe 
 - [2026-07-23 差分对 PSRR 三次同网表 AC 本地实现](docs/validation/2026-07-23-differential-pair-psrr-local.md)
 - [2026-07-24 差分对 PSRR 三次同网表 AC 真实单点](docs/validation/2026-07-24-differential-pair-psrr-live.md)
 - [2026-07-24 差分对带限 PSRR 四点搜索与 transport 恢复](docs/validation/2026-07-24-differential-pair-psrr-search-live.md)
+- [2026-07-24 theory-first gm/Id 尺寸分析本地 Gate](docs/validation/2026-07-24-theory-first-sizing-local.md)
 - [延期的人工 ADE Gate](docs/deferred-manual-gates.md)

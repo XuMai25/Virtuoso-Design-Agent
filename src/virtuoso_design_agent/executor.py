@@ -31,6 +31,8 @@ from .models import (
     Relation,
     RunRecord,
     RunStatus,
+    SearchAudit,
+    SelectionScope,
     SchematicTransformAction,
     TaskSpec,
 )
@@ -2894,6 +2896,59 @@ class TaskExecutor:
             return RunStatus.PARTIAL
         return status
 
+    @classmethod
+    def _search_audit(
+        cls,
+        task: TaskSpec,
+        candidates: list[CandidateEvaluation],
+        *,
+        has_recommendation: bool,
+    ) -> SearchAudit:
+        declared = cls._candidate_space_size(task)
+        attempted = len(candidates)
+        completed = sum(
+            candidate.analysis_complete
+            and candidate.evidence_source is not EvidenceSource.SYSTEM_EVENT
+            for candidate in candidates
+        )
+        domain_exhausted = attempted == declared and completed == declared
+        if has_recommendation and domain_exhausted:
+            scope = SelectionScope.BEST_IN_DECLARED_DISCRETE_DOMAIN
+            statement = (
+                "The recommendation is the highest-ranked feasible candidate "
+                "under the declared constraints and optional objective in the "
+                "fully evaluated discrete domain. It is not a continuous-space "
+                "or global optimum."
+            )
+        elif has_recommendation:
+            scope = SelectionScope.BEST_EVALUATED
+            statement = (
+                "The recommendation is only the highest-ranked feasible point "
+                "among completed evaluated candidates; the declared discrete "
+                "domain was not exhausted."
+            )
+        elif domain_exhausted:
+            scope = SelectionScope.NO_FEASIBLE_IN_DECLARED_DISCRETE_DOMAIN
+            statement = (
+                "No candidate in the fully evaluated declared discrete domain met "
+                "the specification. This does not prove continuous-space "
+                "infeasibility."
+            )
+        else:
+            scope = SelectionScope.NO_RECOMMENDATION_FROM_EVALUATED_POINTS
+            statement = (
+                "No recommendation was produced from the completed evaluated "
+                "points, and the declared discrete domain was not exhausted."
+            )
+        return SearchAudit(
+            declared_candidate_count=declared,
+            attempted_candidate_count=attempted,
+            completed_candidate_count=completed,
+            domain_exhausted=domain_exhausted,
+            selection_scope=scope,
+            statement=statement,
+        )
+
     def execute(
         self,
         task: TaskSpec,
@@ -4448,6 +4503,15 @@ class TaskExecutor:
             persist_checkpoint()
 
         finished = datetime.now(UTC)
+        search_audit = (
+            self._search_audit(
+                task,
+                candidates,
+                has_recommendation=selected_parameters is not None,
+            )
+            if task.operation in {Operation.DESIGN_TUNE, Operation.DESIGN_CLOSE_LOOP}
+            else None
+        )
         return RunRecord(
             task_id=task.id,
             plan_token=plan.confirmation_token,
@@ -4460,6 +4524,7 @@ class TaskExecutor:
             selected_parameters=selected_parameters,
             selected_instance_parameters=selected_instance_parameters,
             selected_metrics=selected_metrics,
+            search_audit=search_audit,
             notes=notes,
         )
 

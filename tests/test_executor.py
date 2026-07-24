@@ -16,6 +16,7 @@ from virtuoso_design_agent.models import (
     AnalysisKind,
     EvidenceSource,
     RunStatus,
+    SelectionScope,
     TaskSpec,
 )
 from virtuoso_design_agent.planner import build_plan
@@ -2592,6 +2593,14 @@ def test_demo_close_loop_selects_and_applies_feasible_candidate() -> None:
         == "software_inference"
         for candidate in record.candidates
     )
+    assert record.search_audit is not None
+    assert record.search_audit.declared_candidate_count == 9
+    assert record.search_audit.completed_candidate_count == 9
+    assert record.search_audit.domain_exhausted is True
+    assert record.search_audit.selection_scope is (
+        SelectionScope.BEST_IN_DECLARED_DISCRETE_DOMAIN
+    )
+    assert record.search_audit.global_optimum_claim is False
 
 
 def test_simulation_record_uses_actual_schematic_parameters_when_omitted() -> None:
@@ -2634,6 +2643,11 @@ def test_infeasible_search_does_not_write_best_attempt_to_oa() -> None:
         "length_um": 0.03,
     }
     assert any("no feasible candidate was committed" in note for note in record.notes)
+    assert record.search_audit is not None
+    assert record.search_audit.selection_scope is (
+        SelectionScope.NO_FEASIBLE_IN_DECLARED_DISCRETE_DOMAIN
+    )
+    assert "does not prove" in record.search_audit.statement
 
 
 def test_missing_objective_metric_blocks_writeback() -> None:
@@ -3621,6 +3635,12 @@ def test_differential_pair_budget_selection_is_only_best_evaluated_prefix() -> N
     assert record.selected_parameters is not None
     assert record.selected_parameters["input_width_um"] == pytest.approx(0.5)
     assert any("search budget exhausted" in note for note in record.notes)
+    assert record.search_audit is not None
+    assert record.search_audit.declared_candidate_count == 3
+    assert record.search_audit.attempted_candidate_count == 1
+    assert record.search_audit.domain_exhausted is False
+    assert record.search_audit.selection_scope is SelectionScope.BEST_EVALUATED
+    assert record.search_audit.continuous_optimum_claim is False
 
 
 def _common_source_ac_run(*, stop_hz: float = 1e11) -> TaskSpec:

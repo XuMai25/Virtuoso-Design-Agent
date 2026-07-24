@@ -98,6 +98,8 @@ Gate 4 的真实尾管能力继续保留；Gate 5 不替换它，而是在其上
 
 下一步不再细扫 `tail_bias_v/load_ff`，也不再把尾管 L 当主 PSRR 旋钮：CL 只改变高频带宽，BIAS 的带内改善约 `0.085 dB` 且增加功耗；尾管 L 从 30 nm 增到 60 nm 的八点平均 PSRR 反而降低约 `0.19 dB`，平均带宽从 `2.033 GHz` 降到 `0.581 GHz`。下一道 Gate 固定尾管 30 nm，仅在显式小网格内细化输入对/PMOS L；若仍不能在增益、带宽、功耗、摆幅和工作区护栏下过门，再判断是否改变 BIAS 对 VSS 的参考或增加供电隔离结构。真实写入继续使用逐候选回读、checkpoint、无可行恢复和最终独立 OA 回读；任何过门点还必须复跑 CMRR、linearity 和 noise。产品 PSRR 数值与频带仍由目标应用定义，临时 `20 dB` 不得外推。之后再处理 slew/settling、输出驱动/摆幅边界，或按任务显式启用差分对 PVT；PVT 不默认附加。若继续拓扑能力，则把 `RS0/RS1 + MP0/MP1` 定义成独立组合 Gate。当前 P1dB 未在 5–50 mVpeak 范围内被包围；差分对 ADE/Maestro setup、人工打开/调整/重跑、mismatch/Monte Carlo 和多 test/multi-analysis 仍未闭合。
 
+为避免上述几何小网格退化成随意试值，Gate 6 已增加本地 theory-first 尺寸入口。它对声明的输入 NMOS/PMOS 负载/尾管 gm/Id 表域逐组合解析求解最小支路电流与 W，而不是把人工 W 列表重新排序；增益、BW、GBW、功耗、面积代理和三管 KVL 余量都保留公式、裕量与证据来源。只有完整穷尽声明表域时才报告 `best_in_declared_discrete_domain`，从不报告连续或全局最优。当前 synthetic 示例只证明软件契约，真实 TSMC N28 表、表内插值精度和 Spectre 误差校准仍是下一 Gate，未完成前不得把理论推荐写回 OA。
+
 ## 升级原则
 
 每个 Gate 都要同时通过结构创建与回读、参数写入与回读、非空仿真和指标重算、可行/不可行规格判定，以及中断恢复。凡是声明支持人工 ADE 介入，还必须证明保存后的 setup 可由人工重开、修改和重跑，VDA 能在不覆盖改动的前提下重新捕获同一个 history/网表/结果关系。

@@ -53,6 +53,8 @@ Gate 5 随后在新 `vda_diffpair_deg_gate5_001` 上验证对称源极退化。e
 
 该 OA 几何 Gate 随后在同一 cell 上真实执行：`input/PMOS-load/tail L` 各取 `0.03/0.06 µm`，8 点逐一写入、回读、自动 `si`、三路 AC 和 checkpoint。8 个点全部通过饱和、摆幅、增益、带宽和功耗护栏，只有临时 `20 dB` PSRR 门失败；最佳观测点为三种 L 全部 `0.06 µm` 的 `19.7438 dB`，但没有被提交。更平衡的短尾管点 `Lin=Lp=0.06 µm/Ltail=0.03 µm` 为 `19.7123 dB`、带宽 `1.1186 GHz`、GBW `10.8095 GHz`；把尾管也加长只改善 `0.0315 dB`，却把带宽降至 `0.3305 GHz`、GBW 降至 `3.2940 GHz`。一次候选 3 写后回读 transport reset 先恢复初始 OA，再由同一 checkpoint 从 index 3 续跑；8/8 后因零可行点恢复三组 `L=0.03 µm`，最终运行内回读和额外独立 inspect 均一致。状态升级为 **OA length sensitivity and infeasible recovery verified; provisional PSRR closure short by 0.256 dB**。下一自动 Gate 固定尾管 30 nm，只对输入对/PMOS L 做小范围显式细化；任何过门点还必须复跑 CMRR、linearity、noise 和必要的可选 PVT，不能因单一 PSRR 指标升级 L5B。
 
+2026-07-24 又加入 theory-first 本地 Gate，避免把少量人工枚举点中的最大值误称为最优。首版针对 Gate 6 固定拓扑，输入有限且带来源声明的 gm/Id characterization 表域，用 KCL、小信号和单极点关系反解每个表点组合满足 BW/GBW 的最小电流与 W，并输出功耗、面积、余量、约束裕量、限制项、寄生渐近上限和局部敏感性。程序会完整计数和穷尽声明的离散表域；现有 `design.tune` 也新增结构化 `search_audit`，预算截断只能称 `best_evaluated`。无论哪条路径，连续/全局最优声明固定为 false。当前仅有 synthetic 本地测试，没有 TSMC N28 characterization artifact 或 Spectre 校准，因此状态只能是 **theory sizing contract locally implemented; PDK characterization and EDA calibration pending**。
+
 Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发送前的 tunnel 自愈。新的 9 点压力任务仍在候选 8 发生一次本地端口拒绝，但 OA 恢复、候选前缀和续跑均正确，最终 9/9 与最佳写回成功；确定性同-client smoke 已覆盖 pre-send 自愈。payload 发送后的不确定错误仍不自动重放，这是保留的可靠性边界而不是跳过的工作。
 
 2026-07-21 又完成 `ade.prepare` + `ade.capture` 的本地纵向实现。`prepare` 只在已有 design schematic 且目标 Maestro view 不存在时新建持久化 Spectre test，保存后重新打开核对；已有 view 一律拒绝，不配置 analysis/stimulus/sweep/output。人工补全并运行后，`capture` 只读核对聚焦的 `library/cell/maestro`，默认要求 setup 已保存，捕获 setup、指定/最新 history、Spectre netlist、PSF/log 和 ADE 逐 sweep 点 output/spec，并生成逐文件及聚合 SHA-256。两者都不把准备或捕获成功算作 VDA 规格 closure。Bridge 当前公开的持久化后端是 Maestro；旧 ADE L state 非破坏迁移、VDA-managed variable sweep/corner 和 live nics4304 prepare/capture 仍待 Gate，因此此项当前只能称为 **local bidirectional human-operated ADE handoff contract implemented**。
@@ -124,6 +126,7 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> 差分对真实尾管/偏置网络 + DC/AC/CMRR/ICMR/transient/noise（已 live；PVT 按任务可选）
   -> 差分对对称源极退化 + 全分析迁移 + RS 写回 + 精确 remove/restore（已 live）
   -> 差分对 active-load/current-mirror exact-template Gate（nominal OA/si/DC/AC/CMRR/ICMR/transient/noise/有限搜索/恢复已 live）
+  -> theory-first gm/Id 尺寸估算（本地方程/离散域穷尽/最优性边界已实现；TSMC N28 表生成与 Spectre 校准待 Gate）
   -> 差分对 PSRR+/PSRR- 三次同网表 AC（nominal、bias/load 只读与三种 L 的 OA 八点搜索已 live；临时 20 dB 门仍未闭合）
   -> L5B 单模块闭环
   -> layout/DRC/LVS/PEX Gate
@@ -131,4 +134,4 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
 
 每一级只有在真实 Bridge smoke、结构回读、指标解析和失败注入均通过后才升级状态。
 
-反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化可逆 transform/DC/AC、quality、W/RD/RS/L/VDD 写回、固定设计 TT/SS/FF、可选 PVT-aware bias 选优，以及差分对 nominal、真实尾管、对称源极退化和 PMOS 电流镜有源负载四条路径均已有 live 证据。Gate 5 已证明源极退化支持严格增量 add、全分析迁移、有限搜索、最佳写回、checkpoint 与精确 remove/restore；Gate 6 又证明 active-load delta 能无缝进入同一 DC/AC/CMRR/ICMR/transient/noise、搜索、失败、预算和恢复状态机。PSRR 三次同网表 AC 已完成 nominal、四点 bias/load 只读和三种 L 的八点 OA 搜索；后者把带内最差值从 `11.5125 dB` 提升到 `19.7438 dB`，并在零可行点时正确恢复基线，但仍差临时门 `0.2562 dB`。下一步应固定尾管 30 nm，只细化输入对与 PMOS L；如仍无法在完整护栏下跨门，再考虑偏置参考/供电隔离拓扑。任何近门或过门点都要补做 CMRR、线性度、噪声和必要的可选 PVT，不能仅按“最大 PSRR”宣称闭合。跨 PVT 不默认附加；slew/settling、输出驱动/摆幅边界、差分对 PVT、mismatch/Monte Carlo、ADE 真实 PVT/multi-test、差分对 setup、已有 output 安全替换，以及人工打开/修改/重跑和旧 ADE L 迁移继续是独立 Gate。若继续拓扑能力，则为 `RS0/RS1 + MP0/MP1` 单独定义组合 Gate；这些完成前仍不能升级为可重复的 L5B 单模块规格闭环。
+反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化可逆 transform/DC/AC、quality、W/RD/RS/L/VDD 写回、固定设计 TT/SS/FF、可选 PVT-aware bias 选优，以及差分对 nominal、真实尾管、对称源极退化和 PMOS 电流镜有源负载四条路径均已有 live 证据。Gate 5 已证明源极退化支持严格增量 add、全分析迁移、有限搜索、最佳写回、checkpoint 与精确 remove/restore；Gate 6 又证明 active-load delta 能无缝进入同一 DC/AC/CMRR/ICMR/transient/noise、搜索、失败、预算和恢复状态机。理论先导层现已能从完整声明的 gm/Id 离散表域推导 W/电流并限制最优性措辞，但尚未取得真实 TSMC N28 表，所以不能用 synthetic 推荐值指导 OA 写入。下一 Gate 应先用只读 PDK characterization 建表并绑定 artifact/hash，再用若干同源 OA/`si`/Spectre 点测量理论误差；校准成立后，理论推荐才可缩小输入对/PMOS L 与 W/bias 的真实搜索域。PSRR 三次同网表 AC 已完成 nominal、四点 bias/load 只读和三种 L 的八点 OA 搜索；后者把带内最差值从 `11.5125 dB` 提升到 `19.7438 dB`，并在零可行点时正确恢复基线，但仍差临时门 `0.2562 dB`。任何近门或过门点都要补做 CMRR、线性度、噪声和必要的可选 PVT，不能仅按“最大 PSRR”宣称闭合。跨 PVT 不默认附加；slew/settling、输出驱动/摆幅边界、差分对 PVT、mismatch/Monte Carlo、ADE 真实 PVT/multi-test、差分对 setup、已有 output 安全替换，以及人工打开/修改/重跑和旧 ADE L 迁移继续是独立 Gate。若继续拓扑能力，则为 `RS0/RS1 + MP0/MP1` 单独定义组合 Gate；这些完成前仍不能升级为可重复的 L5B 单模块规格闭环。
