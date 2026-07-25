@@ -15,7 +15,7 @@
 
 ## Gate 2：单 MOS 共源与源极退化
 
-状态：Gate 2A 电阻负载 NMOS 共源与源极退化的 DC、复数 AC、bias/load 条件搜索和 W/RD/RS 写入调优已真实通过。专用 cell 还完成同参数只加 RS 的控制变量比较、预算/不可行/transport 恢复、5 点 transient 线性度/真实功耗和 ordinary noise。AC+linearity+noise 固定质量组合已经覆盖 bias/load、W/RD/RS 和 L/VDD；随后同一 OA/`si` 网表又通过 TT/SS/FF 三个显式温度/供电条件，并完成可选的两候选 PVT-aware bias 调优。2026-07-23 在全新 cell 上又完成 source degeneration add→DC/AC→remove；恢复后的 placement、nominal `si` 网表和全部 DC/AC 指标与 add 前相同。同一 cell 随后完成 `MN0.fingers=["1","2"]` 原始 CDF 两点搜索、同源网表证明、最佳写回和首候选 transport checkpoint 恢复。2026-07-26 又把真实 W/RD/RS 数据拟合出的 6 个原子局部候选送回同一 OA/`si`/quality 链，完成 6/6 全规格、transport resume 和最佳写回。当前状态是 **bounded common-source topology, explicit-instance-parameter, and atomic local-response EDA selection verified**；局部 output-swing 数值精度、真实 OA 设计变量跨 PVT 写回、复杂 callback 组合、差分对迁移和完整 L5B 仍未闭合。
+状态：Gate 2A 电阻负载 NMOS 共源与源极退化的 DC、复数 AC、bias/load 条件搜索和 W/RD/RS 写入调优已真实通过。专用 cell 还完成同参数只加 RS 的控制变量比较、预算/不可行/transport 恢复、5 点 transient 线性度/真实功耗和 ordinary noise。AC+linearity+noise 固定质量组合已经覆盖 bias/load、W/RD/RS 和 L/VDD；随后同一 OA/`si` 网表又通过 TT/SS/FF 三个显式温度/供电条件，并完成可选的两候选 PVT-aware bias 调优。2026-07-23 在全新 cell 上又完成 source degeneration add→DC/AC→remove；恢复后的 placement、nominal `si` 网表和全部 DC/AC 指标与 add 前相同。同一 cell 随后完成 `MN0.fingers=["1","2"]` 原始 CDF 两点搜索、同源网表证明、最佳写回和首候选 transport checkpoint 恢复。2026-07-26 又把真实 W/RD/RS 数据拟合出的 6 个原子局部候选送回同一 OA/`si`/quality 链，完成 6/6 全规格、transport resume 和最佳写回；在新 anchor 固定 RS 后，第二轮 W/RD 六点也完成 6/6 同源 EDA、60/60 预测审计和最佳写回。当前状态是 **held-out-covered common-source W/RD local response to same-source EDA selection verified at nominal top_tt**；RS 方向、真实 OA 设计变量跨 PVT 写回、复杂 callback 组合、差分对迁移和完整 L5B 仍未闭合。
 
 - OA：`MN0` 与 `analogLib/RD0`，连接 `IN/OUT/VDD/VSS`，W/L/R 创建后结构化回读。
 - 同源：`si` 网表中的 MN0/RD0/可选 RS0 master、端口和 W/L/R 与 OA 一致；DC wrapper 只提供 VDD/VIN/VSS。AC 复用同一网表和 DC OP，额外提供 unit AC input、显式 sweep 和可选 `load_ff`，不复制器件 topology。
@@ -191,11 +191,12 @@ selection verified at nominal top_tt**。目标是既有
 完整记录见
 [`2026-07-25-differential-pair-theory-seeded-gate8-live.md`](validation/2026-07-25-differential-pair-theory-seeded-gate8-live.md)。
 
-## Gate 9：原子候选与真实工作点局部重线性化
+## Gate 9–10：原子候选与真实工作点局部重线性化
 
-状态：2026-07-26 已完成共源级 **atomic local-response shortlist to same-source EDA
-selection verified** 的 live Gate；逐点模型精度为 `partial`。差分对候选仍只有本地
-training/heldout 与任务编译证据。
+状态：2026-07-26 先完成共源级 **atomic local-response shortlist to same-source EDA
+selection verified** 的 live Gate，首轮逐点模型精度为 `partial`；随后在新 anchor 固定 RS
+并缩小 W/RD 域，完成 **held-out-covered W/RD local response to same-source EDA selection
+verified at nominal top_tt**。差分对候选仍只有本地 training/heldout 与任务编译证据。
 
 - `TaskSpec.candidate_set` 把 semantic、testbench 和 raw CDF 字段保留在同一个完整 tuple；
   它与逐维 space/theory seed 互斥，不做交叉乘积。来源、hash、候选 ID 和预测值进入
@@ -220,24 +221,29 @@ training/heldout 与任务编译证据。
 - 继续以真实最佳 candidate 2 重定 anchor 时，三维 W/RD/RS 策略被 heldout 参数覆盖门
   拒绝：两个留出点都没有改变 RS。固定 `RS=750 Ω` 后，W/RD 使用 train `[2,3,4]`、
   heldout `[5,6]`，两维均覆盖；10 个指标最坏 heldout 为 `0.568%`，output swing 为
-  `0.319%`。新域仅有 `W=1.05/1.10 µm × RD=18.5/19/19.5 kΩ` 六点，已本地编译和
-  plan，尚未运行 Spectre。
+  `0.319%`。新域仅有 `W=1.05/1.10 µm × RD=18.5/19/19.5 kΩ` 六点，随后完成
+  6/6 OA→`si`→AC/transient/noise；预测与 EDA 都选 `1.1 µm/18.5 kΩ/750 Ω`，
+  GBW=`34.65534 GHz`，60/60 比较通过，最坏新点误差为 `0.353712%`。
 - 首次候选 1 下载 `si.env` 时发生 DNS/SSH `system_event`；没有候选指标。OA 恢复到
   独立预检得到的 `1 µm/20 kΩ/2 kΩ` 后从 index 1 重跑。最终远端
   `spectre/si/Maestro=0/0/0`，没有运行进程泄漏。
+- 新 anchor 六点又分别在首点下载 `si.env` 和第四点 OA readback 遇到 DNS/SCP、
+  `WinError 10054`。两次都恢复 `1.1 µm/19 kΩ/750 Ω` anchor 并独立回读，再从
+  checkpoint 的 index 1/index 4 续跑；前三点没有重算，最终最佳 OA 独立回读一致。
 
-下一步可执行上述 W/RD 小域并用 exact post-run validator 检查新点；若继续调整 RS，必须
-先增加至少一个独立 RS 留出探针，不能用缺失方向的低总误差代替。差分对 6 点仍是另一条
-独立 live Gate；执行前要重新列出 target、OA 写入、远端计算、scratch、覆盖风险并读取
-当前 OA。semantic+raw CDF 混合原子 tuple、新原子来源的全不可行恢复和可选 PVT 仍是
-后续项。
+下一道增量 Gate 转为差分对 6 点 live；执行前要重新列出 target、OA 写入、远端计算、
+scratch、覆盖风险并读取当前 OA。若继续调整共源 RS，必须先增加至少一个独立 RS 留出
+探针，不能用缺失方向的低总误差代替。semantic+raw CDF 混合原子 tuple、新原子来源的
+全不可行恢复和可选 PVT 仍是后续项。
 
 本地实现与数值见
 [`2026-07-25-atomic-candidate-op-relinearization-local.md`](validation/2026-07-25-atomic-candidate-op-relinearization-local.md)，
 真实结果见
 [`2026-07-26-common-source-op-relinearization-live.md`](validation/2026-07-26-common-source-op-relinearization-live.md)，
 新 anchor 本地刷新见
-[`2026-07-26-common-source-op-refresh-2d-local.md`](validation/2026-07-26-common-source-op-refresh-2d-local.md)。
+[`2026-07-26-common-source-op-refresh-2d-local.md`](validation/2026-07-26-common-source-op-refresh-2d-local.md)，
+对应 live 结果见
+[`2026-07-26-common-source-op-refresh-2d-live.md`](validation/2026-07-26-common-source-op-refresh-2d-live.md)。
 
 ## 升级原则
 

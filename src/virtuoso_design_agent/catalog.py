@@ -157,7 +157,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     ),
     CircuitKind.COMMON_SOURCE: CircuitCapability(
         circuit=CircuitKind.COMMON_SOURCE,
-        stage="Gate 9 atomic local-response EDA selection verified",
+        stage="Gate 10 held-out-covered W/RD local-response EDA validation verified",
         executable=True,
         operations=_STANDARD_OPERATIONS + (Operation.SCHEMATIC_TRANSFORM,),
         parameters=(
@@ -178,10 +178,13 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "source-degeneration patching, and explicit MN0.fingers bounded tuning "
             "live on TSMC N28; six hash-bound local-response W/RD/RS tuples now "
             "complete full-quality OA/si/Spectre selection and writeback with "
-            "recommendation agreement, while pointwise output-swing prediction "
-            "accuracy remains partial; held-out parameter-direction coverage and "
-            "the smaller new-anchor W/RD refresh are locally verified but the new "
-            "points remain EDA-pending; non-overwrite ADE "
+            "recommendation agreement, while the first pass pointwise output-swing "
+            "prediction accuracy remains partial; held-out parameter-direction "
+            "coverage and the smaller fixed-RS new-anchor W/RD refresh are now "
+            "live with 6/6 feasible points, recommendation agreement, 60/60 "
+            "pointwise comparisons passing, checkpoint recovery, and independent "
+            "best-point OA readback; RS sensitivity and PVT are not extrapolated; "
+            "non-overwrite ADE "
             "prepare/setup/background exact-history run-resume is live on the "
             "inverter handoff; live PVT-aware OA-design-variable writeback and "
             "common-source capture/variable/sweep/real-PVT ADE gates remain pending"

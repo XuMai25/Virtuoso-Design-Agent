@@ -22,7 +22,7 @@ Gate 8 已把 Gate 7D 的真实器件表和 validation hash 编译成六个不�
 
 下一层现已加入通用原子 `candidate_set` 和真实工作点局部重线性化。一个候选可同时携带 OA semantic、testbench 与 raw CDF 字段，不再被拆成笛卡尔积；预测来源、hash 和候选 ID 单独保存，最终选优仍只服从本次仿真指标。`vda op-relinearize` 强制把真实 run record 分为 training/heldout，训练与留出误差逐指标都过门才生成 task。既有共源记录的 6-train/2-heldout、10 指标最坏留出误差为 `11.450%`；差分对记录的 4-train/2-heldout、15 指标最坏留出误差为 `8.262%`。2026-07-26 共源 6 点已进一步完成 OA→`si`→AC/transient/noise、transport resume 和最佳写回：6/6 全规格可行，局部模型与真实 EDA 都选择 `W/RD/RS=1.1 µm/19 kΩ/0.75 kΩ`，GBW 为 `34.3965 GHz`，比 anchor 高 `13.561%`。新增 `vda op-relinearization-validate` 证明 GBW 最大预测误差 `4.505%`，但候选 5 的输出摆幅误差 `22.479% > 20%`，所以状态是 **common-source atomic local-response shortlist to same-source EDA selection verified; live pointwise model accuracy partial**，不是完全校准预测器或连续/全局最优。详见[本地生成记录](docs/validation/2026-07-25-atomic-candidate-op-relinearization-local.md)和[共源 live Gate](docs/validation/2026-07-26-common-source-op-relinearization-live.md)。
 
-同日的下一轮本地刷新没有直接把 6 个新点重新回归后宣称闭合。新增 Gate 要求每个声明的可调参数至少被一个 heldout 点实际扰动；因此 W/RD/RS 三维刷新因留出集没有 RS 变化而明确拒绝。把 RS 固定在真实最佳值 `750 Ω` 后，W/RD 二维模型以该最佳点重定 anchor，两个 heldout 点覆盖两维，10 个指标最坏留出误差降至 `0.568%`，并只在 `W=1.05/1.10 µm、RD=18.5/19/19.5 kΩ` 的小域内生成六点任务。该状态是 **held-out-covered local refresh prepared**，仍需新的同源 EDA 才能验证这些未测点。详见[二维刷新记录](docs/validation/2026-07-26-common-source-op-refresh-2d-local.md)。
+同日的下一轮刷新没有直接把 6 个新点重新回归后宣称闭合。新增 Gate 要求每个声明的可调参数至少被一个 heldout 点实际扰动；因此 W/RD/RS 三维刷新因留出集没有 RS 变化而明确拒绝。把 RS 固定在真实最佳值 `750 Ω` 后，W/RD 二维模型以该最佳点重定 anchor，两个 heldout 点覆盖两维，10 个指标最坏历史留出误差为 `0.568%`。随后 `W=1.05/1.10 µm、RD=18.5/19/19.5 kΩ` 六点已全部完成 OA→`si`→AC/transient/noise：6/6 可行，预测与 EDA 都选 `1.1 µm/18.5 kΩ/750 Ω`，GBW=`34.6553 GHz`；60/60 逐点预测比较通过，最坏新点误差仅 `0.354%`。两次 DNS/SCP/`WinError 10054` 均按 `system_event` 恢复并从原子 checkpoint 续跑。当前状态是 **held-out-covered common-source W/RD local response to same-source EDA selection verified at nominal top_tt**；RS 与 PVT 仍不能外推。详见[二维本地刷新](docs/validation/2026-07-26-common-source-op-refresh-2d-local.md)和[二维 live Gate](docs/validation/2026-07-26-common-source-op-refresh-2d-live.md)。
 
 ## 当前能做什么
 
@@ -192,6 +192,17 @@ RS；若把 RS 也声明为可调但 heldout 没有 RS 扰动，第一条命令�
   artifacts\relinearization\common-source-op-refresh-2d.json `
   examples\theory\common-source-op-refresh-2d-task-template.json `
   --output artifacts\relinearization\common-source-op-refresh-2d-task.json
+```
+
+该刷新任务已完成真实六点运行，以下 exact validator 返回 0；它与上一个三维 task 的
+`partial` 历史结论并不冲突，因为新模型明确固定了没有 heldout 覆盖的 RS 方向：
+
+```powershell
+.\.venv\Scripts\vda.exe op-relinearization-validate `
+  artifacts\relinearization\common-source-op-refresh-2d.json `
+  artifacts\relinearization\common-source-op-refresh-2d-task.json `
+  artifacts\runs\common-source-quality-op-refresh-2d-next\live-resume2-20260726.json `
+  --output artifacts\relinearization\common-source-op-refresh-2d-live-validation.json
 ```
 
 当目标 `si` 实例的几何或 LDE signature 不同，不再手工复制几十个参数。先用用户审查的

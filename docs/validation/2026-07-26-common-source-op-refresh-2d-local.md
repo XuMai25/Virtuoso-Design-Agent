@@ -147,3 +147,10 @@ candidate 6 同时改变 W/RD，因此结果保存：
   需要一个相对新 anchor 的独立 RS 探针进入 heldout。
 - 本轮没有增加 PVT、mismatch/Monte Carlo 或新拓扑。
 - Bridge 和 Obsidian Vault 均未修改。
+
+## 后续 live 结果
+
+上述六点随后已按单独授权真实执行：6/6 全规格可行，预测与 EDA 都选择
+`W=1.1 µm/RD=18.5 kΩ/RS=750 Ω`；60/60 逐点预测比较通过，最坏新点误差为
+`0.354%`。完整 OA/`si`/Spectre、transport resume、写回和资源证据见
+[`2026-07-26-common-source-op-refresh-2d-live.md`](2026-07-26-common-source-op-refresh-2d-live.md)。

@@ -180,7 +180,9 @@ Gate 8 把上述层之间的交接做成三个独立、可审计的本地入口�
 
 2026-07-26 共源 6 点 live Gate 完整运行 OA→`si`→AC/transient/noise，6/6 全规格可行，预测与 EDA 都选 `1.1 µm/19 kΩ/0.75 kΩ`；GBW 从 anchor 的 `30.2890 GHz` 提高到 `34.3965 GHz`。GBW 最大预测误差为 `4.505%`，但候选 5 的 output swing 误差为 `22.479% > 20%`，所以执行/推荐 Gate 通过、逐点预测 Gate 为 partial。该结果要求后续在新 anchor 重新留出验证或缩小 trust region，不能靠放宽 20% 门变绿。差分对六点仍需独立 live 证据。
 
-随后以真实 EDA 最佳点重定 anchor。把 W/RD/RS 都保留的三维策略虽然数值误差看似很低，但 heldout candidates 5/6 的 RS 都等于 anchor 的 `750 Ω`，被新的参数覆盖门拒绝。合法刷新只建模 W/RD，并把 RS 固定为来源 record 的真实值；training `[2,3,4]`、heldout `[5,6]` 同时覆盖两维，10 个指标最坏 heldout 误差为 P1dB 的 `0.568%`，output swing 为 `0.319%`。生成域缩至 `W={1.05,1.10} µm × RD={18.5,19,19.5} kΩ` 六点，首点仍是已测 anchor。这是本地 `software_inference` 候选准备，不是六个新点已经通过 Spectre；若要继续调整 RS，必须先增加独立 RS 探针。
+随后以真实 EDA 最佳点重定 anchor。把 W/RD/RS 都保留的三维策略虽然数值误差看似很低，但 heldout candidates 5/6 的 RS 都等于 anchor 的 `750 Ω`，被新的参数覆盖门拒绝。合法刷新只建模 W/RD，并把 RS 固定为来源 record 的真实值；training `[2,3,4]`、heldout `[5,6]` 同时覆盖两维，10 个指标最坏 heldout 误差为 P1dB 的 `0.568%`，output swing 为 `0.319%`。生成域缩至 `W={1.05,1.10} µm × RD={18.5,19,19.5} kΩ` 六点，首点仍是已测 anchor；在执行前，这一阶段只属于本地 `software_inference` 候选准备。
+
+同日该二维刷新完成真实 OA→`si`→AC/transient/noise 六点执行。6/6 全规格可行，预测与 EDA 都选择 `W=1.1 µm、RD=18.5 kΩ、RS=750 Ω`，得到 gain=`3.87961 V/V`、bandwidth=`8.93269 GHz`、GBW=`34.65534 GHz`。exact validator 的 60/60 项逐点比较全部通过，五个新点最坏误差为 candidate 6 P1dB 的 `0.353712%`；因此本小域从“候选已准备”升级为 **held-out-covered common-source W/RD local response to same-source EDA selection verified at nominal top_tt**。一次 DNS/SCP 失败和一次 `WinError 10054` 都按 `system_event` 恢复基线并从原子 checkpoint 续跑，最终独立 OA 回读确认最佳写回。该结论仍固定 `RS=750 Ω` 且只覆盖 nominal `top_tt`；若继续调整 RS，必须先增加独立 RS 探针，PVT 也不得从本结果外推。
 
 ### 通用小信号网络核心
 
