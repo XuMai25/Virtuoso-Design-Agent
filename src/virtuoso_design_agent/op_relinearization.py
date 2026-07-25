@@ -31,9 +31,11 @@ from .models import (
     ObjectiveGoal,
     RunRecord,
     RunStatus,
+    SelectionScope,
     StrictModel,
     TaskSpec,
 )
+from .planner import build_plan
 
 
 class _FiniteStrictModel(StrictModel):
@@ -141,6 +143,7 @@ class LocalMetricModel(_FiniteStrictModel):
     role: Literal["operating_point", "performance"]
     anchor_value: float
     response_scale: float = Field(gt=0.0)
+    relative_error_floor: float = Field(default=1e-30, gt=0.0)
     normalized_sensitivities: dict[StrictStr, float]
     maximum_training_error_percent: float = Field(ge=0.0)
     allowed_training_error_percent: float = Field(gt=0.0)
@@ -200,6 +203,64 @@ class OperatingPointRelinearizationResult(_FiniteStrictModel):
         EvidenceSource.EDA_RESULT
     )
     model_and_selection_evidence: Literal[EvidenceSource.SOFTWARE_INFERENCE] = (
+        EvidenceSource.SOFTWARE_INFERENCE
+    )
+    notes: list[StrictStr] = Field(default_factory=list)
+
+
+class RelinearizationRunMetricComparison(_FiniteStrictModel):
+    metric: StrictStr
+    predicted_value: float
+    measured_value: float
+    signed_error_percent: float
+    absolute_error_percent: float = Field(ge=0.0)
+    maximum_absolute_error_percent: float = Field(gt=0.0)
+    passed: bool
+    prediction_evidence_source: Literal[EvidenceSource.SOFTWARE_INFERENCE] = (
+        EvidenceSource.SOFTWARE_INFERENCE
+    )
+    measurement_evidence_source: Literal[EvidenceSource.EDA_RESULT] = (
+        EvidenceSource.EDA_RESULT
+    )
+
+
+class RelinearizationRunCandidateValidation(_FiniteStrictModel):
+    index: int = Field(ge=1)
+    atomic_candidate_id: StrictStr
+    parameters: dict[StrictStr, float]
+    instance_parameters: dict[StrictStr, dict[StrictStr, StrictStr]]
+    predicted_screening_feasible: bool
+    eda_feasible: bool
+    comparisons: list[RelinearizationRunMetricComparison]
+    prediction_accuracy_passed: bool
+
+
+class OperatingPointRelinearizationRunValidation(_FiniteStrictModel):
+    schema_version: Literal[1] = 1
+    relinearization_result_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    task_id: StrictStr
+    task_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    run_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    plan_token: StrictStr
+    status: RunStatus
+    gate_passed: bool
+    declared_candidate_count: int = Field(ge=1)
+    evaluated_candidate_count: int = Field(ge=1)
+    eda_feasible_candidate_count: int = Field(ge=0)
+    eda_feasible_fraction: float = Field(ge=0.0, le=1.0)
+    predicted_recommendation_candidate_id: StrictStr
+    eda_selected_candidate_id: StrictStr
+    recommendation_agreement: bool
+    candidate_execution_gate_passed: bool
+    prediction_accuracy_gate_passed: bool
+    candidates: list[RelinearizationRunCandidateValidation]
+    prediction_evidence_source: Literal[EvidenceSource.SOFTWARE_INFERENCE] = (
+        EvidenceSource.SOFTWARE_INFERENCE
+    )
+    eda_measurement_evidence_source: Literal[EvidenceSource.EDA_RESULT] = (
+        EvidenceSource.EDA_RESULT
+    )
+    validation_evidence_source: Literal[EvidenceSource.SOFTWARE_INFERENCE] = (
         EvidenceSource.SOFTWARE_INFERENCE
     )
     notes: list[StrictStr] = Field(default_factory=list)
@@ -457,6 +518,7 @@ def relinearize_operating_point(
             role=metric.role,
             anchor_value=anchor_value,
             response_scale=response_scale,
+            relative_error_floor=metric.relative_error_floor,
             normalized_sensitivities=dict(zip(parameter_names, slopes, strict=True)),
             maximum_training_error_percent=0.0,
             allowed_training_error_percent=(
@@ -656,6 +718,239 @@ def relinearize_operating_point(
     )
 
 
+def _same_numeric_mapping(
+    left: dict[str, float], right: dict[str, float]
+) -> bool:
+    return set(left) == set(right) and all(
+        math.isclose(left[name], right[name], rel_tol=1e-12, abs_tol=1e-15)
+        for name in left
+    )
+
+
+def _merged_instance_parameters(
+    task: TaskSpec, candidate: AtomicCandidate
+) -> dict[str, dict[str, str]]:
+    merged = {
+        update.instance: dict(update.parameters)
+        for update in task.instance_parameter_updates
+    }
+    for update in candidate.instance_parameter_updates:
+        merged.setdefault(update.instance, {}).update(update.parameters)
+    return merged
+
+
+def validate_relinearization_run(
+    result_path: Path,
+    task_path: Path,
+    run_path: Path,
+) -> OperatingPointRelinearizationRunValidation:
+    """Audit a compiled local candidate set against its exhausted real EDA run."""
+
+    result_sha256 = _file_sha256(result_path)
+    task_sha256 = _file_sha256(task_path)
+    run_sha256 = _file_sha256(run_path)
+    result = OperatingPointRelinearizationResult.model_validate_json(
+        result_path.read_text(encoding="utf-8")
+    )
+    task = TaskSpec.model_validate_json(task_path.read_text(encoding="utf-8"))
+    run = RunRecord.model_validate_json(run_path.read_text(encoding="utf-8"))
+
+    if (
+        result.status is not RunStatus.SUCCEEDED
+        or not result.gate_passed
+        or result.candidate_set is None
+    ):
+        raise ValueError("run validation requires a passed relinearization result")
+    if task.candidate_set is None:
+        raise ValueError("run validation task has no atomic candidate set")
+    task_source = task.candidate_set.source
+    result_source = result.candidate_set.source
+    if task_source.bindings.get("relinearization_result_sha256") != result_sha256:
+        raise ValueError("task does not bind the exact relinearization result")
+    if (
+        task_source.generator != result_source.generator
+        or task_source.id != result_source.id
+        or task_source.evidence_source is not EvidenceSource.SOFTWARE_INFERENCE
+        or any(
+            task_source.bindings.get(name) != value
+            for name, value in result_source.bindings.items()
+        )
+        or task.candidate_set.candidates != result.candidate_set.candidates
+    ):
+        raise ValueError("task candidate set does not match relinearization result")
+    if run.task_id != task.id:
+        raise ValueError("run/task identity mismatch")
+    if run.adapter != "virtuoso-bridge-subprocess" or run.status is not RunStatus.SUCCEEDED:
+        raise ValueError("run validation requires a successful real-Bridge run")
+    expected_token = build_plan(task).confirmation_token
+    if run.plan_token != expected_token:
+        raise ValueError("run validation plan token mismatch")
+
+    declared = len(task.candidate_set.candidates)
+    audit = run.search_audit
+    if (
+        audit is None
+        or not audit.domain_exhausted
+        or audit.selection_scope
+        is not SelectionScope.BEST_IN_DECLARED_DISCRETE_DOMAIN
+        or audit.declared_candidate_count != declared
+        or audit.attempted_candidate_count != declared
+        or audit.completed_candidate_count != declared
+        or audit.candidate_set_source != task_source
+        or len(run.candidates) != declared
+    ):
+        raise ValueError("run did not exhaust the exact atomic candidate domain")
+
+    models = {model.metric: model for model in result.models}
+    if len(models) != len(result.models):
+        raise ValueError("relinearization result repeats a metric model")
+    validations: list[RelinearizationRunCandidateValidation] = []
+    predicted_feasible: list[tuple[str, float]] = []
+    for index, (atomic, measured) in enumerate(
+        zip(task.candidate_set.candidates, run.candidates, strict=True),
+        start=1,
+    ):
+        expected_parameters = dict(task.parameters)
+        expected_parameters.update(atomic.parameters)
+        expected_instance_parameters = _merged_instance_parameters(task, atomic)
+        if measured.index != index:
+            raise ValueError("run candidate order does not match the atomic task")
+        if (
+            measured.atomic_candidate_id != atomic.id
+            or measured.atomic_candidate_predicted_metrics != atomic.predicted_metrics
+            or measured.atomic_candidate_evidence_source
+            is not EvidenceSource.SOFTWARE_INFERENCE
+            or measured.evidence_source is not EvidenceSource.EDA_RESULT
+            or not measured.analysis_complete
+            or not _same_numeric_mapping(measured.parameters, expected_parameters)
+            or measured.instance_parameters != expected_instance_parameters
+        ):
+            raise ValueError(f"run candidate {index} atomic provenance mismatch")
+
+        comparisons: list[RelinearizationRunMetricComparison] = []
+        for metric, model in models.items():
+            predicted = atomic.predicted_metrics.get(metric)
+            actual = measured.metrics.get(metric)
+            if predicted is None or actual is None:
+                raise ValueError(
+                    f"candidate {index} is missing modeled metric {metric!r}"
+                )
+            if measured.metric_sources.get(metric) is not EvidenceSource.EDA_RESULT:
+                raise ValueError(
+                    f"candidate {index} metric {metric!r} is not eda_result"
+                )
+            signed_error, absolute_error = _error_percent(
+                actual,
+                predicted,
+                model.relative_error_floor,
+            )
+            comparisons.append(
+                RelinearizationRunMetricComparison(
+                    metric=metric,
+                    predicted_value=predicted,
+                    measured_value=actual,
+                    signed_error_percent=signed_error,
+                    absolute_error_percent=absolute_error,
+                    maximum_absolute_error_percent=(
+                        model.allowed_holdout_error_percent
+                    ),
+                    passed=(
+                        absolute_error <= model.allowed_holdout_error_percent
+                    ),
+                )
+            )
+
+        screening = evaluate_constraints(atomic.predicted_metrics, result.constraints)
+        screening_feasible = all(item.passed for item in screening)
+        if screening_feasible:
+            predicted_objective = atomic.predicted_metrics.get(result.objective.metric)
+            if predicted_objective is None:
+                raise ValueError("atomic candidate is missing the modeled objective")
+            predicted_feasible.append((atomic.id, predicted_objective))
+        validations.append(
+            RelinearizationRunCandidateValidation(
+                index=index,
+                atomic_candidate_id=atomic.id,
+                parameters=dict(atomic.parameters),
+                instance_parameters=atomic.instance_parameters(),
+                predicted_screening_feasible=screening_feasible,
+                eda_feasible=measured.feasible,
+                comparisons=comparisons,
+                prediction_accuracy_passed=all(item.passed for item in comparisons),
+            )
+        )
+
+    if not predicted_feasible:
+        raise ValueError("relinearization candidate set has no predicted-feasible point")
+    if result.objective.goal is ObjectiveGoal.MAXIMIZE:
+        predicted_recommendation = max(predicted_feasible, key=lambda item: item[1])
+    else:
+        predicted_recommendation = min(predicted_feasible, key=lambda item: item[1])
+
+    if run.selected_parameters is None:
+        raise ValueError("successful atomic run has no selected parameters")
+    selected_instance_parameters = run.selected_instance_parameters or {}
+    selected = [
+        candidate
+        for candidate in run.candidates
+        if _same_numeric_mapping(candidate.parameters, run.selected_parameters)
+        and candidate.instance_parameters == selected_instance_parameters
+    ]
+    if (
+        len(selected) != 1
+        or not selected[0].feasible
+        or selected[0].atomic_candidate_id is None
+    ):
+        raise ValueError("run selection does not identify one feasible atomic candidate")
+    eda_selected_id = selected[0].atomic_candidate_id
+
+    accuracy_passed = all(
+        candidate.prediction_accuracy_passed for candidate in validations
+    )
+    recommendation_agreement = predicted_recommendation[0] == eda_selected_id
+    failed_metrics = sorted(
+        {
+            comparison.metric
+            for candidate in validations
+            for comparison in candidate.comparisons
+            if not comparison.passed
+        }
+    )
+    notes = [
+        "the exact atomic domain was exhausted and final selection used EDA metrics"
+    ]
+    if failed_metrics:
+        notes.append(
+            "live prediction error gate failed for: " + ", ".join(failed_metrics)
+        )
+    if not recommendation_agreement:
+        notes.append(
+            "predicted local recommendation differs from the final EDA selection"
+        )
+    gate_passed = accuracy_passed
+    feasible_count = sum(candidate.eda_feasible for candidate in validations)
+    return OperatingPointRelinearizationRunValidation(
+        relinearization_result_sha256=result_sha256,
+        task_id=task.id,
+        task_sha256=task_sha256,
+        run_sha256=run_sha256,
+        plan_token=run.plan_token,
+        status=RunStatus.SUCCEEDED if gate_passed else RunStatus.PARTIAL,
+        gate_passed=gate_passed,
+        declared_candidate_count=declared,
+        evaluated_candidate_count=len(validations),
+        eda_feasible_candidate_count=feasible_count,
+        eda_feasible_fraction=feasible_count / declared,
+        predicted_recommendation_candidate_id=predicted_recommendation[0],
+        eda_selected_candidate_id=eda_selected_id,
+        recommendation_agreement=recommendation_agreement,
+        candidate_execution_gate_passed=True,
+        prediction_accuracy_gate_passed=accuracy_passed,
+        candidates=validations,
+        notes=notes,
+    )
+
+
 def build_task_from_relinearization(
     result_path: Path,
     task_template_path: Path,
@@ -732,10 +1027,14 @@ __all__ = [
     "LocalMetricModel",
     "OperatingPointRelinearizationPolicy",
     "OperatingPointRelinearizationResult",
+    "OperatingPointRelinearizationRunValidation",
     "RelinearizationComparison",
     "RelinearizationMetric",
     "RelinearizationParameter",
+    "RelinearizationRunCandidateValidation",
+    "RelinearizationRunMetricComparison",
     "RelinearizedProposal",
     "build_task_from_relinearization",
     "relinearize_operating_point",
+    "validate_relinearization_run",
 ]

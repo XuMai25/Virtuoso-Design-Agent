@@ -73,7 +73,9 @@ Gate 8 同时保留了理论边界：6 点中 4 点可行使候选生成门通�
 
 2026-07-25 已完成该下一步的本地能力 Gate，但尚未执行新候选。Task contract 新增通用 `candidate_set`：一个候选可同时携带 OA semantic、testbench 和原始 CDF 字段，固定 raw 字段按字段深合并；候选不会同逐维 space 组合或再展开成笛卡尔积。来源为 `software_inference` 时必须 hash 绑定，预测只进 provenance，最终选择仍由本次仿真证据决定。`vda op-relinearize` 则只消费成功 real-Bridge run 中的 `eda_result`，强制分离训练/留出 index、拒绝不可辨识扰动和未建模输入漂移，并要求每个指标同时通过训练及留出误差门，失败时不生成任务。
 
-首轮真实记录回放没有连接 Bridge。共源 W/RD/RS 记录用 6 个训练点和 2 个留出点验证 3 个 OP + 7 个性能指标；最坏训练/留出误差为 `17.823%/11.450%`，均低于预声明 `15%` OP、`20%` performance 门。差分对 Gate 8 记录用 4 个训练点和 2 个留出点验证 8 个 OP + 7 个性能指标；最坏留出误差 `8.262%`。两者都从局部 27 点空间只编译出 6 个原子候选；task template 继续保留局部模型未覆盖的 saturation、THD、CMRR 等完整 EDA constraints。状态升级为 **real-EDA-record local OP relinearization and atomic candidate compilation verified**，不是新候选 Spectre 结果、设计写回或连续最优。下一 live Gate 先在共源质量任务上跑这 6 点，核对预测误差、全规格可行性、checkpoint 和 OA 最佳写回/无可行恢复；通过后才把同一流程用于差分对。
+首轮真实记录回放没有连接 Bridge。共源 W/RD/RS 记录用 6 个训练点和 2 个留出点验证 3 个 OP + 7 个性能指标；最坏训练/留出误差为 `17.823%/11.450%`，均低于预声明 `15%` OP、`20%` performance 门。差分对 Gate 8 记录用 4 个训练点和 2 个留出点验证 8 个 OP + 7 个性能指标；最坏留出误差 `8.262%`。两者都从局部 27 点空间只编译出 6 个原子候选；task template 继续保留局部模型未覆盖的 saturation、THD、CMRR 等完整 EDA constraints。该本地状态是 **real-EDA-record local OP relinearization and atomic candidate compilation verified**，本身不代表新候选已跑 Spectre。
+
+2026-07-26 共源六点进一步完成真实 OA→`si`→AC/transient/noise、候选 1 transport 失败后的基线恢复/checkpoint resume、6/6 全规格可行、最佳写回和独立 OA 回读。模型与 EDA 都选择 `W/RD/RS=1.1 µm/19 kΩ/0.75 kΩ`；GBW 为 `34.3965 GHz`，比 anchor 高 `13.561%`。新增 `vda op-relinearization-validate` 以 exact result/task/run 自动审计候选 provenance、完整域和原 held-out error limit：GBW 最大误差 `4.505%`，但候选 5 output swing 为 `22.479% > 20%`。因此状态升级为 **common-source atomic local-response shortlist to same-source EDA selection verified; live pointwise model accuracy partial**。下一轮共源必须在新 anchor 重新留出验证或缩小 trust region，不能放宽门；差分对六点仍需独立 live 授权与当前 OA 基线回读。PVT 保持可选。
 
 Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发送前的 tunnel 自愈。新的 9 点压力任务仍在候选 8 发生一次本地端口拒绝，但 OA 恢复、候选前缀和续跑均正确，最终 9/9 与最佳写回成功；确定性同-client smoke 已覆盖 pre-send 自愈。payload 发送后的不确定错误仍不自动重放，这是保留的可靠性边界而不是跳过的工作。
 
@@ -152,7 +154,7 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> theory-first gm/Id 尺寸估算（本地方程/离散域穷尽/最优性边界已实现；Gate 6 topology-local Spectre 校准与独立 TSMC N28 MOS 表已过）
   -> 通用 MOS 小信号网络（矩阵、stamp/MNA、独立器件表、nominal/源退化共源 held-out 已 live；Gate 7D 三表 signed cxx+cjd/cjs 差分对已通过）
   -> theory-seeded 差分对有限优化与 Spectre 复核（Gate 8 已 live；候选生成通过、逐点预测精度 partial，PVT 可选未跑）
-  -> 通用原子 candidate_set + real-EDA OP 局部重线性化（共源与差分对训练/留出本地 Gate 已通过；新 6 点 Spectre/OA 写回待 live）
+  -> 通用原子 candidate_set + real-EDA OP 局部重线性化（共源 6 点已 live 并写回；推荐一致、逐点 swing 精度 partial；差分对待 live）
   -> 差分对 PSRR+/PSRR- 三次同网表 AC（nominal、bias/load 只读与三种 L 的 OA 八点搜索已 live；临时 20 dB 门仍未闭合）
   -> L5B 单模块闭环
   -> layout/DRC/LVS/PEX Gate
@@ -160,4 +162,4 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
 
 每一级只有在真实 Bridge smoke、结构回读、指标解析和失败注入均通过后才升级状态。
 
-反相器可靠性 Gate 1R、共源 nominal DC、显式实例字段、源极退化可逆 transform/DC/AC、quality、W/RD/RS/L/VDD 写回、固定设计 TT/SS/FF、可选 PVT-aware bias 选优，以及差分对 nominal、真实尾管、对称源极退化和 PMOS 电流镜有源负载四条路径均已有 live 证据。Gate 5 已证明源极退化支持严格增量 add、全分析迁移、有限搜索、最佳写回、checkpoint 与精确 remove/restore；Gate 6 又证明 active-load delta 能无缝进入同一 DC/AC/CMRR/ICMR/transient/noise、搜索、失败、预算和恢复状态机。理论先导层现已能从完整声明的 gm/Id 离散表域推导 W/电流并限制最优性措辞；当前 Gate 6 的一阶增益/带宽模型又已用六点真实 TSMC N28 同源数据完成局部拟合、留一验证和新鲜复跑。其下方的通用 MOS/R/C 矩阵核心已通过多个 synthetic 拓扑，Gate 7A 取得带 raw `eda_result` manifest/hash 的独立 TSMC N28 NMOS/PMOS 表，Gate 7B/7C/7D 已完成 exact-signature nominal 共源、源极退化共源和三表差分对 held-out 验证，并新增从 real-si 实例生成绑定表征任务的窄接口。Gate 8 再把 passed validation/characterization hash 派生为理论请求、原子候选和正常 Spectre 搜索，真实证明 4/6 可行、EDA 能推翻理论首选且 checkpoint 可恢复；同时 8/24 逐点误差超门，防止把候选生成能力包装成已校准预测器。通用 `candidate_set` 与 real-EDA OP 重线性化现已补齐，并在共源与差分对既有记录上通过独立 held-out 本地门；它只把 27 个局部组合收敛成 6 个待测 tuple，不把预测升级为 EDA。公开的低层系数/RHS stamping 与 raw complex solver 允许 Agent 为具体电路增加局部 stamp 或 MNA 辅助未知量，不必复制求解器。每种新 `si` 参数签名仍需对应表，自动生成当前只支持 nf=1/m=1；下一理论 live Gate 是执行共源 6 点同源质量任务，再验证差分对候选，而不是直接宣称缩减预算已经带来设计收益。PSRR 三次同网表 AC 已完成 nominal、四点 bias/load 只读和三种 L 的八点 OA 搜索；后者把带内最差值从 `11.5125 dB` 提升到 `19.7438 dB`，并在零可行点时正确恢复基线，但仍差临时门 `0.2562 dB`。Gate 8 选中点的 PSRR+ 也只有 `11.4828 dB`，不能算 PSRR 闭合。跨 PVT 不默认附加；slew/settling、P1dB 包围、输出驱动/摆幅边界、差分对 PVT、mismatch/Monte Carlo、ADE 真实 PVT/multi-test、差分对 setup、已有 output 安全替换，以及人工打开/修改/重跑和旧 ADE L 迁移继续是独立 Gate。若继续拓扑能力，则为 `RS0/RS1 + MP0/MP1` 单独定义组合 Gate；这些完成前仍不能升级为可重复的 L5B 单模块规格闭环。
+反相器可靠性 Gate 1R、共源 nominal/源退化/quality/PVT、显式实例字段，以及差分对 nominal、真实尾管、对称源退化和 PMOS 电流镜有源负载均已有 live 证据。Gate 7A–7D 又把独立 TSMC N28 器件表、通用 MOS/R/C 矩阵和 exact-signature held-out 验证接到共源及三表差分对；Gate 8 证明 theory seed 能进入正常同源 Spectre 搜索，但其逐点预测仍为 partial。通用 `candidate_set` 与 real-EDA OP 重线性化随后把共源局部 27 组合压缩为 6 个原子 tuple，并真实完成 6/6 quality、transport resume、EDA 最佳写回和自动事后预测审计：推荐一致且 GBW 提升 `13.561%`，但 output swing 的 `22.479%` 误差保留为 partial。下一理论 Gate 是以新 anchor/更小 trust region 重新留出验证，或在独立 OA 基线审计后执行差分对六点；不是继续放宽误差门。公开的低层 stamping/MNA 接口继续允许 Agent 为具体电路增加局部方程而不复制求解器。PSRR 临时 `20 dB` 门、slew/settling、P1dB 包围、输出驱动、可选差分对 PVT、mismatch/Monte Carlo、ADE 真实 PVT/multi-test、人工打开/修改/重跑和旧 ADE L 迁移仍是独立 Gate。跨 PVT 不默认附加；这些完成前仍不能升级为可重复的 L5B 单模块规格闭环。

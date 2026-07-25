@@ -19,7 +19,7 @@ def test_catalog_marks_gate2a_common_source_executable(capsys) -> None:
     assert "existing_schematic: Bridge-preserving manual OA surface [executable]" in output
     assert "inverter: L5A vertical slice [executable]" in output
     assert (
-        "common_source: Gate 2 bounded topology and raw-parameter tuning verified "
+        "common_source: Gate 9 atomic local-response EDA selection verified "
         "[executable]" in output
     )
     assert output.count(

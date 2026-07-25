@@ -15,7 +15,7 @@
 
 ## Gate 2：单 MOS 共源与源极退化
 
-状态：Gate 2A 电阻负载 NMOS 共源与源极退化的 DC、复数 AC、bias/load 条件搜索和 W/RD/RS 写入调优已真实通过。专用 cell 还完成同参数只加 RS 的控制变量比较、预算/不可行/transport 恢复、5 点 transient 线性度/真实功耗和 ordinary noise。AC+linearity+noise 固定质量组合已经覆盖 bias/load、W/RD/RS 和 L/VDD；随后同一 OA/`si` 网表又通过 TT/SS/FF 三个显式温度/供电条件，并完成可选的两候选 PVT-aware bias 调优。2026-07-23 在全新 cell 上又完成 source degeneration add→DC/AC→remove；恢复后的 placement、nominal `si` 网表和全部 DC/AC 指标与 add 前相同。同一 cell 随后完成 `MN0.fingers=["1","2"]` 原始 CDF 两点搜索、同源网表证明、最佳写回和首候选 transport checkpoint 恢复。当前状态是 **bounded common-source topology and explicit-instance-parameter tuning verified**；真实 OA 设计变量跨 PVT 写回、复杂 callback 组合、差分对和完整 L5B 仍未闭合。
+状态：Gate 2A 电阻负载 NMOS 共源与源极退化的 DC、复数 AC、bias/load 条件搜索和 W/RD/RS 写入调优已真实通过。专用 cell 还完成同参数只加 RS 的控制变量比较、预算/不可行/transport 恢复、5 点 transient 线性度/真实功耗和 ordinary noise。AC+linearity+noise 固定质量组合已经覆盖 bias/load、W/RD/RS 和 L/VDD；随后同一 OA/`si` 网表又通过 TT/SS/FF 三个显式温度/供电条件，并完成可选的两候选 PVT-aware bias 调优。2026-07-23 在全新 cell 上又完成 source degeneration add→DC/AC→remove；恢复后的 placement、nominal `si` 网表和全部 DC/AC 指标与 add 前相同。同一 cell 随后完成 `MN0.fingers=["1","2"]` 原始 CDF 两点搜索、同源网表证明、最佳写回和首候选 transport checkpoint 恢复。2026-07-26 又把真实 W/RD/RS 数据拟合出的 6 个原子局部候选送回同一 OA/`si`/quality 链，完成 6/6 全规格、transport resume 和最佳写回。当前状态是 **bounded common-source topology, explicit-instance-parameter, and atomic local-response EDA selection verified**；局部 output-swing 数值精度、真实 OA 设计变量跨 PVT 写回、复杂 callback 组合、差分对迁移和完整 L5B 仍未闭合。
 
 - OA：`MN0` 与 `analogLib/RD0`，连接 `IN/OUT/VDD/VSS`，W/L/R 创建后结构化回读。
 - 同源：`si` 网表中的 MN0/RD0/可选 RS0 master、端口和 W/L/R 与 OA 一致；DC wrapper 只提供 VDD/VIN/VSS。AC 复用同一网表和 DC OP，额外提供 unit AC input、显式 sweep 和可选 `load_ff`，不复制器件 topology。
@@ -35,6 +35,7 @@
 - L/VDD + PVT：固定 W=1 µm、RD=20 kΩ、RS=2 kΩ、bias=0.35 V、load=1 fF 的四点 `L×VDD` 质量搜索全部可行，按 GBW 选择并回读 `L=0.03 µm/VDD=0.9 V`。随后不写 OA 的 TT/25℃/0.90V、SS/125℃/0.81V、FF/−40℃/0.99V 共九项分析共享一个网表，全部通过；SS 给出最坏 GBW 18.696 GHz、P1dB 97.56 mV peak 和输入参考噪声 1348.7 µV RMS。
 - 可选 PVT 调优：`bias=[0.35,0.40] V` 两候选各跨上述三条件运行九项分析。0.40 V 最坏 GBW 更高，但 TT/SS/FF 均违反至少一项 THD、摆幅或功耗约束；0.35 V 三条件全部通过并被选择。该任务无 `parameters.*` action，OA W/L/RD/RS 前后完全相同。
 - 原始实例参数调优：`instance_parameter_space` 显式声明已有实例、实际 CDF 字段和有限字符串值；固定 raw 字段、semantic space 与 raw sweep 共享同一候选预算。live 固定 Wfg=1 µm/L=0.03 µm/RD=10 kΩ/bias=0.35 V/VDD=0.9 V/CL=2 fF，搜索 `MN0.fingers=1/2`。OA 与 `si` 的 nf/总宽度分别为 1/1 µm、2/2 µm；GBW 为 39.582/58.375 GHz，最终写回并独立回读 fingers=2。首轮 `si -batch` transport reset 没有生成候选，从恢复后的 index 1 重试。该能力不自动枚举 233 个 MOS 字段，也不把 callback 耦合解释成独立设计变量。
+- 局部重线性化 live：6 个完整 W/RD/RS tuple 不做笛卡尔展开，逐点复用原 quality 状态机。6/6 可行，模型与 EDA 都选 `1.1 µm/19 kΩ/0.75 kΩ`，GBW=`34.3965 GHz`，比 anchor 高 `13.561%`；最佳值独立 OA 回读一致。自动事后 validator 的 GBW 最大误差为 `4.505%`，但候选 5 的摆幅误差 `22.479% > 20%`，所以执行/推荐通过而数值精度 partial。
 - ADE 自动链已在专用 Maestro cell 真实通过 prepare/setup patch/background run/sweep/corner/result mapping。反相器的 named corner 只改变同一 `top_tt` 下的 VDD；真实 process/temperature corner 目前只在 direct common-source `si`/Spectre Gate 通过，尚未写入或人工打开 Maestro setup。人工打开/调整/重跑和 ADE L 迁移继续按延期记录处理。
 
 跨拓扑的基础有两条。`existing_schematic` 可以不依赖固定模板读取已有 schematic，并用 `instance_parameter_updates` 人工指定实例原始 CDF 参数和值字符串；固定模板还可把它与 W/L/R semantic parameters 组合。写入必须经过 callback、立即定向 OA 回读和独立再次回读。已有真实仿真 adapter 的固定模板可进一步用 `instance_parameter_space` 显式选择少量实际 CDF 字段参与有限调优，但不会自动枚举或猜别名。ADE 路径保留 prepare/capture/corner/variable/setup/run 的正交能力和明确真源；当前 ADE live 证据仍不证明真实 process/temperature corner、history 名唯一或 multi-test 通用映射。direct `si`/Spectre 已证明三条件 PVT，但不会把该状态静默包装成 Maestro setup。通用 OA smoke 已枚举 MN0 的 233 个 CDF 字段；专用新 cell 上又真实闭合 `MN0.fingers=2` 和 `RD0.r=22K` 的双重回读。`MN0.m=2` 被当前 PDK callback 恢复为 `1`，因此保留为字段不可持久化边界。这些能力只证明“按名字修改并以 OA 值确认”“对显式有限字段执行有证据搜索”或“准备、修改声明 setup 范围、运行当前 ADE 状态”，不证明 VDA 理解任意参数的物理作用。
@@ -192,9 +193,9 @@ selection verified at nominal top_tt**。目标是既有
 
 ## Gate 9：原子候选与真实工作点局部重线性化
 
-状态：2026-07-25 已完成 **real-EDA-record local OP relinearization and atomic
-candidate compilation verified** 的本地 Gate。本轮只读取既有 real-Bridge run record，
-没有连接 Bridge、运行远端计算或写 OA；因此还不是 live 新候选验证。
+状态：2026-07-26 已完成共源级 **atomic local-response shortlist to same-source EDA
+selection verified** 的 live Gate；逐点模型精度为 `partial`。差分对候选仍只有本地
+training/heldout 与任务编译证据。
 
 - `TaskSpec.candidate_set` 把 semantic、testbench 和 raw CDF 字段保留在同一个完整 tuple；
   它与逐维 space/theory seed 互斥，不做交叉乘积。来源、hash、候选 ID 和预测值进入
@@ -209,15 +210,26 @@ candidate compilation verified** 的本地 Gate。本轮只读取既有 real-Bri
   门；最坏 heldout 为 `8.262%`。27 个局部组合同样编译为 6 个 tuple，完整 task 继续
   保留 saturation 和 CMRR constraints。
 - policy、source run、result 和 task template 均由 SHA-256 绑定。局部模型、误差、
-  constraint 预筛和排序是 `software_inference`；来源实测是 `eda_result`；本 Gate 没有
-  新的 `bridge_readback`。
+  constraint 预筛和排序是 `software_inference`；来源实测是 `eda_result`。
+- 共源 6 点在既有 `vda_cs_ac_tradeoff_001` 完成 OA 写入/回读、自动 `si`、
+  AC/transient/noise、checkpoint/resume、最佳写回和独立 OA readback。6/6 全规格可行；
+  模型与 EDA 都选 `W/RD/RS=1.1 µm/19 kΩ/0.75 kΩ`，GBW=`34.3965 GHz`。
+- `vda op-relinearization-validate` 自动绑定 exact result/task/run。GBW 最大预测误差
+  `4.505%`，但候选 5 output swing 为 `22.479% > 20%`；因此 candidate execution 和
+  recommendation agreement 通过，prediction accuracy Gate 为 `partial`。
+- 首次候选 1 下载 `si.env` 时发生 DNS/SSH `system_event`；没有候选指标。OA 恢复到
+  独立预检得到的 `1 µm/20 kΩ/2 kΩ` 后从 index 1 重跑。最终远端
+  `spectre/si/Maestro=0/0/0`，没有运行进程泄漏。
 
-下一 live Gate 先执行共源 6 点 quality 任务，真实核对预测误差、全规格、候选级恢复和
-最佳 OA 写回/全不可行恢复；通过后再执行差分对 6 点。任何一轮仍需新的明确远端授权，
-不能从本地 candidate task 推断它已在 Spectre 上更优。
+下一步若继续共源细化，应以新 EDA 点重新定 anchor/training/heldout 或缩小摆幅 trust
+region，不能放宽 20% 门。差分对 6 点是下一条独立 live Gate；执行前仍要重新列出 target、
+OA 写入、远端计算、scratch、覆盖风险并读取当前 OA。semantic+raw CDF 混合原子 tuple、
+新原子来源的全不可行恢复和可选 PVT 仍是后续项。
 
 本地实现与数值见
-[`2026-07-25-atomic-candidate-op-relinearization-local.md`](validation/2026-07-25-atomic-candidate-op-relinearization-local.md)。
+[`2026-07-25-atomic-candidate-op-relinearization-local.md`](validation/2026-07-25-atomic-candidate-op-relinearization-local.md)，
+真实结果见
+[`2026-07-26-common-source-op-relinearization-live.md`](validation/2026-07-26-common-source-op-relinearization-live.md)。
 
 ## 升级原则
 

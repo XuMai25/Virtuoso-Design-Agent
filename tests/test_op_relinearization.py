@@ -8,18 +8,23 @@ from pathlib import Path
 import pytest
 
 from virtuoso_design_agent.cli import main
+from virtuoso_design_agent.metrics import evaluate_constraints
 from virtuoso_design_agent.models import (
     CandidateEvaluation,
     EvidenceSource,
     RunRecord,
     RunStatus,
+    SearchAudit,
+    SelectionScope,
     TaskSpec,
 )
 from virtuoso_design_agent.op_relinearization import (
     OperatingPointRelinearizationPolicy,
     build_task_from_relinearization,
     relinearize_operating_point,
+    validate_relinearization_run,
 )
+from virtuoso_design_agent.planner import build_plan
 
 
 def _sha256(path: Path) -> str:
@@ -168,6 +173,119 @@ def _write_template(tmp_path: Path, policy: OperatingPointRelinearizationPolicy)
     }
     path = tmp_path / "task-template.json"
     path.write_text(json.dumps(template, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def _write_compiled_relinearization(
+    tmp_path: Path,
+) -> tuple[Path, Path, TaskSpec]:
+    source_run = _write_source_run(tmp_path)
+    policy = _policy(source_run)
+    result = relinearize_operating_point(policy, source_run)
+    result_path = tmp_path / "relinearization-result.json"
+    result_path.write_text(result.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    task = build_task_from_relinearization(
+        result_path,
+        _write_template(tmp_path, policy),
+    )
+    task_path = tmp_path / "relinearization-task.json"
+    task_path.write_text(
+        task.model_dump_json(indent=2, exclude_none=True, exclude_unset=True) + "\n",
+        encoding="utf-8",
+    )
+    return result_path, task_path, task
+
+
+def _write_atomic_eda_run(
+    tmp_path: Path,
+    task: TaskSpec,
+    *,
+    metric_offsets: dict[tuple[int, str], float] | None = None,
+    adapter: str = "virtuoso-bridge-subprocess",
+) -> Path:
+    assert task.candidate_set is not None
+    assert task.objective is not None
+    evaluations: list[CandidateEvaluation] = []
+    for index, atomic in enumerate(task.candidate_set.candidates, start=1):
+        parameters = dict(task.parameters)
+        parameters.update(atomic.parameters)
+        instance_parameters = {
+            update.instance: dict(update.parameters)
+            for update in task.instance_parameter_updates
+        }
+        for update in atomic.instance_parameter_updates:
+            instance_parameters.setdefault(update.instance, {}).update(
+                update.parameters
+            )
+        metrics = dict(atomic.predicted_metrics)
+        metrics["saturation_region"] = 1.0
+        for (candidate_index, metric), offset in (metric_offsets or {}).items():
+            if candidate_index == index:
+                metrics[metric] += offset
+        constraints = evaluate_constraints(metrics, task.constraints)
+        feasible = all(item.passed for item in constraints)
+        evaluations.append(
+            CandidateEvaluation(
+                index=index,
+                parameters=parameters,
+                instance_parameters=instance_parameters,
+                metrics=metrics,
+                constraints=constraints,
+                feasible=feasible,
+                total_violation=sum(
+                    item.normalized_violation for item in constraints
+                ),
+                objective_value=metrics[task.objective.metric],
+                evidence_source=EvidenceSource.EDA_RESULT,
+                metric_sources={
+                    name: (
+                        EvidenceSource.SOFTWARE_INFERENCE
+                        if name == "saturation_region"
+                        else EvidenceSource.EDA_RESULT
+                    )
+                    for name in metrics
+                },
+                analysis_complete=True,
+                atomic_candidate_id=atomic.id,
+                atomic_candidate_predicted_metrics=dict(atomic.predicted_metrics),
+                atomic_candidate_evidence_source=(
+                    EvidenceSource.SOFTWARE_INFERENCE
+                ),
+            )
+        )
+    selected = max(
+        (candidate for candidate in evaluations if candidate.feasible),
+        key=lambda candidate: candidate.objective_value,
+    )
+    now = datetime.now(UTC)
+    run = RunRecord(
+        task_id=task.id,
+        plan_token=build_plan(task).confirmation_token,
+        adapter=adapter,
+        status=RunStatus.SUCCEEDED,
+        started_at=now,
+        finished_at=now,
+        actions=[],
+        candidates=evaluations,
+        selected_parameters=dict(selected.parameters),
+        selected_instance_parameters=(
+            dict(selected.instance_parameters)
+            if selected.instance_parameters
+            else None
+        ),
+        selected_metrics=dict(selected.metrics),
+        search_audit=SearchAudit(
+            declared_candidate_count=len(evaluations),
+            attempted_candidate_count=len(evaluations),
+            completed_candidate_count=len(evaluations),
+            domain_exhausted=True,
+            selection_scope=SelectionScope.BEST_IN_DECLARED_DISCRETE_DOMAIN,
+            statement="test exhausted atomic domain",
+            candidate_set_source=task.candidate_set.source,
+        ),
+    )
+    path = tmp_path / "atomic-eda-run.json"
+    path.write_text(run.model_dump_json(indent=2) + "\n", encoding="utf-8")
     return path
 
 
@@ -341,3 +459,93 @@ def test_relinearization_cli_round_trip(tmp_path: Path, capsys) -> None:
     capsys.readouterr()
     task = TaskSpec.model_validate_json(task_path.read_text(encoding="utf-8"))
     assert task.candidate_set is not None
+
+
+def test_live_relinearization_validation_binds_and_accepts_exact_eda_run(
+    tmp_path: Path,
+) -> None:
+    result_path, task_path, task = _write_compiled_relinearization(tmp_path)
+    run_path = _write_atomic_eda_run(tmp_path, task)
+
+    validation = validate_relinearization_run(result_path, task_path, run_path)
+
+    assert validation.status is RunStatus.SUCCEEDED
+    assert validation.gate_passed
+    assert validation.candidate_execution_gate_passed
+    assert validation.prediction_accuracy_gate_passed
+    assert validation.recommendation_agreement
+    assert validation.declared_candidate_count == len(task.candidate_set.candidates)
+    assert validation.eda_feasible_fraction == pytest.approx(1.0)
+    assert all(
+        comparison.measurement_evidence_source is EvidenceSource.EDA_RESULT
+        and comparison.prediction_evidence_source
+        is EvidenceSource.SOFTWARE_INFERENCE
+        and comparison.passed
+        for candidate in validation.candidates
+        for comparison in candidate.comparisons
+    )
+
+
+def test_live_relinearization_validation_reports_prediction_partial(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    result_path, task_path, task = _write_compiled_relinearization(tmp_path)
+    run_path = _write_atomic_eda_run(
+        tmp_path,
+        task,
+        metric_offsets={(2, "gm_us"): 1.0},
+    )
+
+    validation = validate_relinearization_run(result_path, task_path, run_path)
+
+    assert validation.status is RunStatus.PARTIAL
+    assert not validation.gate_passed
+    assert validation.candidate_execution_gate_passed
+    assert not validation.prediction_accuracy_gate_passed
+    assert validation.recommendation_agreement
+    assert any("gm_us" in note for note in validation.notes)
+    failed = [
+        comparison
+        for candidate in validation.candidates
+        for comparison in candidate.comparisons
+        if not comparison.passed
+    ]
+    assert {comparison.metric for comparison in failed} == {"gm_us"}
+
+    output = tmp_path / "live-validation.json"
+    assert main(
+        [
+            "op-relinearization-validate",
+            str(result_path),
+            str(task_path),
+            str(run_path),
+            "--output",
+            str(output),
+        ]
+    ) == 1
+    capsys.readouterr()
+    assert output.is_file()
+
+
+def test_live_relinearization_validation_rejects_provenance_drift(
+    tmp_path: Path,
+) -> None:
+    result_path, task_path, task = _write_compiled_relinearization(tmp_path)
+    run_path = _write_atomic_eda_run(tmp_path, task)
+
+    raw_task = json.loads(task_path.read_text(encoding="utf-8"))
+    raw_task["candidate_set"]["source"]["bindings"][
+        "relinearization_result_sha256"
+    ] = "0" * 64
+    drifted_task = tmp_path / "drifted-task.json"
+    drifted_task.write_text(json.dumps(raw_task, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="does not bind the exact"):
+        validate_relinearization_run(result_path, drifted_task, run_path)
+
+    raw_run = json.loads(run_path.read_text(encoding="utf-8"))
+    raw_run["adapter"] = "deterministic-demo"
+    drifted_run = tmp_path / "drifted-run.json"
+    drifted_run.write_text(json.dumps(raw_run, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="successful real-Bridge"):
+        validate_relinearization_run(result_path, task_path, drifted_run)

@@ -174,7 +174,11 @@ Gate 8 把上述层之间的交接做成三个独立、可审计的本地入口�
 
 每个指标以 anchor 为截距，对 `(parameter-anchor)/proposal_step` 做一阶最小二乘。训练扰动不能独立张成全部声明参数时直接拒绝，不用 ridge 隐藏不可辨识性。训练误差和未参与拟合的留出误差分别计算，并且每个指标两道门都必须通过；只要一项失败，结果就是 `partial` 且没有 `candidate_set`。通过后才在 anchor 周围的显式小网格生成候选，先排除已经测过的 tuple，再按局部筛选约束和 objective 排序；首项固定保留已测 anchor 作为控制点。所有预测、排序和误差判断是 `software_inference`，来源实测指标仍是 `eda_result`。
 
-`vda candidate-task-from-relinearization` 只接受 passed result，并把结果、policy、source run 和 task template 全部做 SHA-256 绑定。template 必须精确匹配固定参数、objective，并至少保留局部模型用过的筛选 constraints；可以额外保留饱和区、THD、CMRR 等未由局部模型预测的完整规格，最终仍由同源 EDA 判定。首轮本地 Gate 用既有真实记录完成了共源级 6-train/2-heldout、10 指标和差分对 4-train/2-heldout、15 指标验证，分别从 27 个局部组合编译 6 个原子候选；最坏留出误差为 `11.450%` 和 `8.262%`。这些数字只验证局部候选生成和留出门，不证明新候选已跑 Spectre，也不授权 OA 写回。
+`vda candidate-task-from-relinearization` 只接受 passed result，并把结果、policy、source run 和 task template 全部做 SHA-256 绑定。template 必须精确匹配固定参数、objective，并至少保留局部模型用过的筛选 constraints；可以额外保留饱和区、THD、CMRR 等未由局部模型预测的完整规格，最终仍由同源 EDA 判定。首轮本地 Gate 用既有真实记录完成了共源级 6-train/2-heldout、10 指标和差分对 4-train/2-heldout、15 指标验证，分别从 27 个局部组合编译 6 个原子候选；最坏留出误差为 `11.450%` 和 `8.262%`。
+
+真实运行后的误差审计不靠人工抄表。`vda op-relinearization-validate` 只读 exact result/task/run，核对 result/task/run SHA、plan token、候选 source/ID/顺序/tuple/预测、完整离散域和 real-Bridge/`eda_result` 边界，再用模型保存的 held-out limit 比较每个新点。候选执行成功、预测推荐与 EDA 推荐一致、逐点预测精度是分开的结论；误差超门时保留完整比较并返回 `partial`，不会撤销已经由 EDA 正确完成的选优，也不会把它包装成数值模型已校准。
+
+2026-07-26 共源 6 点 live Gate 完整运行 OA→`si`→AC/transient/noise，6/6 全规格可行，预测与 EDA 都选 `1.1 µm/19 kΩ/0.75 kΩ`；GBW 从 anchor 的 `30.2890 GHz` 提高到 `34.3965 GHz`。GBW 最大预测误差为 `4.505%`，但候选 5 的 output swing 误差为 `22.479% > 20%`，所以执行/推荐 Gate 通过、逐点预测 Gate 为 partial。该结果要求后续在新 anchor 重新留出验证或缩小 trust region，不能靠放宽 20% 门变绿。差分对六点仍需独立 live 证据。
 
 ### 通用小信号网络核心
 

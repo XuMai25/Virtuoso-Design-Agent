@@ -33,6 +33,7 @@ from .op_relinearization import (
     OperatingPointRelinearizationPolicy,
     build_task_from_relinearization,
     relinearize_operating_point,
+    validate_relinearization_run,
 )
 from .planner import build_plan
 from .resource_audit import audit_local_resources, load_retention_pins
@@ -218,6 +219,20 @@ def _cmd_candidate_task_from_relinearization(args: argparse.Namespace) -> int:
     args.output.write_text(payload + "\n", encoding="utf-8")
     print(payload)
     return 0
+
+
+def _cmd_op_relinearization_validate(args: argparse.Namespace) -> int:
+    result = validate_relinearization_run(
+        args.result,
+        args.task,
+        args.run_record,
+    )
+    payload = result.model_dump_json(indent=2)
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(payload + "\n", encoding="utf-8")
+    print(payload)
+    return 0 if result.status is RunStatus.SUCCEEDED else 1
 
 
 def _cmd_small_signal(args: argparse.Namespace) -> int:
@@ -531,6 +546,21 @@ def build_parser() -> argparse.ArgumentParser:
     candidate_task.add_argument("task_template", type=Path)
     candidate_task.add_argument("--output", type=Path, required=True)
     candidate_task.set_defaults(handler=_cmd_candidate_task_from_relinearization)
+
+    op_relinearization_validate = subparsers.add_parser(
+        "op-relinearization-validate",
+        help=(
+            "audit a compiled local response model against its exhausted real "
+            "EDA candidate run"
+        ),
+    )
+    op_relinearization_validate.add_argument("result", type=Path)
+    op_relinearization_validate.add_argument("task", type=Path)
+    op_relinearization_validate.add_argument("run_record", type=Path)
+    op_relinearization_validate.add_argument("--output", type=Path)
+    op_relinearization_validate.set_defaults(
+        handler=_cmd_op_relinearization_validate
+    )
 
     small_signal = subparsers.add_parser(
         "small-signal",

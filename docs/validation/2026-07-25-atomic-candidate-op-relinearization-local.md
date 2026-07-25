@@ -200,3 +200,11 @@ linearity、noise 完整规格；需要新的明确授权，并列出目标
 `vb_pdk_smoke/vda_cs_ac_tradeoff_001/schematic`、OA write、remote compute、`/data/xum`
 scratch 和 `replace_existing=false`。只有该 Gate 通过后，才执行差分对 6 点并比较 Gate 8
 旧 theory ranking、局部预测和真实 EDA selection。
+
+## 2026-07-26 后续
+
+上述共源 live Gate 已按列出的范围完成。6/6 原子候选全规格可行，真实 EDA 与局部模型都
+选择 `W/RD/RS=1.1 µm/19 kΩ/0.75 kΩ`；但自动事后审计发现候选 5 的 output swing
+预测误差 `22.479% > 20%`，所以执行/推荐通过而逐点模型精度为 `partial`。完整 transport
+恢复、网表 SHA、指标、OA 回读和资源收尾见
+[`2026-07-26-common-source-op-relinearization-live.md`](2026-07-26-common-source-op-relinearization-live.md)。

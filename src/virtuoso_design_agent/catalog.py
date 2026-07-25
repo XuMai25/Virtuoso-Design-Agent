@@ -157,7 +157,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     ),
     CircuitKind.COMMON_SOURCE: CircuitCapability(
         circuit=CircuitKind.COMMON_SOURCE,
-        stage="Gate 2 bounded topology and raw-parameter tuning verified",
+        stage="Gate 9 atomic local-response EDA selection verified",
         executable=True,
         operations=_STANDARD_OPERATIONS + (Operation.SCHEMATIC_TRANSFORM,),
         parameters=(
@@ -176,7 +176,10 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "infeasible restore, checkpoint recovery, fixed-design TT/SS/FF "
             "verification, optional read-only PVT-aware bias tuning, reversible "
             "source-degeneration patching, and explicit MN0.fingers bounded tuning "
-            "live on TSMC N28; non-overwrite ADE "
+            "live on TSMC N28; six hash-bound local-response W/RD/RS tuples now "
+            "complete full-quality OA/si/Spectre selection and writeback with "
+            "recommendation agreement, while pointwise output-swing prediction "
+            "accuracy remains partial; non-overwrite ADE "
             "prepare/setup/background exact-history run-resume is live on the "
             "inverter handoff; live PVT-aware OA-design-variable writeback and "
             "common-source capture/variable/sweep/real-PVT ADE gates remain pending"
