@@ -172,13 +172,15 @@ Gate 8 把上述层之间的交接做成三个独立、可审计的本地入口�
 
 `vda op-relinearize` 是纯本地 run-record 后处理入口，不调用 Bridge、不写 OA。它不依赖某个固定拓扑公式，而是由 policy 显式声明 source task/run SHA-256、一个真实 anchor、互斥的训练/留出 candidate index、待微调 semantic 参数、工作点/性能指标、信任边界、量化网格、误差门和局部筛选规格。来源必须是成功的 `virtuoso-bridge-subprocess` run；每个建模指标必须是完整 `eda_result`。未建模 semantic 参数必须在训练和留出点保持不变；原始 CDF 值若发生变化，必须先建立可数值解释的 semantic 映射，不能把任意字符串硬塞进线性回归。
 
-每个指标以 anchor 为截距，对 `(parameter-anchor)/proposal_step` 做一阶最小二乘。训练扰动不能独立张成全部声明参数时直接拒绝，不用 ridge 隐藏不可辨识性。训练误差和未参与拟合的留出误差分别计算，并且每个指标两道门都必须通过；只要一项失败，结果就是 `partial` 且没有 `candidate_set`。通过后才在 anchor 周围的显式小网格生成候选，先排除已经测过的 tuple，再按局部筛选约束和 objective 排序；首项固定保留已测 anchor 作为控制点。所有预测、排序和误差判断是 `software_inference`，来源实测指标仍是 `eda_result`。
+每个指标以 anchor 为截距，对 `(parameter-anchor)/proposal_step` 做一阶最小二乘。训练扰动不能独立张成全部声明参数时直接拒绝，不用 ridge 隐藏不可辨识性。训练误差和未参与拟合的留出误差分别计算，并且每个指标两道门都必须通过；此外每个声明参数必须在至少一个 heldout 点相对 anchor 有非零扰动。后者不是完整的系数可辨识性证明，但能阻止一个完全没有留出覆盖的方向借其他维度的低误差伪装成已验证。任一门失败时都不生成 `candidate_set`。通过后才在 anchor 周围的显式小网格生成候选，先排除已经测过的 tuple，再按局部筛选约束和 objective 排序；首项固定保留已测 anchor 作为控制点。所有预测、排序和误差判断是 `software_inference`，来源实测指标仍是 `eda_result`。
 
 `vda candidate-task-from-relinearization` 只接受 passed result，并把结果、policy、source run 和 task template 全部做 SHA-256 绑定。template 必须精确匹配固定参数、objective，并至少保留局部模型用过的筛选 constraints；可以额外保留饱和区、THD、CMRR 等未由局部模型预测的完整规格，最终仍由同源 EDA 判定。首轮本地 Gate 用既有真实记录完成了共源级 6-train/2-heldout、10 指标和差分对 4-train/2-heldout、15 指标验证，分别从 27 个局部组合编译 6 个原子候选；最坏留出误差为 `11.450%` 和 `8.262%`。
 
 真实运行后的误差审计不靠人工抄表。`vda op-relinearization-validate` 只读 exact result/task/run，核对 result/task/run SHA、plan token、候选 source/ID/顺序/tuple/预测、完整离散域和 real-Bridge/`eda_result` 边界，再用模型保存的 held-out limit 比较每个新点。候选执行成功、预测推荐与 EDA 推荐一致、逐点预测精度是分开的结论；误差超门时保留完整比较并返回 `partial`，不会撤销已经由 EDA 正确完成的选优，也不会把它包装成数值模型已校准。
 
 2026-07-26 共源 6 点 live Gate 完整运行 OA→`si`→AC/transient/noise，6/6 全规格可行，预测与 EDA 都选 `1.1 µm/19 kΩ/0.75 kΩ`；GBW 从 anchor 的 `30.2890 GHz` 提高到 `34.3965 GHz`。GBW 最大预测误差为 `4.505%`，但候选 5 的 output swing 误差为 `22.479% > 20%`，所以执行/推荐 Gate 通过、逐点预测 Gate 为 partial。该结果要求后续在新 anchor 重新留出验证或缩小 trust region，不能靠放宽 20% 门变绿。差分对六点仍需独立 live 证据。
+
+随后以真实 EDA 最佳点重定 anchor。把 W/RD/RS 都保留的三维策略虽然数值误差看似很低，但 heldout candidates 5/6 的 RS 都等于 anchor 的 `750 Ω`，被新的参数覆盖门拒绝。合法刷新只建模 W/RD，并把 RS 固定为来源 record 的真实值；training `[2,3,4]`、heldout `[5,6]` 同时覆盖两维，10 个指标最坏 heldout 误差为 P1dB 的 `0.568%`，output swing 为 `0.319%`。生成域缩至 `W={1.05,1.10} µm × RD={18.5,19,19.5} kΩ` 六点，首点仍是已测 anchor。这是本地 `software_inference` 候选准备，不是六个新点已经通过 Spectre；若要继续调整 RS，必须先增加独立 RS 探针。
 
 ### 通用小信号网络核心
 

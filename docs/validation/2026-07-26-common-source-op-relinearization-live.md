@@ -161,3 +161,7 @@ VDA-managed Maestro sessions: 0 -> 0
 - semantic 原子 tuple 已 live；包含 raw CDF 的混合原子 tuple 仍只有本地执行测试。
 - 差分对的 6 点工作点重线性化 task 仍未 live。其 target、OA 写入、远端计算、当前 OA
   基线和覆盖风险必须在执行前重新列出；不能从共源结果外推。
+
+后续本地刷新已在不连接 Bridge 的条件下完成：三维 W/RD/RS 因 heldout 没有 RS 扰动而
+拒绝，固定 RS 后的 W/RD 小域通过历史留出并生成待执行六点。见
+[`2026-07-26-common-source-op-refresh-2d-local.md`](2026-07-26-common-source-op-refresh-2d-local.md)。

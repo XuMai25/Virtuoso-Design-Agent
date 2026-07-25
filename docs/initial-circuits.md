@@ -217,19 +217,27 @@ training/heldout 与任务编译证据。
 - `vda op-relinearization-validate` 自动绑定 exact result/task/run。GBW 最大预测误差
   `4.505%`，但候选 5 output swing 为 `22.479% > 20%`；因此 candidate execution 和
   recommendation agreement 通过，prediction accuracy Gate 为 `partial`。
+- 继续以真实最佳 candidate 2 重定 anchor 时，三维 W/RD/RS 策略被 heldout 参数覆盖门
+  拒绝：两个留出点都没有改变 RS。固定 `RS=750 Ω` 后，W/RD 使用 train `[2,3,4]`、
+  heldout `[5,6]`，两维均覆盖；10 个指标最坏 heldout 为 `0.568%`，output swing 为
+  `0.319%`。新域仅有 `W=1.05/1.10 µm × RD=18.5/19/19.5 kΩ` 六点，已本地编译和
+  plan，尚未运行 Spectre。
 - 首次候选 1 下载 `si.env` 时发生 DNS/SSH `system_event`；没有候选指标。OA 恢复到
   独立预检得到的 `1 µm/20 kΩ/2 kΩ` 后从 index 1 重跑。最终远端
   `spectre/si/Maestro=0/0/0`，没有运行进程泄漏。
 
-下一步若继续共源细化，应以新 EDA 点重新定 anchor/training/heldout 或缩小摆幅 trust
-region，不能放宽 20% 门。差分对 6 点是下一条独立 live Gate；执行前仍要重新列出 target、
-OA 写入、远端计算、scratch、覆盖风险并读取当前 OA。semantic+raw CDF 混合原子 tuple、
-新原子来源的全不可行恢复和可选 PVT 仍是后续项。
+下一步可执行上述 W/RD 小域并用 exact post-run validator 检查新点；若继续调整 RS，必须
+先增加至少一个独立 RS 留出探针，不能用缺失方向的低总误差代替。差分对 6 点仍是另一条
+独立 live Gate；执行前要重新列出 target、OA 写入、远端计算、scratch、覆盖风险并读取
+当前 OA。semantic+raw CDF 混合原子 tuple、新原子来源的全不可行恢复和可选 PVT 仍是
+后续项。
 
 本地实现与数值见
 [`2026-07-25-atomic-candidate-op-relinearization-local.md`](validation/2026-07-25-atomic-candidate-op-relinearization-local.md)，
 真实结果见
-[`2026-07-26-common-source-op-relinearization-live.md`](validation/2026-07-26-common-source-op-relinearization-live.md)。
+[`2026-07-26-common-source-op-relinearization-live.md`](validation/2026-07-26-common-source-op-relinearization-live.md)，
+新 anchor 本地刷新见
+[`2026-07-26-common-source-op-refresh-2d-local.md`](validation/2026-07-26-common-source-op-refresh-2d-local.md)。
 
 ## 升级原则
 

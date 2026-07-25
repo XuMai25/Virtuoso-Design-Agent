@@ -309,6 +309,10 @@ def test_heldout_validated_local_model_emits_hash_bound_atomic_task(
         model.training_gate_passed and model.holdout_gate_passed
         for model in result.models
     )
+    assert result.holdout_parameter_coverage == {
+        "device_width_um": True,
+        "bias_v": True,
+    }
     assert all(
         comparison.actual_evidence_source is EvidenceSource.EDA_RESULT
         and comparison.predicted_evidence_source is EvidenceSource.SOFTWARE_INFERENCE
@@ -393,6 +397,21 @@ def test_relinearization_refuses_singular_training_perturbations(
         relinearize_operating_point(_policy(source_run), source_run)
 
 
+def test_relinearization_rejects_uncovered_holdout_parameter_direction(
+    tmp_path: Path,
+) -> None:
+    source_run = _write_source_run(
+        tmp_path,
+        points=[(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (2.0, 0.0)],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="held-out points do not perturb declared parameter directions: bias_v",
+    ):
+        relinearize_operating_point(_policy(source_run), source_run)
+
+
 def test_training_error_gate_is_independent_of_the_holdout_gate(
     tmp_path: Path,
 ) -> None:
@@ -403,7 +422,7 @@ def test_training_error_gate_is_independent_of_the_holdout_gate(
             (1.0, 0.0),
             (0.0, 1.0),
             (1.0, 1.0),
-            (0.0, 0.0),
+            (1.0, -1.0),
         ],
         gain_offsets={4: 10.0},
     )

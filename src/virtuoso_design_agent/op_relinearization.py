@@ -191,6 +191,7 @@ class OperatingPointRelinearizationResult(_FiniteStrictModel):
     anchor_candidate_index: int = Field(ge=1)
     training_candidate_indices: list[int]
     holdout_candidate_indices: list[int]
+    holdout_parameter_coverage: dict[StrictStr, bool] = Field(default_factory=dict)
     fixed_parameters: dict[StrictStr, float]
     fixed_instance_parameters: dict[StrictStr, dict[StrictStr, StrictStr]]
     constraints: list[MetricConstraint]
@@ -502,6 +503,24 @@ def relinearize_operating_point(
     training_features = [
         _features(candidate, anchor, policy.parameters) for candidate in training
     ]
+    holdout_features = [
+        _features(candidate, anchor, policy.parameters) for candidate in holdout
+    ]
+    holdout_parameter_coverage = {
+        parameter.name: any(
+            not math.isclose(row[column], 0.0, rel_tol=0.0, abs_tol=1e-12)
+            for row in holdout_features
+        )
+        for column, parameter in enumerate(policy.parameters)
+    }
+    uncovered = [
+        name for name, covered in holdout_parameter_coverage.items() if not covered
+    ]
+    if uncovered:
+        raise ValueError(
+            "held-out points do not perturb declared parameter directions: "
+            + ", ".join(uncovered)
+        )
 
     models: list[LocalMetricModel] = []
     comparisons: list[RelinearizationComparison] = []
@@ -641,7 +660,9 @@ def relinearize_operating_point(
     )
     feasible_proposals = [item for item in proposals if item.predicted_feasible]
     candidate_set: AtomicCandidateSet | None = None
-    notes: list[str] = []
+    notes = [
+        "every declared parameter is perturbed by at least one held-out point"
+    ]
     failed_training = [
         model.metric for model in models if not model.training_gate_passed
     ]
@@ -706,6 +727,7 @@ def relinearize_operating_point(
         anchor_candidate_index=policy.anchor_candidate_index,
         training_candidate_indices=list(policy.training_candidate_indices),
         holdout_candidate_indices=list(policy.holdout_candidate_indices),
+        holdout_parameter_coverage=holdout_parameter_coverage,
         fixed_parameters=fixed_parameters,
         fixed_instance_parameters=fixed_instance_parameters,
         constraints=list(policy.constraints),
