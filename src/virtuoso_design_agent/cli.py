@@ -226,6 +226,7 @@ def _cmd_op_relinearization_validate(args: argparse.Namespace) -> int:
         args.result,
         args.task,
         args.run_record,
+        args.policy,
     )
     payload = result.model_dump_json(indent=2)
     if args.output is not None:
@@ -557,6 +558,14 @@ def build_parser() -> argparse.ArgumentParser:
     op_relinearization_validate.add_argument("result", type=Path)
     op_relinearization_validate.add_argument("task", type=Path)
     op_relinearization_validate.add_argument("run_record", type=Path)
+    op_relinearization_validate.add_argument(
+        "--policy",
+        type=Path,
+        help=(
+            "exact original policy required when a legacy result predates "
+            "serialized relative-error floors"
+        ),
+    )
     op_relinearization_validate.add_argument("--output", type=Path)
     op_relinearization_validate.set_defaults(
         handler=_cmd_op_relinearization_validate

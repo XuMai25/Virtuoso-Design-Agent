@@ -499,10 +499,82 @@ def test_live_relinearization_validation_binds_and_accepts_exact_eda_run(
         comparison.measurement_evidence_source is EvidenceSource.EDA_RESULT
         and comparison.prediction_evidence_source
         is EvidenceSource.SOFTWARE_INFERENCE
+        and comparison.error_normalization_source == "result_model"
         and comparison.passed
         for candidate in validation.candidates
         for comparison in candidate.comparisons
     )
+
+
+def test_live_validation_requires_bound_policy_for_legacy_error_floors(
+    tmp_path: Path,
+) -> None:
+    source_run = _write_source_run(tmp_path)
+    raw_policy = _policy(source_run).model_dump(mode="json")
+    raw_policy["metrics"][0]["maximum_training_error_percent"] = 1.0
+    raw_policy["metrics"][0]["maximum_holdout_error_percent"] = 1.0
+    raw_policy["metrics"][0]["relative_error_floor"] = 1000.0
+    policy = OperatingPointRelinearizationPolicy.model_validate(raw_policy)
+    policy_path = tmp_path / "legacy-policy.json"
+    policy_path.write_text(policy.model_dump_json(indent=2) + "\n", encoding="utf-8")
+
+    result = relinearize_operating_point(policy, source_run)
+    raw_result = result.model_dump(mode="json")
+    gm_model = next(
+        model for model in raw_result["models"] if model["metric"] == "gm_us"
+    )
+    assert gm_model["response_scale"] == pytest.approx(1000.0)
+    gm_model.pop("relative_error_floor")
+    result_path = tmp_path / "legacy-result.json"
+    result_path.write_text(json.dumps(raw_result, indent=2) + "\n", encoding="utf-8")
+
+    task = build_task_from_relinearization(
+        result_path,
+        _write_template(tmp_path, policy),
+    )
+    task_path = tmp_path / "legacy-task.json"
+    task_path.write_text(task.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    run_path = _write_atomic_eda_run(
+        tmp_path,
+        task,
+        metric_offsets={(2, "gm_us"): 2.0},
+    )
+
+    with pytest.raises(ValueError, match="exact hash-bound policy"):
+        validate_relinearization_run(result_path, task_path, run_path)
+
+    drifted_policy = policy.model_copy(deep=True)
+    drifted_policy.metrics[0].relative_error_floor = 2000.0
+    drifted_policy_path = tmp_path / "drifted-policy.json"
+    drifted_policy_path.write_text(
+        drifted_policy.model_dump_json(indent=2) + "\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="policy hash"):
+        validate_relinearization_run(
+            result_path,
+            task_path,
+            run_path,
+            drifted_policy_path,
+        )
+
+    validation = validate_relinearization_run(
+        result_path,
+        task_path,
+        run_path,
+        policy_path,
+    )
+
+    comparison = next(
+        item
+        for item in validation.candidates[1].comparisons
+        if item.metric == "gm_us"
+    )
+    assert validation.gate_passed
+    assert validation.bound_policy_sha256 == result.policy_sha256
+    assert comparison.passed
+    assert comparison.error_normalization_floor == pytest.approx(1000.0)
+    assert comparison.error_normalization_source == "hash_bound_policy"
+    assert any("legacy relative-error floors restored" in note for note in validation.notes)
 
 
 def test_live_relinearization_validation_reports_prediction_partial(

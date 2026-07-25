@@ -114,8 +114,13 @@ completion 全为 true，并在三项分析中复用同一份已核对网表。
   artifacts\relinearization\common-source-op-relinearization.json `
   artifacts\relinearization\common-source-op-relinearized-task.json `
   artifacts\runs\common-source-quality-op-relinearized-next\live-resume1-20260726.json `
+  --policy examples\theory\common-source-op-relinearization-policy.json `
   --output artifacts\relinearization\common-source-op-relinearization-live-validation.json
 ```
+
+该历史 result 生成于 `relative_error_floor` 被逐 metric 序列化之前，因此新版 validator
+要求 `--policy` 指向 result 已由 canonical SHA 绑定的原 policy；它不会用 schema 默认
+floor 猜测旧运行的误差定义。该参数只恢复运行前已有的归一化定义，不改变 20% 门限。
 
 它核对 result/task/run SHA、plan token、原子候选 source/ID/顺序/tuple/预测、完整离散域、
 真实 Bridge adapter 和每项测量的 `eda_result` 来源；然后用原模型保存的 held-out error

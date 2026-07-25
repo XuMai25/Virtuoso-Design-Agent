@@ -212,7 +212,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     CircuitKind.DIFFERENTIAL_PAIR: CircuitCapability(
         circuit=CircuitKind.DIFFERENTIAL_PAIR,
         stage=(
-            "Gate 8 theory-seeded current-mirror-load selection verified at "
+            "Gate 10 held-out Wn/Wp/Wtail local-response EDA validation verified at "
             "nominal TSMC N28"
         ),
         executable=True,
@@ -265,10 +265,17 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "EDA-only ranking, checkpoint resume, selected-point PSRR/noise/"
             "linearity/ICMR, and final writeback. Four of six tuples were feasible, "
             "while the pointwise theory-accuracy gate remained partial. Hash-bound "
-            "local DC-OP relinearization and held-out atomic task compilation now "
-            "pass on the retained record, but the six new tuples have not run live. "
+            "local DC-OP relinearization then produced six Wn/Wp/Wtail tuples; all "
+            "six completed same-source DC/differential/common AC, passed constraints, "
+            "and agreed with the predicted minimum-power recommendation. Exact live "
+            "validation passed 90/90 comparisons with 2.569% worst new-point error; "
+            "three transport system events restored the anchor and resumed safely, "
+            "and the selected widths were independently read back from OA. Legacy "
+            "results missing serialized error floors require their canonical-hash-"
+            "bound original policy rather than schema defaults. "
             "The provisional 20 dB PSRR gate was infeasible; PVT/mismatch, "
-            "slew/P1dB, and ADE handoff remain pending"
+            "new-selected-point PSRR/noise/linearity/ICMR, slew/P1dB, and ADE "
+            "handoff remain pending"
         ),
     ),
 }

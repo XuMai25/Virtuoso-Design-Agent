@@ -176,13 +176,15 @@ Gate 8 把上述层之间的交接做成三个独立、可审计的本地入口�
 
 `vda candidate-task-from-relinearization` 只接受 passed result，并把结果、policy、source run 和 task template 全部做 SHA-256 绑定。template 必须精确匹配固定参数、objective，并至少保留局部模型用过的筛选 constraints；可以额外保留饱和区、THD、CMRR 等未由局部模型预测的完整规格，最终仍由同源 EDA 判定。首轮本地 Gate 用既有真实记录完成了共源级 6-train/2-heldout、10 指标和差分对 4-train/2-heldout、15 指标验证，分别从 27 个局部组合编译 6 个原子候选；最坏留出误差为 `11.450%` 和 `8.262%`。
 
-真实运行后的误差审计不靠人工抄表。`vda op-relinearization-validate` 只读 exact result/task/run，核对 result/task/run SHA、plan token、候选 source/ID/顺序/tuple/预测、完整离散域和 real-Bridge/`eda_result` 边界，再用模型保存的 held-out limit 比较每个新点。候选执行成功、预测推荐与 EDA 推荐一致、逐点预测精度是分开的结论；误差超门时保留完整比较并返回 `partial`，不会撤销已经由 EDA 正确完成的选优，也不会把它包装成数值模型已校准。
+真实运行后的误差审计不靠人工抄表。`vda op-relinearization-validate` 只读 exact result/task/run，核对 result/task/run SHA、plan token、候选 source/ID/顺序/tuple/预测、完整离散域和 real-Bridge/`eda_result` 边界，再用模型保存的 held-out limit 比较每个新点。候选执行成功、预测推荐与 EDA 推荐一致、逐点预测精度是分开的结论；误差超门时保留完整比较并返回 `partial`，不会撤销已经由 EDA 正确完成的选优，也不会把它包装成数值模型已校准。当前 result schema 会逐 metric 保存 `relative_error_floor`。对字段尚未序列化的旧 result，validator 不再用 schema 默认值猜测；必须用 `--policy` 提供 result 已绑定 canonical SHA 的原始 policy，并逐项核对来源、constraints/objective、metric set、role、response scale 与误差门。比较结果同时记录 floor 数值和 `result_model/hash_bound_policy` 来源。
 
-2026-07-26 共源 6 点 live Gate 完整运行 OA→`si`→AC/transient/noise，6/6 全规格可行，预测与 EDA 都选 `1.1 µm/19 kΩ/0.75 kΩ`；GBW 从 anchor 的 `30.2890 GHz` 提高到 `34.3965 GHz`。GBW 最大预测误差为 `4.505%`，但候选 5 的 output swing 误差为 `22.479% > 20%`，所以执行/推荐 Gate 通过、逐点预测 Gate 为 partial。该结果要求后续在新 anchor 重新留出验证或缩小 trust region，不能靠放宽 20% 门变绿。差分对六点仍需独立 live 证据。
+2026-07-26 共源 6 点 live Gate 完整运行 OA→`si`→AC/transient/noise，6/6 全规格可行，预测与 EDA 都选 `1.1 µm/19 kΩ/0.75 kΩ`；GBW 从 anchor 的 `30.2890 GHz` 提高到 `34.3965 GHz`。GBW 最大预测误差为 `4.505%`，但候选 5 的 output swing 误差为 `22.479% > 20%`，所以执行/推荐 Gate 通过、逐点预测 Gate 为 partial。该结果要求后续在新 anchor 重新留出验证或缩小 trust region，不能靠放宽 20% 门变绿。
 
 随后以真实 EDA 最佳点重定 anchor。把 W/RD/RS 都保留的三维策略虽然数值误差看似很低，但 heldout candidates 5/6 的 RS 都等于 anchor 的 `750 Ω`，被新的参数覆盖门拒绝。合法刷新只建模 W/RD，并把 RS 固定为来源 record 的真实值；training `[2,3,4]`、heldout `[5,6]` 同时覆盖两维，10 个指标最坏 heldout 误差为 P1dB 的 `0.568%`，output swing 为 `0.319%`。生成域缩至 `W={1.05,1.10} µm × RD={18.5,19,19.5} kΩ` 六点，首点仍是已测 anchor；在执行前，这一阶段只属于本地 `software_inference` 候选准备。
 
 同日该二维刷新完成真实 OA→`si`→AC/transient/noise 六点执行。6/6 全规格可行，预测与 EDA 都选择 `W=1.1 µm、RD=18.5 kΩ、RS=750 Ω`，得到 gain=`3.87961 V/V`、bandwidth=`8.93269 GHz`、GBW=`34.65534 GHz`。exact validator 的 60/60 项逐点比较全部通过，五个新点最坏误差为 candidate 6 P1dB 的 `0.353712%`；因此本小域从“候选已准备”升级为 **held-out-covered common-source W/RD local response to same-source EDA selection verified at nominal top_tt**。一次 DNS/SCP 失败和一次 `WinError 10054` 都按 `system_event` 恢复基线并从原子 checkpoint 续跑，最终独立 OA 回读确认最佳写回。该结论仍固定 `RS=750 Ω` 且只覆盖 nominal `top_tt`；若继续调整 RS，必须先增加独立 RS 探针，PVT 也不得从本结果外推。
+
+同日差分对的 `Wn/Wp/Wtail` 六点也完成真实 OA→`si`→双支路 DC/差模 AC/共模 AC/CMRR。6/6 全规格可行；功耗 objective 下，局部模型和 EDA 都选择 `1.215/1.080/0.555 µm`，得到 `10.2971 µW`、gain=`3.71568 V/V`、BW=`2.68269 GHz`、GBW=`9.96800 GHz`、CMRR=`34.8249 dB`。相对 Gate 8 anchor，功耗下降 `6.228%`，gain/BW/GBW 只下降 `0.323%/0.254%/0.576%`。旧 result 的归一化 floor 通过 exact canonical-hash-bound policy 恢复后，90/90 比较全过，最坏新点误差为 BW 的 `2.5693%`。一次 DNS/SCP 和两次 `WinError 10054` 均在恢复并独立回读 anchor 后从未完成候选续跑，最终 OA 独立回读最佳宽度，远端 `Spectre/si/Maestro=0/0/0`。状态升级为 **differential-pair held-out local-response shortlist to same-source EDA selection verified at nominal top_tt**。旧 anchor 的 PSRR/noise/linearity/ICMR 证据不能外推到新宽度，所以下一增量 Gate 是新最佳点的只读质量回归；PVT 仍为可选项。
 
 ### 通用小信号网络核心
 

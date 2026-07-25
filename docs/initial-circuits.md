@@ -15,7 +15,7 @@
 
 ## Gate 2：单 MOS 共源与源极退化
 
-状态：Gate 2A 电阻负载 NMOS 共源与源极退化的 DC、复数 AC、bias/load 条件搜索和 W/RD/RS 写入调优已真实通过。专用 cell 还完成同参数只加 RS 的控制变量比较、预算/不可行/transport 恢复、5 点 transient 线性度/真实功耗和 ordinary noise。AC+linearity+noise 固定质量组合已经覆盖 bias/load、W/RD/RS 和 L/VDD；随后同一 OA/`si` 网表又通过 TT/SS/FF 三个显式温度/供电条件，并完成可选的两候选 PVT-aware bias 调优。2026-07-23 在全新 cell 上又完成 source degeneration add→DC/AC→remove；恢复后的 placement、nominal `si` 网表和全部 DC/AC 指标与 add 前相同。同一 cell 随后完成 `MN0.fingers=["1","2"]` 原始 CDF 两点搜索、同源网表证明、最佳写回和首候选 transport checkpoint 恢复。2026-07-26 又把真实 W/RD/RS 数据拟合出的 6 个原子局部候选送回同一 OA/`si`/quality 链，完成 6/6 全规格、transport resume 和最佳写回；在新 anchor 固定 RS 后，第二轮 W/RD 六点也完成 6/6 同源 EDA、60/60 预测审计和最佳写回。当前状态是 **held-out-covered common-source W/RD local response to same-source EDA selection verified at nominal top_tt**；RS 方向、真实 OA 设计变量跨 PVT 写回、复杂 callback 组合、差分对迁移和完整 L5B 仍未闭合。
+状态：Gate 2A 电阻负载 NMOS 共源与源极退化的 DC、复数 AC、bias/load 条件搜索和 W/RD/RS 写入调优已真实通过。专用 cell 还完成同参数只加 RS 的控制变量比较、预算/不可行/transport 恢复、5 点 transient 线性度/真实功耗和 ordinary noise。AC+linearity+noise 固定质量组合已经覆盖 bias/load、W/RD/RS 和 L/VDD；随后同一 OA/`si` 网表又通过 TT/SS/FF 三个显式温度/供电条件，并完成可选的两候选 PVT-aware bias 调优。2026-07-23 在全新 cell 上又完成 source degeneration add→DC/AC→remove；恢复后的 placement、nominal `si` 网表和全部 DC/AC 指标与 add 前相同。同一 cell 随后完成 `MN0.fingers=["1","2"]` 原始 CDF 两点搜索、同源网表证明、最佳写回和首候选 transport checkpoint 恢复。2026-07-26 又把真实 W/RD/RS 数据拟合出的 6 个原子局部候选送回同一 OA/`si`/quality 链，完成 6/6 全规格、transport resume 和最佳写回；在新 anchor 固定 RS 后，第二轮 W/RD 六点也完成 6/6 同源 EDA、60/60 预测审计和最佳写回。当前状态是 **held-out-covered common-source W/RD local response to same-source EDA selection verified at nominal top_tt**；RS 方向、真实 OA 设计变量跨 PVT 写回、复杂 callback 组合和完整 L5B 仍未闭合。
 
 - OA：`MN0` 与 `analogLib/RD0`，连接 `IN/OUT/VDD/VSS`，W/L/R 创建后结构化回读。
 - 同源：`si` 网表中的 MN0/RD0/可选 RS0 master、端口和 W/L/R 与 OA 一致；DC wrapper 只提供 VDD/VIN/VSS。AC 复用同一网表和 DC OP，额外提供 unit AC input、显式 sweep 和可选 `load_ff`，不复制器件 topology。
@@ -196,7 +196,8 @@ selection verified at nominal top_tt**。目标是既有
 状态：2026-07-26 先完成共源级 **atomic local-response shortlist to same-source EDA
 selection verified** 的 live Gate，首轮逐点模型精度为 `partial`；随后在新 anchor 固定 RS
 并缩小 W/RD 域，完成 **held-out-covered W/RD local response to same-source EDA selection
-verified at nominal top_tt**。差分对候选仍只有本地 training/heldout 与任务编译证据。
+verified at nominal top_tt**。差分对的 Wn/Wp/Wtail 六点随后也完成
+**held-out local-response shortlist to same-source EDA selection verified at nominal top_tt**。
 
 - `TaskSpec.candidate_set` 把 semantic、testbench 和 raw CDF 字段保留在同一个完整 tuple；
   它与逐维 space/theory seed 互斥，不做交叉乘积。来源、hash、候选 ID 和预测值进入
@@ -218,6 +219,14 @@ verified at nominal top_tt**。差分对候选仍只有本地 training/heldout �
 - `vda op-relinearization-validate` 自动绑定 exact result/task/run。GBW 最大预测误差
   `4.505%`，但候选 5 output swing 为 `22.479% > 20%`；因此 candidate execution 和
   recommendation agreement 通过，prediction accuracy Gate 为 `partial`。
+- 差分对六点在既有 `vda_diffpair_active_gate6_001` 完成逐点 OA 写入/回读、自动 `si`、
+  双支路 DC、差模 AC、共模 AC/CMRR、最佳写回和独立 OA 回读。6/6 全规格可行；模型
+  与 EDA 都选最小功耗点 `Wn/Wp/Wtail=1.215/1.080/0.555 µm`，功耗=`10.2971 µW`、
+  gain=`3.71568 V/V`、BW=`2.68269 GHz`、GBW=`9.96800 GHz`、CMRR=`34.8249 dB`。
+  exact validator 的 90/90 比较通过，最坏新点误差为 BW 的 `2.5693%`。
+- 新 result 保存每个 metric 的误差归一化 floor；旧 result 缺少该字段时必须提供已由
+  result canonical SHA 绑定的原 policy。差分对旧 record 首次按 schema 默认值得到的
+  mismatch 假失败被保留为诊断证据，修复没有改变运行前声明的 floor 或误差门。
 - 继续以真实最佳 candidate 2 重定 anchor 时，三维 W/RD/RS 策略被 heldout 参数覆盖门
   拒绝：两个留出点都没有改变 RS。固定 `RS=750 Ω` 后，W/RD 使用 train `[2,3,4]`、
   heldout `[5,6]`，两维均覆盖；10 个指标最坏 heldout 为 `0.568%`，output swing 为
@@ -230,11 +239,15 @@ verified at nominal top_tt**。差分对候选仍只有本地 training/heldout �
 - 新 anchor 六点又分别在首点下载 `si.env` 和第四点 OA readback 遇到 DNS/SCP、
   `WinError 10054`。两次都恢复 `1.1 µm/19 kΩ/750 Ω` anchor 并独立回读，再从
   checkpoint 的 index 1/index 4 续跑；前三点没有重算，最终最佳 OA 独立回读一致。
+- 差分对首点下载 `si.env` 发生 DNS/SCP，第二、三点分别在 `si -batch` 发生
+  `WinError 10054`。每次都恢复并独立回读 Gate 8 anchor，再从 index 1/2/3 续跑；最终
+  6/6 完整且远端 `Spectre/si/Maestro=0/0/0`，没有运行进程泄漏。
 
-下一道增量 Gate 转为差分对 6 点 live；执行前要重新列出 target、OA 写入、远端计算、
-scratch、覆盖风险并读取当前 OA。若继续调整共源 RS，必须先增加至少一个独立 RS 留出
-探针，不能用缺失方向的低总误差代替。semantic+raw CDF 混合原子 tuple、新原子来源的
-全不可行恢复和可选 PVT 仍是后续项。
+下一道增量 Gate 转为新差分对最佳点的只读质量回归：重新运行 PSRR、noise、
+transient/P1dB 和 ICMR，不能把 Gate 8 旧宽度的 follow-up 结果直接外推。执行前仍要
+重新列出远端计算与 scratch；本轮授权没有覆盖这些 analysis。若继续调整共源 RS，必须
+先增加至少一个独立 RS 留出探针，不能用缺失方向的低总误差代替。semantic+raw CDF
+混合原子 tuple、新原子来源的全不可行恢复和可选 PVT 仍是后续项。
 
 本地实现与数值见
 [`2026-07-25-atomic-candidate-op-relinearization-local.md`](validation/2026-07-25-atomic-candidate-op-relinearization-local.md)，
@@ -243,7 +256,9 @@ scratch、覆盖风险并读取当前 OA。若继续调整共源 RS，必须先�
 新 anchor 本地刷新见
 [`2026-07-26-common-source-op-refresh-2d-local.md`](validation/2026-07-26-common-source-op-refresh-2d-local.md)，
 对应 live 结果见
-[`2026-07-26-common-source-op-refresh-2d-live.md`](validation/2026-07-26-common-source-op-refresh-2d-live.md)。
+[`2026-07-26-common-source-op-refresh-2d-live.md`](validation/2026-07-26-common-source-op-refresh-2d-live.md)，
+差分对 live 结果见
+[`2026-07-26-differential-pair-op-relinearization-live.md`](validation/2026-07-26-differential-pair-op-relinearization-live.md)。
 
 ## 升级原则
 

@@ -30,7 +30,7 @@ def test_catalog_marks_gate2a_common_source_executable(capsys) -> None:
         "explicit instance parameters: parameters.apply + OA readback"
     ) == 1
     assert (
-        "differential_pair: Gate 8 theory-seeded current-mirror-load selection "
+        "differential_pair: Gate 10 held-out Wn/Wp/Wtail local-response EDA validation "
         "verified at nominal TSMC N28 [executable]" in output
     )
 

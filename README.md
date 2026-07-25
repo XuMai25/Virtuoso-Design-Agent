@@ -24,6 +24,8 @@ Gate 8 已把 Gate 7D 的真实器件表和 validation hash 编译成六个不�
 
 同日的下一轮刷新没有直接把 6 个新点重新回归后宣称闭合。新增 Gate 要求每个声明的可调参数至少被一个 heldout 点实际扰动；因此 W/RD/RS 三维刷新因留出集没有 RS 变化而明确拒绝。把 RS 固定在真实最佳值 `750 Ω` 后，W/RD 二维模型以该最佳点重定 anchor，两个 heldout 点覆盖两维，10 个指标最坏历史留出误差为 `0.568%`。随后 `W=1.05/1.10 µm、RD=18.5/19/19.5 kΩ` 六点已全部完成 OA→`si`→AC/transient/noise：6/6 可行，预测与 EDA 都选 `1.1 µm/18.5 kΩ/750 Ω`，GBW=`34.6553 GHz`；60/60 逐点预测比较通过，最坏新点误差仅 `0.354%`。两次 DNS/SCP/`WinError 10054` 均按 `system_event` 恢复并从原子 checkpoint 续跑。当前状态是 **held-out-covered common-source W/RD local response to same-source EDA selection verified at nominal top_tt**；RS 与 PVT 仍不能外推。详见[二维本地刷新](docs/validation/2026-07-26-common-source-op-refresh-2d-local.md)和[二维 live Gate](docs/validation/2026-07-26-common-source-op-refresh-2d-live.md)。
 
+差分对的 6 个 `Wn/Wp/Wtail` 局部候选也已在既有 `vda_diffpair_active_gate6_001` 完成 OA→`si`→双支路 DC/差模 AC/共模 AC/CMRR。三次 DNS/SCP/`WinError 10054` 都在恢复并独立回读 anchor 后从未完成候选续跑；最终 6/6 可行，预测与 EDA 同选最小功耗点 `1.215/1.080/0.555 µm`，功耗 `10.2971 µW`、gain `3.71568 V/V`、BW `2.68269 GHz`、GBW `9.96800 GHz`、CMRR `34.8249 dB`，并独立回读写回值。exact validator 的 90/90 比较全过，最坏新点误差 `2.5693%`。旧 result 未序列化误差 floor 时现在必须传入 canonical-hash-bound 原 policy，禁止用 schema 默认值猜测。当前状态是 **differential-pair held-out local-response shortlist to same-source EDA selection verified at nominal top_tt**；新最佳点的 PSRR/noise/linearity/ICMR、PVT 与 mismatch 仍需独立复核。详见[差分对 live Gate](docs/validation/2026-07-26-differential-pair-op-relinearization-live.md)。
+
 ## 当前能做什么
 
 - 将任务编译为带副作用标记的稳定执行计划。
@@ -31,7 +33,7 @@ Gate 8 已把 Gate 7D 的真实器件表和 validation hash 编译成六个不�
 - 用确定性 demo adapter 离线验证闭环、规格判定和参数选择；结果明确标为 `software_inference`。
 - 用独立本地命令 `vda theory` 对 Gate 6 电流镜负载差分对做理论先导尺寸估算。它不接收一份任意手列的 W 候选，而是遍历声明且有来源绑定的有限 gm/Id 表域，对每个输入管/PMOS 负载/尾管工作点组合用 KCL、小信号和一阶极点方程反解满足 BW/GBW 的最小支路电流与三组 W，再检查增益、余量、功耗、面积和宽度边界。输出包括约束裕量、主导电流下界、寄生渐近上限和局部对数敏感性；只称为 `best_in_declared_discrete_characterization_domain`，`continuous_optimum_claim` 与 `global_optimum_claim` 永远为 false。`vda theory-calibrate` 又能从绑定的真实 Bridge run records 拟合并留一验证 topology-local 增益修正和等效输出电容模型；首个 TSMC N28 六点 Gate 的 gain/BW/GBW 最大留一误差为 `0.083%/0.373%/0.457%`，新鲜只读同点复跑误差为 `0.069%/0.320%/0.390%`。Gate 7B/7C/7D 已分别把 nominal 共源、源极退化共源和五管差分对的 OA/`si` 图及实际 DC 偏置绑定到独立表；任何不同器件签名、几何或 PVT 的推荐仍不能直接写 OA。
 - 用 `vda theory-request-from-validation` 从 passed held-out validation 和 exact characterization run 集派生真实 PDK theory request；用 `vda theory-seed-task` 将理论结果编译为带 hash、量化规则和最优性边界的原子候选；再由正常 `design.tune` executor 用 `eda_result` 判规格和选优。`vda theory-seed-validate` 分开报告 shortlist 可行比例与逐点预测误差，防止“候选里有好点”被包装成“理论数值已准确”。Gate 8 已验证这条交接和中断恢复，但预测精度仍为 partial。
-- 用通用 `candidate_set` 表达人工或任意本地优化器产生的完整候选 tuple；semantic/testbench/raw CDF 可以成组出现，固定字段深合并，不会与逐维搜索交叉展开。`vda op-relinearize` 可从 hash-bound real-Bridge run 的 `eda_result` 拟合 anchor-local 一阶响应并执行独立 heldout Gate；每个建模参数还必须在至少一个 heldout 点发生变化，避免一个从未被留出验证的方向伪装成已校准。`vda candidate-task-from-relinearization` 只把 passed 结果编译成普通调优任务；`vda op-relinearization-validate` 再把 exact result/task/real run 绑定起来，分开报告候选执行、推荐一致性和逐点误差。局部筛选可只覆盖适合线性化的连续指标，而最终 task 继续保留 saturation、THD、CMRR 等完整 EDA constraints。
+- 用通用 `candidate_set` 表达人工或任意本地优化器产生的完整候选 tuple；semantic/testbench/raw CDF 可以成组出现，固定字段深合并，不会与逐维搜索交叉展开。`vda op-relinearize` 可从 hash-bound real-Bridge run 的 `eda_result` 拟合 anchor-local 一阶响应并执行独立 heldout Gate；每个建模参数还必须在至少一个 heldout 点发生变化，避免一个从未被留出验证的方向伪装成已校准。`vda candidate-task-from-relinearization` 只把 passed 结果编译成普通调优任务；`vda op-relinearization-validate` 再把 exact result/task/real run 绑定起来，分开报告候选执行、推荐一致性和逐点误差。新 result 直接保存每项误差归一化 floor；旧 result 缺少该字段时必须用 `--policy` 提供 result 已绑定 canonical SHA 的原始 policy，任何 hash、来源、metric、scale 或门限漂移都会拒绝。局部筛选可只覆盖适合线性化的连续指标，而最终 task 继续保留 saturation、THD、CMRR 等完整 EDA constraints。
 - 用 `vda small-signal` 对 characterization-bound MOS/R/C 实例图做不依赖拓扑名称的复数矩阵分析。器件点按 model/polarity/L/VGS/VDS/VSB 绑定 `Id/W、gm/Id、gds/Id、gmb/Id`、完整 signed 4×4 `dQi/dVj` 本征电荷导数矩阵和分开的 `cjd/cjs` 结耗尽电容；旧 artifact 仍走显式 legacy 五电容兼容路径。实例 model、L 和偏置不匹配即拒绝。求解器统一组装 `Y(f)`，支持固定 AC 边界、差分输入/输出线性表达式、低频增益、相位、−3 dB 带宽和 GBW；同一核心已用 NMOS/PMOS 共源、源极退化共源和差分对解析值测试。数值层另公开 `ComplexNodalSystem` 的系数/RHS stamping 接口和 `solve_complex_linear_system`，电路专属脚本可增加局部受控源、独立电流探针，或自行组装带辅助未知量的 MNA 方程，而无需复制求解器。`vda small-signal-validate` 又能从 real Bridge run records 自动绑定结构化 `si` 图、EDA DC 偏置、exact W/L/模型参数签名和原始 AC 网格，拒绝长度插值与所有偏置外推，再按固定 policy 对比 DC、每项电荷/结电容、gain、phase、BW 和 GBW。多 MOS 图可用重复 `--additional-characterization-run` 提供多张真实表，每个实例按 model/polarity/W/L/签名选择唯一 artifact，缺失、歧义和未使用表都拒绝。`vda characterization-task-from-run` 可把一个成功、只读的 real-si MOS 实例与用户审查的安全偏置网格合成为 standalone 表征任务，并保留来源哈希；当前自动生成只允许 `nf=1、m=1`。Gate 7D 已用三张真实表通过 nominal held-out 差分对；该层仍不求非线性 DC，也不能替代最终 Spectre。
 - 通过独立 worker 调用本机 `virtuoso-bridge-lite` 环境。反相器支持 `OA -> si -> Spectre transient` 的 timing、过冲/欠冲和周期供电能量；共源级支持同一 `OA -> si` 网表上的 DC OP、复数 AC、相干正弦 transient 幅度 sweep 和普通 noise sweep。可提取 `Id/VGS/VDS/VDSAT/gm/gds`、真实 VDD 功耗与 KCL、低频增益、首个 −3 dB 带宽、GBW、unity、HD2/HD3、THD、P1dB，以及频带积分的输出/输入参考噪声；单项执行与提取均有 live 证据。`analysis: "quality"` 已在一次 OA/`si` 核对后依次运行 AC、linearity、noise，并完成 bias/load、W/RD/RS、L/VDD 搜索、固定设计 TT/SS/FF 验证和显式启用的 PVT-aware bias 调优；每个 PVT 条件保留原始 `eda_result`，跨条件约束和最坏值聚合标为 `software_inference`。
 - Gate 3/4/5/6 差分对复用同一 worker 与 executor，不复制 Bridge。Gate 3 保留外部理想尾源能力；Gate 4 只新增 `MNTAIL(TAIL,BIAS,VSS,VSS)` 与 `BIAS` pin；Gate 5 再把 `MN0.S/MN1.S` 从 `TAIL` 分离到 `NSP/NSN`，只新增对称 `RS0(NSP,TAIL)`、`RS1(NSN,TAIL)`。Gate 6 从未退化的 Gate 4 拓扑删除 `RD0/RD1` 并加入 `MP0(OUTP,OUTP,VDD,VDD)`、`MP1(OUTN,OUTP,VDD,VDD)`，反向操作可按声明电阻值恢复原负载和可选 placement 指纹。`tail_width_um/tail_length_um/source_resistance_ohm/pmos_load_width_um/pmos_load_length_um` 属于 OA semantic 参数，`tail_bias_v` 只属于 wrapper；真实尾管路径拒绝理想 `tail_current_ua/tail_output_resistance_ohm`。Gate 3–6 的 OA→`si` 证据链均已有 live 结果；Gate 6 还真实覆盖 ICMR、多种有限搜索、预算、不可行和 transport checkpoint/resume。新增 `analysis: "psrr"` 在同一自动 `si` 网表上分别运行平衡差模、VDD 注入和 VSS 注入，并核对三次 DC 与频率网格；`evaluation_stop_hz` 提供声明频带内最差 PSRR，三份下载根 AC 文件各自绑定大小与 SHA-256。nominal 单点、四点 bias/load 只读搜索和三种沟道长度的八点 OA 搜索已经 live。后者把带内最差 PSRR 从 `11.5125 dB` 提高到 `19.7438 dB`，但临时 `20 dB` 门仍不可行，故自动恢复基线；下一步应固定对 PSRR 几乎无益且严重损失带宽的尾管 `L=0.03 µm`，再在显式小网格内验证输入对/PMOS L，并对任何可行点补做 CMRR、线性度和噪声复核。不得把“最大值”包装成规格闭合。可选 PVT、mismatch、更多质量指标和 ADE handoff 仍是边界。
@@ -173,12 +175,23 @@ Gate 8 run record。每份新生成 task 仍需要重新 `plan` 和单独远端�
   artifacts\relinearization\common-source-op-relinearization.json `
   artifacts\relinearization\common-source-op-relinearized-task.json `
   artifacts\runs\common-source-quality-op-relinearized-next\live-resume1-20260726.json `
+  --policy examples\theory\common-source-op-relinearization-policy.json `
   --output artifacts\relinearization\common-source-op-relinearization-live-validation.json
 ```
 
-该命令只读三个 hash-bound JSON，不连接 Bridge；任一新点超过原 held-out error limit 时
+该命令只读 hash-bound JSON，不连接 Bridge；任一新点超过原 held-out error limit 时
 输出完整 `partial` 并返回 1。当前共源执行/推荐 Gate 通过，但 output swing 精度 Gate
-保留为 partial；差分对六点仍不能称为 Spectre 已验证结果。
+保留为 partial。差分对六点也已执行；其旧 result 同样必须绑定原 policy，当前 exact
+validator 返回 0：
+
+```powershell
+.\.venv\Scripts\vda.exe op-relinearization-validate `
+  artifacts\relinearization\differential-pair-op-relinearization.json `
+  artifacts\relinearization\differential-pair-op-relinearized-task.json `
+  artifacts\runs\differential-pair-op-relinearized-next\live-resume3-20260726.json `
+  --policy examples\theory\differential-pair-op-relinearization-policy.json `
+  --output artifacts\relinearization\differential-pair-op-relinearization-live-validation-bound-policy.json
+```
 
 可继续使用该真实六点 record 在新最佳点重定 anchor。当前合法刷新只建模 W/RD、固定
 RS；若把 RS 也声明为可调但 heldout 没有 RS 扰动，第一条命令会明确失败：

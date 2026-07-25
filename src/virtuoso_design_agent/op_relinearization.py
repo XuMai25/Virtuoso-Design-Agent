@@ -216,6 +216,8 @@ class RelinearizationRunMetricComparison(_FiniteStrictModel):
     signed_error_percent: float
     absolute_error_percent: float = Field(ge=0.0)
     maximum_absolute_error_percent: float = Field(gt=0.0)
+    error_normalization_floor: float = Field(gt=0.0)
+    error_normalization_source: Literal["result_model", "hash_bound_policy"]
     passed: bool
     prediction_evidence_source: Literal[EvidenceSource.SOFTWARE_INFERENCE] = (
         EvidenceSource.SOFTWARE_INFERENCE
@@ -239,6 +241,9 @@ class RelinearizationRunCandidateValidation(_FiniteStrictModel):
 class OperatingPointRelinearizationRunValidation(_FiniteStrictModel):
     schema_version: Literal[1] = 1
     relinearization_result_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    bound_policy_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     task_id: StrictStr
     task_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     run_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -761,10 +766,57 @@ def _merged_instance_parameters(
     return merged
 
 
+def _load_bound_validation_policy(
+    result: OperatingPointRelinearizationResult,
+    policy_path: Path | None,
+) -> tuple[OperatingPointRelinearizationPolicy | None, str | None]:
+    if policy_path is None:
+        return None, None
+    policy = OperatingPointRelinearizationPolicy.model_validate_json(
+        policy_path.read_text(encoding="utf-8")
+    )
+    policy_sha256 = _canonical_sha256(policy.model_dump(mode="json"))
+    if policy_sha256 != result.policy_sha256:
+        raise ValueError("validation policy does not match the result policy hash")
+    if (
+        policy.id != result.policy_id
+        or policy.expected_source_task_id != result.source_task_id
+        or policy.expected_source_run_sha256 != result.source_run_sha256
+        or policy.constraints != result.constraints
+        or policy.objective != result.objective
+    ):
+        raise ValueError("validation policy does not match result provenance")
+    return policy, policy_sha256
+
+
+def _validation_error_floor(
+    model: LocalMetricModel,
+    policy_metric: RelinearizationMetric | None,
+) -> tuple[float, Literal["result_model", "hash_bound_policy"]]:
+    if "relative_error_floor" in model.model_fields_set:
+        if policy_metric is not None and not math.isclose(
+            model.relative_error_floor,
+            policy_metric.relative_error_floor,
+            rel_tol=1e-12,
+            abs_tol=1e-30,
+        ):
+            raise ValueError(
+                f"model/policy relative-error floor mismatch for {model.metric}"
+            )
+        return model.relative_error_floor, "result_model"
+    if policy_metric is None:
+        raise ValueError(
+            "legacy relinearization result omits relative_error_floor; pass the "
+            "exact hash-bound policy with --policy"
+        )
+    return policy_metric.relative_error_floor, "hash_bound_policy"
+
+
 def validate_relinearization_run(
     result_path: Path,
     task_path: Path,
     run_path: Path,
+    policy_path: Path | None = None,
 ) -> OperatingPointRelinearizationRunValidation:
     """Audit a compiled local candidate set against its exhausted real EDA run."""
 
@@ -826,6 +878,54 @@ def validate_relinearization_run(
     models = {model.metric: model for model in result.models}
     if len(models) != len(result.models):
         raise ValueError("relinearization result repeats a metric model")
+    bound_policy, bound_policy_sha256 = _load_bound_validation_policy(
+        result, policy_path
+    )
+    policy_metrics = (
+        {metric.metric: metric for metric in bound_policy.metrics}
+        if bound_policy is not None
+        else {}
+    )
+    if bound_policy is not None and set(policy_metrics) != set(models):
+        raise ValueError("validation policy metric set does not match result models")
+    legacy_floor_metrics: list[str] = []
+    error_floors: dict[
+        str, tuple[float, Literal["result_model", "hash_bound_policy"]]
+    ] = {}
+    for metric, model in models.items():
+        policy_metric = policy_metrics.get(metric)
+        floor, source = _validation_error_floor(model, policy_metric)
+        if policy_metric is not None:
+            expected_scale = max(abs(model.anchor_value), floor)
+            expected_training_limit = (
+                policy_metric.maximum_training_error_percent
+                or policy_metric.maximum_holdout_error_percent
+            )
+            if (
+                model.role != policy_metric.role
+                or not math.isclose(
+                    model.response_scale,
+                    expected_scale,
+                    rel_tol=1e-12,
+                    abs_tol=1e-30,
+                )
+                or not math.isclose(
+                    model.allowed_training_error_percent,
+                    expected_training_limit,
+                    rel_tol=1e-12,
+                    abs_tol=1e-15,
+                )
+                or not math.isclose(
+                    model.allowed_holdout_error_percent,
+                    policy_metric.maximum_holdout_error_percent,
+                    rel_tol=1e-12,
+                    abs_tol=1e-15,
+                )
+            ):
+                raise ValueError(f"validation policy/model mismatch for {metric}")
+        if source == "hash_bound_policy":
+            legacy_floor_metrics.append(metric)
+        error_floors[metric] = (floor, source)
     validations: list[RelinearizationRunCandidateValidation] = []
     predicted_feasible: list[tuple[str, float]] = []
     for index, (atomic, measured) in enumerate(
@@ -861,10 +961,11 @@ def validate_relinearization_run(
                 raise ValueError(
                     f"candidate {index} metric {metric!r} is not eda_result"
                 )
+            error_floor, error_floor_source = error_floors[metric]
             signed_error, absolute_error = _error_percent(
                 actual,
                 predicted,
-                model.relative_error_floor,
+                error_floor,
             )
             comparisons.append(
                 RelinearizationRunMetricComparison(
@@ -876,6 +977,8 @@ def validate_relinearization_run(
                     maximum_absolute_error_percent=(
                         model.allowed_holdout_error_percent
                     ),
+                    error_normalization_floor=error_floor,
+                    error_normalization_source=error_floor_source,
                     passed=(
                         absolute_error <= model.allowed_holdout_error_percent
                     ),
@@ -941,6 +1044,11 @@ def validate_relinearization_run(
     notes = [
         "the exact atomic domain was exhausted and final selection used EDA metrics"
     ]
+    if legacy_floor_metrics:
+        notes.append(
+            "legacy relative-error floors restored from the exact hash-bound "
+            "policy for: " + ", ".join(sorted(legacy_floor_metrics))
+        )
     if failed_metrics:
         notes.append(
             "live prediction error gate failed for: " + ", ".join(failed_metrics)
@@ -953,6 +1061,7 @@ def validate_relinearization_run(
     feasible_count = sum(candidate.eda_feasible for candidate in validations)
     return OperatingPointRelinearizationRunValidation(
         relinearization_result_sha256=result_sha256,
+        bound_policy_sha256=bound_policy_sha256,
         task_id=task.id,
         task_sha256=task_sha256,
         run_sha256=run_sha256,
