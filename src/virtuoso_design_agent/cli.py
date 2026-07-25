@@ -39,6 +39,18 @@ from .small_signal_validation import (
 )
 from .theory import DifferentialPairTheoryRequest, size_differential_pair
 from .theory_calibration import calibrate_differential_pair_theory
+from .theory_derivation import (
+    DifferentialPairTheoryDerivationPolicy,
+    derive_differential_pair_theory_request,
+)
+from .theory_seed import (
+    DifferentialPairTheorySeedPolicy,
+    build_theory_seeded_task,
+)
+from .theory_seed_validation import (
+    TheorySeedValidationPolicy,
+    validate_theory_seed_run,
+)
 
 
 def _load_task(path: Path) -> TaskSpec:
@@ -126,6 +138,55 @@ def _cmd_theory_calibrate(args: argparse.Namespace) -> int:
         args.output.write_text(payload, encoding="utf-8")
     print(payload)
     return 0 if result.status is RunStatus.SUCCEEDED else 1
+
+
+def _cmd_theory_seed_task(args: argparse.Namespace) -> int:
+    policy = DifferentialPairTheorySeedPolicy.model_validate_json(
+        args.policy.read_text(encoding="utf-8")
+    )
+    task = build_theory_seeded_task(
+        policy,
+        args.theory_result,
+        args.task_template,
+    )
+    payload = task.model_dump_json(
+        indent=2,
+        exclude_none=True,
+        exclude_unset=True,
+    )
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(payload + "\n", encoding="utf-8")
+    print(payload)
+    return 0
+
+
+def _cmd_theory_seed_validate(args: argparse.Namespace) -> int:
+    policy = TheorySeedValidationPolicy.model_validate_json(
+        args.policy.read_text(encoding="utf-8")
+    )
+    result = validate_theory_seed_run(policy, args.task, args.run_record)
+    payload = result.model_dump_json(indent=2)
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(payload + "\n", encoding="utf-8")
+    print(payload)
+    return 0 if result.status is RunStatus.SUCCEEDED else 1
+
+
+def _cmd_theory_request_from_validation(args: argparse.Namespace) -> int:
+    policy = DifferentialPairTheoryDerivationPolicy.model_validate_json(
+        args.policy.read_text(encoding="utf-8")
+    )
+    request = derive_differential_pair_theory_request(
+        policy,
+        args.validation,
+        [args.characterization_run, *args.additional_characterization_run],
+    )
+    payload = request.model_dump_json(indent=2, exclude_none=True)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(payload + "\n", encoding="utf-8")
+    print(payload)
+    return 0
 
 
 def _cmd_small_signal(args: argparse.Namespace) -> int:
@@ -372,6 +433,49 @@ def build_parser() -> argparse.ArgumentParser:
     theory_calibrate.add_argument("--id", default="gate6-one-pole-calibration")
     theory_calibrate.add_argument("--output", type=Path)
     theory_calibrate.set_defaults(handler=_cmd_theory_calibrate)
+
+    theory_seed_task = subparsers.add_parser(
+        "theory-seed-task",
+        help=(
+            "compile a hash-bound theory result into atomic finite EDA candidates"
+        ),
+    )
+    theory_seed_task.add_argument("policy", type=Path)
+    theory_seed_task.add_argument("theory_result", type=Path)
+    theory_seed_task.add_argument("task_template", type=Path)
+    theory_seed_task.add_argument("--output", type=Path, required=True)
+    theory_seed_task.set_defaults(handler=_cmd_theory_seed_task)
+
+    theory_seed_validate = subparsers.add_parser(
+        "theory-seed-validate",
+        help=(
+            "audit a hash-bound theory shortlist against its exhausted real EDA run"
+        ),
+    )
+    theory_seed_validate.add_argument("policy", type=Path)
+    theory_seed_validate.add_argument("task", type=Path)
+    theory_seed_validate.add_argument("run_record", type=Path)
+    theory_seed_validate.add_argument("--output", type=Path)
+    theory_seed_validate.set_defaults(handler=_cmd_theory_seed_validate)
+
+    theory_request = subparsers.add_parser(
+        "theory-request-from-validation",
+        help=(
+            "derive a PDK-bound differential-pair theory request from a passed "
+            "held-out validation and its exact characterization runs"
+        ),
+    )
+    theory_request.add_argument("policy", type=Path)
+    theory_request.add_argument("validation", type=Path)
+    theory_request.add_argument("characterization_run", type=Path)
+    theory_request.add_argument(
+        "--additional-characterization-run",
+        action="append",
+        type=Path,
+        default=[],
+    )
+    theory_request.add_argument("--output", type=Path, required=True)
+    theory_request.set_defaults(handler=_cmd_theory_request_from_validation)
 
     small_signal = subparsers.add_parser(
         "small-signal",

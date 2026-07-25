@@ -69,6 +69,16 @@ OA_SEMANTIC_PARAMETER_NAMES: dict[CircuitKind, frozenset[str]] = {
     ),
 }
 
+
+def task_semantic_parameter_names(task: TaskSpec) -> set[str]:
+    """Return every semantic name declared by fixed or finite-search inputs."""
+
+    supplied = set(task.parameters) | set(task.parameter_space)
+    if task.theory_seed is not None:
+        supplied.update(task.theory_seed.candidates[0].parameters)
+    return supplied
+
+
 CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     CircuitKind.MOS_DEVICE: CircuitCapability(
         circuit=CircuitKind.MOS_DEVICE,
@@ -191,7 +201,10 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     ),
     CircuitKind.DIFFERENTIAL_PAIR: CircuitCapability(
         circuit=CircuitKind.DIFFERENTIAL_PAIR,
-        stage="Gate 6 current-mirror load verified at nominal TSMC N28",
+        stage=(
+            "Gate 8 theory-seeded current-mirror-load selection verified at "
+            "nominal TSMC N28"
+        ),
         executable=True,
         operations=(
             Operation.SCHEMATIC_CREATE,
@@ -236,9 +249,14 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "restore, and checkpoint recovery are live at nominal TSMC N28; "
             "a same-si-netlist three-run PSRR+/PSRR- contract, one nominal point, "
             "and a four-point band-limited bias/load search with raw AC hashes and "
-            "transport resume are live; the provisional 20 dB gate was infeasible, "
-            "so device/bias-topology closure, PVT/mismatch, slew, and ADE handoff "
-            "remain pending"
+            "transport resume are live; Gate 8 additionally binds passed Gate 7D "
+            "characterization/validation hashes into six atomic, 5 nm-grid theory "
+            "tuples and verifies OA write/readback, si, DC/differential/common AC, "
+            "EDA-only ranking, checkpoint resume, selected-point PSRR/noise/"
+            "linearity/ICMR, and final writeback. Four of six tuples were feasible, "
+            "while the pointwise theory-accuracy gate remained partial. The "
+            "provisional 20 dB PSRR gate was infeasible, so DC-OP relinearization, "
+            "PVT/mismatch, slew/P1dB, and ADE handoff remain pending"
         ),
     ),
 }
@@ -259,7 +277,7 @@ def validate_task_capability(task: TaskSpec) -> None:
             f"{task.circuit.value} does not expose explicit instance parameters"
         )
     allowed = set(capability.parameters)
-    supplied = set(task.parameters) | set(task.parameter_space)
+    supplied = task_semantic_parameter_names(task)
     unknown = sorted(supplied - allowed)
     if unknown:
         raise UnsupportedCapability(
@@ -433,7 +451,7 @@ def validate_task_capability(task: TaskSpec) -> None:
 
 def task_requests_oa_parameter_write(task: TaskSpec) -> bool:
     names = OA_SEMANTIC_PARAMETER_NAMES.get(task.circuit, frozenset())
-    supplied = set(task.parameters) | set(task.parameter_space)
+    supplied = task_semantic_parameter_names(task)
     return bool(
         names & supplied
         or task.instance_parameter_updates

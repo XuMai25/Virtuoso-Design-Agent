@@ -5,7 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 
-from .catalog import task_requests_oa_parameter_write, validate_task_capability
+from .catalog import (
+    task_requests_oa_parameter_write,
+    task_semantic_parameter_names,
+    validate_task_capability,
+)
 from .models import (
     AnalysisKind,
     CircuitKind,
@@ -74,7 +78,7 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
     common_source = task.circuit is CircuitKind.COMMON_SOURCE
     differential_pair = task.circuit is CircuitKind.DIFFERENTIAL_PAIR
     analysis = task.resolved_analysis()
-    declared_parameters = task.parameters.keys() | task.parameter_space.keys()
+    declared_parameters = task_semantic_parameter_names(task)
     differential_pair_real_tail = differential_pair and "tail_bias_v" in declared_parameters
     common_source_ac = common_source and analysis is AnalysisKind.AC
     differential_pair_ac = differential_pair and analysis is AnalysisKind.AC
@@ -263,6 +267,13 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             f"{condition_names}"
         )
     selection_description = "按规格违例与 objective 选择候选"
+    if task.theory_seed is not None:
+        sweep_description += (
+            "；候选是 hash 绑定的 theory tuple，保持成组顺序，不展开为笛卡尔积"
+        )
+        selection_description += (
+            "；理论预测只作 software_inference 种子，最终排序只采用本次 EDA 结果"
+        )
     if task.operating_conditions:
         selection_description += (
             "；只有全部条件均通过的候选才可提交，objective 使用跨条件最坏值"

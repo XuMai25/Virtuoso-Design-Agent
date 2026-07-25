@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-gate8-theory-derivation",
+  "request_id": "differential-pair-gate8-tsmc28-theory",
+  "expected_validation_policy_id": "differential-pair-gate7d-multi-artifact-heldout",
+  "expected_validation_sha256": "6495473d18b1c32da356d295f0d28d498598b7d3a8db6cad0fbe775d7581cf03",
+  "load_capacitance_f": 5e-16,
+  "sizing_margin_fraction": 0.05,
+  "maximum_characterization_voltage_mismatch_v": 0.02,
+  "input_width": {"minimum_um": 1.0, "maximum_um": 2.5},
+  "load_width": {"minimum_um": 1.0, "maximum_um": 2.5},
+  "tail_width": {"minimum_um": 0.6, "maximum_um": 1.2},
+  "constraints": [
+    {"metric": "estimated_differential_gain_v_per_v", "relation": ">=", "value": 3.0},
+    {"metric": "estimated_bandwidth_hz", "relation": ">=", "value": 2.5e9},
+    {"metric": "estimated_gain_bandwidth_product_hz", "relation": ">=", "value": 9.0e9},
+    {"metric": "estimated_minimum_headroom_v", "relation": ">=", "value": 0.05},
+    {"metric": "estimated_power_w", "relation": "<=", "value": 2.5e-5},
+    {"metric": "estimated_area_proxy_um2", "relation": "<=", "value": 0.35}
+  ],
+  "objective": {"metric": "estimated_power_w", "goal": "minimize"}
+}

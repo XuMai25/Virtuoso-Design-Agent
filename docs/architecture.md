@@ -154,6 +154,16 @@ GBW  = gm / (2*pi*Cout)
 
 该 topology-local 校准已经量化当前一阶模型在小范围内的误差，但它不是独立 MOS characterization：`Cn/Cp` 是拓扑等效电容，不能冒充 PDK 的端子电荷导数或结耗尽电容；每个校准预测仍消费该观测点由 Spectre 得到的 `gm/gds`。Gate 7A–7D 现已提供独立 TSMC N28 表，并把 Gate 6 三种器件角色及各自真实 DC 偏置绑定到三张 exact-signature artifact，再以未参与建表的完整电路点验证。topology-local 校准仍不会自动注入 `vda theory` 或触发 OA 写入；它与通用器件表/矩阵路径是两条证据边界不同的先导工具。
 
+### 理论候选编译与 EDA 复核
+
+Gate 8 把上述层之间的交接做成三个独立、可审计的本地入口。`vda theory-request-from-validation` 只接受已经通过的 held-out validation SHA-256 及其 exact characterization run 集合，从验证记录中的实际 DC 偏置、器件表 VGS 轴和 `dQi/dVj + cjd/cjs` 派生 topology-local theory request。规格、宽度边界和角色映射由 `user_input` policy 固定；器件原始值仍是 `eda_result`，派生 request 是 `software_inference`。validation、器件 run、PDK/PVT、model/W/L/signature 或来源集合任一漂移都会在理论求解前拒绝。
+
+`vda theory-seed-task` 再把穷尽的理论结果编译成普通 `TaskSpec.theory_seed`。每个 seed 是输入管、负载管和尾管参数的完整原子 tuple，不允许同 `parameter_space` 或 `instance_parameter_space` 组合，也不会展开成笛卡尔积。policy 可保留理论排名前缀，并在剩余可行点中用确定性 log-distance maximin 选择覆盖点。连续宽度必须在生成 plan/token 前按声明的小数位或 OA/PDK 网格量化；Gate 8 live 使用 `0.005 µm` half-up 网格。量化规则、request/result/policy hash、器件 artifact hash、理论域穷尽和最优性边界都进入 task 与 run record。
+
+正常 executor 对每个 tuple 仍执行 OA 暂存、定向回读、自动 `si` netlist 和 Spectre，并保存理论候选 ID/预测值为 `software_inference`。可行性和最终排序只读取 `eda_result` metrics；理论排名不能覆盖真实 EDA 选择。checkpoint 把候选边界作为原子状态，transport reset 后必须先恢复/独立回读，再从未完成 tuple 续跑。
+
+`vda theory-seed-validate` 最后用 task/run SHA-256、plan token、候选顺序、参数、证据源和完整域审计比较理论与 EDA。它把“候选中有足够真实可行点”和“每点数值预测足够准确”分成两个 Gate。首个 nominal TSMC N28 live Gate 的前者通过（4/6 可行），但功耗/增益/BW/GBW 的 24 项比较有 8 项超过预先固定的 25%，理论第一名也不是 EDA 最小功耗点，因此总状态为 `partial`。这条路径当前只能称为可靠的 theory-seeded shortlist；下一步应以第一遍真实 DC OP 重线性化并用独立 held-out 候选复核，不能在同一六点上拟合后宣称通用精度。
+
 ### 通用小信号网络核心
 
 `vda small-signal` 补充的是 `vda theory` 下方的拓扑无关计算层，而不是第二套仿真器。请求没有 topology 枚举，只包含 width-normalized MOS characterization、MOS/R/C 实例与节点、固定 AC 边界、输入/输出节点线性表达式和频率点。共源、源极退化、差分连接和电流镜的差异由图连接表达；同一个 stamping 路径组装复数 `Y(f)`，分块求解未知节点，再计算 transfer、低频参考、相位和首个 −3 dB 交点。

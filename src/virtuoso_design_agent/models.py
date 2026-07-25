@@ -182,6 +182,122 @@ class InstanceParameterSweep(StrictModel):
         return value
 
 
+class TheorySeedCandidate(StrictModel):
+    """One atomic semantic-parameter tuple proposed by the local theory path."""
+
+    id: StrictStr = Field(
+        min_length=1,
+        max_length=96,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
+    source_candidate_id: StrictStr = Field(min_length=1, max_length=256)
+    parameters: dict[StrictStr, float]
+    predicted_metrics: dict[StrictStr, float] = Field(default_factory=dict)
+    evidence_source: Literal[EvidenceSource.SOFTWARE_INFERENCE] = (
+        EvidenceSource.SOFTWARE_INFERENCE
+    )
+
+    @field_validator("parameters")
+    @classmethod
+    def validate_parameters(cls, value: dict[str, float]) -> dict[str, float]:
+        if not value:
+            raise ValueError("theory-seed candidate parameters cannot be empty")
+        for name, number in value.items():
+            if not name or not math.isfinite(number) or number <= 0.0:
+                raise ValueError(
+                    f"theory-seed candidate parameter {name!r} must be finite and positive"
+                )
+        return value
+
+    @field_validator("predicted_metrics")
+    @classmethod
+    def validate_predicted_metrics(
+        cls, value: dict[str, float]
+    ) -> dict[str, float]:
+        for name, number in value.items():
+            if not name or not math.isfinite(number):
+                raise ValueError(
+                    f"theory-seed predicted metric {name!r} must be finite"
+                )
+        return value
+
+
+class TheorySeedSource(StrictModel):
+    """Hash-bound provenance for an atomic theory-seeded candidate set."""
+
+    generator: Literal["vda.theory"] = "vda.theory"
+    policy_id: StrictStr = Field(min_length=1, max_length=96)
+    policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    theory_request_id: StrictStr = Field(min_length=1, max_length=96)
+    theory_request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    theory_result_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    device_data_source: StrictStr = Field(min_length=1, max_length=64)
+    device_data_artifact_id: StrictStr | None = Field(default=None, min_length=1)
+    device_data_artifact_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    optimality_classification: StrictStr = Field(min_length=1, max_length=128)
+    declared_theory_combinations: int = Field(ge=1)
+    evaluated_theory_combinations: int = Field(ge=1)
+    theory_domain_exhausted: Literal[True] = True
+    selection_strategy: Literal["ranked_then_log_maximin"]
+    width_quantization: Literal["decimal_places", "nearest_grid_half_up"] = (
+        "decimal_places"
+    )
+    width_grid_um: float | None = Field(default=None, gt=0.0)
+    continuous_optimum_claim: Literal[False] = False
+    global_optimum_claim: Literal[False] = False
+    evidence_source: Literal[EvidenceSource.SOFTWARE_INFERENCE] = (
+        EvidenceSource.SOFTWARE_INFERENCE
+    )
+
+    @model_validator(mode="after")
+    def validate_width_quantization(self) -> "TheorySeedSource":
+        if self.evaluated_theory_combinations != self.declared_theory_combinations:
+            raise ValueError(
+                "exhausted theory-seed provenance requires evaluated and declared "
+                "combination counts to match"
+            )
+        if self.width_quantization == "nearest_grid_half_up":
+            if self.width_grid_um is None:
+                raise ValueError(
+                    "nearest-grid theory-seed provenance requires width_grid_um"
+                )
+        elif self.width_grid_um is not None:
+            raise ValueError(
+                "decimal-place theory-seed provenance cannot declare width_grid_um"
+            )
+        return self
+
+
+class TheorySeedCandidateSet(StrictModel):
+    """A provenance-bound list whose tuples must not be expanded as a product."""
+
+    source: TheorySeedSource
+    candidates: list[TheorySeedCandidate] = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_atomic_domain(self) -> "TheorySeedCandidateSet":
+        ids = [candidate.id for candidate in self.candidates]
+        if len(ids) != len(set(ids)):
+            raise ValueError("theory-seed candidate ids must be unique")
+        source_ids = [candidate.source_candidate_id for candidate in self.candidates]
+        if len(source_ids) != len(set(source_ids)):
+            raise ValueError("theory-seed source candidate ids must be unique")
+        parameter_names = [set(candidate.parameters) for candidate in self.candidates]
+        if any(names != parameter_names[0] for names in parameter_names[1:]):
+            raise ValueError(
+                "theory-seed candidates must declare the same parameter names"
+            )
+        canonical = [
+            tuple(sorted(candidate.parameters.items())) for candidate in self.candidates
+        ]
+        if len(canonical) != len(set(canonical)):
+            raise ValueError("theory-seed candidate parameter tuples must be unique")
+        return self
+
+
 class MetricConstraint(StrictModel):
     metric: str = Field(min_length=1, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
     relation: Relation
@@ -1645,6 +1761,7 @@ class TaskSpec(StrictModel):
         default_factory=list
     )
     parameter_space: dict[str, list[float]] = Field(default_factory=dict)
+    theory_seed: TheorySeedCandidateSet | None = None
     instance_parameter_space: list[InstanceParameterSweep] = Field(
         default_factory=list,
         max_length=12,
@@ -1704,6 +1821,7 @@ class TaskSpec(StrictModel):
                 or self.parameters
                 or self.instance_parameter_updates
                 or self.parameter_space
+                or self.theory_seed is not None
                 or self.instance_parameter_space
                 or self.constraints
                 or self.objective is not None
@@ -1755,7 +1873,10 @@ class TaskSpec(StrictModel):
                         "operating_conditions with per-condition supplies must not "
                         "also declare vdd_v in task parameters"
                     )
-                if "vdd_v" in self.parameter_space:
+                if "vdd_v" in self.parameter_space or (
+                    self.theory_seed is not None
+                    and "vdd_v" in self.theory_seed.candidates[0].parameters
+                ):
                     raise ValueError(
                         "operating_conditions with per-condition supplies must not "
                         "also tune vdd_v"
@@ -1882,7 +2003,15 @@ class TaskSpec(StrictModel):
                         "differential-pair noise accepts only noise_sweep"
                     )
                 if self.operation in _TUNING_OPERATIONS:
-                    declared_parameters = self.parameters.keys() | self.parameter_space.keys()
+                    declared_parameters = (
+                        self.parameters.keys()
+                        | self.parameter_space.keys()
+                        | (
+                            self.theory_seed.candidates[0].parameters.keys()
+                            if self.theory_seed is not None
+                            else set()
+                        )
+                    )
                     tail_parameter = (
                         "tail_bias_v"
                         if "tail_bias_v" in declared_parameters
@@ -1956,6 +2085,7 @@ class TaskSpec(StrictModel):
                 self.parameters
                 or self.instance_parameter_updates
                 or self.parameter_space
+                or self.theory_seed is not None
                 or self.constraints
                 or self.objective is not None
                 or self.create_if_missing
@@ -1977,6 +2107,7 @@ class TaskSpec(StrictModel):
                 self.parameters
                 or self.instance_parameter_updates
                 or self.parameter_space
+                or self.theory_seed is not None
                 or self.constraints
                 or self.objective is not None
                 or self.create_if_missing
@@ -1999,6 +2130,7 @@ class TaskSpec(StrictModel):
                 self.parameters
                 or self.instance_parameter_updates
                 or self.parameter_space
+                or self.theory_seed is not None
                 or self.create_if_missing
             ):
                 raise ValueError(
@@ -2042,6 +2174,7 @@ class TaskSpec(StrictModel):
                 self.parameters
                 or self.instance_parameter_updates
                 or self.parameter_space
+                or self.theory_seed is not None
                 or self.constraints
                 or self.objective is not None
                 or self.create_if_missing
@@ -2070,6 +2203,7 @@ class TaskSpec(StrictModel):
                 self.parameters
                 or self.instance_parameter_updates
                 or self.parameter_space
+                or self.theory_seed is not None
                 or self.constraints
                 or self.objective is not None
                 or self.create_if_missing
@@ -2098,6 +2232,7 @@ class TaskSpec(StrictModel):
                 self.parameters
                 or self.instance_parameter_updates
                 or self.parameter_space
+                or self.theory_seed is not None
                 or self.constraints
                 or self.objective is not None
                 or self.create_if_missing
@@ -2152,6 +2287,16 @@ class TaskSpec(StrictModel):
                     "fixed instance_parameter_updates overlap swept dimensions: "
                     + formatted
                 )
+        if self.theory_seed is not None:
+            if self.operation not in _TUNING_OPERATIONS:
+                raise ValueError(
+                    "theory_seed requires design.tune or design.close_loop"
+                )
+            if self.parameter_space or self.instance_parameter_space:
+                raise ValueError(
+                    "theory_seed is atomic and cannot be combined with parameter_space "
+                    "or instance_parameter_space"
+                )
         if (
             self.operation is Operation.PARAMETERS_APPLY
             and not self.parameters
@@ -2167,6 +2312,8 @@ class TaskSpec(StrictModel):
                 )
             if self.parameter_space:
                 raise ValueError("schematic.transform does not accept parameter_space")
+            if self.theory_seed is not None:
+                raise ValueError("schematic.transform does not accept theory_seed")
             if self.circuit is CircuitKind.COMMON_SOURCE:
                 action = self.resolved_schematic_transform_action()
                 if (
@@ -2271,10 +2418,14 @@ class TaskSpec(StrictModel):
                 "schematic_transform settings require operation='schematic.transform'"
             )
         if self.operation in _TUNING_OPERATIONS:
-            if not self.parameter_space and not self.instance_parameter_space:
+            if (
+                not self.parameter_space
+                and self.theory_seed is None
+                and not self.instance_parameter_space
+            ):
                 raise ValueError(
-                    f"{self.operation.value} requires parameter_space or "
-                    "instance_parameter_space"
+                    f"{self.operation.value} requires parameter_space, theory_seed, "
+                    "or instance_parameter_space"
                 )
             if not self.constraints:
                 raise ValueError(f"{self.operation.value} requires constraints")
@@ -2371,6 +2522,10 @@ class CandidateEvaluation(StrictModel):
     operating_conditions: list["OperatingConditionEvaluation"] = Field(
         default_factory=list
     )
+    theory_seed_candidate_id: str | None = None
+    theory_seed_source_candidate_id: str | None = None
+    theory_seed_predicted_metrics: dict[str, float] = Field(default_factory=dict)
+    theory_seed_evidence_source: EvidenceSource | None = None
 
 
 class OperatingConditionEvaluation(StrictModel):
@@ -2411,6 +2566,7 @@ class SearchAudit(StrictModel):
     continuous_optimum_claim: Literal[False] = False
     global_optimum_claim: Literal[False] = False
     statement: str = Field(min_length=1)
+    theory_seed_source: TheorySeedSource | None = None
 
 
 class RunRecord(StrictModel):

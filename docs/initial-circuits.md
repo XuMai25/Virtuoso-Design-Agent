@@ -161,6 +161,37 @@ Spectre，没有新建、修改或覆盖 cellview。
 证据。下一自动 Gate 使用该器件表/矩阵能力产生 theory seed，再以有限 Spectre 搜索复核，
 不会把理论预测直接写回 OA。
 
+## Gate 8：理论候选到同源 EDA 选优
+
+状态：2026-07-25 已完成 **real-PDK theory shortlist to bounded same-source EDA
+selection verified at nominal top_tt**。目标是既有
+`vb_pdk_smoke/vda_diffpair_active_gate6_001/schematic`；没有新建或覆盖 cellview，
+但按本 Gate 明确授权逐点修改三组器件尺寸并在最终写回 EDA 选中的可行点。
+
+- Gate 7D 的 passed validation、三张 characterization run、实际 DC 偏置和 PDK/PVT
+  全部由 SHA-256 绑定后，才派生 64 组合 theory request；12 个一阶可行点中选出 6 个
+  原子 tuple，而不是手列六个 W 或展开 Wn×Wp×Wtail。
+- 第一次连续宽度 `1.316019 µm` 被 OA 量化成 `1.315 µm` 时在 Spectre 前失败并恢复
+  基线；正式 task 因而在 plan 前显式按 `0.005 µm` half-up 网格量化，且把量化规则
+  纳入 provenance/token。
+- 六点均完成 OA 写入/回读、自动 `si`、DC、差模 AC、共模 AC；4/6 满足饱和、失配、
+  摆幅、功耗、增益、BW、GBW、peaking 和 CMRR 约束。功耗 objective 选择理论第二名
+  `Wn/Wp/Wtail=1.315/1.180/0.605 µm`：功耗 `10.981 µW`、增益 `3.7277 V/V`、
+  BW `2.6895 GHz`、GBW `10.0258 GHz`、CMRR `34.815 dB`。
+- 候选 6 前发生 `WinError 10054`；VDA 恢复基线、保存 5/6 checkpoint、独立回读后只
+  执行未完成点。最终最佳写回和独立 OA readback 一致，transport 没有被算作不可行。
+- follow-up 只读完成 PSRR、noise、5/20/50 mV transient 和 0.35–0.80 V ICMR。
+  PSRR+ 仅 `11.4828 dB`，P1dB 未包围；ICMR 只能报告声明网格上 0.35–0.75 V 可行。
+  PVT 按授权未执行。
+- theory validation 将 shortlist utility 与 prediction accuracy 分开：真实可行比例
+  `4/6` 使候选生成 Gate 通过，但理论首选与 EDA 选择不同，24 个功耗/增益/BW/GBW
+  对照有 8 个超过 25%，所以精度 Gate 保留为 `partial`。
+
+下一理论 Gate 先对候选做第一遍真实 DC OP 重线性化，再用未参与校正的 held-out tuple
+验证；不能在这六点上拟合后回测同一数据。Spectre 指标继续拥有最终约束和写回决定权。
+完整记录见
+[`2026-07-25-differential-pair-theory-seeded-gate8-live.md`](validation/2026-07-25-differential-pair-theory-seeded-gate8-live.md)。
+
 ## 升级原则
 
 每个 Gate 都要同时通过结构创建与回读、参数写入与回读、非空仿真和指标重算、可行/不可行规格判定，以及中断恢复。凡是声明支持人工 ADE 介入，还必须证明保存后的 setup 可由人工重开、修改和重跑，VDA 能在不覆盖改动的前提下重新捕获同一个 history/网表/结果关系。

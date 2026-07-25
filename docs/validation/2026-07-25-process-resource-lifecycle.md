@@ -33,6 +33,14 @@ worker 内部复用 Bridge 的 `ssh.exe`、`scp.exe`、Windows `tar.exe`、远�
 
 真实 read-only OA inspect 在新 Job Object 路径下成功。随后一次 CAD transport timeout 触发 Bridge tunnel recovery，旧的两个 SSH PID 被新的两个 PID 替换，而不是叠加；新链句柄仍为 153/151。最终本地仍只有这两个共享 SSH，无 Python/SCP/Spectre 和 `vda_*` temp。
 
+Gate 8 完成后又做了一次面向真实长任务的复核。一次只读 inventory 得到远端
+`spectre=0`、`si=0`、Maestro session=0；连续两次新的 OA inspect 分别成功返回后，本地
+仍是完全相同的 `ssh.exe` PID `38784/41248`，启动时间都为 `2026-07-25 16:29:14`，
+没有残留 Python 或 SCP。两次 inspect 没有造成 PID 替换或计数增长。这一结果继续支持
+“固定双层 tunnel/jump chain 被跨请求复用”，不支持“每个 Bridge/VDA 调用都应当留下
+零 SSH”。因此没有采用会在每次正常 worker 退出时终止共享 tunnel 的实现；该做法会
+破坏复用并显著增加下一次只读请求延迟。Bridge 本身在本轮保持未修改。
+
 ## 远端进程证据
 
 一个唯一 scratch root 下的合成 `sleep 60` 由一次性 SSH 执行，本地 2 秒 timeout 后独立检查得到 `child_alive_after_timeout=1`。该 child 已按记录的精确 PID TERM/KILL，探针 root 随即删除；前后远端 `spectre/si/virtuoso` 均为 0。这是本轮确认的远端孤儿风险，不能归类为电路失败。

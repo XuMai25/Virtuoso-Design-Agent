@@ -18,12 +18,15 @@ Gate 7C 随后把同一个 binder/矩阵核心迁移到既有 `vda_cs_ac_tradeof
 
 Gate 7D 已把同一核心迁移到既有 `vda_diffpair_active_gate6_001` 电流镜负载差分对。三张真实 TSMC N28 表分别绑定输入 NMOS、PMOS 负载和尾 NMOS 的 exact W/L、31 项 `si` 参数签名及同一份 held-out 电路 run/netlist 哈希。调试没有放宽 25%/0.5 dB/5° 门限：只加入完整 signed 4×4 `dQi/dVj` 电荷导数时，BW/GBW 仍约错 43%；独立回读证明三张表与电路内实际 `cxx` 最坏只差 0.74%，随后确认遗漏的是不包含在本征 `cxx` 中的结耗尽电容 `cjd/cjs`。把两者分开表征和 stamp 后，增益误差为 `0.063 dB`、BW/GBW 误差为 `3.97%/4.67%`，相位和五个器件的 DC/电容门全部通过。全过程只读 OA、没有修改 Bridge。当前状态是 **differential-pair exact three-plane same-source small-signal validation verified at nominal top_tt**；`nf/m != 1`、PVT、mismatch 和任意新器件签名仍需各自证据。
 
+Gate 8 已把 Gate 7D 的真实器件表和 validation hash 编译成六个不可拆分的 theory seed，并在既有 active-load OA 上完成逐点写入/回读、自动 `si`、Spectre DC/差模 AC/共模 AC、transport checkpoint/resume 和最佳写回。理论连续宽度在 plan 前按声明的 5 nm 网格量化；4/6 候选真实可行，功耗 objective 选择理论第二名 `Wn/Wp/Wtail=1.315/1.180/0.605 µm`，得到 `10.981 µW`、增益 `3.7277 V/V`、BW `2.6895 GHz`、GBW `10.0258 GHz`、CMRR `34.815 dB`。只读 follow-up 覆盖 PSRR/noise/transient/10 点 ICMR，但 PSRR+ 只有 `11.4828 dB`、P1dB 未包围。候选生成门通过，逐点预测精度门因 24 项中 8 项超过 25% 保留为 partial；所以当前状态是 **real-PDK theory shortlist to bounded same-source EDA selection verified**，不是已校准预测器或连续/全局最优。详见[Gate 8 live 记录](docs/validation/2026-07-25-differential-pair-theory-seeded-gate8-live.md)。
+
 ## 当前能做什么
 
 - 将任务编译为带副作用标记的稳定执行计划。
 - 单独规划或执行：`device.characterize`、`schematic.create`、`schematic.inspect`、`schematic.transform`、`parameters.apply`、`ade.prepare`、`ade.capture`、`ade.corners.apply`、`ade.variables.apply`、`ade.setup.apply`、`ade.run`、`simulation.run`、`design.tune`、`design.close_loop`。`device.characterize` 只有远端 scratch/compute，不接受 OA target；当前 `schematic.transform` 开放共源级源极退化的受控 add/remove、反相器 core→ADE source/load testbench、差分对 core→`MNTAIL/BIAS`、真实尾管差分对的对称源极退化 add/remove，以及无源退化真实尾管差分对的 `RD0/RD1 ↔ MP0/MP1` 电流镜负载可逆变换。
 - 用确定性 demo adapter 离线验证闭环、规格判定和参数选择；结果明确标为 `software_inference`。
 - 用独立本地命令 `vda theory` 对 Gate 6 电流镜负载差分对做理论先导尺寸估算。它不接收一份任意手列的 W 候选，而是遍历声明且有来源绑定的有限 gm/Id 表域，对每个输入管/PMOS 负载/尾管工作点组合用 KCL、小信号和一阶极点方程反解满足 BW/GBW 的最小支路电流与三组 W，再检查增益、余量、功耗、面积和宽度边界。输出包括约束裕量、主导电流下界、寄生渐近上限和局部对数敏感性；只称为 `best_in_declared_discrete_characterization_domain`，`continuous_optimum_claim` 与 `global_optimum_claim` 永远为 false。`vda theory-calibrate` 又能从绑定的真实 Bridge run records 拟合并留一验证 topology-local 增益修正和等效输出电容模型；首个 TSMC N28 六点 Gate 的 gain/BW/GBW 最大留一误差为 `0.083%/0.373%/0.457%`，新鲜只读同点复跑误差为 `0.069%/0.320%/0.390%`。Gate 7B/7C/7D 已分别把 nominal 共源、源极退化共源和五管差分对的 OA/`si` 图及实际 DC 偏置绑定到独立表；任何不同器件签名、几何或 PVT 的推荐仍不能直接写 OA。
+- 用 `vda theory-request-from-validation` 从 passed held-out validation 和 exact characterization run 集派生真实 PDK theory request；用 `vda theory-seed-task` 将理论结果编译为带 hash、量化规则和最优性边界的原子候选；再由正常 `design.tune` executor 用 `eda_result` 判规格和选优。`vda theory-seed-validate` 分开报告 shortlist 可行比例与逐点预测误差，防止“候选里有好点”被包装成“理论数值已准确”。Gate 8 已验证这条交接和中断恢复，但预测精度仍为 partial。
 - 用 `vda small-signal` 对 characterization-bound MOS/R/C 实例图做不依赖拓扑名称的复数矩阵分析。器件点按 model/polarity/L/VGS/VDS/VSB 绑定 `Id/W、gm/Id、gds/Id、gmb/Id`、完整 signed 4×4 `dQi/dVj` 本征电荷导数矩阵和分开的 `cjd/cjs` 结耗尽电容；旧 artifact 仍走显式 legacy 五电容兼容路径。实例 model、L 和偏置不匹配即拒绝。求解器统一组装 `Y(f)`，支持固定 AC 边界、差分输入/输出线性表达式、低频增益、相位、−3 dB 带宽和 GBW；同一核心已用 NMOS/PMOS 共源、源极退化共源和差分对解析值测试。数值层另公开 `ComplexNodalSystem` 的系数/RHS stamping 接口和 `solve_complex_linear_system`，电路专属脚本可增加局部受控源、独立电流探针，或自行组装带辅助未知量的 MNA 方程，而无需复制求解器。`vda small-signal-validate` 又能从 real Bridge run records 自动绑定结构化 `si` 图、EDA DC 偏置、exact W/L/模型参数签名和原始 AC 网格，拒绝长度插值与所有偏置外推，再按固定 policy 对比 DC、每项电荷/结电容、gain、phase、BW 和 GBW。多 MOS 图可用重复 `--additional-characterization-run` 提供多张真实表，每个实例按 model/polarity/W/L/签名选择唯一 artifact，缺失、歧义和未使用表都拒绝。`vda characterization-task-from-run` 可把一个成功、只读的 real-si MOS 实例与用户审查的安全偏置网格合成为 standalone 表征任务，并保留来源哈希；当前自动生成只允许 `nf=1、m=1`。Gate 7D 已用三张真实表通过 nominal held-out 差分对；该层仍不求非线性 DC，也不能替代最终 Spectre。
 - 通过独立 worker 调用本机 `virtuoso-bridge-lite` 环境。反相器支持 `OA -> si -> Spectre transient` 的 timing、过冲/欠冲和周期供电能量；共源级支持同一 `OA -> si` 网表上的 DC OP、复数 AC、相干正弦 transient 幅度 sweep 和普通 noise sweep。可提取 `Id/VGS/VDS/VDSAT/gm/gds`、真实 VDD 功耗与 KCL、低频增益、首个 −3 dB 带宽、GBW、unity、HD2/HD3、THD、P1dB，以及频带积分的输出/输入参考噪声；单项执行与提取均有 live 证据。`analysis: "quality"` 已在一次 OA/`si` 核对后依次运行 AC、linearity、noise，并完成 bias/load、W/RD/RS、L/VDD 搜索、固定设计 TT/SS/FF 验证和显式启用的 PVT-aware bias 调优；每个 PVT 条件保留原始 `eda_result`，跨条件约束和最坏值聚合标为 `software_inference`。
 - Gate 3/4/5/6 差分对复用同一 worker 与 executor，不复制 Bridge。Gate 3 保留外部理想尾源能力；Gate 4 只新增 `MNTAIL(TAIL,BIAS,VSS,VSS)` 与 `BIAS` pin；Gate 5 再把 `MN0.S/MN1.S` 从 `TAIL` 分离到 `NSP/NSN`，只新增对称 `RS0(NSP,TAIL)`、`RS1(NSN,TAIL)`。Gate 6 从未退化的 Gate 4 拓扑删除 `RD0/RD1` 并加入 `MP0(OUTP,OUTP,VDD,VDD)`、`MP1(OUTN,OUTP,VDD,VDD)`，反向操作可按声明电阻值恢复原负载和可选 placement 指纹。`tail_width_um/tail_length_um/source_resistance_ohm/pmos_load_width_um/pmos_load_length_um` 属于 OA semantic 参数，`tail_bias_v` 只属于 wrapper；真实尾管路径拒绝理想 `tail_current_ua/tail_output_resistance_ohm`。Gate 3–6 的 OA→`si` 证据链均已有 live 结果；Gate 6 还真实覆盖 ICMR、多种有限搜索、预算、不可行和 transport checkpoint/resume。新增 `analysis: "psrr"` 在同一自动 `si` 网表上分别运行平衡差模、VDD 注入和 VSS 注入，并核对三次 DC 与频率网格；`evaluation_stop_hz` 提供声明频带内最差 PSRR，三份下载根 AC 文件各自绑定大小与 SHA-256。nominal 单点、四点 bias/load 只读搜索和三种沟道长度的八点 OA 搜索已经 live。后者把带内最差 PSRR 从 `11.5125 dB` 提高到 `19.7438 dB`，但临时 `20 dB` 门仍不可行，故自动恢复基线；下一步应固定对 PSRR 几乎无益且严重损失带宽的尾管 `L=0.03 µm`，再在显式小网格内验证输入对/PMOS L，并对任何可行点补做 CMRR、线性度和噪声复核。不得把“最大值”包装成规格闭合。可选 PVT、mismatch、更多质量指标和 ADE handoff 仍是边界。
@@ -111,6 +114,35 @@ py -3.13 -m venv .venv
 它要求 real Bridge adapter、只读 OA side-effect 记录、匹配 target/PVT、完整 raw hash、
 exact W 与模型参数签名；结果中的理论值和误差门属于 `software_inference`。详见
 [Gate 7B 共源小信号真实验证](docs/validation/2026-07-24-common-source-small-signal-validation-live.md)。
+
+Gate 7D 的差分对 validation 和三张 exact characterization run 可继续生成 Gate 8 的
+真实 PDK theory request、原子任务和事后误差审计；前三条命令完全本地，真正运行任务
+仍需通常的 plan token、`--execute` 和 OA/compute 授权：
+
+```powershell
+.\.venv\Scripts\vda.exe theory-request-from-validation `
+  examples\theory\differential-pair-gate8-derivation-policy.json `
+  artifacts\runs\differential-pair-current-mirror-characterization-heldout-bridge\gate7d-final-validation-20260725.json `
+  artifacts\runs\mos-device-characterize-diffpair-input-mn0-top-tt\run-20260724T204823Z.json `
+  --additional-characterization-run artifacts\runs\mos-device-characterize-diffpair-load-mp0-top-tt\run-20260724T204820Z.json `
+  --additional-characterization-run artifacts\runs\mos-device-characterize-diffpair-tail-mntail-top-tt\run-20260724T204818Z.json `
+  --output artifacts\theory\differential-pair-gate8-tsmc28-request.json
+.\.venv\Scripts\vda.exe theory artifacts\theory\differential-pair-gate8-tsmc28-request.json `
+  --output artifacts\theory\differential-pair-gate8-tsmc28-result.json
+.\.venv\Scripts\vda.exe theory-seed-task `
+  examples\theory\differential-pair-gate8-seed-policy.json `
+  artifacts\theory\differential-pair-gate8-tsmc28-result.json `
+  examples\theory\differential-pair-gate8-task-template.json `
+  --output examples\tasks\differential-pair-current-mirror-theory-seed-gate8.bridge.json
+.\.venv\Scripts\vda.exe theory-seed-validate `
+  examples\theory\differential-pair-gate8-validation-policy.json `
+  examples\tasks\differential-pair-current-mirror-theory-seed-gate8.bridge.json `
+  artifacts\runs\differential-pair-current-mirror-theory-seed-gate8-bridge\run-20260725-grid-resumed.json `
+  --output artifacts\theory\differential-pair-gate8-seed-validation.json
+```
+
+最后一个命令在候选生成可用但逐点预测门失败时会输出完整 `partial` 结果并返回非零，
+不会为了让 CI 变绿而隐藏误差。完整解释见上述 Gate 8 live 记录。
 
 当目标 `si` 实例的几何或 LDE signature 不同，不再手工复制几十个参数。先用用户审查的
 偏置网格模板从只读 circuit run 生成新任务，再正常 plan/授权执行：
@@ -367,4 +399,5 @@ direct `si`/Spectre 路径还会在每个唯一 `/data/xum/.../vda_<task>_<nonce
 - [2026-07-25 进程与资源生命周期审计](docs/validation/2026-07-25-process-resource-lifecycle.md)
 - [2026-07-25 资源取消、盘点与保留策略 follow-up Gate](docs/validation/2026-07-25-resource-cancellation-retention.md)
 - [2026-07-25 反相器 Wp/Wn 细化 live Gate](docs/validation/2026-07-25-inverter-ratio-refinement-live.md)
+- [2026-07-25 差分对 theory-seeded Gate 8 live](docs/validation/2026-07-25-differential-pair-theory-seeded-gate8-live.md)
 - [延期的人工 ADE Gate](docs/deferred-manual-gates.md)

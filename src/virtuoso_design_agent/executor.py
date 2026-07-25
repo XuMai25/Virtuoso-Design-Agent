@@ -8,7 +8,7 @@ import json
 import math
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
@@ -70,6 +70,9 @@ _DIFFERENTIAL_PAIR_OPTIONAL_OA_PARAMETERS = (
 class _CandidateInput:
     parameters: dict[str, float]
     instance_parameters: dict[str, dict[str, str]]
+    theory_seed_candidate_id: str | None = None
+    theory_seed_source_candidate_id: str | None = None
+    theory_seed_predicted_metrics: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -117,6 +120,13 @@ class TaskExecutor:
 
     @staticmethod
     def _candidates(task: TaskSpec) -> list[dict[str, float]]:
+        if task.theory_seed is not None:
+            return [
+                dict(task.parameters) | dict(candidate.parameters)
+                for candidate in task.theory_seed.candidates[
+                    : task.limits.max_iterations
+                ]
+            ]
         if not task.parameter_space:
             return [dict(task.parameters)]
         names = sorted(task.parameter_space)
@@ -159,7 +169,12 @@ class TaskExecutor:
     @classmethod
     def _candidate_inputs(cls, task: TaskSpec) -> list[_CandidateInput]:
         candidates: list[_CandidateInput] = []
-        for parameters in cls._candidates(task):
+        for semantic_index, parameters in enumerate(cls._candidates(task)):
+            seed = (
+                task.theory_seed.candidates[semantic_index]
+                if task.theory_seed is not None
+                else None
+            )
             for instance_parameters in cls._instance_parameter_candidates(task):
                 candidates.append(
                     _CandidateInput(
@@ -168,6 +183,13 @@ class TaskExecutor:
                             instance: dict(values)
                             for instance, values in instance_parameters.items()
                         },
+                        theory_seed_candidate_id=(seed.id if seed is not None else None),
+                        theory_seed_source_candidate_id=(
+                            seed.source_candidate_id if seed is not None else None
+                        ),
+                        theory_seed_predicted_metrics=(
+                            dict(seed.predicted_metrics) if seed is not None else {}
+                        ),
                     )
                 )
                 if len(candidates) >= task.limits.max_iterations:
@@ -182,6 +204,9 @@ class TaskExecutor:
         simulation: AdapterResult,
         instance_parameters: dict[str, dict[str, str]] | None = None,
         oa_parameters: dict[str, float] | None = None,
+        theory_seed_candidate_id: str | None = None,
+        theory_seed_source_candidate_id: str | None = None,
+        theory_seed_predicted_metrics: dict[str, float] | None = None,
     ) -> CandidateEvaluation:
         raw_conditions = simulation.data.get("operating_condition_results")
         if raw_conditions is not None:
@@ -193,6 +218,9 @@ class TaskExecutor:
                 raw_conditions,
                 instance_parameters=instance_parameters,
                 oa_parameters=oa_parameters,
+                theory_seed_candidate_id=theory_seed_candidate_id,
+                theory_seed_source_candidate_id=theory_seed_source_candidate_id,
+                theory_seed_predicted_metrics=theory_seed_predicted_metrics,
             )
         metrics = {
             str(name): float(value)
@@ -242,6 +270,14 @@ class TaskExecutor:
             analysis_complete=analysis_complete,
             analysis_issues=analysis_issues,
             analysis_warnings=analysis_warnings,
+            theory_seed_candidate_id=theory_seed_candidate_id,
+            theory_seed_source_candidate_id=theory_seed_source_candidate_id,
+            theory_seed_predicted_metrics=theory_seed_predicted_metrics or {},
+            theory_seed_evidence_source=(
+                EvidenceSource.SOFTWARE_INFERENCE
+                if theory_seed_candidate_id is not None
+                else None
+            ),
         )
 
     @staticmethod
@@ -254,6 +290,9 @@ class TaskExecutor:
         *,
         instance_parameters: dict[str, dict[str, str]] | None = None,
         oa_parameters: dict[str, float] | None = None,
+        theory_seed_candidate_id: str | None = None,
+        theory_seed_source_candidate_id: str | None = None,
+        theory_seed_predicted_metrics: dict[str, float] | None = None,
     ) -> CandidateEvaluation:
         if not isinstance(raw_conditions, list) or not raw_conditions:
             raise RuntimeError("operating-condition simulation returned no cases")
@@ -459,6 +498,14 @@ class TaskExecutor:
             analysis_issues=analysis_issues,
             analysis_warnings=analysis_warnings,
             operating_conditions=evaluations,
+            theory_seed_candidate_id=theory_seed_candidate_id,
+            theory_seed_source_candidate_id=theory_seed_source_candidate_id,
+            theory_seed_predicted_metrics=theory_seed_predicted_metrics or {},
+            theory_seed_evidence_source=(
+                EvidenceSource.SOFTWARE_INFERENCE
+                if theory_seed_candidate_id is not None
+                else None
+            ),
         )
 
     @staticmethod
@@ -1578,6 +1625,7 @@ class TaskExecutor:
                 # Candidate enumeration belongs to VDA.  The Bridge receives only
                 # the exact point that it must apply/read back for this action.
                 "instance_parameter_space": [],
+                "theory_seed": None,
             }
         )
 
@@ -2729,6 +2777,8 @@ class TaskExecutor:
 
     @staticmethod
     def _candidate_space_size(task: TaskSpec) -> int:
+        if task.theory_seed is not None:
+            return len(task.theory_seed.candidates)
         semantic_size = (
             math.prod(len(values) for values in task.parameter_space.values())
             if task.parameter_space
@@ -2830,6 +2880,18 @@ class TaskExecutor:
                         ),
                         evidence_source=EvidenceSource.SYSTEM_EVENT,
                         metric_sources={},
+                        theory_seed_candidate_id=candidate.theory_seed_candidate_id,
+                        theory_seed_source_candidate_id=(
+                            candidate.theory_seed_source_candidate_id
+                        ),
+                        theory_seed_predicted_metrics=(
+                            candidate.theory_seed_predicted_metrics
+                        ),
+                        theory_seed_evidence_source=(
+                            EvidenceSource.SOFTWARE_INFERENCE
+                            if candidate.theory_seed_candidate_id is not None
+                            else None
+                        ),
                     )
                 )
                 if progress is not None:
@@ -2846,6 +2908,13 @@ class TaskExecutor:
                         applied_state.oa_parameters
                         if applied_state is not None
                         else {}
+                    ),
+                    theory_seed_candidate_id=candidate.theory_seed_candidate_id,
+                    theory_seed_source_candidate_id=(
+                        candidate.theory_seed_source_candidate_id
+                    ),
+                    theory_seed_predicted_metrics=(
+                        candidate.theory_seed_predicted_metrics
                     ),
                 )
             )
@@ -2948,6 +3017,9 @@ class TaskExecutor:
             domain_exhausted=domain_exhausted,
             selection_scope=scope,
             statement=statement,
+            theory_seed_source=(
+                task.theory_seed.source if task.theory_seed is not None else None
+            ),
         )
 
     def execute(

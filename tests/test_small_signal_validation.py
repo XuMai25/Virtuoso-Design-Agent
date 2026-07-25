@@ -18,6 +18,11 @@ from virtuoso_design_agent.small_signal_validation import (
     SmallSignalCircuitValidationPolicy,
     validate_common_source_small_signal_runs,
 )
+from virtuoso_design_agent.theory import size_differential_pair
+from virtuoso_design_agent.theory_derivation import (
+    DifferentialPairTheoryDerivationPolicy,
+    derive_differential_pair_theory_request,
+)
 
 
 _NOW = "2026-07-24T00:00:00Z"
@@ -869,6 +874,80 @@ def test_differential_pair_binds_independent_non_one_to_one_width_planes(
         "test-load-pmos-characterization",
         "test-tail-nmos-characterization",
     ]
+
+
+def test_differential_theory_request_derives_all_vgs_points_from_bound_runs(
+    tmp_path: Path,
+) -> None:
+    characterization_paths = []
+    for index, run in enumerate(_differential_characterizations()):
+        path = tmp_path / f"theory-characterization-{index}.json"
+        path.write_text(json.dumps(run), encoding="utf-8")
+        characterization_paths.append(path)
+    circuit_path = tmp_path / "theory-differential.json"
+    circuit_path.write_text(json.dumps(_differential_circuit_run()), encoding="utf-8")
+    validation = validate_common_source_small_signal_runs(
+        SmallSignalCircuitValidationPolicy.model_validate(_differential_policy()),
+        characterization_paths,
+        circuit_path,
+    )
+    validation_path = tmp_path / "theory-validation.json"
+    validation_path.write_text(validation.model_dump_json(indent=2), encoding="utf-8")
+    validation_sha256 = hashlib.sha256(validation_path.read_bytes()).hexdigest()
+    policy = DifferentialPairTheoryDerivationPolicy.model_validate(
+        {
+            "id": "test-theory-derivation",
+            "request_id": "test-theory-request",
+            "expected_validation_policy_id": validation.policy_id,
+            "expected_validation_sha256": validation_sha256,
+            "load_capacitance_f": 1e-12,
+            "input_width": {"minimum_um": 0.1, "maximum_um": 10.0},
+            "load_width": {"minimum_um": 0.1, "maximum_um": 10.0},
+            "tail_width": {"minimum_um": 0.1, "maximum_um": 10.0},
+            "constraints": [
+                {
+                    "metric": "estimated_differential_gain_v_per_v",
+                    "relation": ">=",
+                    "value": 1.0,
+                },
+                {
+                    "metric": "estimated_power_w",
+                    "relation": "<=",
+                    "value": 1.0,
+                },
+            ],
+            "objective": {
+                "metric": "estimated_power_w",
+                "goal": "minimize",
+            },
+            "output_capacitance_rule": "legacy_cgd_cdb_plus_cjd",
+        }
+    )
+
+    request = derive_differential_pair_theory_request(
+        policy,
+        validation_path,
+        characterization_paths,
+    )
+    result = size_differential_pair(request)
+
+    assert len(request.device_characterization.nmos_input_points) == 2
+    assert len(request.device_characterization.pmos_load_points) == 2
+    assert len(request.device_characterization.nmos_tail_points) == 2
+    assert result.optimality_boundary.declared_combinations == 8
+    assert result.optimality_boundary.domain_exhausted is True
+    assert request.device_characterization.source_artifact_sha256 == validation_sha256
+    assert all(
+        point.source_artifact_sha256
+        for point in request.device_characterization.nmos_input_points
+    )
+
+    with pytest.raises(ValueError, match="validation SHA-256"):
+        derive_differential_pair_theory_request(
+            policy.model_copy(update={"expected_validation_sha256": "0" * 64}),
+            validation_path,
+            characterization_paths,
+        )
 
 
 def test_differential_pair_rejects_missing_ambiguous_and_mismatched_planes(

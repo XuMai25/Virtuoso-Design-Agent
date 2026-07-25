@@ -43,6 +43,15 @@ class MosCharacterizationPoint(StrictModel):
     gds_over_id_per_v: float = Field(gt=0.0)
     output_capacitance_f_per_um: float = Field(gt=0.0)
     vdsat_v: float = Field(gt=0.0)
+    model: StrictStr | None = Field(default=None, min_length=1, max_length=96)
+    vgs_magnitude_v: float | None = Field(default=None, ge=0.0)
+    vds_magnitude_v: float | None = Field(default=None, ge=0.0)
+    vsb_magnitude_v: float | None = Field(default=None, ge=0.0)
+    source_artifact_id: StrictStr | None = Field(default=None, min_length=1)
+    source_artifact_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
 
 
 class DeviceCharacterization(StrictModel):
@@ -88,6 +97,22 @@ class DeviceCharacterization(StrictModel):
             ids = [point.id for point in points]
             if len(ids) != len(set(ids)):
                 raise ValueError(f"{role} contains duplicate point ids")
+            if self.source is not DeviceDataSource.SYNTHETIC_EXAMPLE:
+                for point in points:
+                    required = {
+                        "model": point.model,
+                        "vgs_magnitude_v": point.vgs_magnitude_v,
+                        "vds_magnitude_v": point.vds_magnitude_v,
+                        "vsb_magnitude_v": point.vsb_magnitude_v,
+                        "source_artifact_id": point.source_artifact_id,
+                        "source_artifact_sha256": point.source_artifact_sha256,
+                    }
+                    missing = [name for name, value in required.items() if value is None]
+                    if missing:
+                        raise ValueError(
+                            f"{role} point {point.id} is missing PDK provenance: "
+                            + ", ".join(missing)
+                        )
         return self
 
 
@@ -238,6 +263,9 @@ class TheoryCandidateEvaluation(StrictModel):
     input_width_um: float | None = None
     load_width_um: float | None = None
     tail_width_um: float | None = None
+    input_length_um: float | None = None
+    load_length_um: float | None = None
+    tail_length_um: float | None = None
     metrics: dict[str, float] = Field(default_factory=dict)
     constraints: list[ConstraintEvaluation] = Field(default_factory=list)
     constraint_margins: dict[str, float | None] = Field(default_factory=dict)
@@ -564,6 +592,9 @@ def _evaluate_combination(
         input_width_um=input_width_um,
         load_width_um=load_width_um,
         tail_width_um=tail_width_um,
+        input_length_um=input_point.length_um,
+        load_length_um=load_point.length_um,
+        tail_length_um=tail_point.length_um,
         metrics=metrics,
         constraints=constraints,
         constraint_margins={
