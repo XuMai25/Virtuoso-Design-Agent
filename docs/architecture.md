@@ -86,6 +86,10 @@ CDF 的 `display` 和 `editable` 元数据不是写入 allowlist。2026-07-20 �
 
 任务请求及原始值标为 `user_input`；真实 OA 确认标为 `bridge_readback`；demo 只能产生 `software_inference`。完整 inspect 会保留 callback 导致的旁路参数变化，但 VDA 只对任务显式列出的字段宣称确认。`instance_parameter_updates` 不会隐式进入搜索；调优必须用 `instance_parameter_space` 逐维声明 exact instance、未过滤 OA inspect 中真实存在的 CDF 字段名和有限原始字符串集合。executor 将固定实例字段、raw sweep 与 semantic space 组合成一个受 `max_iterations` 截断的确定性笛卡尔积，不把所有 CDF 自动扩成搜索空间。每个 candidate 只把具体点交给 Bridge，要求请求、实际应用映射、立即定向回读一致；candidate/checkpoint 分别保存原始字段与 canonical OA semantic 状态，最佳值或初始值写回后再独立定向回读。独立 `parameters.apply` 继续保留 Bridge 的别名和更广字符串能力；有限搜索为保证初始值恢复而只接受可在完整 readback 中精确定位的实际字段名。
 
+`candidate_set` 是与上述逐维 space 正交的通用原子候选域，只用于 `design.tune`/`design.close_loop`。每个候选同时携带一个完整的 semantic/testbench 参数表和可选的原始实例参数表；所有 tuple 必须声明相同字段面、ID 和参数值组合必须唯一，固定字段不能与候选字段重叠。它与 `parameter_space`、`instance_parameter_space`、专用 `theory_seed` 互斥，因此 executor 按声明顺序逐 tuple 执行，不会把 `W/bias/load/CDF` 再展开成笛卡尔积。同一实例上的固定 raw 字段与候选 raw 字段按字段深合并，既不会丢掉人工固定的 `m`，也不会限制候选调整 `fingers`。独立 `parameters.apply` 和既有逐维搜索均保持原能力面。
+
+原子候选来源只能是 `user_input` 或 `software_inference`；后者至少绑定一个 SHA-256。候选 ID、预测指标、来源和 hash 进入 task、checkpoint、candidate record 与 `search_audit`，恢复时逐项复核。预测值始终保留为候选来源证据，不能参与最终覆盖：可行性、规格和最终排序仍只使用本次 adapter 返回的真实仿真指标。demo adapter 即使跑通也只能产生 `software_inference`，不能把候选生成器升级成 EDA 证据。
+
 有限搜索的结果不能简称为“最优解”。所有 tuning run record 都带 `search_audit`：分别记录声明、尝试和分析完整的候选数，只有全部声明点都完整完成时才允许 `best_in_declared_discrete_domain`；预算截断、transport 失败或缺指标只能是 `best_evaluated`。即使声明离散域穷尽，`continuous_optimum_claim` 和 `global_optimum_claim` 仍固定为 false；全不可行也只证明声明离散域内没有可行点。
 
 ## 独立 MOS 器件表征
@@ -162,7 +166,15 @@ Gate 8 把上述层之间的交接做成三个独立、可审计的本地入口�
 
 正常 executor 对每个 tuple 仍执行 OA 暂存、定向回读、自动 `si` netlist 和 Spectre，并保存理论候选 ID/预测值为 `software_inference`。可行性和最终排序只读取 `eda_result` metrics；理论排名不能覆盖真实 EDA 选择。checkpoint 把候选边界作为原子状态，transport reset 后必须先恢复/独立回读，再从未完成 tuple 续跑。
 
-`vda theory-seed-validate` 最后用 task/run SHA-256、plan token、候选顺序、参数、证据源和完整域审计比较理论与 EDA。它把“候选中有足够真实可行点”和“每点数值预测足够准确”分成两个 Gate。首个 nominal TSMC N28 live Gate 的前者通过（4/6 可行），但功耗/增益/BW/GBW 的 24 项比较有 8 项超过预先固定的 25%，理论第一名也不是 EDA 最小功耗点，因此总状态为 `partial`。这条路径当前只能称为可靠的 theory-seeded shortlist；下一步应以第一遍真实 DC OP 重线性化并用独立 held-out 候选复核，不能在同一六点上拟合后宣称通用精度。
+`vda theory-seed-validate` 最后用 task/run SHA-256、plan token、候选顺序、参数、证据源和完整域审计比较理论与 EDA。它把“候选中有足够真实可行点”和“每点数值预测足够准确”分成两个 Gate。首个 nominal TSMC N28 live Gate 的前者通过（4/6 可行），但功耗/增益/BW/GBW 的 24 项比较有 8 项超过预先固定的 25%，理论第一名也不是 EDA 最小功耗点，因此总状态为 `partial`。这条路径当前只能称为可靠的 theory-seeded shortlist，不能把同一六点回归包装成已校准预测器。
+
+### 真实工作点局部重线性化
+
+`vda op-relinearize` 是纯本地 run-record 后处理入口，不调用 Bridge、不写 OA。它不依赖某个固定拓扑公式，而是由 policy 显式声明 source task/run SHA-256、一个真实 anchor、互斥的训练/留出 candidate index、待微调 semantic 参数、工作点/性能指标、信任边界、量化网格、误差门和局部筛选规格。来源必须是成功的 `virtuoso-bridge-subprocess` run；每个建模指标必须是完整 `eda_result`。未建模 semantic 参数必须在训练和留出点保持不变；原始 CDF 值若发生变化，必须先建立可数值解释的 semantic 映射，不能把任意字符串硬塞进线性回归。
+
+每个指标以 anchor 为截距，对 `(parameter-anchor)/proposal_step` 做一阶最小二乘。训练扰动不能独立张成全部声明参数时直接拒绝，不用 ridge 隐藏不可辨识性。训练误差和未参与拟合的留出误差分别计算，并且每个指标两道门都必须通过；只要一项失败，结果就是 `partial` 且没有 `candidate_set`。通过后才在 anchor 周围的显式小网格生成候选，先排除已经测过的 tuple，再按局部筛选约束和 objective 排序；首项固定保留已测 anchor 作为控制点。所有预测、排序和误差判断是 `software_inference`，来源实测指标仍是 `eda_result`。
+
+`vda candidate-task-from-relinearization` 只接受 passed result，并把结果、policy、source run 和 task template 全部做 SHA-256 绑定。template 必须精确匹配固定参数、objective，并至少保留局部模型用过的筛选 constraints；可以额外保留饱和区、THD、CMRR 等未由局部模型预测的完整规格，最终仍由同源 EDA 判定。首轮本地 Gate 用既有真实记录完成了共源级 6-train/2-heldout、10 指标和差分对 4-train/2-heldout、15 指标验证，分别从 27 个局部组合编译 6 个原子候选；最坏留出误差为 `11.450%` 和 `8.262%`。这些数字只验证局部候选生成和留出门，不证明新候选已跑 Spectre，也不授权 OA 写回。
 
 ### 通用小信号网络核心
 

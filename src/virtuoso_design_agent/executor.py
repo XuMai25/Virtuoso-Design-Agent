@@ -70,6 +70,9 @@ _DIFFERENTIAL_PAIR_OPTIONAL_OA_PARAMETERS = (
 class _CandidateInput:
     parameters: dict[str, float]
     instance_parameters: dict[str, dict[str, str]]
+    atomic_candidate_id: str | None = None
+    atomic_candidate_predicted_metrics: dict[str, float] = field(default_factory=dict)
+    atomic_candidate_evidence_source: EvidenceSource | None = None
     theory_seed_candidate_id: str | None = None
     theory_seed_source_candidate_id: str | None = None
     theory_seed_predicted_metrics: dict[str, float] = field(default_factory=dict)
@@ -120,6 +123,13 @@ class TaskExecutor:
 
     @staticmethod
     def _candidates(task: TaskSpec) -> list[dict[str, float]]:
+        if task.candidate_set is not None:
+            return [
+                dict(task.parameters) | dict(candidate.parameters)
+                for candidate in task.candidate_set.candidates[
+                    : task.limits.max_iterations
+                ]
+            ]
         if task.theory_seed is not None:
             return [
                 dict(task.parameters) | dict(candidate.parameters)
@@ -166,8 +176,39 @@ class TaskExecutor:
                 break
         return candidates
 
+    @staticmethod
+    def _merge_instance_parameters(
+        fixed: dict[str, dict[str, str]],
+        varying: dict[str, dict[str, str]],
+    ) -> dict[str, dict[str, str]]:
+        merged = {instance: dict(values) for instance, values in fixed.items()}
+        for instance, values in varying.items():
+            merged.setdefault(instance, {}).update(values)
+        return merged
+
     @classmethod
     def _candidate_inputs(cls, task: TaskSpec) -> list[_CandidateInput]:
+        if task.candidate_set is not None:
+            fixed_instance_parameters = cls._instance_parameter_candidates(task)[0]
+            return [
+                _CandidateInput(
+                    parameters=dict(task.parameters) | dict(candidate.parameters),
+                    instance_parameters=cls._merge_instance_parameters(
+                        fixed_instance_parameters,
+                        candidate.instance_parameters(),
+                    ),
+                    atomic_candidate_id=candidate.id,
+                    atomic_candidate_predicted_metrics=dict(
+                        candidate.predicted_metrics
+                    ),
+                    atomic_candidate_evidence_source=(
+                        task.candidate_set.source.evidence_source
+                    ),
+                )
+                for candidate in task.candidate_set.candidates[
+                    : task.limits.max_iterations
+                ]
+            ]
         candidates: list[_CandidateInput] = []
         for semantic_index, parameters in enumerate(cls._candidates(task)):
             seed = (
@@ -204,6 +245,9 @@ class TaskExecutor:
         simulation: AdapterResult,
         instance_parameters: dict[str, dict[str, str]] | None = None,
         oa_parameters: dict[str, float] | None = None,
+        atomic_candidate_id: str | None = None,
+        atomic_candidate_predicted_metrics: dict[str, float] | None = None,
+        atomic_candidate_evidence_source: EvidenceSource | None = None,
         theory_seed_candidate_id: str | None = None,
         theory_seed_source_candidate_id: str | None = None,
         theory_seed_predicted_metrics: dict[str, float] | None = None,
@@ -218,6 +262,13 @@ class TaskExecutor:
                 raw_conditions,
                 instance_parameters=instance_parameters,
                 oa_parameters=oa_parameters,
+                atomic_candidate_id=atomic_candidate_id,
+                atomic_candidate_predicted_metrics=(
+                    atomic_candidate_predicted_metrics
+                ),
+                atomic_candidate_evidence_source=(
+                    atomic_candidate_evidence_source
+                ),
                 theory_seed_candidate_id=theory_seed_candidate_id,
                 theory_seed_source_candidate_id=theory_seed_source_candidate_id,
                 theory_seed_predicted_metrics=theory_seed_predicted_metrics,
@@ -270,6 +321,11 @@ class TaskExecutor:
             analysis_complete=analysis_complete,
             analysis_issues=analysis_issues,
             analysis_warnings=analysis_warnings,
+            atomic_candidate_id=atomic_candidate_id,
+            atomic_candidate_predicted_metrics=(
+                atomic_candidate_predicted_metrics or {}
+            ),
+            atomic_candidate_evidence_source=atomic_candidate_evidence_source,
             theory_seed_candidate_id=theory_seed_candidate_id,
             theory_seed_source_candidate_id=theory_seed_source_candidate_id,
             theory_seed_predicted_metrics=theory_seed_predicted_metrics or {},
@@ -290,6 +346,9 @@ class TaskExecutor:
         *,
         instance_parameters: dict[str, dict[str, str]] | None = None,
         oa_parameters: dict[str, float] | None = None,
+        atomic_candidate_id: str | None = None,
+        atomic_candidate_predicted_metrics: dict[str, float] | None = None,
+        atomic_candidate_evidence_source: EvidenceSource | None = None,
         theory_seed_candidate_id: str | None = None,
         theory_seed_source_candidate_id: str | None = None,
         theory_seed_predicted_metrics: dict[str, float] | None = None,
@@ -498,6 +557,11 @@ class TaskExecutor:
             analysis_issues=analysis_issues,
             analysis_warnings=analysis_warnings,
             operating_conditions=evaluations,
+            atomic_candidate_id=atomic_candidate_id,
+            atomic_candidate_predicted_metrics=(
+                atomic_candidate_predicted_metrics or {}
+            ),
+            atomic_candidate_evidence_source=atomic_candidate_evidence_source,
             theory_seed_candidate_id=theory_seed_candidate_id,
             theory_seed_source_candidate_id=theory_seed_source_candidate_id,
             theory_seed_predicted_metrics=theory_seed_predicted_metrics or {},
@@ -1625,6 +1689,7 @@ class TaskExecutor:
                 # Candidate enumeration belongs to VDA.  The Bridge receives only
                 # the exact point that it must apply/read back for this action.
                 "instance_parameter_space": [],
+                "candidate_set": None,
                 "theory_seed": None,
             }
         )
@@ -1638,6 +1703,9 @@ class TaskExecutor:
             targets.setdefault(update.instance, set()).update(update.parameters)
         for sweep in task.instance_parameter_space:
             targets.setdefault(sweep.instance, set()).add(sweep.parameter)
+        if task.candidate_set is not None:
+            for update in task.candidate_set.candidates[0].instance_parameter_updates:
+                targets.setdefault(update.instance, set()).update(update.parameters)
         return targets
 
     @classmethod
@@ -2686,7 +2754,8 @@ class TaskExecutor:
         if [candidate.index for candidate in checkpoint.candidates] != expected_indexes:
             raise ValueError("checkpoint candidates are not a completed search prefix")
         for candidate in checkpoint.candidates:
-            declared_parameters = declared[candidate.index - 1].parameters
+            declared_candidate = declared[candidate.index - 1]
+            declared_parameters = declared_candidate.parameters
             parameters_match = (
                 cls._checkpoint_applied_candidate_matches(
                     declared_parameters,
@@ -2706,11 +2775,23 @@ class TaskExecutor:
                 )
             if (
                 candidate.instance_parameters
-                != declared[candidate.index - 1].instance_parameters
+                != declared_candidate.instance_parameters
             ):
                 raise ValueError(
                     f"checkpoint candidate {candidate.index} instance parameters "
                     "do not match task"
+                )
+            if (
+                candidate.atomic_candidate_id
+                != declared_candidate.atomic_candidate_id
+                or candidate.atomic_candidate_predicted_metrics
+                != declared_candidate.atomic_candidate_predicted_metrics
+                or candidate.atomic_candidate_evidence_source
+                != declared_candidate.atomic_candidate_evidence_source
+            ):
+                raise ValueError(
+                    f"checkpoint candidate {candidate.index} atomic provenance "
+                    "does not match task"
                 )
 
     @classmethod
@@ -2777,6 +2858,8 @@ class TaskExecutor:
 
     @staticmethod
     def _candidate_space_size(task: TaskSpec) -> int:
+        if task.candidate_set is not None:
+            return len(task.candidate_set.candidates)
         if task.theory_seed is not None:
             return len(task.theory_seed.candidates)
         semantic_size = (
@@ -2880,6 +2963,13 @@ class TaskExecutor:
                         ),
                         evidence_source=EvidenceSource.SYSTEM_EVENT,
                         metric_sources={},
+                        atomic_candidate_id=candidate.atomic_candidate_id,
+                        atomic_candidate_predicted_metrics=(
+                            candidate.atomic_candidate_predicted_metrics
+                        ),
+                        atomic_candidate_evidence_source=(
+                            candidate.atomic_candidate_evidence_source
+                        ),
                         theory_seed_candidate_id=candidate.theory_seed_candidate_id,
                         theory_seed_source_candidate_id=(
                             candidate.theory_seed_source_candidate_id
@@ -2908,6 +2998,13 @@ class TaskExecutor:
                         applied_state.oa_parameters
                         if applied_state is not None
                         else {}
+                    ),
+                    atomic_candidate_id=candidate.atomic_candidate_id,
+                    atomic_candidate_predicted_metrics=(
+                        candidate.atomic_candidate_predicted_metrics
+                    ),
+                    atomic_candidate_evidence_source=(
+                        candidate.atomic_candidate_evidence_source
                     ),
                     theory_seed_candidate_id=candidate.theory_seed_candidate_id,
                     theory_seed_source_candidate_id=(
@@ -3017,6 +3114,9 @@ class TaskExecutor:
             domain_exhausted=domain_exhausted,
             selection_scope=scope,
             statement=statement,
+            candidate_set_source=(
+                task.candidate_set.source if task.candidate_set is not None else None
+            ),
             theory_seed_source=(
                 task.theory_seed.source if task.theory_seed is not None else None
             ),

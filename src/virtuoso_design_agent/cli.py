@@ -29,6 +29,11 @@ from .models import (
     RunStatus,
     TaskSpec,
 )
+from .op_relinearization import (
+    OperatingPointRelinearizationPolicy,
+    build_task_from_relinearization,
+    relinearize_operating_point,
+)
 from .planner import build_plan
 from .resource_audit import audit_local_resources, load_retention_pins
 from .safety import SafetyViolation
@@ -183,6 +188,32 @@ def _cmd_theory_request_from_validation(args: argparse.Namespace) -> int:
         [args.characterization_run, *args.additional_characterization_run],
     )
     payload = request.model_dump_json(indent=2, exclude_none=True)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(payload + "\n", encoding="utf-8")
+    print(payload)
+    return 0
+
+
+def _cmd_op_relinearize(args: argparse.Namespace) -> int:
+    policy = OperatingPointRelinearizationPolicy.model_validate_json(
+        args.policy.read_text(encoding="utf-8")
+    )
+    result = relinearize_operating_point(policy, args.source_run)
+    payload = result.model_dump_json(indent=2)
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(payload + "\n", encoding="utf-8")
+    print(payload)
+    return 0 if result.status is RunStatus.SUCCEEDED else 1
+
+
+def _cmd_candidate_task_from_relinearization(args: argparse.Namespace) -> int:
+    task = build_task_from_relinearization(args.result, args.task_template)
+    payload = task.model_dump_json(
+        indent=2,
+        exclude_none=True,
+        exclude_unset=True,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(payload + "\n", encoding="utf-8")
     print(payload)
@@ -476,6 +507,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     theory_request.add_argument("--output", type=Path, required=True)
     theory_request.set_defaults(handler=_cmd_theory_request_from_validation)
+
+    op_relinearize = subparsers.add_parser(
+        "op-relinearize",
+        help=(
+            "fit a local operating-point response model from a hash-bound real "
+            "EDA run and validate explicit held-out candidates"
+        ),
+    )
+    op_relinearize.add_argument("policy", type=Path)
+    op_relinearize.add_argument("source_run", type=Path)
+    op_relinearize.add_argument("--output", type=Path)
+    op_relinearize.set_defaults(handler=_cmd_op_relinearize)
+
+    candidate_task = subparsers.add_parser(
+        "candidate-task-from-relinearization",
+        help=(
+            "compile a passed hash-bound local model into an atomic EDA "
+            "candidate-set task"
+        ),
+    )
+    candidate_task.add_argument("result", type=Path)
+    candidate_task.add_argument("task_template", type=Path)
+    candidate_task.add_argument("--output", type=Path, required=True)
+    candidate_task.set_defaults(handler=_cmd_candidate_task_from_relinearization)
 
     small_signal = subparsers.add_parser(
         "small-signal",

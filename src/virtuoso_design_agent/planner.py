@@ -267,7 +267,15 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             f"{condition_names}"
         )
     selection_description = "按规格违例与 objective 选择候选"
-    if task.theory_seed is not None:
+    if task.candidate_set is not None:
+        sweep_description += (
+            "；候选是显式原子 tuple，semantic/raw/testbench 参数保持成组顺序，"
+            "不展开为笛卡尔积"
+        )
+        selection_description += (
+            "；候选来源单独记录，最终排序只采用本次仿真证据"
+        )
+    elif task.theory_seed is not None:
         sweep_description += (
             "；候选是 hash 绑定的 theory tuple，保持成组顺序，不展开为笛卡尔积"
         )

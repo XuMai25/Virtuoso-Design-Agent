@@ -182,6 +182,137 @@ class InstanceParameterSweep(StrictModel):
         return value
 
 
+class CandidateSetSource(StrictModel):
+    """Provenance shared by one ordered set of complete candidate tuples."""
+
+    generator: StrictStr = Field(
+        default="user_declared",
+        min_length=1,
+        max_length=96,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
+    id: StrictStr = Field(
+        default="user-declared",
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
+    bindings: dict[StrictStr, str] = Field(default_factory=dict, max_length=16)
+    evidence_source: Literal[
+        EvidenceSource.USER_INPUT,
+        EvidenceSource.SOFTWARE_INFERENCE,
+    ] = EvidenceSource.USER_INPUT
+
+    @field_validator("bindings")
+    @classmethod
+    def validate_bindings(cls, value: dict[str, str]) -> dict[str, str]:
+        for name, digest in value.items():
+            if not name or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise ValueError(
+                    "candidate-set bindings require nonempty names and SHA-256 values"
+                )
+        return value
+
+    @model_validator(mode="after")
+    def inferred_sources_are_hash_bound(self) -> "CandidateSetSource":
+        if (
+            self.evidence_source is EvidenceSource.SOFTWARE_INFERENCE
+            and not self.bindings
+        ):
+            raise ValueError(
+                "software-inference candidate sets require at least one hash binding"
+            )
+        return self
+
+
+class AtomicCandidate(StrictModel):
+    """One complete semantic/raw parameter tuple; it is never product-expanded."""
+
+    id: StrictStr = Field(
+        min_length=1,
+        max_length=96,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
+    parameters: dict[StrictStr, float] = Field(default_factory=dict)
+    instance_parameter_updates: list[InstanceParameterUpdate] = Field(
+        default_factory=list
+    )
+    predicted_metrics: dict[StrictStr, float] = Field(default_factory=dict)
+
+    @field_validator("parameters", "predicted_metrics")
+    @classmethod
+    def validate_finite_numbers(
+        cls, value: dict[str, float], info: Any
+    ) -> dict[str, float]:
+        for name, number in value.items():
+            if not name or not math.isfinite(number):
+                raise ValueError(f"atomic candidate {info.field_name} must be finite")
+            if info.field_name == "parameters" and number <= 0.0:
+                raise ValueError("atomic candidate parameters must be positive")
+        return value
+
+    @model_validator(mode="after")
+    def validate_complete_tuple(self) -> "AtomicCandidate":
+        if not self.parameters and not self.instance_parameter_updates:
+            raise ValueError(
+                "atomic candidate requires semantic or instance parameters"
+            )
+        instances = [update.instance for update in self.instance_parameter_updates]
+        if len(instances) != len(set(instances)):
+            raise ValueError(
+                "atomic candidate instance_parameter_updates cannot repeat an instance"
+            )
+        return self
+
+    def instance_parameters(self) -> dict[str, dict[str, str]]:
+        return {
+            update.instance: dict(update.parameters)
+            for update in self.instance_parameter_updates
+        }
+
+    def field_identity(self) -> tuple[frozenset[str], frozenset[tuple[str, str]]]:
+        return (
+            frozenset(self.parameters),
+            frozenset(
+                (update.instance, parameter)
+                for update in self.instance_parameter_updates
+                for parameter in update.parameters
+            ),
+        )
+
+    def value_identity(self) -> tuple[Any, ...]:
+        raw_values = tuple(
+            sorted(
+                (update.instance, parameter, value)
+                for update in self.instance_parameter_updates
+                for parameter, value in update.parameters.items()
+            )
+        )
+        return (tuple(sorted(self.parameters.items())), raw_values)
+
+
+class AtomicCandidateSet(StrictModel):
+    """An ordered, provenance-bound finite domain of complete parameter tuples."""
+
+    source: CandidateSetSource = Field(default_factory=CandidateSetSource)
+    candidates: list[AtomicCandidate] = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_atomic_domain(self) -> "AtomicCandidateSet":
+        ids = [candidate.id for candidate in self.candidates]
+        if len(ids) != len(set(ids)):
+            raise ValueError("atomic candidate ids must be unique")
+        fields = [candidate.field_identity() for candidate in self.candidates]
+        if any(identity != fields[0] for identity in fields[1:]):
+            raise ValueError(
+                "atomic candidates must declare the same semantic and raw fields"
+            )
+        values = [candidate.value_identity() for candidate in self.candidates]
+        if len(values) != len(set(values)):
+            raise ValueError("atomic candidate parameter tuples must be unique")
+        return self
+
+
 class TheorySeedCandidate(StrictModel):
     """One atomic semantic-parameter tuple proposed by the local theory path."""
 
@@ -1761,6 +1892,7 @@ class TaskSpec(StrictModel):
         default_factory=list
     )
     parameter_space: dict[str, list[float]] = Field(default_factory=dict)
+    candidate_set: AtomicCandidateSet | None = None
     theory_seed: TheorySeedCandidateSet | None = None
     instance_parameter_space: list[InstanceParameterSweep] = Field(
         default_factory=list,
@@ -1821,6 +1953,7 @@ class TaskSpec(StrictModel):
                 or self.parameters
                 or self.instance_parameter_updates
                 or self.parameter_space
+                or self.candidate_set is not None
                 or self.theory_seed is not None
                 or self.instance_parameter_space
                 or self.constraints
@@ -1873,9 +2006,17 @@ class TaskSpec(StrictModel):
                         "operating_conditions with per-condition supplies must not "
                         "also declare vdd_v in task parameters"
                     )
-                if "vdd_v" in self.parameter_space or (
-                    self.theory_seed is not None
-                    and "vdd_v" in self.theory_seed.candidates[0].parameters
+                if (
+                    "vdd_v" in self.parameter_space
+                    or (
+                        self.candidate_set is not None
+                        and "vdd_v"
+                        in self.candidate_set.candidates[0].parameters
+                    )
+                    or (
+                        self.theory_seed is not None
+                        and "vdd_v" in self.theory_seed.candidates[0].parameters
+                    )
                 ):
                     raise ValueError(
                         "operating_conditions with per-condition supplies must not "
@@ -2007,6 +2148,11 @@ class TaskSpec(StrictModel):
                         self.parameters.keys()
                         | self.parameter_space.keys()
                         | (
+                            self.candidate_set.candidates[0].parameters.keys()
+                            if self.candidate_set is not None
+                            else set()
+                        )
+                        | (
                             self.theory_seed.candidates[0].parameters.keys()
                             if self.theory_seed is not None
                             else set()
@@ -2085,6 +2231,7 @@ class TaskSpec(StrictModel):
                 self.parameters
                 or self.instance_parameter_updates
                 or self.parameter_space
+                or self.candidate_set is not None
                 or self.theory_seed is not None
                 or self.constraints
                 or self.objective is not None
@@ -2107,6 +2254,7 @@ class TaskSpec(StrictModel):
                 self.parameters
                 or self.instance_parameter_updates
                 or self.parameter_space
+                or self.candidate_set is not None
                 or self.theory_seed is not None
                 or self.constraints
                 or self.objective is not None
@@ -2130,6 +2278,7 @@ class TaskSpec(StrictModel):
                 self.parameters
                 or self.instance_parameter_updates
                 or self.parameter_space
+                or self.candidate_set is not None
                 or self.theory_seed is not None
                 or self.create_if_missing
             ):
@@ -2174,6 +2323,7 @@ class TaskSpec(StrictModel):
                 self.parameters
                 or self.instance_parameter_updates
                 or self.parameter_space
+                or self.candidate_set is not None
                 or self.theory_seed is not None
                 or self.constraints
                 or self.objective is not None
@@ -2203,6 +2353,7 @@ class TaskSpec(StrictModel):
                 self.parameters
                 or self.instance_parameter_updates
                 or self.parameter_space
+                or self.candidate_set is not None
                 or self.theory_seed is not None
                 or self.constraints
                 or self.objective is not None
@@ -2232,6 +2383,7 @@ class TaskSpec(StrictModel):
                 self.parameters
                 or self.instance_parameter_updates
                 or self.parameter_space
+                or self.candidate_set is not None
                 or self.theory_seed is not None
                 or self.constraints
                 or self.objective is not None
@@ -2287,6 +2439,44 @@ class TaskSpec(StrictModel):
                     "fixed instance_parameter_updates overlap swept dimensions: "
                     + formatted
                 )
+        if self.candidate_set is not None:
+            if self.operation not in _TUNING_OPERATIONS:
+                raise ValueError(
+                    "candidate_set requires design.tune or design.close_loop"
+                )
+            if (
+                self.parameter_space
+                or self.instance_parameter_space
+                or self.theory_seed is not None
+            ):
+                raise ValueError(
+                    "candidate_set is atomic and cannot be combined with parameter_space, "
+                    "instance_parameter_space, or theory_seed"
+                )
+            candidate = self.candidate_set.candidates[0]
+            semantic_overlap = sorted(set(self.parameters) & set(candidate.parameters))
+            if semantic_overlap:
+                raise ValueError(
+                    "fixed parameters overlap candidate_set fields: "
+                    + ", ".join(semantic_overlap)
+                )
+            fixed_instance_fields = {
+                (update.instance, parameter)
+                for update in self.instance_parameter_updates
+                for parameter in update.parameters
+            }
+            candidate_instance_fields = candidate.field_identity()[1]
+            instance_overlap = sorted(
+                fixed_instance_fields & candidate_instance_fields
+            )
+            if instance_overlap:
+                raise ValueError(
+                    "fixed instance_parameter_updates overlap candidate_set fields: "
+                    + ", ".join(
+                        f"{instance}.{parameter}"
+                        for instance, parameter in instance_overlap
+                    )
+                )
         if self.theory_seed is not None:
             if self.operation not in _TUNING_OPERATIONS:
                 raise ValueError(
@@ -2312,6 +2502,8 @@ class TaskSpec(StrictModel):
                 )
             if self.parameter_space:
                 raise ValueError("schematic.transform does not accept parameter_space")
+            if self.candidate_set is not None:
+                raise ValueError("schematic.transform does not accept candidate_set")
             if self.theory_seed is not None:
                 raise ValueError("schematic.transform does not accept theory_seed")
             if self.circuit is CircuitKind.COMMON_SOURCE:
@@ -2420,12 +2612,13 @@ class TaskSpec(StrictModel):
         if self.operation in _TUNING_OPERATIONS:
             if (
                 not self.parameter_space
+                and self.candidate_set is None
                 and self.theory_seed is None
                 and not self.instance_parameter_space
             ):
                 raise ValueError(
-                    f"{self.operation.value} requires parameter_space, theory_seed, "
-                    "or instance_parameter_space"
+                    f"{self.operation.value} requires parameter_space, candidate_set, "
+                    "theory_seed, or instance_parameter_space"
                 )
             if not self.constraints:
                 raise ValueError(f"{self.operation.value} requires constraints")
@@ -2522,6 +2715,11 @@ class CandidateEvaluation(StrictModel):
     operating_conditions: list["OperatingConditionEvaluation"] = Field(
         default_factory=list
     )
+    atomic_candidate_id: str | None = None
+    atomic_candidate_predicted_metrics: dict[str, float] = Field(
+        default_factory=dict
+    )
+    atomic_candidate_evidence_source: EvidenceSource | None = None
     theory_seed_candidate_id: str | None = None
     theory_seed_source_candidate_id: str | None = None
     theory_seed_predicted_metrics: dict[str, float] = Field(default_factory=dict)
@@ -2566,6 +2764,7 @@ class SearchAudit(StrictModel):
     continuous_optimum_claim: Literal[False] = False
     global_optimum_claim: Literal[False] = False
     statement: str = Field(min_length=1)
+    candidate_set_source: CandidateSetSource | None = None
     theory_seed_source: TheorySeedSource | None = None
 
 

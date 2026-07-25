@@ -74,6 +74,8 @@ def task_semantic_parameter_names(task: TaskSpec) -> set[str]:
     """Return every semantic name declared by fixed or finite-search inputs."""
 
     supplied = set(task.parameters) | set(task.parameter_space)
+    if task.candidate_set is not None:
+        supplied.update(task.candidate_set.candidates[0].parameters)
     if task.theory_seed is not None:
         supplied.update(task.theory_seed.candidates[0].parameters)
     return supplied
@@ -254,9 +256,11 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "tuples and verifies OA write/readback, si, DC/differential/common AC, "
             "EDA-only ranking, checkpoint resume, selected-point PSRR/noise/"
             "linearity/ICMR, and final writeback. Four of six tuples were feasible, "
-            "while the pointwise theory-accuracy gate remained partial. The "
-            "provisional 20 dB PSRR gate was infeasible, so DC-OP relinearization, "
-            "PVT/mismatch, slew/P1dB, and ADE handoff remain pending"
+            "while the pointwise theory-accuracy gate remained partial. Hash-bound "
+            "local DC-OP relinearization and held-out atomic task compilation now "
+            "pass on the retained record, but the six new tuples have not run live. "
+            "The provisional 20 dB PSRR gate was infeasible; PVT/mismatch, "
+            "slew/P1dB, and ADE handoff remain pending"
         ),
     ),
 }
@@ -270,7 +274,14 @@ def validate_task_capability(task: TaskSpec) -> None:
             f"operation {task.operation.value} is not executable yet"
         )
     if (
-        (task.instance_parameter_updates or task.instance_parameter_space)
+        (
+            task.instance_parameter_updates
+            or task.instance_parameter_space
+            or (
+                task.candidate_set is not None
+                and task.candidate_set.candidates[0].instance_parameter_updates
+            )
+        )
         and not capability.explicit_instance_parameters
     ):
         raise UnsupportedCapability(
@@ -456,6 +467,10 @@ def task_requests_oa_parameter_write(task: TaskSpec) -> bool:
         names & supplied
         or task.instance_parameter_updates
         or task.instance_parameter_space
+        or (
+            task.candidate_set is not None
+            and task.candidate_set.candidates[0].instance_parameter_updates
+        )
     )
 
 

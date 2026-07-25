@@ -187,10 +187,37 @@ selection verified at nominal top_tt**。目标是既有
   `4/6` 使候选生成 Gate 通过，但理论首选与 EDA 选择不同，24 个功耗/增益/BW/GBW
   对照有 8 个超过 25%，所以精度 Gate 保留为 `partial`。
 
-下一理论 Gate 先对候选做第一遍真实 DC OP 重线性化，再用未参与校正的 held-out tuple
-验证；不能在这六点上拟合后回测同一数据。Spectre 指标继续拥有最终约束和写回决定权。
 完整记录见
 [`2026-07-25-differential-pair-theory-seeded-gate8-live.md`](validation/2026-07-25-differential-pair-theory-seeded-gate8-live.md)。
+
+## Gate 9：原子候选与真实工作点局部重线性化
+
+状态：2026-07-25 已完成 **real-EDA-record local OP relinearization and atomic
+candidate compilation verified** 的本地 Gate。本轮只读取既有 real-Bridge run record，
+没有连接 Bridge、运行远端计算或写 OA；因此还不是 live 新候选验证。
+
+- `TaskSpec.candidate_set` 把 semantic、testbench 和 raw CDF 字段保留在同一个完整 tuple；
+  它与逐维 space/theory seed 互斥，不做交叉乘积。来源、hash、候选 ID 和预测值进入
+  checkpoint/run record，但最终 ranking 只读本次 simulation metrics。
+- `vda op-relinearize` 要求 source run/hash、真实 anchor、显式且互斥的 training/heldout
+  index。未建模输入漂移、raw 字符串变化、非 `eda_result` 指标和奇异训练扰动都会拒绝。
+  每个指标的 training 与 heldout error gate 都通过后，才允许生成局部候选。
+- 共源 W/RD/RS 记录使用 6 train + 2 heldout，3 个 OP 和 7 个 performance 指标全部过
+  `15%/20%` 门；最坏 training/heldout 为 `17.823%/11.450%`。27 个局部组合编译为
+  6 个 tuple，完整 quality task 仍保留 saturation、mismatch、THD 等未建模 constraints。
+- 差分对 Gate 8 记录使用 4 train + 2 heldout，8 个 OP 和 7 个 performance 指标全部过
+  门；最坏 heldout 为 `8.262%`。27 个局部组合同样编译为 6 个 tuple，完整 task 继续
+  保留 saturation 和 CMRR constraints。
+- policy、source run、result 和 task template 均由 SHA-256 绑定。局部模型、误差、
+  constraint 预筛和排序是 `software_inference`；来源实测是 `eda_result`；本 Gate 没有
+  新的 `bridge_readback`。
+
+下一 live Gate 先执行共源 6 点 quality 任务，真实核对预测误差、全规格、候选级恢复和
+最佳 OA 写回/全不可行恢复；通过后再执行差分对 6 点。任何一轮仍需新的明确远端授权，
+不能从本地 candidate task 推断它已在 Spectre 上更优。
+
+本地实现与数值见
+[`2026-07-25-atomic-candidate-op-relinearization-local.md`](validation/2026-07-25-atomic-candidate-op-relinearization-local.md)。
 
 ## 升级原则
 
