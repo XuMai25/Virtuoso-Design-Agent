@@ -30,6 +30,7 @@ Gate 8 已把 Gate 7D 的真实器件表和 validation hash 编译成六个不�
 
 - 将任务编译为带副作用标记的稳定执行计划。
 - 单独规划或执行：`device.characterize`、`schematic.create`、`schematic.inspect`、`schematic.transform`、`parameters.apply`、`ade.prepare`、`ade.capture`、`ade.corners.apply`、`ade.variables.apply`、`ade.setup.apply`、`ade.run`、`simulation.run`、`design.tune`、`design.close_loop`。`device.characterize` 只有远端 scratch/compute，不接受 OA target；当前 `schematic.transform` 开放共源级源极退化的受控 add/remove、反相器 core→ADE source/load testbench、差分对 core→`MNTAIL/BIAS`、真实尾管差分对的对称源极退化 add/remove，以及无源退化真实尾管差分对的 `RD0/RD1 ↔ MP0/MP1` 电流镜负载可逆变换。
+- 每次专用 `schematic.transform` 通过原有模板语义断言后，还会把完整结构回读规范化为通用 topology snapshot，推导只含实例增删、端子重连、master 替换、net/pin 增删的 allowlisted delta，计算前后 SHA-256，并证明自动生成的 inverse patch 精确恢复原结构。参数不混入拓扑指纹，继续由独立 CDF/semantic 回读负责；该本地契约尚未开放成任意远端 OA writer。
 - 用确定性 demo adapter 离线验证闭环、规格判定和参数选择；结果明确标为 `software_inference`。
 - 用独立本地命令 `vda theory` 对 Gate 6 电流镜负载差分对做理论先导尺寸估算。它不接收一份任意手列的 W 候选，而是遍历声明且有来源绑定的有限 gm/Id 表域，对每个输入管/PMOS 负载/尾管工作点组合用 KCL、小信号和一阶极点方程反解满足 BW/GBW 的最小支路电流与三组 W，再检查增益、余量、功耗、面积和宽度边界。输出包括约束裕量、主导电流下界、寄生渐近上限和局部对数敏感性；只称为 `best_in_declared_discrete_characterization_domain`，`continuous_optimum_claim` 与 `global_optimum_claim` 永远为 false。`vda theory-calibrate` 又能从绑定的真实 Bridge run records 拟合并留一验证 topology-local 增益修正和等效输出电容模型；首个 TSMC N28 六点 Gate 的 gain/BW/GBW 最大留一误差为 `0.083%/0.373%/0.457%`，新鲜只读同点复跑误差为 `0.069%/0.320%/0.390%`。Gate 7B/7C/7D 已分别把 nominal 共源、源极退化共源和五管差分对的 OA/`si` 图及实际 DC 偏置绑定到独立表；任何不同器件签名、几何或 PVT 的推荐仍不能直接写 OA。
 - 用 `vda theory-request-from-validation` 从 passed held-out validation 和 exact characterization run 集派生真实 PDK theory request；用 `vda theory-seed-task` 将理论结果编译为带 hash、量化规则和最优性边界的原子候选；再由正常 `design.tune` executor 用 `eda_result` 判规格和选优。`vda theory-seed-validate` 分开报告 shortlist 可行比例与逐点预测误差，防止“候选里有好点”被包装成“理论数值已准确”。Gate 8 已验证这条交接和中断恢复，但预测精度仍为 partial。
@@ -475,4 +476,5 @@ direct `si`/Spectre 路径还会在每个唯一 `/data/xum/.../vda_<task>_<nonce
 - [2026-07-25 反相器 Wp/Wn 细化 live Gate](docs/validation/2026-07-25-inverter-ratio-refinement-live.md)
 - [2026-07-25 差分对 theory-seeded Gate 8 live](docs/validation/2026-07-25-differential-pair-theory-seeded-gate8-live.md)
 - [2026-07-25 原子候选与真实工作点局部重线性化本地 Gate](docs/validation/2026-07-25-atomic-candidate-op-relinearization-local.md)
+- [2026-07-26 通用 topology-delta 可逆契约本地 Gate](docs/validation/2026-07-26-generic-topology-delta-local.md)
 - [延期的人工 ADE Gate](docs/deferred-manual-gates.md)

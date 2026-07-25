@@ -109,6 +109,8 @@ Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发�
 
 2026-07-25 又完成 Bridge/Spectre/ADE 资源生命周期 Gate。重复 10 次真实只读 worker 请求没有新增本地 Python/Spectre/SSH、句柄或 `vda_*` temp；合成超时先证伪 `taskkill /T`，随后 Windows Job Object 真实杀净 worker 的 120 秒后代进程。远端 direct Spectre 使用已哈希回读的 timeout guard。follow-up 再加入 cancel marker/父进程 watchdog，让 Python `finally` 在强杀前有 30 秒恢复 Maestro runtime、关闭 session/client；既有 Maestro view 的真实 timeout 故障注入后，独立 inventory 得到 Spectre/si/Maestro session 均为 0，空诊断 root 经逐层检查后精确删除。`vda resources [--remote]` 现可只读盘点本地 temp、持久 evidence、远端 EDA process/session、age/size 和 exact pin；默认不删除。状态升级为 **known VDA-owned process lifecycles bounded, Maestro cancellation live-verified, and retained evidence inventory available**。硬件/OS 崩溃与历史 evidence 的用户确认删除仍不是自动 GC。
 
+2026-07-26 完成通用 topology-delta 的本地契约 Gate。结构 snapshot 对实例 master/端子/位置属性、net 和 pin 做确定性 SHA-256；八类 allowlisted operation 覆盖实例、master、端子、net 与 pin 的最小增删改，每项带旧状态前置条件。编译后自动生成逆向 patch，并要求完整 after readback 匹配以及 inverse 精确恢复 before fingerprint。现有所有专用 `schematic.transform` 在原模板断言后都会产生统一 `software_inference` 审计。共源加源退化与差分对 RD→PMOS 电流镜两份既有真实 `bridge_readback` 记录已迁移通过；参数值仍走独立 CDF/semantic 契约，不混入结构指纹。当前状态是 **generic topology-delta contract and reversible local audit verified**。它尚未成为通用远端 OA writer；下一 Gate 才是在不覆盖的新 cellview 上，把预声明 contract 编译到 Bridge、前后完整回读并执行逆向恢复。
+
 ## L5B：单模块设计代理（产品目标）
 
 面向反相器、单管放大器、差分对等单模块，由规格驱动完成更完整的设计过程：
@@ -160,6 +162,7 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> theory-seeded 差分对有限优化与 Spectre 复核（Gate 8 已 live；候选生成通过、逐点预测精度 partial，PVT 可选未跑）
   -> 通用原子 candidate_set + real-EDA OP 局部重线性化（共源首轮、新 anchor W/RD 和差分对 Wn/Wp/Wtail 六点均已 live、写回并完成 exact 审计；共源 RS 需独立探针）
   -> 差分对 PSRR+/PSRR- 三次同网表 AC（nominal、bias/load 只读与三种 L 的 OA 八点搜索已 live；临时 20 dB 门仍未闭合）
+  -> 通用 topology-delta 契约（本地 allowlist/CAS/完整指纹/逆向恢复已过；新 cellview Bridge smoke 待 Gate）
   -> L5B 单模块闭环
   -> layout/DRC/LVS/PEX Gate
 ```

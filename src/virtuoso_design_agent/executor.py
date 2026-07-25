@@ -39,6 +39,7 @@ from .models import (
 )
 from .safety import authorize_execution
 from .spectre_values import spectre_scalar, spectre_values_equal
+from .topology_delta import audit_derived_topology_delta
 
 T = TypeVar("T")
 
@@ -3507,6 +3508,17 @@ class TaskExecutor:
                         after,
                         float(task.parameters["source_resistance_ohm"]),
                     )
+                self._action(
+                    "schematic.transform.topology-delta.audit",
+                    lambda: AdapterResult(
+                        data=audit_derived_topology_delta(
+                            f"{task.id}:{transform_action}",
+                            before.data,
+                            after.data,
+                        ),
+                        evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+                    ),
+                )
                 selected_parameters = dict(task.parameters)
             elif operation is Operation.PARAMETERS_APPLY:
                 self._action(

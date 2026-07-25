@@ -65,7 +65,13 @@ VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PD
 
 `schematic.transform` 不等同于重建模板。共源 transform 的 `add_source_degeneration` 把 `MN0.S: VSS -> NSRC` 并新增 `RS0(NSRC,VSS)`；remove 只删除 VDA 创建的 RS0 两条端子 stub/标签并恢复 VSS。差分对先由 `add_tail_device` 在精确 nominal core 上增加 `MNTAIL(TAIL,BIAS,VSS,VSS)` 与 `BIAS` pin；只有该真实尾管变体可以继续执行对称 `add_source_degeneration`：`MN0.S/MN1.S: TAIL -> NSP/NSN`，并新增等值 `RS0(NSP,TAIL)`、`RS1(NSN,TAIL)`。差分对 source-degeneration remove 不接受参数，只删除这四条 VDA 自有 wire/label stub 与两只电阻并恢复两管源极到 TAIL。另一条互斥路径 `replace_resistive_load_with_current_mirror` 只接受未退化的真实尾管拓扑，删除 RD0/RD1 自有 stub 后加入固定 MP0/MP1 电流镜；`restore_resistive_load` 删除 MP0/MP1 自有 stub 并按显式 `load_resistance_ohm` 恢复两只电阻。非对称器件、缺失任一支路、混合 R/PM 负载或额外连接都会拒绝。
 
-两种 remove 都可带 `expected_restored_placement_sha256`，把 add 前 Bridge placement 回读中的实例、pin、标签和导线完整绑定进 plan token，并在保存后强制相等。反相器 testbench transform 则要求现有 cell 是 MN0/MP0 core 或已经完成同一变更；它保留 MOS/pins，只把地归一到 `gnd!` 并增加固定的 `VDD0/VIN0/CL0/GND0`。所有已有对象编辑都强制 Bridge editor append mode；preflight 拒绝未保存改动，编辑 batch 失败时只 purge 未保存缓存且不保存。前后回读必须证明未点名器件的完整参数、master、位置和顶层 pins 保持，重复调用幂等。为了避免把任意图编辑伪装成安全能力，当前仍没有通用图重写 DSL；若保存已成功而后置审计失败，会保留失败和真实 OA 状态，尚没有通用 snapshot 回滚。
+两种 remove 都可带 `expected_restored_placement_sha256`，把 add 前 Bridge placement 回读中的实例、pin、标签和导线完整绑定进 plan token，并在保存后强制相等。反相器 testbench transform 则要求现有 cell 是 MN0/MP0 core 或已经完成同一变更；它保留 MOS/pins，只把地归一到 `gnd!` 并增加固定的 `VDD0/VIN0/CL0/GND0`。所有已有对象编辑都强制 Bridge editor append mode；preflight 拒绝未保存改动，编辑 batch 失败时只 purge 未保存缓存且不保存。前后回读必须证明未点名器件的完整参数、master、位置和顶层 pins 保持，重复调用幂等。若保存已成功而后置审计失败，会保留失败和真实 OA 状态，尚没有通用 snapshot 回滚。
+
+2026-07-26 增加了 Bridge 之上的本地通用 topology-delta 契约，但没有把任意 SKILL 或字符串脚本开放成图重写接口。契约只允许八类结构操作：添加/删除实例、重连已有端子、替换实例 master、添加/删除 net、添加/删除 pin。每个删除、重连和 master 替换都携带 exact 旧状态 CAS；添加要求名称不存在且所有引用 net 已存在；删除 net 要求已无 instance terminal 或 pin 引用。实例移动、reshape、端子集合变化和同名 net 属性突变不在首版 allowlist 中。
+
+Bridge/demo 的完整 `instances/nets/pins` 回读先被规范化并排序，再计算确定性 SHA-256。`parameters/params` 与顶层 parameter 表不进入结构指纹，因为 CDF 参数仍由既有写入、callback 和双重回读契约负责；master、端子连接、view、位置及其余结构属性进入指纹。编译器在本地应用前向 operations，生成逆序 inverse operations，并证明 inverse 精确恢复 before fingerprint。验证器再把实际 after 完整结构与预期结构比较；缺实例、额外 pin、旧状态漂移、悬空 net 或未声明 placement 变化都会失败。现有每个专用 `schematic.transform` 在原有模板语义断言通过后，会追加 `schematic.transform.topology-delta.audit`；真实前后 inspect 仍是 `bridge_readback`，契约推导、哈希和逆向证明明确是 `software_inference`。
+
+这一层目前是可序列化的结构契约和本地验证核心，不是新的远端执行器。Bridge 仍只执行已验证的专用 transform；把预声明 topology-delta 编译成 Bridge/OA 操作、在新 cellview 上做真实 forward/readback/inverse smoke，以及保存后失败的通用恢复，是下一道独立 Gate。
 
 ## 两层参数契约
 

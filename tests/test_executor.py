@@ -5202,6 +5202,23 @@ def test_source_degeneration_is_an_in_place_audited_delta() -> None:
     assert next(
         item for item in after["instances"] if item["name"] == "MN0"
     )["terminals"]["S"] == "NSRC"
+    audit_action = next(
+        item
+        for item in record.actions
+        if item.action == "schematic.transform.topology-delta.audit"
+    )
+    assert audit_action.evidence_source is EvidenceSource.SOFTWARE_INFERENCE
+    assert audit_action.details["audit"]["forward_readback_match"] is True
+    assert audit_action.details["audit"]["inverse_restored_before"] is True
+    assert audit_action.details["scope"] == {
+        "local_post_readback_audit": True,
+        "contract_predeclared_before_transform": False,
+        "generic_remote_writer_used": False,
+        "instance_parameters_excluded": True,
+    }
+    assert [
+        item["operation"] for item in audit_action.details["contract"]["operations"]
+    ] == ["add_net", "reconnect_terminal", "add_instance"]
 
 
 def test_source_degeneration_transform_is_idempotent_and_can_retarget_only_rs0() -> None:
