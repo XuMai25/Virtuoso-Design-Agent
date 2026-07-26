@@ -5397,6 +5397,308 @@ def test_bridge_payload_preserves_explicit_removal_action() -> None:
     assert payload["parameters"] == {}
 
 
+def test_bridge_payload_preserves_predeclared_topology_direction_and_hashes() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "generic-topology-forward",
+            "operation": "schematic.transform",
+            "circuit": "existing_schematic",
+            "target": {"library": "vda_test", "cell": "vda_generic"},
+            "topology_delta": {
+                "direction": "forward",
+                "contract": {
+                    "id": "noop",
+                    "expected_before_sha256": "a" * 64,
+                    "expected_after_sha256": "a" * 64,
+                    "operations": [],
+                    "inverse_operations": [],
+                },
+            },
+        }
+    )
+
+    payload = SubprocessBridgeAdapter._task_payload(task)
+
+    assert payload["topology_delta"]["direction"] == "forward"
+    assert payload["topology_delta"]["contract"]["id"] == "noop"
+    assert (
+        payload["topology_delta"]["contract"]["expected_before_sha256"]
+        == "a" * 64
+    )
+
+
+def test_generic_topology_compiler_uses_bridge_editor_for_owned_stub_delta() -> None:
+    from virtuoso_design_agent.topology_delta import (
+        AddInstanceOperation,
+        AddNetOperation,
+        ReconnectTerminalOperation,
+        TopologyInstance,
+        TopologyMaster,
+        TopologyNet,
+    )
+
+    rs0 = TopologyInstance(
+        name="RS0",
+        master=TopologyMaster(
+            library="analogLib", cell="res", view="symbol"
+        ),
+        terminals={"PLUS": "NSRC", "MINUS": "VSS"},
+        attributes={"xy": [0.0, -1.3], "orient": "R0", "numInst": 1},
+    )
+    commands, declarative = bridge_worker._compile_generic_topology_commands(
+        [
+            AddNetOperation(
+                net=TopologyNet(
+                    name="NSRC",
+                    attributes={
+                        "numBits": 1,
+                        "sigType": "signal",
+                        "isGlobal": False,
+                    },
+                )
+            ),
+            ReconnectTerminalOperation(
+                instance="MN0",
+                terminal="S",
+                expected_net="VSS",
+                net="NSRC",
+            ),
+            AddInstanceOperation(instance=rs0),
+        ],
+        instance_builder=lambda *args: "INST:" + "|".join(map(str, args)),
+        terminal_label_builder=(
+            lambda instance, terminal, net: f"LABEL:{instance}.{terminal}={net}"
+        ),
+    )
+
+    assert declarative == ["add_net"]
+    assert len(commands) == 4
+    assert 'x~>name == "MN0"' in commands[0]
+    assert 'x~>theLabel == "VSS"' in commands[0]
+    assert 'rbLabel~>theLabel = "NSRC"' in commands[0]
+    assert commands[1].startswith("INST:analogLib|res|symbol|RS0|0.0|-1.3|R0")
+    assert set(commands[2:]) == {
+        "LABEL:RS0.MINUS=VSS",
+        "LABEL:RS0.PLUS=NSRC",
+    }
+
+
+def test_generic_topology_compiler_rejects_unverified_master_and_pin_writes() -> None:
+    from virtuoso_design_agent.topology_delta import (
+        AddPinOperation,
+        TopologyPin,
+    )
+
+    with pytest.raises(RuntimeError, match="dedicated OA/CDF or pin-geometry Gate"):
+        bridge_worker._compile_generic_topology_commands(
+            [AddPinOperation(pin=TopologyPin(name="X", net="X"))],
+            instance_builder=lambda *args: "unused",
+            terminal_label_builder=lambda *args: "unused",
+        )
+
+
+def test_generic_topology_master_scope_is_existing_or_profile_bound() -> None:
+    from virtuoso_design_agent.topology_delta import (
+        AddInstanceOperation,
+        TopologyInstance,
+        TopologyMaster,
+        snapshot_from_inspection,
+    )
+
+    before = snapshot_from_inspection(
+        {
+            "instances": [
+                {
+                    "name": "M0",
+                    "library": "existing_blocks",
+                    "cell": "device",
+                    "view": "symbol",
+                    "terminals": {},
+                    "xy": [0.0, 0.0],
+                    "orient": "R0",
+                    "numInst": 1,
+                }
+            ],
+            "nets": [],
+            "pins": [],
+        }
+    )
+    disallowed = AddInstanceOperation(
+        instance=TopologyInstance(
+            name="X0",
+            master=TopologyMaster(
+                library="unrelated_lib", cell="x", view="symbol"
+            ),
+            terminals={},
+            attributes={"xy": [1.0, 0.0], "orient": "R0", "numInst": 1},
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="outside the existing/profile boundary"):
+        bridge_worker._generic_topology_allowed_master_libraries(
+            before,
+            [disallowed],
+            {"tech_library": "tsmcN28"},
+        )
+
+
+def _generic_bridge_source_degeneration_readbacks() -> tuple[dict, dict]:
+    before = {
+        "instances": [
+            {
+                "name": "MN0",
+                "lib": "tsmcN28",
+                "cell": "nch_lvt_mac",
+                "view": "symbol",
+                "xy": [0.0, 0.0],
+                "orient": "R0",
+                "numInst": 1,
+                "params": {"Wfg": "1u", "l": "30n"},
+                "terms": {"D": "OUT", "G": "IN", "S": "VSS", "B": "VSS"},
+            }
+        ],
+        "nets": {
+            name: {"connections": [], "numBits": 1, "sigType": "signal", "isGlobal": False}
+            for name in ("IN", "OUT", "VSS")
+        },
+        "pins": {
+            "IN": {"direction": "input", "numBits": 1},
+            "OUT": {"direction": "output", "numBits": 1},
+            "VSS": {"direction": "inputOutput", "numBits": 1},
+        },
+    }
+    after = deepcopy(before)
+    after["instances"][0]["terms"]["S"] = "NSRC"
+    after["instances"].append(
+        {
+            "name": "RS0",
+            "lib": "analogLib",
+            "cell": "res",
+            "view": "symbol",
+            "xy": [0.0, -1.3],
+            "orient": "R0",
+            "numInst": 1,
+            "params": {"r": "1K"},
+            "terms": {"PLUS": "NSRC", "MINUS": "VSS"},
+        }
+    )
+    after["nets"]["NSRC"] = {
+        "connections": ["MN0.S", "RS0.PLUS"],
+        "numBits": 1,
+        "sigType": "signal",
+        "isGlobal": False,
+    }
+    return before, after
+
+
+def test_generic_topology_worker_binds_append_write_to_independent_readback(
+    monkeypatch,
+) -> None:
+    from virtuoso_design_agent.topology_delta import derive_topology_delta
+
+    before, after = _generic_bridge_source_degeneration_readbacks()
+    contract = derive_topology_delta(
+        "generic-source-degeneration",
+        {"topology": bridge_worker._generic_topology_readback(before)},
+        {"topology": bridge_worker._generic_topology_readback(after)},
+    )
+    reads = iter([before, after])
+    commands: list[str] = []
+
+    class Editor:
+        def __enter__(self):
+            return self
+
+        def add(self, command):
+            commands.append(command)
+
+        def __exit__(self, *_args):
+            return False
+
+    client = SimpleNamespace(
+        schematic=SimpleNamespace(edit=lambda *_args, **_kwargs: Editor())
+    )
+    monkeypatch.setattr(bridge_worker, "_client", lambda: client)
+    monkeypatch.setattr(bridge_worker, "_read_schematic", lambda *_args: next(reads))
+    monkeypatch.setattr(
+        bridge_worker,
+        "_compile_generic_topology_commands",
+        lambda operations: (["compiled-batch"], [operations[0].operation]),
+    )
+
+    result = bridge_worker.transform_existing_schematic_topology_delta(
+        {
+            "target": {"library": "vda_test", "cell": "vda_generic"},
+            "profile": {"tech_library": "tsmcN28"},
+            "topology_delta": {
+                "direction": "forward",
+                "contract": contract.model_dump(mode="json"),
+            },
+        }
+    )
+
+    assert commands == ["compiled-batch"]
+    assert result["append_mode"] is True
+    assert result["replace_existing"] is False
+    assert result["preserved_instance_parameters"] is True
+    assert result["actual_output_topology_sha256"] == contract.expected_after_sha256
+    assert result["contract_audit"]["source"] == "software_inference"
+
+
+def test_generic_topology_worker_purges_unsaved_edit_after_command_failure(
+    monkeypatch,
+) -> None:
+    from virtuoso_design_agent.topology_delta import derive_topology_delta
+
+    before, after = _generic_bridge_source_degeneration_readbacks()
+    contract = derive_topology_delta(
+        "generic-source-degeneration",
+        {"topology": bridge_worker._generic_topology_readback(before)},
+        {"topology": bridge_worker._generic_topology_readback(after)},
+    )
+    cleaned: list[tuple[str, str]] = []
+
+    class FailingEditor:
+        def __enter__(self):
+            return self
+
+        def add(self, _command):
+            raise RuntimeError("synthetic command failure")
+
+        def __exit__(self, *_args):
+            return False
+
+    client = SimpleNamespace(
+        schematic=SimpleNamespace(edit=lambda *_args, **_kwargs: FailingEditor())
+    )
+    monkeypatch.setattr(bridge_worker, "_client", lambda: client)
+    monkeypatch.setattr(bridge_worker, "_read_schematic", lambda *_args: before)
+    monkeypatch.setattr(
+        bridge_worker,
+        "_compile_generic_topology_commands",
+        lambda _operations: (["compiled-batch"], ["add_net"]),
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_discard_failed_existing_schematic_edit",
+        lambda _client, library, cell: cleaned.append((library, cell)),
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic command failure"):
+        bridge_worker.transform_existing_schematic_topology_delta(
+            {
+                "target": {"library": "vda_test", "cell": "vda_generic"},
+                "profile": {"tech_library": "tsmcN28"},
+                "topology_delta": {
+                    "direction": "forward",
+                    "contract": contract.model_dump(mode="json"),
+                },
+            }
+        )
+
+    assert cleaned == [("vda_test", "vda_generic")]
+
+
 def test_bridge_payload_preserves_raw_instance_search_dimensions() -> None:
     task = TaskSpec.model_validate(
         {

@@ -49,6 +49,22 @@ from virtuoso_design_agent.metrics import (
 )
 from virtuoso_design_agent.spectre_values import spectre_values_equal
 from virtuoso_design_agent.calculator_expressions import calculator_expressions_equal
+from virtuoso_design_agent.topology_delta import (
+    AddInstanceOperation,
+    AddNetOperation,
+    AddPinOperation,
+    ReconnectTerminalOperation,
+    RemoveInstanceOperation,
+    RemoveNetOperation,
+    RemovePinOperation,
+    ReplaceMasterOperation,
+    TopologyDeltaExecutionSpec,
+    TopologyInstance,
+    apply_topology_delta_execution,
+    snapshot_from_inspection,
+    topology_fingerprint,
+    validate_topology_execution_readback,
+)
 
 _MARKER = "VDA_RESULT="
 _WORKER_RESOURCES: list[Any] = []
@@ -355,7 +371,52 @@ def _existing_schematic_summary(data: dict[str, Any]) -> dict[str, Any]:
         "nets": sorted(data.get("nets", {}).keys()),
         "pins": sorted(data.get("pins", {}).keys()),
         "instance_parameters": _instance_parameters_from_schematic(data),
+        "topology": _generic_topology_readback(data),
         "bridge_schematic": data,
+    }
+
+
+def _generic_topology_readback(data: dict[str, Any]) -> dict[str, Any]:
+    """Project Bridge readback onto the writable generic-topology contract."""
+
+    instances = []
+    for item in data.get("instances", []):
+        instances.append(
+            {
+                "name": item.get("name"),
+                "library": item.get("lib"),
+                "cell": item.get("cell"),
+                "view": item.get("view"),
+                "terminals": dict(item.get("terms", {})),
+                "xy": item.get("xy"),
+                "orient": item.get("orient"),
+                "numInst": item.get("numInst", 1),
+            }
+        )
+    nets = []
+    for name, item in data.get("nets", {}).items():
+        attributes = {
+            str(key): value
+            for key, value in dict(item or {}).items()
+            if key != "connections"
+        }
+        nets.append({"name": str(name), **attributes})
+    pins = []
+    for name, item in data.get("pins", {}).items():
+        attributes = dict(item or {})
+        direction = attributes.pop("direction", None)
+        pins.append(
+            {
+                "name": str(name),
+                "net": str(name),
+                "direction": direction,
+                **attributes,
+            }
+        )
+    return {
+        "instances": sorted(instances, key=lambda item: str(item["name"])),
+        "nets": sorted(nets, key=lambda item: item["name"]),
+        "pins": sorted(pins, key=lambda item: item["name"]),
     }
 
 
@@ -5711,13 +5772,24 @@ def apply_inverter_parameters(payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _mn0_source_label_selection_operation(
+def _skill_string(value: str) -> str:
+    if any(ord(character) < 32 for character in value):
+        raise RuntimeError("OA identifiers and net names cannot contain control characters")
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _instance_terminal_label_selection_operation(
     *,
     rename: bool,
-    current_label: str = "VSS",
-    replacement_label: str = "NSRC",
-    instance_name: str = "MN0",
+    current_label: str,
+    replacement_label: str,
+    instance_name: str,
+    terminal: str,
 ) -> str:
+    instance_name = _skill_string(instance_name)
+    terminal = _skill_string(terminal)
+    current_label = _skill_string(current_label)
+    replacement_label = _skill_string(replacement_label)
     final_action = (
         f'rbLabel~>theLabel = "{replacement_label}" rbLabel'
         if rename
@@ -5727,23 +5799,39 @@ def _mn0_source_label_selection_operation(
         "let((rbInst rbTerm rbPin rbFig rbBBox rbCtr rbLabels rbLabel rbDx rbDy) "
         f'rbInst = car(setof(x cv~>instances x~>name == "{instance_name}")) '
         f'unless(rbInst error("{instance_name} not found during source-degeneration transform")) '
-        'rbTerm = car(setof(x rbInst~>master~>terminals x~>name == "S")) '
-        f'unless(rbTerm error("{instance_name}.S not found during source-degeneration transform")) '
+        f'rbTerm = car(setof(x rbInst~>master~>terminals x~>name == "{terminal}")) '
+        f'unless(rbTerm error("{instance_name}.{terminal} not found during topology transform")) '
         "rbPin = car(rbTerm~>pins) "
         "rbFig = when(rbPin car(rbPin~>figs)) "
         "rbBBox = when(rbFig dbTransformBBox(rbFig~>bBox rbInst~>transform)) "
         "rbCtr = when(rbBBox list("
         "(xCoord(car(rbBBox)) + xCoord(cadr(rbBBox))) / 2.0 "
         "(yCoord(car(rbBBox)) + yCoord(cadr(rbBBox))) / 2.0)) "
-        f'unless(rbCtr error("{instance_name}.S center could not be resolved")) '
+        f'unless(rbCtr error("{instance_name}.{terminal} center could not be resolved")) '
         "rbLabels = setof(x cv~>shapes "
         f'x~>objType == "label" && x~>theLabel == "{current_label}" && x~>xy && '
         "let((dx dy) dx = xCoord(x~>xy) - xCoord(rbCtr) "
         "dy = yCoord(x~>xy) - yCoord(rbCtr) "
         "dx * dx + dy * dy <= 0.02)) "
-        f'unless(length(rbLabels) == 1 error("{instance_name}.S {current_label} label selection was not unique")) '
+        f'unless(length(rbLabels) == 1 error("{instance_name}.{terminal} {current_label} label selection was not unique")) '
         "rbLabel = car(rbLabels) "
         f"{final_action})"
+    )
+
+
+def _mn0_source_label_selection_operation(
+    *,
+    rename: bool,
+    current_label: str = "VSS",
+    replacement_label: str = "NSRC",
+    instance_name: str = "MN0",
+) -> str:
+    return _instance_terminal_label_selection_operation(
+        rename=rename,
+        current_label=current_label,
+        replacement_label=replacement_label,
+        instance_name=instance_name,
+        terminal="S",
     )
 
 
@@ -5769,6 +5857,9 @@ def _instance_terminal_stub_selection_operation(
     instance_name: str = "RS0",
 ) -> str:
     """Select one VDA-created instance-terminal label and wire by geometry."""
+    terminal = _skill_string(terminal)
+    net_name = _skill_string(net_name)
+    instance_name = _skill_string(instance_name)
     final_action = (
         "dbDeleteObject(rbLabel) dbDeleteObject(rbWire) t"
         if delete
@@ -5826,6 +5917,155 @@ def _edit_existing_schematic(client, library: str, cell: str, *, timeout: int = 
     return client.schematic.edit(
         library, cell, mode="a", timeout=timeout
     )
+
+
+def _generic_instance_placement(instance: TopologyInstance) -> tuple[float, float, str]:
+    attributes = dict(instance.attributes)
+    unknown = sorted(set(attributes) - {"xy", "orient", "numInst"})
+    if unknown:
+        raise RuntimeError(
+            f"generic OA instance {instance.name!r} has unsupported structural "
+            f"attributes: {unknown}"
+        )
+    xy = attributes.get("xy")
+    orient = attributes.get("orient")
+    if (
+        not isinstance(xy, list)
+        or len(xy) != 2
+        or any(not isinstance(value, (int, float)) for value in xy)
+        or any(not math.isfinite(float(value)) for value in xy)
+    ):
+        raise RuntimeError(
+            f"generic OA instance {instance.name!r} requires finite xy=[x, y]"
+        )
+    if not isinstance(orient, str) or not orient:
+        raise RuntimeError(
+            f"generic OA instance {instance.name!r} requires an orientation"
+        )
+    if attributes.get("numInst", 1) != 1:
+        raise RuntimeError(
+            "generic OA topology delta currently supports only scalar instances"
+        )
+    return float(xy[0]), float(xy[1]), orient
+
+
+def _generic_delete_instance_operation(instance: TopologyInstance) -> str:
+    operations = [
+        _instance_terminal_stub_selection_operation(
+            terminal,
+            net,
+            delete=True,
+            instance_name=instance.name,
+        )
+        for terminal, net in sorted(instance.terminals.items())
+    ]
+    name = _skill_string(instance.name)
+    operations.append(
+        "let((rbInst) "
+        f'rbInst = car(setof(x cv~>instances x~>name == "{name}")) '
+        f'unless(rbInst error("{name} not found during generic topology removal")) '
+        "dbDeleteObject(rbInst) t)"
+    )
+    return " ".join(operations)
+
+
+def _compile_generic_topology_commands(
+    operations: list[Any],
+    *,
+    instance_builder=None,
+    terminal_label_builder=None,
+) -> tuple[list[str], list[str]]:
+    """Compile bounded graph operations to the existing Bridge editor surface."""
+
+    if instance_builder is None or terminal_label_builder is None:
+        from virtuoso_bridge.virtuoso.schematic.ops import (
+            schematic_create_inst_by_master_name,
+            schematic_label_instance_term,
+        )
+
+        instance_builder = (
+            instance_builder or schematic_create_inst_by_master_name
+        )
+        terminal_label_builder = (
+            terminal_label_builder or schematic_label_instance_term
+        )
+
+    commands: list[str] = []
+    declarative_operations: list[str] = []
+    for operation in operations:
+        if isinstance(operation, (AddNetOperation, RemoveNetOperation)):
+            # OA nets are materialized by the instance-terminal labels.  The
+            # complete post-readback fingerprint proves creation/removal.
+            declarative_operations.append(operation.operation)
+        elif isinstance(operation, ReconnectTerminalOperation):
+            commands.append(
+                _instance_terminal_label_selection_operation(
+                    rename=True,
+                    current_label=operation.expected_net,
+                    replacement_label=operation.net,
+                    instance_name=operation.instance,
+                    terminal=operation.terminal,
+                )
+            )
+        elif isinstance(operation, AddInstanceOperation):
+            instance = operation.instance
+            x, y, orient = _generic_instance_placement(instance)
+            commands.append(
+                instance_builder(
+                    instance.master.library,
+                    instance.master.cell,
+                    instance.master.view or "symbol",
+                    instance.name,
+                    x,
+                    y,
+                    orient,
+                )
+            )
+            commands.extend(
+                terminal_label_builder(instance.name, terminal, net)
+                for terminal, net in sorted(instance.terminals.items())
+            )
+        elif isinstance(operation, RemoveInstanceOperation):
+            _generic_instance_placement(operation.expected)
+            commands.append(_generic_delete_instance_operation(operation.expected))
+        elif isinstance(
+            operation,
+            (ReplaceMasterOperation, AddPinOperation, RemovePinOperation),
+        ):
+            raise RuntimeError(
+                f"generic OA compiler does not yet execute {operation.operation}; "
+                "the serializable/local reversible contract supports it, but a "
+                "dedicated OA/CDF or pin-geometry Gate is still required"
+            )
+        else:  # pragma: no cover - exhaustive typed operation union
+            raise AssertionError(f"unsupported generic topology operation: {operation}")
+    return commands, declarative_operations
+
+
+def _generic_topology_allowed_master_libraries(
+    before_snapshot: Any,
+    operations: list[Any],
+    profile: dict[str, Any],
+) -> list[str]:
+    allowed = {
+        item.master.library for item in before_snapshot.instances
+    } | {"analogLib", str(profile["tech_library"])}
+    requested = {
+        operation.instance.master.library
+        for operation in operations
+        if isinstance(operation, AddInstanceOperation)
+    } | {
+        operation.master.library
+        for operation in operations
+        if isinstance(operation, ReplaceMasterOperation)
+    }
+    disallowed = sorted(requested - allowed)
+    if disallowed:
+        raise RuntimeError(
+            "generic topology delta requested master libraries outside the "
+            "existing/profile boundary: " + ", ".join(disallowed)
+        )
+    return sorted(allowed)
 
 
 def _preflight_mn0_source_label(client, library: str, cell: str) -> None:
@@ -6720,10 +6960,113 @@ def inspect_common_source(payload: dict[str, Any]) -> dict[str, Any]:
 def inspect_existing_schematic(payload: dict[str, Any]) -> dict[str, Any]:
     client = _client()
     library, cell = _target(payload)
+    if not _schematic_exists(client, library, cell):
+        raise RuntimeError(
+            f"target schematic does not exist: {library}/{cell}/schematic"
+        )
     data = _read_schematic(client, library, cell)
     return _attach_targeted_parameter_verification(
         client, library, cell, payload, _existing_schematic_summary(data)
     )
+
+
+def transform_existing_schematic_topology_delta(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Execute one exact direction of a predeclared, bounded topology delta."""
+
+    raw_execution = payload.get("topology_delta")
+    if not isinstance(raw_execution, dict):
+        raise RuntimeError(
+            "generic existing-schematic transform requires topology_delta"
+        )
+    execution = TopologyDeltaExecutionSpec.model_validate(raw_execution)
+    operations = (
+        execution.contract.operations
+        if execution.direction == "forward"
+        else execution.contract.inverse_operations
+    )
+
+    client = _client()
+    library, cell = _target(payload)
+    before = _read_schematic(client, library, cell)
+    before_summary = _existing_schematic_summary(before)
+    before_snapshot = snapshot_from_inspection(before_summary)
+    expected_after = apply_topology_delta_execution(before_snapshot, execution)
+    # Prove the declared opposite direction locally before opening append mode.
+    validate_topology_execution_readback(
+        before_snapshot,
+        expected_after,
+        execution,
+    )
+    allowed_master_libraries = _generic_topology_allowed_master_libraries(
+        before_snapshot,
+        operations,
+        payload["profile"],
+    )
+    commands, declarative_operations = _compile_generic_topology_commands(operations)
+    before_parameters = _instance_parameters_from_schematic(before)
+
+    if commands:
+        try:
+            with _edit_existing_schematic(
+                client, library, cell, timeout=120
+            ) as schematic:
+                for command in commands:
+                    schematic.add(command)
+        except Exception as edit_error:
+            try:
+                _discard_failed_existing_schematic_edit(client, library, cell)
+            except Exception as cleanup_error:
+                raise RuntimeError(
+                    "generic topology edit failed and unsaved-edit cleanup also "
+                    f"failed: {cleanup_error}"
+                ) from edit_error
+            raise
+
+    after = _read_schematic(client, library, cell)
+    after_summary = _existing_schematic_summary(after)
+    audit = validate_topology_execution_readback(
+        before_summary,
+        after_summary,
+        execution,
+    )
+    after_parameters = _instance_parameters_from_schematic(after)
+    preserved_instances = sorted(set(before_parameters) & set(after_parameters))
+    changed_parameters = [
+        name
+        for name in preserved_instances
+        if before_parameters[name] != after_parameters[name]
+    ]
+    if changed_parameters:
+        raise RuntimeError(
+            "generic topology transform changed parameters on preserved instances: "
+            + ", ".join(changed_parameters)
+        )
+    actual_after_sha256 = topology_fingerprint(
+        snapshot_from_inspection(after_summary)
+    )
+    return {
+        "contract_id": execution.contract.id,
+        "direction": execution.direction,
+        "operation_count": len(operations),
+        "operation_kinds": [operation.operation for operation in operations],
+        "compiled_editor_command_count": len(commands),
+        "declarative_net_operations": declarative_operations,
+        "append_mode": True,
+        "replace_existing": False,
+        "allowed_master_libraries": allowed_master_libraries,
+        "input_topology_sha256": topology_fingerprint(before_snapshot),
+        "expected_output_topology_sha256": topology_fingerprint(expected_after),
+        "actual_output_topology_sha256": actual_after_sha256,
+        "preserved_instance_parameters": True,
+        "preserved_instances": preserved_instances,
+        "contract_audit": {
+            "source": "software_inference",
+            **audit.model_dump(mode="json"),
+        },
+        "readback": after_summary,
+    }
 
 
 def apply_existing_schematic_parameters(payload: dict[str, Any]) -> dict[str, Any]:
@@ -13651,6 +13994,9 @@ _ACTIONS = {
     "apply_maestro_corners": apply_maestro_corners,
     "apply_maestro_setup": apply_maestro_setup,
     "inspect_existing_schematic": inspect_existing_schematic,
+    "transform_existing_schematic_topology_delta": (
+        transform_existing_schematic_topology_delta
+    ),
     "apply_existing_schematic_parameters": apply_existing_schematic_parameters,
     "create_inverter": create_inverter,
     "inspect_inverter": inspect_inverter,

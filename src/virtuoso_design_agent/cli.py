@@ -57,6 +57,7 @@ from .theory_seed_validation import (
     TheorySeedValidationPolicy,
     validate_theory_seed_run,
 )
+from .topology_delta import compile_topology_delta
 
 
 def _load_task(path: Path) -> TaskSpec:
@@ -245,6 +246,45 @@ def _cmd_small_signal(args: argparse.Namespace) -> int:
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(payload, encoding="utf-8")
+    print(payload)
+    return 0
+
+
+def _inspection_details(payload: object) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("topology readback JSON must be an object")
+    actions = payload.get("actions")
+    if isinstance(actions, list):
+        for action in reversed(actions):
+            if (
+                isinstance(action, dict)
+                and action.get("status") == "succeeded"
+                and str(action.get("action", "")).startswith("schematic.inspect")
+                and isinstance(action.get("details"), dict)
+            ):
+                return action["details"]
+        raise ValueError(
+            "run record has no successful schematic.inspect action with details"
+        )
+    return payload
+
+
+def _cmd_topology_compile(args: argparse.Namespace) -> int:
+    readback = _inspection_details(
+        json.loads(args.readback.read_text(encoding="utf-8"))
+    )
+    raw_operations = json.loads(args.operations.read_text(encoding="utf-8"))
+    operations = (
+        raw_operations.get("operations")
+        if isinstance(raw_operations, dict)
+        else raw_operations
+    )
+    if not isinstance(operations, list):
+        raise ValueError("topology operations JSON must be a list or an operations list")
+    contract = compile_topology_delta(args.id, readback, operations)
+    payload = contract.model_dump_json(indent=2)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(payload + "\n", encoding="utf-8")
     print(payload)
     return 0
 
@@ -625,6 +665,19 @@ def build_parser() -> argparse.ArgumentParser:
     characterization_task.add_argument("--operating-condition")
     characterization_task.add_argument("--output", type=Path, required=True)
     characterization_task.set_defaults(handler=_cmd_characterization_task_from_run)
+
+    topology_compile = subparsers.add_parser(
+        "topology-compile",
+        help=(
+            "compile explicit graph operations against one successful schematic "
+            "inspection into an exact reversible contract"
+        ),
+    )
+    topology_compile.add_argument("readback", type=Path)
+    topology_compile.add_argument("operations", type=Path)
+    topology_compile.add_argument("--id", required=True)
+    topology_compile.add_argument("--output", type=Path, required=True)
+    topology_compile.set_defaults(handler=_cmd_topology_compile)
 
     run = subparsers.add_parser("run", help="plan or execute a task")
     run.add_argument("task", type=Path)

@@ -1051,7 +1051,7 @@ def test_raw_instance_parameter_space_is_tuning_only_and_string_strict() -> None
         )
 
 
-def test_existing_schematic_exposes_only_read_and_manual_parameter_write() -> None:
+def test_existing_schematic_exposes_read_manual_parameters_and_bounded_topology() -> None:
     inspect = TaskSpec.model_validate(
         {
             "id": "inspect-existing",
@@ -1068,6 +1068,63 @@ def test_existing_schematic_exposes_only_read_and_manual_parameter_write() -> No
     )
     with pytest.raises(UnsupportedCapability, match="manual OA surface"):
         build_plan(invalid)
+
+    topology = TaskSpec.model_validate(
+        {
+            "id": "generic-topology-noop",
+            "operation": "schematic.transform",
+            "circuit": "existing_schematic",
+            "target": {"library": "vda_test", "cell": "vda_existing"},
+            "topology_delta": {
+                "direction": "forward",
+                "contract": {
+                    "id": "noop",
+                    "expected_before_sha256": "a" * 64,
+                    "expected_after_sha256": "a" * 64,
+                    "operations": [],
+                    "inverse_operations": [],
+                },
+            },
+        }
+    )
+    assert build_plan(topology).operation.value == "schematic.transform"
+
+
+def test_generic_topology_transform_requires_isolated_nonreplace_contract() -> None:
+    base = {
+        "id": "generic-topology",
+        "operation": "schematic.transform",
+        "circuit": "existing_schematic",
+        "target": {"library": "vda_test", "cell": "vda_existing"},
+    }
+    with pytest.raises(ValidationError, match="predeclared topology_delta"):
+        TaskSpec.model_validate(base)
+
+    topology_delta = {
+        "contract": {
+            "id": "noop",
+            "expected_before_sha256": "a" * 64,
+            "expected_after_sha256": "a" * 64,
+            "operations": [],
+            "inverse_operations": [],
+        }
+    }
+    with pytest.raises(ValidationError, match="never replaces"):
+        TaskSpec.model_validate(
+            base
+            | {
+                "topology_delta": topology_delta,
+                "safety": {"replace_existing": True},
+            }
+        )
+    with pytest.raises(ValidationError, match="does not accept semantic parameters"):
+        TaskSpec.model_validate(
+            base
+            | {
+                "topology_delta": topology_delta,
+                "parameters": {"vdd_v": 0.9},
+            }
+        )
 
 
 @pytest.mark.parametrize(

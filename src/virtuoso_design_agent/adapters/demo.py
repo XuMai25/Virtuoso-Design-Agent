@@ -25,6 +25,11 @@ from ..models import (
     TaskSpec,
 )
 from ..profiles import load_pdk_profile
+from ..topology_delta import (
+    apply_topology_delta_execution,
+    snapshot_from_inspection,
+    topology_fingerprint,
+)
 from .base import AdapterResult, merge_analysis_bundle
 
 
@@ -362,6 +367,8 @@ class DeterministicDemoAdapter:
                 for instance, parameters in schematic["instance_parameters"].items()
             },
         }
+        if "topology" in schematic:
+            data["topology"] = schematic["topology"]
         return AdapterResult(
             data=data,
             evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
@@ -371,6 +378,45 @@ class DeterministicDemoAdapter:
         schematic = self._schematics.get(self._key(task))
         if schematic is None:
             raise RuntimeError("demo schematic does not exist")
+        if task.circuit is CircuitKind.EXISTING_SCHEMATIC:
+            if task.topology_delta is None:
+                raise RuntimeError(
+                    "generic demo topology transform requires topology_delta"
+                )
+            before = snapshot_from_inspection(self.inspect_schematic(task).data)
+            after = apply_topology_delta_execution(before, task.topology_delta)
+            prior_parameters = {
+                name: dict(parameters)
+                for name, parameters in schematic["instance_parameters"].items()
+            }
+            schematic["topology"] = after.model_dump(mode="json")
+            schematic["instances"] = [
+                {
+                    "name": item.name,
+                    "library": item.master.library,
+                    "cell": item.master.cell,
+                    "view": item.master.view,
+                    "terminals": dict(item.terminals),
+                    **dict(item.attributes),
+                }
+                for item in after.instances
+            ]
+            schematic["nets"] = [item.name for item in after.nets]
+            schematic["pins"] = [item.name for item in after.pins]
+            schematic["instance_parameters"] = {
+                item.name: prior_parameters.get(item.name, {})
+                for item in after.instances
+            }
+            return AdapterResult(
+                data={
+                    "contract_id": task.topology_delta.contract.id,
+                    "direction": task.topology_delta.direction,
+                    "input_topology_sha256": topology_fingerprint(before),
+                    "actual_output_topology_sha256": topology_fingerprint(after),
+                    "source": "software_inference",
+                },
+                evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+            )
         if task.circuit is CircuitKind.INVERTER:
             variant = schematic.get("topology_variant")
             changed = variant == "inverter"

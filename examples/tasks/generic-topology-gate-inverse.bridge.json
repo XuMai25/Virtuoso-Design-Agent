@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "id": "generic-topology-gate-inverse",
+  "operation": "schematic.transform",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_generic_topology_delta_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "topology_delta": {
+    "direction": "inverse",
+    "contract": {
+        "id": "generic-source-degeneration-v1",
+        "expected_before_sha256": "4471c93914bf888a3c17df01ca3b97625353e8e0e5b3e2f5110e4d5684d4dea9",
+        "expected_after_sha256": "68e0cbcd7d00900fde010e7b44c354d4cd73cc525434cff943db4274845a67ed",
+        "operations": [
+          {
+            "operation": "add_net",
+            "net": {
+              "name": "NSRC",
+              "attributes": {
+                "isGlobal": false,
+                "numBits": 1,
+                "sigType": "signal"
+              }
+            }
+          },
+          {
+            "operation": "reconnect_terminal",
+            "instance": "MN0",
+            "terminal": "S",
+            "expected_net": "VSS",
+            "net": "NSRC"
+          },
+          {
+            "operation": "add_instance",
+            "instance": {
+              "name": "RS0",
+              "master": {
+                "library": "analogLib",
+                "cell": "res",
+                "view": "symbol"
+              },
+              "terminals": {
+                "MINUS": "VSS",
+                "PLUS": "NSRC"
+              },
+              "attributes": {
+                "numInst": 1,
+                "orient": "R0",
+                "xy": [0.0, -1.3]
+              }
+            }
+          }
+        ],
+        "inverse_operations": [
+          {
+            "operation": "remove_instance",
+            "expected": {
+              "name": "RS0",
+              "master": {
+                "library": "analogLib",
+                "cell": "res",
+                "view": "symbol"
+              },
+              "terminals": {
+                "MINUS": "VSS",
+                "PLUS": "NSRC"
+              },
+              "attributes": {
+                "numInst": 1,
+                "orient": "R0",
+                "xy": [0.0, -1.3]
+              }
+            }
+          },
+          {
+            "operation": "reconnect_terminal",
+            "instance": "MN0",
+            "terminal": "S",
+            "expected_net": "NSRC",
+            "net": "VSS"
+          },
+          {
+            "operation": "remove_net",
+            "expected": {
+              "name": "NSRC",
+              "attributes": {
+                "isGlobal": false,
+                "numBits": 1,
+                "sigType": "signal"
+              }
+            }
+          }
+        ]
+      }
+  },
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}

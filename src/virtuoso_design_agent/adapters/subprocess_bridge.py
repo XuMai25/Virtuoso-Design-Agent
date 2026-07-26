@@ -26,6 +26,7 @@ _WORKER_COOPERATIVE_CLEANUP_SECONDS = 30.0
 _WORKER_ACTIONS = {
     CircuitKind.EXISTING_SCHEMATIC: {
         "inspect": "inspect_existing_schematic",
+        "transform": "transform_existing_schematic_topology_delta",
         "apply": "apply_existing_schematic_parameters",
     },
     CircuitKind.INVERTER: {
@@ -340,6 +341,11 @@ class SubprocessBridgeAdapter:
             "schematic_transform": (
                 task.schematic_transform.model_dump(mode="json", exclude_none=True)
                 if task.schematic_transform is not None
+                else None
+            ),
+            "topology_delta": (
+                task.topology_delta.model_dump(mode="json")
+                if task.topology_delta is not None
                 else None
             ),
             "instance_parameter_updates": [

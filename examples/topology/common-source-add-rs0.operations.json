@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "operations": [
+    {
+      "operation": "add_net",
+      "net": {
+        "name": "NSRC",
+        "attributes": {
+          "isGlobal": false,
+          "numBits": 1,
+          "sigType": "signal"
+        }
+      }
+    },
+    {
+      "operation": "reconnect_terminal",
+      "instance": "MN0",
+      "terminal": "S",
+      "expected_net": "VSS",
+      "net": "NSRC"
+    },
+    {
+      "operation": "add_instance",
+      "instance": {
+        "name": "RS0",
+        "master": {
+          "library": "analogLib",
+          "cell": "res",
+          "view": "symbol"
+        },
+        "terminals": {
+          "MINUS": "VSS",
+          "PLUS": "NSRC"
+        },
+        "attributes": {
+          "numInst": 1,
+          "orient": "R0",
+          "xy": [0.0, -1.3]
+        }
+      }
+    }
+  ]
+}

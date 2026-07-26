@@ -17,6 +17,8 @@ from pydantic import (
     model_validator,
 )
 
+from .topology_delta import TopologyDeltaExecutionSpec
+
 # The default is the currently verified foundry-CMOS environment. Packaging,
 # TSV, and hybrid-bonding profiles must always be selected explicitly.
 DEFAULT_PDK_PROFILE = "nics4304_tsmc28"
@@ -1882,6 +1884,7 @@ class TaskSpec(StrictModel):
     ade_corners: AdeCornersApplySpec | None = None
     ade_setup: AdeSetupApplySpec | None = None
     schematic_transform: SchematicTransformSpec | None = None
+    topology_delta: TopologyDeltaExecutionSpec | None = None
     device_characterization: DeviceCharacterizationSpec | None = None
     operating_conditions: list[OperatingCondition] = Field(
         default_factory=list,
@@ -1949,6 +1952,7 @@ class TaskSpec(StrictModel):
                 or self.ade_corners is not None
                 or self.ade_setup is not None
                 or self.schematic_transform is not None
+                or self.topology_delta is not None
                 or self.operating_conditions
                 or self.parameters
                 or self.instance_parameter_updates
@@ -2506,7 +2510,35 @@ class TaskSpec(StrictModel):
                 raise ValueError("schematic.transform does not accept candidate_set")
             if self.theory_seed is not None:
                 raise ValueError("schematic.transform does not accept theory_seed")
-            if self.circuit is CircuitKind.COMMON_SOURCE:
+            if self.circuit is CircuitKind.EXISTING_SCHEMATIC:
+                if self.topology_delta is None:
+                    raise ValueError(
+                        "existing_schematic schematic.transform requires a "
+                        "predeclared topology_delta"
+                    )
+                if self.schematic_transform is not None:
+                    raise ValueError(
+                        "generic topology_delta cannot be combined with the fixed "
+                        "schematic_transform action"
+                    )
+                if self.parameters:
+                    raise ValueError(
+                        "generic topology_delta does not accept semantic parameters; "
+                        "device parameters remain a separate parameters.apply contract"
+                    )
+                if self.target is not None and self.target.view != "schematic":
+                    raise ValueError(
+                        "generic topology_delta currently requires target view='schematic'"
+                    )
+                if self.safety.replace_existing:
+                    raise ValueError(
+                        "generic topology_delta never replaces the target cellview"
+                    )
+            elif self.topology_delta is not None:
+                raise ValueError(
+                    "topology_delta currently requires circuit='existing_schematic'"
+                )
+            elif self.circuit is CircuitKind.COMMON_SOURCE:
                 action = self.resolved_schematic_transform_action()
                 if (
                     action is SchematicTransformAction.ADD_SOURCE_DEGENERATION
@@ -2608,6 +2640,10 @@ class TaskSpec(StrictModel):
         elif self.schematic_transform is not None:
             raise ValueError(
                 "schematic_transform settings require operation='schematic.transform'"
+            )
+        elif self.topology_delta is not None:
+            raise ValueError(
+                "topology_delta settings require operation='schematic.transform'"
             )
         if self.operation in _TUNING_OPERATIONS:
             if (

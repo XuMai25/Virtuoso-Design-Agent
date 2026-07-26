@@ -914,6 +914,50 @@ def test_source_degeneration_plan_discloses_minimal_in_place_delta() -> None:
     assert [step.capability for step in plan.steps].count("schematic.inspect") == 2
 
 
+def test_generic_topology_plan_discloses_direction_hashes_and_append_scope() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "generic-topology-forward",
+            "operation": "schematic.transform",
+            "circuit": "existing_schematic",
+            "target": {"library": "vda_test", "cell": "vda_generic"},
+            "topology_delta": {
+                "direction": "forward",
+                "contract": {
+                    "id": "add-rs0",
+                    "expected_before_sha256": "a" * 64,
+                    "expected_after_sha256": "b" * 64,
+                    "operations": [
+                        {
+                            "operation": "add_net",
+                            "net": {"name": "NSRC"},
+                        }
+                    ],
+                    "inverse_operations": [
+                        {
+                            "operation": "remove_net",
+                            "expected": {"name": "NSRC"},
+                        }
+                    ],
+                },
+            },
+        }
+    )
+
+    plan = build_plan(task)
+    transform = next(
+        step
+        for step in plan.steps
+        if step.capability == "schematic.transform.topology-delta.forward"
+    )
+
+    assert transform.side_effect is SideEffect.REMOTE_WRITE
+    assert "add-rs0" in transform.description
+    assert "a" * 64 in transform.description
+    assert "b" * 64 in transform.description
+    assert "不创建或替换" in transform.description
+
+
 def test_source_degeneration_removal_plan_discloses_exact_inverse_delta() -> None:
     task = TaskSpec.model_validate(
         {

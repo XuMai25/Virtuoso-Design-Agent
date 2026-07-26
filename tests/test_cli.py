@@ -49,6 +49,63 @@ def test_run_without_execute_is_plan_only(capsys) -> None:
     assert "No action executed" in output
 
 
+def test_topology_compile_uses_successful_inspection_and_writes_inverse(
+    tmp_path, capsys
+) -> None:
+    readback = tmp_path / "inspect.json"
+    operations = tmp_path / "operations.json"
+    output = tmp_path / "contract.json"
+    readback.write_text(
+        json.dumps(
+            {
+                "actions": [
+                    {
+                        "action": "schematic.inspect",
+                        "status": "succeeded",
+                        "details": {
+                            "instances": [],
+                            "nets": ["VSS"],
+                            "pins": ["VSS"],
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    operations.write_text(
+        json.dumps(
+            {
+                "operations": [
+                    {"operation": "add_net", "net": {"name": "NSRC"}}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "topology-compile",
+                str(readback),
+                str(operations),
+                "--id",
+                "add-nsrc",
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    contract = json.loads(output.read_text(encoding="utf-8"))
+    assert contract["id"] == "add-nsrc"
+    assert contract["operations"][0]["operation"] == "add_net"
+    assert contract["inverse_operations"][0]["operation"] == "remove_net"
+    assert contract["expected_before_sha256"] != contract["expected_after_sha256"]
+    assert "add-nsrc" in capsys.readouterr().out
+
+
 def test_tuning_run_creates_complete_checkpoint_by_default(tmp_path, capsys) -> None:
     task = TaskSpec.model_validate_json(DEMO_TASK.read_text(encoding="utf-8"))
     plan = build_plan(task)

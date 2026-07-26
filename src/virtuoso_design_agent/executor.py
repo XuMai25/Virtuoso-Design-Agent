@@ -39,7 +39,10 @@ from .models import (
 )
 from .safety import authorize_execution
 from .spectre_values import spectre_scalar, spectre_values_equal
-from .topology_delta import audit_derived_topology_delta
+from .topology_delta import (
+    audit_derived_topology_delta,
+    validate_topology_execution_readback,
+)
 
 T = TypeVar("T")
 
@@ -3374,7 +3377,13 @@ class TaskExecutor:
                 )
                 resolved_transform = task.resolved_schematic_transform_action()
                 transform_action = "schematic.transform.inverter-testbench"
-                if task.circuit is CircuitKind.COMMON_SOURCE:
+                if task.circuit is CircuitKind.EXISTING_SCHEMATIC:
+                    assert task.topology_delta is not None
+                    transform_action = (
+                        "schematic.transform.topology-delta."
+                        f"{task.topology_delta.direction}"
+                    )
+                elif task.circuit is CircuitKind.COMMON_SOURCE:
                     transform_action = (
                         "schematic.transform.source-degeneration.remove"
                         if resolved_transform
@@ -3450,7 +3459,21 @@ class TaskExecutor:
                     "schematic.inspect.after",
                     lambda: self.adapter.inspect_schematic(task),
                 )
-                if task.circuit is CircuitKind.INVERTER:
+                if task.circuit is CircuitKind.EXISTING_SCHEMATIC:
+                    assert task.topology_delta is not None
+                    audit = validate_topology_execution_readback(
+                        before.data,
+                        after.data,
+                        task.topology_delta,
+                    )
+                    self._action(
+                        "schematic.transform.topology-delta.predeclared-audit",
+                        lambda: AdapterResult(
+                            data=audit.model_dump(mode="json"),
+                            evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+                        ),
+                    )
+                elif task.circuit is CircuitKind.INVERTER:
                     self._assert_inverter_testbench_delta(
                         before,
                         after,
@@ -3508,17 +3531,18 @@ class TaskExecutor:
                         after,
                         float(task.parameters["source_resistance_ohm"]),
                     )
-                self._action(
-                    "schematic.transform.topology-delta.audit",
-                    lambda: AdapterResult(
-                        data=audit_derived_topology_delta(
-                            f"{task.id}:{transform_action}",
-                            before.data,
-                            after.data,
+                if task.circuit is not CircuitKind.EXISTING_SCHEMATIC:
+                    self._action(
+                        "schematic.transform.topology-delta.audit",
+                        lambda: AdapterResult(
+                            data=audit_derived_topology_delta(
+                                f"{task.id}:{transform_action}",
+                                before.data,
+                                after.data,
+                            ),
+                            evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
                         ),
-                        evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
-                    ),
-                )
+                    )
                 selected_parameters = dict(task.parameters)
             elif operation is Operation.PARAMETERS_APPLY:
                 self._action(

@@ -1,5 +1,7 @@
 # 2026-07-26 通用 topology-delta 可逆契约本地 Gate
 
+> 同日 follow-up 已把契约接入 `existing_schematic` 的真实 Bridge/OA 执行边界，并在全新 cellview 上完成 forward、独立回读、自动 `si`/Spectre DC、inverse 和最终恢复。见[通用 topology-delta 真实同源 Gate](2026-07-26-generic-topology-delta-live.md)。本页保留本地 Gate 当时的范围与结论。
+
 ## 范围
 
 本 Gate 只实现并验证 VDA 本地结构契约，没有连接 nics4304、没有运行 Spectre、没有写 OA，也没有修改 `virtuoso-bridge-lite`。它使用本地结构模型、demo adapter 和既有真实 Bridge run record 的只读 `schematic.inspect.before/after`。

@@ -112,6 +112,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
         executable=True,
         operations=(
             Operation.SCHEMATIC_INSPECT,
+            Operation.SCHEMATIC_TRANSFORM,
             Operation.PARAMETERS_APPLY,
             Operation.ADE_PREPARE,
             Operation.ADE_CAPTURE,
@@ -124,12 +125,16 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
         explicit_instance_parameters=True,
         evidence_gate=(
             "unfiltered Bridge schematic readback + targeted CDF value verification + "
+            "predeclared topology-delta CAS with bounded add/remove-instance, "
+            "terminal reconnect, net operations, complete independent readback and "
+            "exact inverse restoration live on a non-overwrite TSMC N28 cell + "
             "live non-overwrite ADE prepare/setup patch/background run-resume + exact-"
             "history/result/log and OA-to-runtime-input consistency; native Maestro "
             "CL and VDDxCL sweep setup/input-bundle/RDB point binding and pinned "
             "scalar-to-constraint mapping plus test-scope CL x environmental-corner "
-            "raw-result binding live on TSMC N28; human capture, real PVT corners, "
-            "and multi-test/multi-analysis mapping pending"
+            "raw-result binding live on TSMC N28; generic master replacement, pin "
+            "geometry, post-save rollback, human capture, real PVT corners, and "
+            "multi-test/multi-analysis mapping pending"
         ),
     ),
     CircuitKind.INVERTER: CircuitCapability(
@@ -325,7 +330,9 @@ def validate_task_capability(task: TaskSpec) -> None:
             )
     if task.operation is Operation.SCHEMATIC_TRANSFORM:
         transform_action = task.resolved_schematic_transform_action()
-        if task.circuit is CircuitKind.INVERTER:
+        if task.circuit is CircuitKind.EXISTING_SCHEMATIC:
+            expected = set()
+        elif task.circuit is CircuitKind.INVERTER:
             expected = {"vdd_v", "load_ff"}
         elif task.circuit is CircuitKind.DIFFERENTIAL_PAIR:
             if transform_action is SchematicTransformAction.ADD_TAIL_DEVICE:
@@ -346,6 +353,10 @@ def validate_task_capability(task: TaskSpec) -> None:
         else:
             expected = {"source_resistance_ohm"}
         if supplied != expected:
+            if task.circuit is CircuitKind.EXISTING_SCHEMATIC:
+                raise UnsupportedCapability(
+                    "generic topology_delta does not accept semantic parameters"
+                )
             if task.circuit is CircuitKind.INVERTER:
                 raise UnsupportedCapability(
                     "schematic.transform for inverter requires exactly vdd_v and "

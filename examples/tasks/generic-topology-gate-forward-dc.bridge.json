@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "id": "generic-topology-gate-forward-dc",
+  "operation": "simulation.run",
+  "circuit": "common_source",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_generic_topology_delta_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis": "dc",
+  "parameters": {
+    "device_width_um": 1.0,
+    "length_um": 0.03,
+    "load_resistance_ohm": 20000.0,
+    "source_resistance_ohm": 1000.0,
+    "bias_v": 0.35,
+    "vdd_v": 0.9
+  },
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}

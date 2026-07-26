@@ -751,7 +751,30 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             persist.model_copy(update={"id": "03-persist"}),
         ]
     if task.operation is Operation.SCHEMATIC_TRANSFORM:
-        if task.circuit is CircuitKind.INVERTER:
+        if task.circuit is CircuitKind.EXISTING_SCHEMATIC:
+            assert task.topology_delta is not None
+            direction = task.topology_delta.direction
+            contract = task.topology_delta.contract
+            input_sha256 = (
+                contract.expected_before_sha256
+                if direction == "forward"
+                else contract.expected_after_sha256
+            )
+            output_sha256 = (
+                contract.expected_after_sha256
+                if direction == "forward"
+                else contract.expected_before_sha256
+            )
+            capability = f"schematic.transform.topology-delta.{direction}"
+            description = (
+                f"对现有 schematic 执行预声明 topology delta {contract.id!r} 的"
+                f"{direction}方向，共 "
+                f"{len(contract.operations if direction == 'forward' else contract.inverse_operations)} "
+                "个 allowlisted 结构操作；写前完整结构 SHA-256 必须等于 "
+                f"{input_sha256}，写后独立完整回读必须等于 {output_sha256}；"
+                "不改设备参数，不创建或替换目标 cellview"
+            )
+        elif task.circuit is CircuitKind.INVERTER:
             capability = "schematic.transform.inverter-testbench"
             description = (
                 "在同一 cellview 内保留 MN0/MP0 与 pins，新增固定边界的 "

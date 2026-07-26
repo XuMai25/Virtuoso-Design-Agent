@@ -15,9 +15,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from copy import deepcopy
 from typing import Annotated, Any, Literal, TypeAlias
 
-from pydantic import Field, TypeAdapter, field_validator
-
-from .models import EvidenceSource, StrictModel
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _IDENTIFIER_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
@@ -28,7 +26,9 @@ _INSTANCE_CORE_KEYS = {
     "lib",
     "cell",
     "view",
+    "master",
     "terminals",
+    "attributes",
 }
 
 
@@ -36,13 +36,17 @@ class TopologyDeltaError(RuntimeError):
     """A topology contract or readback failed an exact structural check."""
 
 
-class TopologyMaster(StrictModel):
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class TopologyMaster(_StrictModel):
     library: str = Field(min_length=1)
     cell: str = Field(min_length=1)
     view: str | None = Field(default=None, min_length=1)
 
 
-class TopologyInstance(StrictModel):
+class TopologyInstance(_StrictModel):
     name: str = Field(min_length=1)
     master: TopologyMaster
     terminals: dict[str, str]
@@ -62,7 +66,7 @@ class TopologyInstance(StrictModel):
         return dict(sorted(normalized.items()))
 
 
-class TopologyNet(StrictModel):
+class TopologyNet(_StrictModel):
     name: str = Field(min_length=1)
     attributes: dict[str, Any] = Field(default_factory=dict)
 
@@ -73,7 +77,7 @@ class TopologyNet(StrictModel):
         return dict(sorted(normalized.items()))
 
 
-class TopologyPin(StrictModel):
+class TopologyPin(_StrictModel):
     name: str = Field(min_length=1)
     net: str = Field(min_length=1)
     direction: str | None = Field(default=None, min_length=1)
@@ -86,7 +90,7 @@ class TopologyPin(StrictModel):
         return dict(sorted(normalized.items()))
 
 
-class TopologySnapshot(StrictModel):
+class TopologySnapshot(_StrictModel):
     schema_version: Literal[1] = 1
     instances: list[TopologyInstance] = Field(default_factory=list)
     nets: list[TopologyNet] = Field(default_factory=list)
@@ -113,17 +117,17 @@ class TopologySnapshot(StrictModel):
         return sorted(value, key=lambda item: item.name)
 
 
-class AddInstanceOperation(StrictModel):
+class AddInstanceOperation(_StrictModel):
     operation: Literal["add_instance"] = "add_instance"
     instance: TopologyInstance
 
 
-class RemoveInstanceOperation(StrictModel):
+class RemoveInstanceOperation(_StrictModel):
     operation: Literal["remove_instance"] = "remove_instance"
     expected: TopologyInstance
 
 
-class ReconnectTerminalOperation(StrictModel):
+class ReconnectTerminalOperation(_StrictModel):
     operation: Literal["reconnect_terminal"] = "reconnect_terminal"
     instance: str = Field(min_length=1)
     terminal: str = Field(min_length=1)
@@ -131,29 +135,29 @@ class ReconnectTerminalOperation(StrictModel):
     net: str = Field(min_length=1)
 
 
-class ReplaceMasterOperation(StrictModel):
+class ReplaceMasterOperation(_StrictModel):
     operation: Literal["replace_master"] = "replace_master"
     instance: str = Field(min_length=1)
     expected_master: TopologyMaster
     master: TopologyMaster
 
 
-class AddNetOperation(StrictModel):
+class AddNetOperation(_StrictModel):
     operation: Literal["add_net"] = "add_net"
     net: TopologyNet
 
 
-class RemoveNetOperation(StrictModel):
+class RemoveNetOperation(_StrictModel):
     operation: Literal["remove_net"] = "remove_net"
     expected: TopologyNet
 
 
-class AddPinOperation(StrictModel):
+class AddPinOperation(_StrictModel):
     operation: Literal["add_pin"] = "add_pin"
     pin: TopologyPin
 
 
-class RemovePinOperation(StrictModel):
+class RemovePinOperation(_StrictModel):
     operation: Literal["remove_pin"] = "remove_pin"
     expected: TopologyPin
 
@@ -173,7 +177,7 @@ TopologyOperation: TypeAlias = Annotated[
 _OPERATIONS_ADAPTER = TypeAdapter(list[TopologyOperation])
 
 
-class TopologyDeltaContract(StrictModel):
+class TopologyDeltaContract(_StrictModel):
     schema_version: Literal[1] = 1
     id: str = Field(min_length=1, pattern=_IDENTIFIER_PATTERN)
     expected_before_sha256: str = Field(pattern=_SHA256_PATTERN)
@@ -185,7 +189,14 @@ class TopologyDeltaContract(StrictModel):
     )
 
 
-class TopologyDeltaAudit(StrictModel):
+class TopologyDeltaExecutionSpec(_StrictModel):
+    """One direction of an immutable, predeclared topology contract."""
+
+    direction: Literal["forward", "inverse"] = "forward"
+    contract: TopologyDeltaContract
+
+
+class TopologyDeltaAudit(_StrictModel):
     schema_version: Literal[1] = 1
     contract_id: str
     before_sha256: str = Field(pattern=_SHA256_PATTERN)
@@ -195,9 +206,22 @@ class TopologyDeltaAudit(StrictModel):
     inverse_operation_count: int = Field(ge=0)
     forward_readback_match: Literal[True]
     inverse_restored_before: Literal[True]
-    evidence_source: Literal[EvidenceSource.SOFTWARE_INFERENCE] = (
-        EvidenceSource.SOFTWARE_INFERENCE
-    )
+    evidence_source: Literal["software_inference"] = "software_inference"
+
+
+class TopologyDeltaExecutionAudit(_StrictModel):
+    """Exact input/output proof for a predeclared forward or inverse run."""
+
+    schema_version: Literal[1] = 1
+    contract_id: str
+    direction: Literal["forward", "inverse"]
+    input_sha256: str = Field(pattern=_SHA256_PATTERN)
+    expected_output_sha256: str = Field(pattern=_SHA256_PATTERN)
+    actual_output_sha256: str = Field(pattern=_SHA256_PATTERN)
+    operation_count: int = Field(ge=0)
+    output_readback_match: Literal[True]
+    roundtrip_restored_input: Literal[True]
+    evidence_source: Literal["software_inference"] = "software_inference"
 
 
 def _require_unique(values: Iterable[str], kind: str) -> None:
@@ -228,6 +252,9 @@ def _json_value(value: Any, *, context: str) -> Any:
 
 
 def _readback_payload(readback: Mapping[str, Any]) -> Mapping[str, Any]:
+    topology = readback.get("topology")
+    if isinstance(topology, Mapping):
+        return _readback_payload(topology)
     if all(name in readback for name in ("instances", "nets", "pins")):
         return readback
     nested = readback.get("readback")
@@ -245,8 +272,15 @@ def _instance_from_readback(raw: Any) -> TopologyInstance:
     if not isinstance(raw, Mapping):
         raise TopologyDeltaError("schematic instance readback must be an object")
     name = raw.get("name")
-    library = raw.get("library", raw.get("lib"))
-    cell = raw.get("cell")
+    raw_master = raw.get("master")
+    if isinstance(raw_master, Mapping):
+        library = raw_master.get("library")
+        cell = raw_master.get("cell")
+        view = raw_master.get("view")
+    else:
+        library = raw.get("library", raw.get("lib"))
+        cell = raw.get("cell")
+        view = raw.get("view")
     terminals = raw.get("terminals")
     if not isinstance(name, str) or not isinstance(library, str) or not isinstance(
         cell, str
@@ -265,10 +299,14 @@ def _instance_from_readback(raw: Any) -> TopologyInstance:
         raise TopologyDeltaError(
             f"schematic instance {name!r} terminal names and nets must be strings"
         )
-    view = raw.get("view")
     if view is not None and not isinstance(view, str):
         raise TopologyDeltaError(f"schematic instance {name!r} has invalid view")
-    attributes = {
+    raw_attributes = raw.get("attributes", {})
+    if not isinstance(raw_attributes, Mapping):
+        raise TopologyDeltaError(
+            f"schematic instance {name!r} attributes must be an object"
+        )
+    attributes = dict(raw_attributes) | {
         str(key): _json_value(value, context=f"instance {name!r} attribute {key!r}")
         for key, value in raw.items()
         if key not in _INSTANCE_CORE_KEYS | _INSTANCE_NONSTRUCTURAL_KEYS
@@ -289,10 +327,13 @@ def _net_from_readback(raw: Any) -> TopologyNet:
     name = raw.get("name", raw.get("net"))
     if not isinstance(name, str):
         raise TopologyDeltaError("schematic net object requires a string name")
-    attributes = {
+    raw_attributes = raw.get("attributes", {})
+    if not isinstance(raw_attributes, Mapping):
+        raise TopologyDeltaError(f"schematic net {name!r} attributes must be an object")
+    attributes = dict(raw_attributes) | {
         str(key): _json_value(value, context=f"net {name!r} attribute {key!r}")
         for key, value in raw.items()
-        if key not in {"name", "net"}
+        if key not in {"name", "net", "attributes"}
     }
     return TopologyNet(name=name, attributes=dict(sorted(attributes.items())))
 
@@ -309,10 +350,13 @@ def _pin_from_readback(raw: Any) -> TopologyPin:
         raise TopologyDeltaError("schematic pin object requires string name/net")
     if direction is not None and not isinstance(direction, str):
         raise TopologyDeltaError(f"schematic pin {name!r} has invalid direction")
-    attributes = {
+    raw_attributes = raw.get("attributes", {})
+    if not isinstance(raw_attributes, Mapping):
+        raise TopologyDeltaError(f"schematic pin {name!r} attributes must be an object")
+    attributes = dict(raw_attributes) | {
         str(key): _json_value(value, context=f"pin {name!r} attribute {key!r}")
         for key, value in raw.items()
-        if key not in {"name", "net", "direction"}
+        if key not in {"name", "net", "direction", "attributes"}
     }
     return TopologyPin(
         name=name,
@@ -598,6 +642,104 @@ def apply_topology_delta(
             f"{parsed_contract.expected_after_sha256}, got {actual_after}"
         )
     return after
+
+
+def apply_topology_delta_execution(
+    snapshot: TopologySnapshot | Mapping[str, Any],
+    execution: TopologyDeltaExecutionSpec | Mapping[str, Any],
+) -> TopologySnapshot:
+    """Apply one declared direction only when its exact input fingerprint matches."""
+
+    parsed = (
+        execution
+        if isinstance(execution, TopologyDeltaExecutionSpec)
+        else TopologyDeltaExecutionSpec.model_validate(execution)
+    )
+    current = (
+        snapshot
+        if isinstance(snapshot, TopologySnapshot)
+        else snapshot_from_inspection(snapshot)
+    )
+    if parsed.direction == "forward":
+        expected_input = parsed.contract.expected_before_sha256
+        expected_output = parsed.contract.expected_after_sha256
+        operations = parsed.contract.operations
+    else:
+        expected_input = parsed.contract.expected_after_sha256
+        expected_output = parsed.contract.expected_before_sha256
+        operations = parsed.contract.inverse_operations
+    actual_input = topology_fingerprint(current)
+    if actual_input != expected_input:
+        raise TopologyDeltaError(
+            f"topology {parsed.direction} input fingerprint mismatch: expected "
+            f"{expected_input}, got {actual_input}"
+        )
+    output = apply_topology_operations(current, operations)
+    actual_output = topology_fingerprint(output)
+    if actual_output != expected_output:
+        raise TopologyDeltaError(
+            f"topology {parsed.direction} local output fingerprint mismatch: "
+            f"expected {expected_output}, got {actual_output}"
+        )
+    return output
+
+
+def validate_topology_execution_readback(
+    input_readback: TopologySnapshot | Mapping[str, Any],
+    output_readback: TopologySnapshot | Mapping[str, Any],
+    execution: TopologyDeltaExecutionSpec | Mapping[str, Any],
+) -> TopologyDeltaExecutionAudit:
+    """Validate complete independent readback for one predeclared direction."""
+
+    parsed = (
+        execution
+        if isinstance(execution, TopologyDeltaExecutionSpec)
+        else TopologyDeltaExecutionSpec.model_validate(execution)
+    )
+    input_snapshot = (
+        input_readback
+        if isinstance(input_readback, TopologySnapshot)
+        else snapshot_from_inspection(input_readback)
+    )
+    actual_output = (
+        output_readback
+        if isinstance(output_readback, TopologySnapshot)
+        else snapshot_from_inspection(output_readback)
+    )
+    expected_output = apply_topology_delta_execution(input_snapshot, parsed)
+    actual_output_sha256 = topology_fingerprint(actual_output)
+    expected_output_sha256 = topology_fingerprint(expected_output)
+    if actual_output != expected_output:
+        raise TopologyDeltaError(
+            f"topology {parsed.direction} readback does not match the complete "
+            f"expected structure: expected {expected_output_sha256}, got "
+            f"{actual_output_sha256}"
+        )
+    opposite_operations = (
+        parsed.contract.inverse_operations
+        if parsed.direction == "forward"
+        else parsed.contract.operations
+    )
+    restored = apply_topology_operations(actual_output, opposite_operations)
+    if restored != input_snapshot:
+        raise TopologyDeltaError(
+            f"topology {parsed.direction} opposite operations did not restore the "
+            "complete input structure"
+        )
+    return TopologyDeltaExecutionAudit(
+        contract_id=parsed.contract.id,
+        direction=parsed.direction,
+        input_sha256=topology_fingerprint(input_snapshot),
+        expected_output_sha256=expected_output_sha256,
+        actual_output_sha256=actual_output_sha256,
+        operation_count=(
+            len(parsed.contract.operations)
+            if parsed.direction == "forward"
+            else len(parsed.contract.inverse_operations)
+        ),
+        output_readback_match=True,
+        roundtrip_restored_input=True,
+    )
 
 
 def validate_topology_readback(

@@ -45,7 +45,7 @@ VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PD
 | `device.characterize` | 在声明的 foundry PDK/model section、温度、合法几何和有限偏置域内运行独立 NMOS/PMOS OP 表征，保存 raw manifest/hash 并审计留出点；没有 OA target | scratch/计算，不写 OA |
 | `schematic.create` | 建图并结构回读 | OA 写入 |
 | `schematic.inspect` | 读取拓扑、参数、pins | 只读 |
-| `schematic.transform` | 对已知拓扑应用可审计的小变更；当前覆盖共源源极退化、反相器 core→ADE testbench、差分对真实尾管、对称源极退化与 PMOS 电流镜负载可逆变换 | OA 写入 |
+| `schematic.transform` | 对已知拓扑应用可审计的小变更；除共源源极退化、反相器 core→ADE testbench、差分对真实尾管、对称源极退化与 PMOS 电流镜负载专用变换外，`existing_schematic` 可执行一份带完整结构指纹的预声明 topology-delta | OA 写入 |
 | `parameters.apply` | 应用指定参数并回读 | OA 写入 |
 | `ade.prepare` | 为已有 design 新建持久化 Spectre-backed Maestro view/test；拒绝已有 view | Maestro OA 写入 |
 | `ade.capture` | 捕获人工聚焦并已保存的 Maestro setup、history 和已有真实结果 | 远端只读 + 本地证据写入 |
@@ -67,11 +67,13 @@ VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PD
 
 两种 remove 都可带 `expected_restored_placement_sha256`，把 add 前 Bridge placement 回读中的实例、pin、标签和导线完整绑定进 plan token，并在保存后强制相等。反相器 testbench transform 则要求现有 cell 是 MN0/MP0 core 或已经完成同一变更；它保留 MOS/pins，只把地归一到 `gnd!` 并增加固定的 `VDD0/VIN0/CL0/GND0`。所有已有对象编辑都强制 Bridge editor append mode；preflight 拒绝未保存改动，编辑 batch 失败时只 purge 未保存缓存且不保存。前后回读必须证明未点名器件的完整参数、master、位置和顶层 pins 保持，重复调用幂等。若保存已成功而后置审计失败，会保留失败和真实 OA 状态，尚没有通用 snapshot 回滚。
 
-2026-07-26 增加了 Bridge 之上的本地通用 topology-delta 契约，但没有把任意 SKILL 或字符串脚本开放成图重写接口。契约只允许八类结构操作：添加/删除实例、重连已有端子、替换实例 master、添加/删除 net、添加/删除 pin。每个删除、重连和 master 替换都携带 exact 旧状态 CAS；添加要求名称不存在且所有引用 net 已存在；删除 net 要求已无 instance terminal 或 pin 引用。实例移动、reshape、端子集合变化和同名 net 属性突变不在首版 allowlist 中。
+2026-07-26 增加了 Bridge 之上的通用 topology-delta 契约，但没有把任意 SKILL 或字符串脚本开放成图重写接口。契约可序列化八类结构操作：添加/删除实例、重连已有端子、替换实例 master、添加/删除 net、添加/删除 pin。每个删除、重连和 master 替换都携带 exact 旧状态 CAS；添加要求名称不存在且所有引用 net 已存在；删除 net 要求已无 instance terminal 或 pin 引用。实例移动、reshape、端子集合变化和同名 net 属性突变不在首版 allowlist 中。
 
-Bridge/demo 的完整 `instances/nets/pins` 回读先被规范化并排序，再计算确定性 SHA-256。`parameters/params` 与顶层 parameter 表不进入结构指纹，因为 CDF 参数仍由既有写入、callback 和双重回读契约负责；master、端子连接、view、位置及其余结构属性进入指纹。编译器在本地应用前向 operations，生成逆序 inverse operations，并证明 inverse 精确恢复 before fingerprint。验证器再把实际 after 完整结构与预期结构比较；缺实例、额外 pin、旧状态漂移、悬空 net 或未声明 placement 变化都会失败。现有每个专用 `schematic.transform` 在原有模板语义断言通过后，会追加 `schematic.transform.topology-delta.audit`；真实前后 inspect 仍是 `bridge_readback`，契约推导、哈希和逆向证明明确是 `software_inference`。
+Bridge/demo 的完整 `instances/nets/pins` 回读先被规范化并排序，再计算确定性 SHA-256。`parameters/params` 与顶层 parameter 表不进入结构指纹，因为 CDF 参数仍由既有写入、callback 和双重回读契约负责；master、端子连接、view、位置及其余结构属性进入指纹。`vda topology-compile` 从一次成功的 `schematic.inspect` 与显式 operation 列表生成前向/逆向契约。编译器先在本地应用前向 operations，生成逆序 inverse operations，并证明 inverse 精确恢复 before fingerprint。验证器再把实际 after 完整结构与预期结构比较；缺实例、额外 pin、旧状态漂移、悬空 net 或未声明 placement 变化都会失败。现有每个专用 `schematic.transform` 在原有模板语义断言通过后，会追加 `schematic.transform.topology-delta.audit`；真实前后 inspect 仍是 `bridge_readback`，契约推导、哈希和逆向证明明确是 `software_inference`。
 
-这一层目前是可序列化的结构契约和本地验证核心，不是新的远端执行器。Bridge 仍只执行已验证的专用 transform；把预声明 topology-delta 编译成 Bridge/OA 操作、在新 cellview 上做真实 forward/readback/inverse smoke，以及保存后失败的通用恢复，是下一道独立 Gate。
+`existing_schematic + schematic.transform` 现在可以执行契约的 `forward` 或 `inverse` 方向。worker 只把其中已验证的 `add/remove_instance`、`reconnect_terminal` 和 `add/remove_net` 编译到 Bridge 现有 append editor/reader；新实例必须有有限 placement，master library 只能来自原结构、profile tech library 或 `analogLib`，保留实例的参数表必须逐项不变。net 仍由端子 label/stub 在 OA 中物化，最终以完整独立 readback 指纹而不是 editor return code 判定。`replace_master` 与 `add/remove_pin` 仍只可序列化和本地验证，真实 worker 会明确拒绝，等待独立 CDF/pin-geometry Gate。
+
+首个 live Gate 在全新 `vda_generic_topology_delta_001` 上把普通共源级增量变成 `MN0.S→NSRC + RS0(NSRC,VSS)`，随后自动 `si`/Spectre DC，再执行 inverse；最终独立 topology SHA-256 与变换前完全相同，恢复后的普通共源 DC 也重新执行成功。这证明已开放子集的真实增量写入、同源网表和可逆恢复，不等于任意图编辑事务：wire/label/shape 没有进入通用 snapshot，保存成功但 post-readback 失败时仍没有自动逆向写回，未知 master/CDF callback、pin 几何和并发 editor 也未验证。
 
 ## 两层参数契约
 
@@ -80,7 +82,7 @@ VDA 保留两种用途不同的参数表示：
 - `parameters` / `parameter_space` 是电路模板已定义的 canonical semantic parameters，例如 `device_width_um`、`load_resistance_ohm`、`bias_v` 和 AC `load_ff`。它们可参与仿真、规格判定和有限搜索，但并非都写 OA：W/L/RD/RS 是设计参数，bias/VDD/外部负载是 testbench 条件。当前 MOS width semantic 指单指宽 `Wfg`；多指 OA/`si` 一致性另外核对 `finger_width`、`fingers/nf`、`m/multi` 和总有效宽度，不能把网表 `w` 无条件当成 `Wfg`。
 - `instance_parameter_updates` 是人工明确指定的实例级 CDF/OA 写入，例如 `MN0.fingers="2"`、`MN0.m="1"` 或 `RD0.r="22k"`。参数名和值按 Bridge 字符串契约原样传递，不做单位、别名或枚举推断。
 
-`existing_schematic` 是不依赖固定拓扑模板的通用 circuit kind，开放 `schematic.inspect`、`parameters.apply`、`ade.prepare`、`ade.capture`、`ade.run`、`ade.corners.apply`、`ade.variables.apply` 与 `ade.setup.apply`：前者保留 Bridge reader 的完整结构对象、geometry、notes、nets/pins 细节和所有可回读 CDF 参数；参数操作允许人工指定任意已有实例；ADE 操作则为已有 design 准备新的 Maestro 人工入口、读取人工状态、后台运行一个已保存 setup，或用显式旧状态前置条件增量修改 corner、变量/selection、analysis 和新增 output/spec，不要求 VDA 理解 DUT 拓扑。反相器和共源模板也能使用相同原始参数与 ADE 交接路径，并可在一个参数任务中组合 semantic parameters 与原始实例参数；semantic 写入先执行，原始 CDF callback 后执行，最终 OA 必须同时满足所有已声明 semantic 值和原始字段值。
+`existing_schematic` 是不依赖固定拓扑模板的通用 circuit kind，开放 `schematic.inspect`、预声明 `schematic.transform`、`parameters.apply`、`ade.prepare`、`ade.capture`、`ade.run`、`ade.corners.apply`、`ade.variables.apply` 与 `ade.setup.apply`：inspect 保留 Bridge reader 的完整结构对象、geometry、notes、nets/pins 细节和所有可回读 CDF 参数；transform 只执行上述 exact topology-delta 子集；参数操作允许人工指定任意已有实例；ADE 操作则为已有 design 准备新的 Maestro 人工入口、读取人工状态、后台运行一个已保存 setup，或用显式旧状态前置条件增量修改 corner、变量/selection、analysis 和新增 output/spec，不要求 VDA 理解 DUT 拓扑。反相器和共源模板也能使用相同原始参数与 ADE 交接路径，并可在一个参数任务中组合 semantic parameters 与原始实例参数；semantic 写入先执行，原始 CDF callback 后执行，最终 OA 必须同时满足所有已声明 semantic 值和原始字段值。
 
 执行路径先结构化回读目标 schematic 并确认实例存在，再复用 Bridge 的 `set_instance_params(..., param_filters=None)` 触发 CDF callback、`schCheck` 和 `dbSave`。通用 reader 为控制输出会省略空值和超长值，因此 VDA 不用摘要缺失来限制 Bridge：写入后另发只读 SKILL，直接打开目标 OA、定位实例 CDF，并逐字段比较真实 `p~>value` 与请求字符串；executor 的 `schematic.inspect.after` 再独立执行一次同样的定向读取。首次值不一致时，worker 至多按任务声明顺序逐字段重放一次；计划必须披露该副作用，最终仍不一致则整个 run 失败。
 

@@ -4,7 +4,6 @@ import copy
 
 import pytest
 
-from virtuoso_design_agent.models import EvidenceSource
 from virtuoso_design_agent.topology_delta import (
     AddInstanceOperation,
     AddNetOperation,
@@ -15,18 +14,21 @@ from virtuoso_design_agent.topology_delta import (
     RemovePinOperation,
     ReplaceMasterOperation,
     TopologyDeltaContract,
+    TopologyDeltaExecutionSpec,
     TopologyDeltaError,
     TopologyInstance,
     TopologyMaster,
     TopologyNet,
     TopologyPin,
     apply_topology_delta,
+    apply_topology_delta_execution,
     apply_topology_operations,
     compile_topology_delta,
     derive_topology_delta,
     snapshot_from_inspection,
     topology_fingerprint,
     validate_topology_readback,
+    validate_topology_execution_readback,
 )
 
 
@@ -110,7 +112,7 @@ def test_source_degeneration_derives_minimal_reversible_contract() -> None:
     audit = validate_topology_readback(before, after, contract)
     assert audit.forward_readback_match is True
     assert audit.inverse_restored_before is True
-    assert audit.evidence_source is EvidenceSource.SOFTWARE_INFERENCE
+    assert audit.evidence_source == "software_inference"
 
     serialized = contract.model_dump_json()
     assert TopologyDeltaContract.model_validate_json(serialized) == contract
@@ -209,6 +211,42 @@ def test_contract_rejects_stale_before_fingerprint() -> None:
 
     with pytest.raises(TopologyDeltaError, match="before fingerprint mismatch"):
         apply_topology_delta(stale, contract)
+
+
+def test_predeclared_execution_supports_exact_forward_and_inverse_directions() -> None:
+    before = _common_source_before()
+    after = _common_source_after()
+    contract = derive_topology_delta("directional-source-degeneration", before, after)
+
+    forward = TopologyDeltaExecutionSpec(direction="forward", contract=contract)
+    inverse = TopologyDeltaExecutionSpec(direction="inverse", contract=contract)
+
+    assert apply_topology_delta_execution(before, forward) == snapshot_from_inspection(
+        after
+    )
+    assert apply_topology_delta_execution(after, inverse) == snapshot_from_inspection(
+        before
+    )
+    forward_audit = validate_topology_execution_readback(before, after, forward)
+    inverse_audit = validate_topology_execution_readback(after, before, inverse)
+    assert forward_audit.direction == "forward"
+    assert inverse_audit.direction == "inverse"
+    assert forward_audit.output_readback_match is True
+    assert inverse_audit.roundtrip_restored_input is True
+
+
+def test_inverse_execution_rejects_a_non_after_input_fingerprint() -> None:
+    contract = derive_topology_delta(
+        "directional-source-degeneration",
+        _common_source_before(),
+        _common_source_after(),
+    )
+
+    with pytest.raises(TopologyDeltaError, match="inverse input fingerprint mismatch"):
+        apply_topology_delta_execution(
+            _common_source_before(),
+            TopologyDeltaExecutionSpec(direction="inverse", contract=contract),
+        )
 
 
 def test_operation_rejects_old_state_conflict() -> None:

@@ -5221,6 +5221,111 @@ def test_source_degeneration_is_an_in_place_audited_delta() -> None:
     ] == ["add_net", "reconnect_terminal", "add_instance"]
 
 
+def test_predeclared_generic_topology_executes_forward_then_exact_inverse() -> None:
+    from virtuoso_design_agent.topology_delta import (
+        derive_topology_delta,
+        snapshot_from_inspection,
+        topology_fingerprint,
+    )
+
+    before = {
+        "instances": [
+            {
+                "name": "MN0",
+                "library": "tsmcN28",
+                "cell": "nch_lvt_mac",
+                "view": "symbol",
+                "terminals": {
+                    "D": "OUT",
+                    "G": "IN",
+                    "S": "VSS",
+                    "B": "VSS",
+                },
+                "xy": [0.0, 0.0],
+                "orient": "R0",
+                "numInst": 1,
+            }
+        ],
+        "nets": ["IN", "OUT", "VSS"],
+        "pins": ["IN", "OUT", "VSS"],
+    }
+    after = json.loads(json.dumps(before))
+    after["instances"][0]["terminals"]["S"] = "NSRC"
+    after["instances"].append(
+        {
+            "name": "RS0",
+            "library": "analogLib",
+            "cell": "res",
+            "view": "symbol",
+            "terminals": {"PLUS": "NSRC", "MINUS": "VSS"},
+            "xy": [0.0, -1.3],
+            "orient": "R0",
+            "numInst": 1,
+        }
+    )
+    after["nets"].append("NSRC")
+    contract = derive_topology_delta("generic-source-degeneration", before, after)
+    adapter = DeterministicDemoAdapter()
+    adapter._schematics[("vda_test", "vda_generic")] = {
+        "instances": before["instances"],
+        "nets": before["nets"],
+        "pins": before["pins"],
+        "parameters": {},
+        "semantic_parameters": {},
+        "instance_parameters": {"MN0": {"Wfg": "1u", "l": "30n"}},
+        "topology": snapshot_from_inspection(before).model_dump(mode="json"),
+    }
+
+    def task(direction: str) -> TaskSpec:
+        return TaskSpec.model_validate(
+            {
+                "id": f"generic-topology-{direction}",
+                "operation": "schematic.transform",
+                "circuit": "existing_schematic",
+                "target": {"library": "vda_test", "cell": "vda_generic"},
+                "topology_delta": {
+                    "direction": direction,
+                    "contract": contract.model_dump(mode="json"),
+                },
+                "safety": {
+                    "allow_remote_write": True,
+                    "allowed_library": "vda_test",
+                },
+            }
+        )
+
+    forward = task("forward")
+    forward_plan = build_plan(forward)
+    forward_record = TaskExecutor(adapter).execute(
+        forward, forward_plan, token=forward_plan.confirmation_token
+    )
+
+    assert forward_record.status is RunStatus.SUCCEEDED
+    forward_audit = next(
+        item
+        for item in forward_record.actions
+        if item.action
+        == "schematic.transform.topology-delta.predeclared-audit"
+    )
+    assert forward_audit.evidence_source is EvidenceSource.SOFTWARE_INFERENCE
+    assert forward_audit.details["direction"] == "forward"
+    assert forward_audit.details["output_readback_match"] is True
+    assert topology_fingerprint(
+        snapshot_from_inspection(adapter.inspect_schematic(forward).data)
+    ) == contract.expected_after_sha256
+
+    inverse = task("inverse")
+    inverse_plan = build_plan(inverse)
+    inverse_record = TaskExecutor(adapter).execute(
+        inverse, inverse_plan, token=inverse_plan.confirmation_token
+    )
+
+    assert inverse_record.status is RunStatus.SUCCEEDED
+    assert topology_fingerprint(
+        snapshot_from_inspection(adapter.inspect_schematic(inverse).data)
+    ) == contract.expected_before_sha256
+
+
 def test_source_degeneration_transform_is_idempotent_and_can_retarget_only_rs0() -> None:
     adapter = DeterministicDemoAdapter()
     first = _source_degeneration_transform()
