@@ -33,6 +33,53 @@ from ..topology_delta import (
 from .base import AdapterResult, merge_analysis_bundle
 
 
+_DIFFERENTIAL_PAIR_BASE_VARIANT = "resistive_load_nmos_differential_pair"
+_DIFFERENTIAL_PAIR_TAIL_VARIANT = (
+    "resistive_load_nmos_differential_pair_with_tail_device"
+)
+_DIFFERENTIAL_PAIR_DEGENERATED_VARIANT = (
+    "resistive_load_nmos_differential_pair_with_tail_device_and_source_degeneration"
+)
+_DIFFERENTIAL_PAIR_CURRENT_MIRROR_VARIANT = (
+    "pmos_current_mirror_load_nmos_differential_pair_with_tail_device"
+)
+_DIFFERENTIAL_PAIR_CURRENT_MIRROR_DEGENERATED_VARIANT = (
+    "pmos_current_mirror_load_nmos_differential_pair_with_tail_device_"
+    "and_source_degeneration"
+)
+_DIFFERENTIAL_PAIR_VARIANTS = {
+    _DIFFERENTIAL_PAIR_BASE_VARIANT,
+    _DIFFERENTIAL_PAIR_TAIL_VARIANT,
+    _DIFFERENTIAL_PAIR_DEGENERATED_VARIANT,
+    _DIFFERENTIAL_PAIR_CURRENT_MIRROR_VARIANT,
+    _DIFFERENTIAL_PAIR_CURRENT_MIRROR_DEGENERATED_VARIANT,
+}
+
+
+def _demo_differential_pair_variant(schematic: dict[str, Any]) -> str:
+    names = {
+        str(item.get("name"))
+        for item in schematic.get("instances", [])
+        if isinstance(item, dict)
+    }
+    has_tail = "MNTAIL" in names
+    has_source_degeneration = {"RS0", "RS1"} <= names
+    has_current_mirror = {"MP0", "MP1"} <= names
+    if has_current_mirror and has_source_degeneration and has_tail:
+        return _DIFFERENTIAL_PAIR_CURRENT_MIRROR_DEGENERATED_VARIANT
+    if has_current_mirror and has_tail:
+        return _DIFFERENTIAL_PAIR_CURRENT_MIRROR_VARIANT
+    if {"RD0", "RD1"} <= names and has_source_degeneration and has_tail:
+        return _DIFFERENTIAL_PAIR_DEGENERATED_VARIANT
+    if {"RD0", "RD1"} <= names and has_tail:
+        return _DIFFERENTIAL_PAIR_TAIL_VARIANT
+    if {"RD0", "RD1"} <= names and not has_tail:
+        return _DIFFERENTIAL_PAIR_BASE_VARIANT
+    raise RuntimeError(
+        "generic demo topology delta produced an unsupported differential pair"
+    )
+
+
 class DeterministicDemoAdapter:
     name = "deterministic-demo"
 
@@ -407,6 +454,16 @@ class DeterministicDemoAdapter:
                 item.name: prior_parameters.get(item.name, {})
                 for item in after.instances
             }
+            if schematic.get("topology_variant") in _DIFFERENTIAL_PAIR_VARIANTS:
+                schematic["topology_variant"] = _demo_differential_pair_variant(
+                    schematic
+                )
+                names = set(schematic["instance_parameters"])
+                if not {"RS0", "RS1"} <= names:
+                    schematic["semantic_parameters"].pop(
+                        "source_resistance_ohm", None
+                    )
+                    schematic["parameters"].pop("source_resistance_ohm", None)
             return AdapterResult(
                 data={
                     "contract_id": task.topology_delta.contract.id,
@@ -493,10 +550,7 @@ class DeterministicDemoAdapter:
         if task.circuit is CircuitKind.DIFFERENTIAL_PAIR:
             variant = schematic.get("topology_variant")
             supported = {
-                "resistive_load_nmos_differential_pair",
-                "resistive_load_nmos_differential_pair_with_tail_device",
-                "resistive_load_nmos_differential_pair_with_tail_device_and_source_degeneration",
-                "pmos_current_mirror_load_nmos_differential_pair_with_tail_device",
+                *_DIFFERENTIAL_PAIR_VARIANTS,
             }
             if variant not in supported:
                 raise RuntimeError(f"unsupported demo topology variant: {variant}")
@@ -1269,9 +1323,10 @@ class DeterministicDemoAdapter:
             width_um = effective_parameters["input_width_um"]
             length_um = effective_parameters["length_um"]
             topology_variant = str(schematic.get("topology_variant"))
-            current_mirror_load = topology_variant == (
-                "pmos_current_mirror_load_nmos_differential_pair_with_tail_device"
-            )
+            current_mirror_load = topology_variant in {
+                _DIFFERENTIAL_PAIR_CURRENT_MIRROR_VARIANT,
+                _DIFFERENTIAL_PAIR_CURRENT_MIRROR_DEGENERATED_VARIANT,
+            }
             resistance = (
                 None
                 if current_mirror_load
@@ -1281,9 +1336,10 @@ class DeterministicDemoAdapter:
                 "with_tail_device_and_source_degeneration"
             )
             real_tail = topology_variant in {
-                "resistive_load_nmos_differential_pair_with_tail_device",
-                "resistive_load_nmos_differential_pair_with_tail_device_and_source_degeneration",
-                "pmos_current_mirror_load_nmos_differential_pair_with_tail_device",
+                _DIFFERENTIAL_PAIR_TAIL_VARIANT,
+                _DIFFERENTIAL_PAIR_DEGENERATED_VARIANT,
+                _DIFFERENTIAL_PAIR_CURRENT_MIRROR_VARIANT,
+                _DIFFERENTIAL_PAIR_CURRENT_MIRROR_DEGENERATED_VARIANT,
             }
             if (
                 task.resolved_analysis() is AnalysisKind.PSRR

@@ -83,6 +83,10 @@ _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT = (
 _DIFFERENTIAL_PAIR_CURRENT_MIRROR_LOAD_VARIANT = (
     "pmos_current_mirror_load_nmos_differential_pair_with_tail_device"
 )
+_DIFFERENTIAL_PAIR_CURRENT_MIRROR_DEGENERATED_VARIANT = (
+    "pmos_current_mirror_load_nmos_differential_pair_with_tail_device_"
+    "and_source_degeneration"
+)
 
 
 def _differential_pair_has_real_tail(topology_variant: str) -> bool:
@@ -90,15 +94,22 @@ def _differential_pair_has_real_tail(topology_variant: str) -> bool:
         _DIFFERENTIAL_PAIR_TAIL_VARIANT,
         _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT,
         _DIFFERENTIAL_PAIR_CURRENT_MIRROR_LOAD_VARIANT,
+        _DIFFERENTIAL_PAIR_CURRENT_MIRROR_DEGENERATED_VARIANT,
     }
 
 
 def _differential_pair_has_source_degeneration(topology_variant: str) -> bool:
-    return topology_variant == _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT
+    return topology_variant in {
+        _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT,
+        _DIFFERENTIAL_PAIR_CURRENT_MIRROR_DEGENERATED_VARIANT,
+    }
 
 
 def _differential_pair_has_current_mirror_load(topology_variant: str) -> bool:
-    return topology_variant == _DIFFERENTIAL_PAIR_CURRENT_MIRROR_LOAD_VARIANT
+    return topology_variant in {
+        _DIFFERENTIAL_PAIR_CURRENT_MIRROR_LOAD_VARIANT,
+        _DIFFERENTIAL_PAIR_CURRENT_MIRROR_DEGENERATED_VARIANT,
+    }
 
 
 def _register_worker_resource(resource: Any) -> Any:
@@ -577,18 +588,22 @@ def _assert_differential_pair(
     tail_names = core_names | {"MNTAIL"}
     degenerated_tail_names = tail_names | {"RS0", "RS1"}
     current_mirror_names = {"MN0", "MN1", "MNTAIL", "MP0", "MP1"}
+    current_mirror_degenerated_names = current_mirror_names | {"RS0", "RS1"}
     names = set(by_name)
     if frozenset(names) not in {
         frozenset(core_names),
         frozenset(tail_names),
         frozenset(degenerated_tail_names),
         frozenset(current_mirror_names),
+        frozenset(current_mirror_degenerated_names),
     }:
         raise RuntimeError(
             "existing schematic is not the VDA differential pair: "
             f"instances={sorted(by_name)}"
         )
-    if names == current_mirror_names:
+    if names == current_mirror_degenerated_names:
+        variant = _DIFFERENTIAL_PAIR_CURRENT_MIRROR_DEGENERATED_VARIANT
+    elif names == current_mirror_names:
         variant = _DIFFERENTIAL_PAIR_CURRENT_MIRROR_LOAD_VARIANT
     elif names == degenerated_tail_names:
         variant = _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT
@@ -598,10 +613,24 @@ def _assert_differential_pair(
         variant = _DIFFERENTIAL_PAIR_BASE_VARIANT
     required_pins = {"INP", "INN", "OUTP", "OUTN", "TAIL", "VDD", "VSS"}
     required_nets = set(required_pins)
-    if names in (tail_names, degenerated_tail_names, current_mirror_names):
+    real_tail_names = {
+        frozenset(tail_names),
+        frozenset(degenerated_tail_names),
+        frozenset(current_mirror_names),
+        frozenset(current_mirror_degenerated_names),
+    }
+    has_source_degeneration = frozenset(names) in {
+        frozenset(degenerated_tail_names),
+        frozenset(current_mirror_degenerated_names),
+    }
+    has_current_mirror_load = frozenset(names) in {
+        frozenset(current_mirror_names),
+        frozenset(current_mirror_degenerated_names),
+    }
+    if frozenset(names) in real_tail_names:
         required_pins.add("BIAS")
         required_nets.add("BIAS")
-    if names == degenerated_tail_names:
+    if has_source_degeneration:
         required_nets.update({"NSP", "NSN"})
     missing_pins = required_pins - set(data.get("pins", {}).keys())
     if missing_pins:
@@ -619,17 +648,17 @@ def _assert_differential_pair(
         "MN0": {
             "D": "OUTP",
             "G": "INP",
-            "S": "NSP" if names == degenerated_tail_names else "TAIL",
+            "S": "NSP" if has_source_degeneration else "TAIL",
             "B": "VSS",
         },
         "MN1": {
             "D": "OUTN",
             "G": "INN",
-            "S": "NSN" if names == degenerated_tail_names else "TAIL",
+            "S": "NSN" if has_source_degeneration else "TAIL",
             "B": "VSS",
         },
     }
-    if names == current_mirror_names:
+    if has_current_mirror_load:
         expected_terminals.update(
             {
                 "MP0": {"D": "OUTP", "G": "OUTP", "S": "VDD", "B": "VDD"},
@@ -643,14 +672,14 @@ def _assert_differential_pair(
                 "RD1": {"PLUS": "VDD", "MINUS": "OUTN"},
             }
         )
-    if names in (tail_names, degenerated_tail_names, current_mirror_names):
+    if frozenset(names) in real_tail_names:
         expected_terminals["MNTAIL"] = {
             "D": "TAIL",
             "G": "BIAS",
             "S": "VSS",
             "B": "VSS",
         }
-    if names == degenerated_tail_names:
+    if has_source_degeneration:
         expected_terminals.update(
             {
                 "RS0": {"PLUS": "NSP", "MINUS": "TAIL"},
@@ -669,7 +698,7 @@ def _assert_differential_pair(
             "MN0": (profile["tech_library"], profile["nmos_cell"]),
             "MN1": (profile["tech_library"], profile["nmos_cell"]),
         }
-        if names == current_mirror_names:
+        if has_current_mirror_load:
             expected_masters.update(
                 {
                     "MP0": (profile["tech_library"], profile["pmos_cell"]),
@@ -680,12 +709,12 @@ def _assert_differential_pair(
             expected_masters.update(
                 {"RD0": ("analogLib", "res"), "RD1": ("analogLib", "res")}
             )
-        if names in (tail_names, degenerated_tail_names, current_mirror_names):
+        if frozenset(names) in real_tail_names:
             expected_masters["MNTAIL"] = (
                 profile["tech_library"],
                 profile["nmos_cell"],
             )
-        if names == degenerated_tail_names:
+        if has_source_degeneration:
             expected_masters.update(
                 {"RS0": ("analogLib", "res"), "RS1": ("analogLib", "res")}
             )
@@ -9645,10 +9674,6 @@ def _parse_differential_pair_netlist(
         raise RuntimeError(
             "si netlist source-degenerated differential pair is missing MNTAIL"
         )
-    if has_current_mirror_load and has_source_degeneration:
-        raise RuntimeError(
-            "Gate 6 current-mirror load does not compose with source degeneration"
-        )
     source_p = "NSP" if has_source_degeneration else "TAIL"
     source_n = "NSN" if has_source_degeneration else "TAIL"
     expected = {
@@ -9846,7 +9871,9 @@ def _parse_differential_pair_netlist(
             )
         },
         "topology_variant": (
-            _DIFFERENTIAL_PAIR_CURRENT_MIRROR_LOAD_VARIANT
+            _DIFFERENTIAL_PAIR_CURRENT_MIRROR_DEGENERATED_VARIANT
+            if has_current_mirror_load and has_source_degeneration
+            else _DIFFERENTIAL_PAIR_CURRENT_MIRROR_LOAD_VARIANT
             if has_current_mirror_load
             else _DIFFERENTIAL_PAIR_DEGENERATED_TAIL_VARIANT
             if has_source_degeneration

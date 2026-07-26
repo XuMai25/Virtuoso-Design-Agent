@@ -5737,3 +5737,237 @@ def test_differential_pair_demo_current_mirror_load_is_tunable_and_reversible() 
     )
     assert final_readback["semantic_parameters"]["load_resistance_ohm"] == 10_000.0
     assert "pmos_load_width_um" not in final_readback["semantic_parameters"]
+
+
+def test_generic_delta_composes_active_load_and_source_degeneration_analyses() -> None:
+    from virtuoso_design_agent.topology_delta import derive_topology_delta
+
+    adapter = DeterministicDemoAdapter()
+    executor = TaskExecutor(adapter)
+    target = {"library": "vda_test", "cell": "vda_diffpair_active_deg"}
+    write_safety = {
+        "allow_remote_write": True,
+        "allowed_library": "vda_test",
+    }
+
+    def execute(payload: dict):
+        task = TaskSpec.model_validate(payload)
+        plan = build_plan(task)
+        return executor.execute(task, plan, token=plan.confirmation_token)
+
+    setup_payloads = (
+        {
+            "id": "active-deg-create",
+            "operation": "schematic.create",
+            "circuit": "differential_pair",
+            "target": target,
+            "parameters": {
+                "input_width_um": 1.0,
+                "length_um": 0.03,
+                "load_resistance_ohm": 10_000.0,
+            },
+            "safety": write_safety,
+        },
+        {
+            "id": "active-deg-tail",
+            "operation": "schematic.transform",
+            "circuit": "differential_pair",
+            "target": target,
+            "schematic_transform": {"action": "add_tail_device"},
+            "parameters": {"tail_width_um": 0.8, "tail_length_um": 0.03},
+            "safety": write_safety,
+        },
+        {
+            "id": "active-deg-mirror",
+            "operation": "schematic.transform",
+            "circuit": "differential_pair",
+            "target": target,
+            "schematic_transform": {
+                "action": "replace_resistive_load_with_current_mirror"
+            },
+            "parameters": {
+                "pmos_load_width_um": 2.0,
+                "pmos_load_length_um": 0.03,
+            },
+            "safety": write_safety,
+        },
+    )
+    for payload in setup_payloads:
+        assert execute(payload).status is RunStatus.SUCCEEDED
+
+    inspect_task = TaskSpec.model_validate(
+        {
+            "id": "active-deg-inspect",
+            "operation": "schematic.inspect",
+            "circuit": "differential_pair",
+            "target": target,
+        }
+    )
+    before = adapter.inspect_schematic(inspect_task).data
+    after = json.loads(json.dumps(before))
+    for item in after["instances"]:
+        if item["name"] == "MN0":
+            item["terminals"]["S"] = "NSP"
+        elif item["name"] == "MN1":
+            item["terminals"]["S"] = "NSN"
+    after["instances"].extend(
+        [
+            {
+                "name": "RS0",
+                "library": "analogLib",
+                "cell": "res",
+                "view": "symbol",
+                "terminals": {"PLUS": "NSP", "MINUS": "TAIL"},
+                "xy": [-0.8, -0.8],
+                "orient": "R0",
+            },
+            {
+                "name": "RS1",
+                "library": "analogLib",
+                "cell": "res",
+                "view": "symbol",
+                "terminals": {"PLUS": "NSN", "MINUS": "TAIL"},
+                "xy": [0.8, -0.8],
+                "orient": "R0",
+            },
+        ]
+    )
+    after["nets"].extend(["NSP", "NSN"])
+    contract = derive_topology_delta("active-load-source-degeneration", before, after)
+
+    def topology_task(direction: str) -> dict:
+        return {
+            "id": f"active-deg-topology-{direction}",
+            "operation": "schematic.transform",
+            "circuit": "existing_schematic",
+            "target": target,
+            "topology_delta": {
+                "direction": direction,
+                "contract": contract.model_dump(mode="json"),
+            },
+            "safety": write_safety,
+        }
+
+    assert execute(topology_task("forward")).status is RunStatus.SUCCEEDED
+    assert execute(
+        {
+            "id": "active-deg-rs-apply",
+            "operation": "parameters.apply",
+            "circuit": "differential_pair",
+            "target": target,
+            "parameters": {"source_resistance_ohm": 500.0},
+            "safety": write_safety,
+        }
+    ).status is RunStatus.SUCCEEDED
+    readback = adapter.inspect_schematic(inspect_task).data
+    assert readback["topology_variant"] == (
+        "pmos_current_mirror_load_nmos_differential_pair_with_tail_device_"
+        "and_source_degeneration"
+    )
+    assert readback["semantic_parameters"]["source_resistance_ohm"] == 500.0
+
+    analysis_payloads = (
+        {
+            "id": "active-deg-ac",
+            "analysis": "ac",
+            "ac_sweep": {"start_hz": 1e3, "stop_hz": 1e12},
+            "parameters": {
+                "tail_bias_v": 0.30,
+                "common_mode_v": 0.55,
+                "vdd_v": 0.9,
+                "load_ff": 1.0,
+            },
+        },
+        {
+            "id": "active-deg-linearity",
+            "analysis": "transient",
+            "linearity_sweep": {
+                "frequency_hz": 1e7,
+                "amplitudes_v": [0.005, 0.02, 0.05],
+            },
+            "parameters": {
+                "tail_bias_v": 0.30,
+                "common_mode_v": 0.55,
+                "vdd_v": 0.9,
+                "load_ff": 1.0,
+            },
+        },
+        {
+            "id": "active-deg-psrr",
+            "analysis": "psrr",
+            "ac_sweep": {
+                "start_hz": 1e3,
+                "stop_hz": 1e12,
+                "evaluation_stop_hz": 1e6,
+            },
+            "parameters": {
+                "tail_bias_v": 0.30,
+                "common_mode_v": 0.55,
+                "vdd_v": 0.9,
+                "load_ff": 1.0,
+            },
+        },
+        {
+            "id": "active-deg-noise",
+            "analysis": "noise",
+            "noise_sweep": {"start_hz": 1e3, "stop_hz": 1e9},
+            "parameters": {
+                "tail_bias_v": 0.30,
+                "common_mode_v": 0.55,
+                "vdd_v": 0.9,
+            },
+        },
+    )
+    records = []
+    for payload in analysis_payloads:
+        record = execute(
+            {
+                **payload,
+                "operation": "simulation.run",
+                "circuit": "differential_pair",
+                "target": target,
+                "safety": {"allow_remote_compute": True},
+            }
+        )
+        assert record.status is RunStatus.SUCCEEDED
+        records.append(record)
+    assert records[0].selected_metrics["low_frequency_cmrr_db"] > 0.0
+    assert records[1].selected_metrics["differential_max_thd_percent"] >= 0.0
+    assert records[2].selected_metrics["minimum_psrr_db_in_band"] > 0.0
+    assert records[3].selected_metrics[
+        "differential_integrated_input_referred_noise_uv_rms"
+    ] > 0.0
+
+    icmr = execute(
+        {
+            "id": "active-deg-icmr",
+            "operation": "design.tune",
+            "circuit": "differential_pair",
+            "target": target,
+            "analysis": "dc",
+            "parameters": {"tail_bias_v": 0.30, "vdd_v": 0.9},
+            "parameter_space": {"common_mode_v": [0.45, 0.55]},
+            "constraints": [
+                {
+                    "metric": "max_source_current_mismatch_percent",
+                    "relation": "<=",
+                    "value": 1.0,
+                }
+            ],
+            "objective": {
+                "metric": "minimum_output_swing_margin_v",
+                "goal": "maximize",
+            },
+            "safety": {"allow_remote_compute": True},
+            "limits": {"max_iterations": 2},
+        }
+    )
+    assert icmr.status is RunStatus.SUCCEEDED
+    assert len(icmr.candidates) == 2
+
+    assert execute(topology_task("inverse")).status is RunStatus.SUCCEEDED
+    restored = adapter.inspect_schematic(inspect_task).data
+    assert restored["topology_variant"] == (
+        "pmos_current_mirror_load_nmos_differential_pair_with_tail_device"
+    )
+    assert "source_resistance_ohm" not in restored["semantic_parameters"]

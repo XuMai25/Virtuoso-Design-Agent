@@ -403,7 +403,7 @@ Gate 5 继续在同一真实尾管 cellview 上做 exact-delta，而不是复制
 
 Gate 6 仍是固定 exact-template delta，不是任意拓扑综合。前向 action `replace_resistive_load_with_current_mirror` 只接受 Gate 4 的未退化真实尾管拓扑，保持 `MN0/MN1/MNTAIL`、全部顶层 pins/nets 和未点名参数不变，只把 `RD0(VDD,OUTP)`、`RD1(VDD,OUTN)` 替换为 `MP0(OUTP,OUTP,VDD,VDD)`、`MP1(OUTN,OUTP,VDD,VDD)`。`pmos_load_width_um` 与 `pmos_load_length_um` 是对称 OA semantic 参数，可由 `parameters.apply` 或有限搜索同时写入 MP0/MP1；任一 PM 缺失、W/L 不等、master/node 错误，或 RD 与 PM 混合存在，都会在 OA 或 `si` 边界拒绝。
 
-反向 action `restore_resistive_load` 明确接收 `load_resistance_ohm`，删除两只 PMOS 及 VDA 自有 terminal stubs，在原位置重建 RD0/RD1；可选 `expected_restored_placement_sha256` 用于声明并核对恢复基线。源极退化与电流镜负载当前故意互斥：Gate 6 先证明一个新变量，组合 `RS0/RS1 + MP0/MP1` 留给后续显式 Gate，避免把两种拓扑变化混进同一验证。
+反向 action `restore_resistive_load` 明确接收 `load_resistance_ohm`，删除两只 PMOS 及 VDA 自有 terminal stubs，在原位置重建 RD0/RD1；可选 `expected_restored_placement_sha256` 用于声明并核对恢复基线。两个旧的专用 transform 仍保持互斥，避免在一个专用 action 中同时改变负载与源极网络；组合拓扑改走 `existing_schematic` 的预声明 topology-delta：只在已回读的 Gate 6 结构上增加 `NSP/NSN`、重连 `MN0.S/MN1.S` 并加入 `RS0/RS1`。组合后的 OA/`si` 识别、对称 PMOS/RS semantic 参数和 DC/动态分析路由已本地通过，真实新 cellview Gate 尚待单独授权执行。
 
 电流镜负载把动态输出定义从 Gate 3–5 的 `OUTP-OUTN` 改为差分输入到单端输出 `OUTN/(INP-INN)`；`OUTP` 是二极管连接的镜像参考。差模 AC、同相共模 AC 和 CMRR 都显式使用这个输出契约；transient 从 OUTN 提取基波/THD/P1dB；noise 使用 `noise (OUTN 0)` 与原唯一 `VIN_DIFF` 输入参考；`load_ff` 只加在 OUTN。指标名继续保留 `differential_*`，其中 differential 描述输入方式，证据中另存 `output_mode=single_ended_outn`，不得误读为差分输出。
 

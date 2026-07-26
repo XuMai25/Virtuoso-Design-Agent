@@ -7684,6 +7684,96 @@ def _differential_pair_current_mirror_readback() -> dict:
     return readback
 
 
+def _differential_pair_current_mirror_degenerated_readback() -> dict:
+    readback = _differential_pair_current_mirror_readback()
+    for item in readback["instances"]:
+        if item["name"] == "MN0":
+            item["terms"]["S"] = "NSP"
+        elif item["name"] == "MN1":
+            item["terms"]["S"] = "NSN"
+    readback["instances"].extend(
+        [
+            {
+                "name": "RS0",
+                "lib": "analogLib",
+                "cell": "res",
+                "params": {"r": "500"},
+                "terms": {"PLUS": "NSP", "MINUS": "TAIL"},
+            },
+            {
+                "name": "RS1",
+                "lib": "analogLib",
+                "cell": "res",
+                "params": {"r": "500"},
+                "terms": {"PLUS": "NSN", "MINUS": "TAIL"},
+            },
+        ]
+    )
+    readback["nets"].update({"NSP": {}, "NSN": {}})
+    return readback
+
+
+def test_differential_pair_current_mirror_source_degeneration_composes() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump(mode="json")
+    variant = (
+        "pmos_current_mirror_load_nmos_differential_pair_with_tail_device_"
+        "and_source_degeneration"
+    )
+    readback = _differential_pair_current_mirror_degenerated_readback()
+
+    assert _assert_differential_pair(readback, profile) == variant
+    assert _differential_pair_semantic_parameters_from_schematic(readback) == {
+        "input_width_um": pytest.approx(1.0),
+        "length_um": pytest.approx(0.03),
+        "pmos_load_width_um": pytest.approx(2.0),
+        "pmos_load_length_um": pytest.approx(0.03),
+        "tail_width_um": pytest.approx(0.5),
+        "tail_length_um": pytest.approx(0.03),
+        "source_resistance_ohm": pytest.approx(500.0),
+    }
+
+    text = """
+MN0 (OUTP INP NSP VSS) nch_lvt_mac l=30n w=2u nf=2 multi=1
+MN1 (OUTN INN NSN VSS) nch_lvt_mac l=30n w=2u nf=2 multi=1
+MNTAIL (TAIL BIAS VSS VSS) nch_lvt_mac l=30n w=500n nf=1 multi=1
+MP0 (OUTP OUTP VDD VDD) pch_lvt_mac l=30n w=4u nf=2 multi=1
+MP1 (OUTN OUTP VDD VDD) pch_lvt_mac l=30n w=4u nf=2 multi=1
+RS0 (NSP TAIL) resistor r=500
+RS1 (NSN TAIL) resistor r=500
+"""
+    parsed = _parse_differential_pair_netlist(text, profile)
+
+    assert parsed["topology_variant"] == variant
+    assert parsed["semantic_parameters"] == {
+        "input_width_um": pytest.approx(1.0),
+        "length_um": pytest.approx(0.03),
+        "pmos_load_width_um": pytest.approx(2.0),
+        "pmos_load_length_um": pytest.approx(0.03),
+        "tail_width_um": pytest.approx(0.5),
+        "tail_length_um": pytest.approx(0.03),
+        "source_resistance_ohm": pytest.approx(500.0),
+    }
+    assert parsed["instances"]["MN0"]["nodes"] == ["OUTP", "INP", "NSP", "VSS"]
+    assert parsed["instances"]["MP1"]["nodes"] == ["OUTN", "OUTP", "VDD", "VDD"]
+    assert parsed["instances"]["RS1"]["nodes"] == ["NSN", "TAIL"]
+
+    resolved = bridge_worker._resolved_differential_pair_parameters(
+        {
+            "profile": profile,
+            "parameters": {
+                "tail_bias_v": 0.30,
+                "common_mode_v": 0.55,
+                "vdd_v": 0.9,
+            },
+        },
+        parsed["semantic_parameters"],
+        variant,
+    )
+    assert resolved["pmos_load_width_um"] == pytest.approx(2.0)
+    assert resolved["source_resistance_ohm"] == pytest.approx(500.0)
+    assert "load_resistance_ohm" not in resolved
+
+
 def test_differential_pair_current_mirror_oa_and_si_contract_is_exact() -> None:
     profile = load_pdk_profile("nics4304_tsmc28").model_dump(mode="json")
     readback = _differential_pair_current_mirror_readback()
@@ -8868,6 +8958,50 @@ def test_current_mirror_load_deck_uses_single_ended_output_contract() -> None:
     assert "noise (OUTP OUTN)" not in noise_deck
 
 
+def test_current_mirror_source_degenerated_deck_composes_both_contracts() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump(mode="json")
+    parameters = {
+        "input_width_um": 1.0,
+        "length_um": 0.03,
+        "pmos_load_width_um": 2.0,
+        "pmos_load_length_um": 0.03,
+        "tail_width_um": 0.5,
+        "tail_length_um": 0.03,
+        "source_resistance_ohm": 500.0,
+        "tail_bias_v": 0.30,
+        "common_mode_v": 0.55,
+        "vdd_v": 0.9,
+        "load_ff": 1.0,
+    }
+    variant = (
+        "pmos_current_mirror_load_nmos_differential_pair_with_tail_device_"
+        "and_source_degeneration"
+    )
+
+    ac_deck = _differential_pair_testbench_deck(
+        profile,
+        parameters,
+        "/data/xum/virtuoso_bridge_smoke/vda_diffpair_active_deg/netlist",
+        analysis="ac",
+        ac_sweep={"start_hz": 1e3, "stop_hz": 1e10},
+        topology_variant=variant,
+    )
+    noise_deck = _differential_pair_testbench_deck(
+        profile,
+        parameters,
+        "/data/xum/virtuoso_bridge_smoke/vda_diffpair_active_deg/netlist",
+        analysis="noise",
+        noise_sweep={"start_hz": 1e3, "stop_hz": 1e9},
+        topology_variant=variant,
+    )
+
+    assert "save INP INN OUTP OUTN TAIL VDD VSS NSP NSN BIAS" in ac_deck
+    assert "save MP0:ids" in ac_deck and "save MNTAIL:ids" in ac_deck
+    assert "CLN (OUTN 0) capacitor c=1f" in ac_deck
+    assert "CLP (OUTP 0)" not in ac_deck
+    assert "noise (OUTN 0)" in noise_deck
+
+
 def _current_mirror_dc_fixture(*, pm1_current_a: float = -25e-6) -> tuple[dict, dict]:
     parameters = {
         "input_width_um": 1.0,
@@ -8944,6 +9078,45 @@ def test_current_mirror_load_dc_binds_pm_regions_mirror_and_kcl() -> None:
     bad_data, bad_parameters = _current_mirror_dc_fixture(pm1_current_a=-20e-6)
     with pytest.raises(RuntimeError, match="max_load_current_mismatch_percent"):
         _differential_pair_metrics_from_result(bad_data, bad_parameters, variant)
+
+
+def test_current_mirror_source_degenerated_dc_checks_both_kcl_layers() -> None:
+    data, parameters = _current_mirror_dc_fixture()
+    parameters["source_resistance_ohm"] = 500.0
+    data.update(
+        {
+            "dc_NSP": 0.1625,
+            "dc_NSN": 0.1625,
+            "dcOpInfo_MN0:vgs": 0.3875,
+            "dcOpInfo_MN0:vds": 0.4875,
+            "dcOpInfo_MN1:vgs": 0.3875,
+            "dcOpInfo_MN1:vds": 0.4875,
+        }
+    )
+    variant = (
+        "pmos_current_mirror_load_nmos_differential_pair_with_tail_device_"
+        "and_source_degeneration"
+    )
+
+    metrics, evidence = _differential_pair_metrics_from_result(
+        data, parameters, variant
+    )
+
+    assert metrics["current_mirror_current_mismatch_percent"] == pytest.approx(0.0)
+    assert metrics["max_source_current_mismatch_percent"] == pytest.approx(0.0)
+    assert metrics["source_p_degeneration_drop_v"] == pytest.approx(0.0125)
+    assert metrics["both_load_saturation_region"] == 1.0
+    assert evidence["source_degeneration_consistency"] == "matched"
+    assert evidence["load_consistency"].startswith(
+        "MN0/MN1 branch currents match MP0/MP1"
+    )
+
+    bad = dict(data)
+    bad["dc_NSN"] = 0.16
+    bad["dcOpInfo_MN1:vgs"] = 0.39
+    bad["dcOpInfo_MN1:vds"] = 0.49
+    with pytest.raises(RuntimeError, match="KCL mismatch across RS0/RS1"):
+        _differential_pair_metrics_from_result(bad, parameters, variant)
 
 
 def test_differential_pair_live_worker_psrr_binds_three_runs_to_one_netlist(
