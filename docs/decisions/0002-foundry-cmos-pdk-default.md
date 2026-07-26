@@ -13,6 +13,7 @@ VDA 当前目标是晶体管级模拟/混合信号单模块设计。日常设计
 - TSV、hybrid-bonding 或其他封装/3D PDK 只能由任务显式选择；不得作为缺省 profile、自动 fallback，或被混入晶圆厂 CMOS 电路模板的默认参数。
 - profile 是“工艺 + 当前执行环境”的绑定。切换晶圆厂、节点、PDK 版本、model section 或服务器时必须重新验证，不能沿用另一 profile 的性能证据。
 - 同一工艺/环境下的器件 flavor 可以用显式继承 profile 只覆盖 master，例如 `nics4304_tsmc28_svt` 的 `nch_mac/pch_mac`。继承只减少静态配置重复，不继承 OA、网表或性能验证结论，也不改变默认 LVT profile。
+- 2026-07-26 已对该 SVT profile 的 NMOS 共源完成 LVT→SVT→LVT OA/CDF、`si` model 和 Spectre DC/AC round-trip；该证据不自动覆盖 PMOS、其他拓扑或其他 PVT。
 
 ## 影响
 

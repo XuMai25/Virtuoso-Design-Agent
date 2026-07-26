@@ -1,6 +1,9 @@
 # 2026-07-26 topology post-save 恢复与 master/CDF 迁移本地 Gate
 
-状态：**exact-state topology recovery and controlled symbol-master/CDF migration locally verified; live OA/si verification pending**。
+状态：**local implementation/fault-injection verified; normal master/CDF live round-trip subsequently verified; automatic recovery live fault-injection pending**。
+
+后续正常 forward/inverse live round-trip 已完成，见
+[`2026-07-26-topology-master-migration-live.md`](2026-07-26-topology-master-migration-live.md)。本页的自动 recovery 故障注入边界仍保持为 local-only。
 
 ## 范围
 
@@ -114,11 +117,11 @@ git diff --check
 - PDK master inventory、端子/pin bBox 与 CDF 字段探针、远端资源盘点：`bridge_readback`；
 - 本 Gate 没有新的 `eda_result`。只有后续 `si`/Spectre smoke 才会产生。
 
-## 尚未闭合与下一 Gate
+## 本地 Gate 当时尚未闭合与随后 Gate
 
-- `rbInst~>master = rbMaster` 在当前 Virtuoso 6.1.8/TSMC N28 PCell 上尚未 live；
-- 新 master 的 CDF callback、subMaster 生成及完整参数表变化尚未真实观测；
-- `si` 是否读取新 model、W/L/fingers/m，以及 Spectre 是否得到可解释结果尚未验证；
+- `rbInst~>master = rbMaster` 随后已在当前 Virtuoso 6.1.8/TSMC N28 NMOS PCell 上 live；
+- 新 master 的 CDF callback、完整 233 项参数表变化和 inverse 恢复随后已真实观测；
+- `si` 已读取新 model、W/L/fingers/m，LVT/SVT/restored-LVT Spectre DC/AC 均有可解释结果；
 - 自动 inverse 尚未在真实已保存失败点触发；
 - `record_only` 不等于全 CDF 迁移；
 - pin add/remove、不同 symbol pin 几何、wire/label/shape 通用 snapshot、并发 editor 仍拒绝或待 Gate。
@@ -126,3 +129,5 @@ git diff --check
 下一 Gate 已固定为全新且不覆盖的 `vb_pdk_smoke/vda_master_migration_001/schematic`。一次真实 `existing_schematic` inspect 已按预期返回 “target schematic does not exist”，对应失败记录为 `artifacts/runs/common-source-master-migration/00-target-absence-preflight.json`；这证明执行前目标空缺，不是写入失败。其后资源审计仍为 `spectre=0`、`si=0`、VDA Maestro session=`0`。
 
 获授权后的顺序为：创建 LVT 共源级 → before OA/CDF → LVT `si`/Spectre AC 基线 → `MN0: nch_lvt_mac -> nch_mac` forward → SVT OA/CDF → SVT profile 下的 `si` master/model/W/L 与 Spectre AC → inverse → 最终 LVT OA/CDF/`si`/AC 恢复。远端仿真 scratch 只允许 `/data/xum/virtuoso_bridge_smoke/vda_common-source-master-migration-{lvt-ac,svt-ac,restored-lvt-ac}_<run-id>`。故障恢复 live smoke 应在正常 round-trip 之后单独设计可控注入，不能为了测试恢复而破坏唯一基线。
+
+上述正常 round-trip 随后已按计划完成；0.45 V 初始点因器件进入线性区保留为 partial，0.35 V 的 LVT/SVT/restored-LVT 三次 DC/AC 均完整。自动 recovery 的可控 post-save 失败注入仍未执行。

@@ -17,7 +17,7 @@
     "reference_points": 5,
     "max_reference_variation_db": 0.5
   },
-  "parameters": {"bias_v": 0.45, "vdd_v": 0.9, "load_ff": 2.0},
+  "parameters": {"bias_v": 0.35, "vdd_v": 0.9, "load_ff": 2.0},
   "constraints": [
     {"metric": "saturation_region", "relation": ">=", "value": 1.0},
     {"metric": "current_mismatch_percent", "relation": "<=", "value": 1.0},

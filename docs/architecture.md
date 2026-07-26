@@ -34,7 +34,7 @@ VDA 不嵌入一个新的通用 LLM。Codex 负责开放式推理，VDA 负责�
 
 ## PDK 选择边界
 
-VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PDK_PROFILE=nics4304_tsmc28`，其当前工艺身份是 TSMC N28/`tsmcN28`，默认器件为 `nch_lvt_mac/pch_lvt_mac`。profile loader 支持显式单继承，避免同一工艺的 device-flavor profile 复制 model/corner/远端路径；`nics4304_tsmc28_svt` 只覆盖为只读探针确认存在且 symbol pin 兼容的 `nch_mac/pch_mac`。继承不继承性能证据，SVT 的 OA/`si`/Spectre 仍需独立 smoke。未来 TSMC、SMIC 等工艺各用独立 profile 绑定器件库、model、默认电压和远端路径，并单独通过 smoke；profile 之间不共享性能结论。TSV、hybrid-bonding 等封装/3D PDK 不参与默认选择或 fallback，必须由任务显式指定并使用专门 Gate。见[决策 0002](decisions/0002-foundry-cmos-pdk-default.md)。
+VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PDK_PROFILE=nics4304_tsmc28`，其当前工艺身份是 TSMC N28/`tsmcN28`，默认器件为 `nch_lvt_mac/pch_lvt_mac`。profile loader 支持显式单继承，避免同一工艺的 device-flavor profile 复制 model/corner/远端路径；`nics4304_tsmc28_svt` 只覆盖为 `nch_mac/pch_mac`。继承不继承性能证据：当前只对 NMOS 共源完成 LVT/SVT OA/`si`/Spectre round-trip，PMOS 与其他电路仍需独立 smoke。未来 TSMC、SMIC 等工艺各用独立 profile 绑定器件库、model、默认电压和远端路径，并单独通过 smoke；profile 之间不共享性能结论。TSV、hybrid-bonding 等封装/3D PDK 不参与默认选择或 fallback，必须由任务显式指定并使用专门 Gate。见[决策 0002](decisions/0002-foundry-cmos-pdk-default.md)。
 
 ## 任务与局部能力
 
@@ -77,7 +77,7 @@ Bridge/demo 的完整 `instances/nets/pins` 回读先被规范化并排序，再
 
 通用 worker 在 editor batch 抛错时仍只 purge 未保存 edit。若 editor 已正常退出而参数 callback、完整结构审计或保留参数审计随后失败，它会再做一次独立 readback：只有当前 topology SHA 精确等于本次契约预期输出，才执行相反方向的预声明 operations、恢复已声明的旧 CDF 值，并要求最终 topology SHA 与全部实例参数表都等于初始 readback。请求本身仍返回失败，恢复证据写入错误记录；新鲜 readback 失败或出现任何额外/缺失结构时状态分别记为 `state_unknown_no_write` 或 `unexpected_topology_no_write`，不做第二次 OA 写入。这个恢复边界已通过本地故障注入，尚未 live 验证。
 
-首个 live Gate 在全新 `vda_generic_topology_delta_001` 上把普通共源级增量变成 `MN0.S→NSRC + RS0(NSRC,VSS)`，随后自动 `si`/Spectre DC，再执行 inverse；最终独立 topology SHA-256 与变换前完全相同，恢复后的普通共源 DC 也重新执行成功。这证明已开放子集的真实增量写入、同源网表和显式 inverse，不等于任意图编辑事务。后续本地 Gate 已补上上述 exact-state post-save recovery 与 master/CDF compiler，但两者尚未在真实 OA 触发；wire/label/shape 没有进入通用 snapshot，pin 写入、不同 symbol 几何迁移和并发 editor 仍未验证。
+首个 live Gate 在全新 `vda_generic_topology_delta_001` 上把普通共源级增量变成 `MN0.S→NSRC + RS0(NSRC,VSS)`，随后自动 `si`/Spectre DC，再执行 inverse；最终独立 topology SHA-256 与变换前完全相同，恢复后的普通共源 DC 也重新执行成功。第二个 live Gate 在新 `vda_master_migration_001` 上执行 `MN0: nch_lvt_mac -> nch_mac -> nch_lvt_mac`：forward 后独立回读 233 项 CDF，`si` 明确导出 `model=nch_mac`，271 点 Spectre AC 完整；inverse 后 topology、全部实例参数、LVT 网表 SHA 和核心 DC/AC 标量与 before 一致。两者证明已开放子集的真实增量写入、同源网表和显式 inverse，不等于任意图编辑事务。exact-state post-save recovery 的失败分支仍只有本地故障注入；wire/label/shape 没有进入通用 snapshot，pin 写入、不同 symbol 几何迁移和并发 editor 仍未验证。
 
 ## 两层参数契约
 

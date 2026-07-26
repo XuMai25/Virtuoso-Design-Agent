@@ -262,16 +262,19 @@ transient/P1dB 和 ICMR，不能把 Gate 8 旧宽度的 follow-up 结果直接�
 
 ## 跨电路 Gate：通用微调事务
 
-状态：instance/net/reconnect 子集已在共源和“电流镜负载 + 对称源退化”两个新 cellview 完成真实 OA/`si`/Spectre forward 与 exact inverse；2026-07-26 又在本地补齐 **exact-state post-save recovery and controlled symbol-master/CDF migration**。
+状态：instance/net/reconnect 子集已在共源和“电流镜负载 + 对称源退化”两个新 cellview 完成真实 OA/`si`/Spectre forward 与 exact inverse；NMOS `nch_lvt_mac -> nch_mac -> nch_lvt_mac` 的 master/CDF、`si` model、DC/AC 和恢复态也已 live。post-save 自动 recovery 的失败分支仍只有本地故障注入。
 
 - 保存后审计失败不会盲目 inverse。只有独立回读证明当前 topology 正好是该次契约的预期输出，才执行相反方向；状态未知或存在额外结构漂移时不写。
 - `replace_master` 只作用于一个具名实例并对旧 master 做 CAS。新旧 symbol 必须有完全相同的端子集合、方向和 pin bBox；目标 master/CDF 字段也要在写前只读验证。
 - 每个替换必须声明旧/新 CDF 字符串子集。未声明字段的策略固定为 `record_only`，因此完整前后参数表属于 `bridge_readback` 证据，但不声称全部字段可迁移。
 - 正向/反向与故障恢复都复用同一契约。请求失败但恢复成功时仍记失败，不把“已恢复”包装成变换成功。
-- Bridge 仓库没有修改。当前 master/CDF 与自动恢复只有本地故障注入证据；下一步必须在新 `vda_` cellview 真实验证 OA 回读、`si` master/model/W/L 和 Spectre，再验证 inverse 恢复。pin 创建/删除及通用 wire/shape snapshot 仍在后面。
+- Bridge 仓库没有修改。正常 master/CDF forward/inverse 已在新 `vda_master_migration_001` 真实验证；下一步若验证自动恢复，必须在另一个 disposable `vda_` cellview 做受控 post-save 失败注入，不能破坏该基线。pin 创建/删除及通用 wire/shape snapshot 仍在后面。
 
 详见
 [`2026-07-26-topology-recovery-master-migration-local.md`](validation/2026-07-26-topology-recovery-master-migration-local.md)。
+
+对应 live round-trip 见
+[`2026-07-26-topology-master-migration-live.md`](validation/2026-07-26-topology-master-migration-live.md)。
 
 ## 升级原则
 

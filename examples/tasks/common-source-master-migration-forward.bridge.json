@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "id": "common-source-master-migration-forward",
+  "operation": "schematic.transform",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_master_migration_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "topology_delta": {
+    "direction": "forward",
+    "contract": {
+      "schema_version": 1,
+      "id": "common-source-nmos-lvt-to-svt-v1",
+      "expected_before_sha256": "4471c93914bf888a3c17df01ca3b97625353e8e0e5b3e2f5110e4d5684d4dea9",
+      "expected_after_sha256": "17ddebdb6de97e72c1d9181934d9dece743e7dc6d66acfb5229920492478d5d1",
+      "operations": [
+        {
+          "operation": "replace_master",
+          "instance": "MN0",
+          "expected_master": {
+            "library": "tsmcN28",
+            "cell": "nch_lvt_mac",
+            "view": "symbol"
+          },
+          "master": {
+            "library": "tsmcN28",
+            "cell": "nch_mac",
+            "view": "symbol"
+          }
+        }
+      ],
+      "inverse_operations": [
+        {
+          "operation": "replace_master",
+          "instance": "MN0",
+          "expected_master": {
+            "library": "tsmcN28",
+            "cell": "nch_mac",
+            "view": "symbol"
+          },
+          "master": {
+            "library": "tsmcN28",
+            "cell": "nch_lvt_mac",
+            "view": "symbol"
+          }
+        }
+      ],
+      "master_parameter_migrations": [
+        {
+          "instance": "MN0",
+          "expected_parameters": {"Wfg": "1u", "l": "30n"},
+          "parameters": {"Wfg": "1u", "l": "30n"},
+          "undeclared_parameter_policy": "record_only"
+        }
+      ]
+    }
+  },
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}
