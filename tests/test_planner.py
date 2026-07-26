@@ -945,6 +945,7 @@ def test_generic_topology_plan_discloses_direction_hashes_and_append_scope() -> 
             "target": {"library": "vda_test", "cell": "vda_generic"},
             "topology_delta": {
                 "direction": "forward",
+                "expected_output_placement_sha256": "c" * 64,
                 "contract": {
                     "id": "add-rs0",
                     "expected_before_sha256": "a" * 64,
@@ -977,8 +978,33 @@ def test_generic_topology_plan_discloses_direction_hashes_and_append_scope() -> 
     assert "add-rs0" in transform.description
     assert "a" * 64 in transform.description
     assert "b" * 64 in transform.description
+    assert "c" * 64 in transform.description
+    assert "wire/label/pin/instance placement" in transform.description
+    assert "自动执行逆向恢复" in transform.description
     assert "不改设备参数" in transform.description
     assert "不创建或替换" in transform.description
+    without_placement = task.model_copy(
+        update={
+            "topology_delta": task.topology_delta.model_copy(
+                update={"expected_output_placement_sha256": None}
+            )
+        }
+    )
+    assert build_plan(without_placement).confirmation_token != plan.confirmation_token
+    with_resume = task.model_copy(
+        update={
+            "topology_delta": task.topology_delta.model_copy(
+                update={"resume_partial_prefix": True}
+            )
+        }
+    )
+    resumed_plan = build_plan(with_resume)
+    assert "唯一可逆的已执行前缀" in next(
+        step.description
+        for step in resumed_plan.steps
+        if step.capability == "schematic.transform.topology-delta.forward"
+    )
+    assert resumed_plan.confirmation_token != plan.confirmation_token
 
 
 def test_generic_master_plan_discloses_cdf_cas_and_readback() -> None:

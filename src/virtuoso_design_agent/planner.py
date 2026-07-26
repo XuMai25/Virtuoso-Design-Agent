@@ -773,13 +773,33 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 )
             else:
                 parameter_clause = "不改设备参数；"
+            placement_clause = (
+                ""
+                if task.topology_delta.expected_output_placement_sha256 is None
+                else (
+                    "写后 wire/label/pin/instance placement SHA-256 还必须等于 "
+                    f"{task.topology_delta.expected_output_placement_sha256}；"
+                )
+            )
+            resume_clause = (
+                ""
+                if not task.topology_delta.resume_partial_prefix
+                else (
+                    "若 fresh readback 证明当前状态是本契约唯一可逆的已执行前缀，"
+                    "且孤立物理 pin figure 精确匹配该前缀，则允许清理 figure 并从"
+                    "剩余 operation 继续；"
+                )
+            )
             description = (
                 f"对现有 schematic 执行预声明 topology delta {contract.id!r} 的"
                 f"{direction}方向，共 "
                 f"{len(contract.operations if direction == 'forward' else contract.inverse_operations)} "
                 "个 allowlisted 结构操作；写前完整结构 SHA-256 必须等于 "
                 f"{input_sha256}，写后独立完整回读必须等于 {output_sha256}；"
-                f"{parameter_clause}不创建或替换目标 cellview"
+                f"{placement_clause}{parameter_clause}{resume_clause}"
+                "若保存后的任一审计失败，"
+                "只有 fresh readback 精确匹配声明输出时才自动执行逆向恢复；"
+                "不创建或替换目标 cellview"
             )
         elif task.circuit is CircuitKind.INVERTER:
             capability = "schematic.transform.inverter-testbench"

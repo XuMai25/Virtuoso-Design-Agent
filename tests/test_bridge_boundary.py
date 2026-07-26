@@ -62,6 +62,8 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     _parse_common_source_netlist,
     _parse_differential_pair_netlist,
     _parse_inverter_netlist,
+    _bind_logical_pin_names_to_placement,
+    _placement_fingerprint_match_mode,
     _placement_snapshot_from_readback,
     _preflight_mn0_source_label,
     _preflight_source_degeneration_removal,
@@ -5013,6 +5015,110 @@ RS0 (NSRC VSS) resistor r=1k
     }
 
 
+def test_cascode_oa_netlist_reuses_common_source_parser_with_two_mos_roles() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump()
+    parsed = _parse_common_source_netlist(
+        """
+MN0 (NCAS IN VSS VSS) nch_lvt_mac l=30n w=1u nf=1 multi=1
+MNCAS (OUT VCAS NCAS VSS) nch_lvt_mac l=60n w=1.5u nf=1 multi=1
+RD0 (VDD OUT) resistor r=20k
+""",
+        profile,
+    )
+
+    assert parsed["topology_variant"] == "cascode_common_source"
+    assert parsed["instances"]["MN0"]["nodes"] == [
+        "NCAS",
+        "IN",
+        "VSS",
+        "VSS",
+    ]
+    assert parsed["instances"]["MNCAS"]["nodes"] == [
+        "OUT",
+        "VCAS",
+        "NCAS",
+        "VSS",
+    ]
+    assert parsed["semantic_parameters"] == {
+        "device_width_um": pytest.approx(1.0),
+        "length_um": pytest.approx(0.03),
+        "load_resistance_ohm": pytest.approx(20_000.0),
+        "cascode_width_um": pytest.approx(1.5),
+        "cascode_length_um": pytest.approx(0.06),
+    }
+    assert parsed["device_geometry"]["cascode_total_width_um"] == pytest.approx(
+        1.5
+    )
+
+
+def test_cascode_schematic_readback_binds_graph_and_both_device_geometries() -> None:
+    data = {
+        "instances": [
+            {
+                "name": "MN0",
+                "lib": "tsmcN28",
+                "cell": "nch_lvt_mac",
+                "params": {"Wfg": "1u", "l": "30n", "fingers": "1", "m": "1"},
+                "terms": {"D": "NCAS", "G": "IN", "S": "VSS", "B": "VSS"},
+            },
+            {
+                "name": "MNCAS",
+                "lib": "tsmcN28",
+                "cell": "nch_lvt_mac",
+                "params": {
+                    "Wfg": "1.5u",
+                    "l": "60n",
+                    "fingers": "1",
+                    "m": r'iPar(\\"simM\\")',
+                    "simM": "1",
+                },
+                "terms": {"D": "OUT", "G": "VCAS", "S": "NCAS", "B": "VSS"},
+            },
+            {
+                "name": "RD0",
+                "lib": "analogLib",
+                "cell": "res",
+                "params": {"r": "20k"},
+                "terms": {"PLUS": "VDD", "MINUS": "OUT"},
+            },
+        ],
+        "nets": {name: {} for name in ("IN", "OUT", "VDD", "VSS", "VCAS", "NCAS")},
+        "pins": {name: {} for name in ("IN", "OUT", "VDD", "VSS", "VCAS")},
+    }
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump()
+
+    assert _assert_common_source(data, profile) == "cascode_common_source"
+    assert bridge_worker._common_source_semantic_parameters_from_schematic(data) == {
+        "device_width_um": pytest.approx(1.0),
+        "length_um": pytest.approx(0.03),
+        "load_resistance_ohm": pytest.approx(20_000.0),
+        "cascode_width_um": pytest.approx(1.5),
+        "cascode_length_um": pytest.approx(0.06),
+    }
+    geometry = _common_source_device_geometry_from_schematic(data)
+    assert geometry["total_width_um"] == pytest.approx(1.0)
+    assert geometry["cascode_total_width_um"] == pytest.approx(1.5)
+
+
+def test_device_geometry_rejects_unbound_cdf_count_indirection() -> None:
+    with pytest.raises(RuntimeError, match="missing CDF parameter 'simM'"):
+        _common_source_device_geometry_from_schematic(
+            {
+                "instances": [
+                    {
+                        "name": "MN0",
+                        "params": {
+                            "Wfg": "1u",
+                            "l": "30n",
+                            "fingers": "1",
+                            "m": r'iPar(\\"simM\\")',
+                        },
+                    }
+                ]
+            }
+        )
+
+
 def test_multifinger_oa_and_si_geometry_use_the_same_width_semantics() -> None:
     profile = load_pdk_profile("nics4304_tsmc28").model_dump()
     oa_geometry = _common_source_device_geometry_from_schematic(
@@ -5083,6 +5189,84 @@ def test_source_degenerated_dc_uses_nsrc_and_checks_both_resistors() -> None:
         )
 
 
+def test_cascode_dc_requires_two_saturated_devices_and_three_way_kcl() -> None:
+    metrics, evidence = _common_source_metrics_from_result(
+        {
+            "dc_IN": 0.35,
+            "dc_OUT": 0.5,
+            "dc_VDD": 0.9,
+            "dc_VSS": 0.0,
+            "dc_VCAS": 0.55,
+            "dc_NCAS": 0.2,
+            "dc_VDD_SRC:p": -20e-6,
+            "dcOpInfo_MN0:ids": 20e-6,
+            "dcOpInfo_MN0:vgs": 0.35,
+            "dcOpInfo_MN0:vds": 0.2,
+            "dcOpInfo_MN0:vdsat": 0.1,
+            "dcOpInfo_MN0:gm": 200e-6,
+            "dcOpInfo_MN0:gds": 10e-6,
+            "dcOpInfo_MNCAS:ids": 20e-6,
+            "dcOpInfo_MNCAS:vgs": 0.35,
+            "dcOpInfo_MNCAS:vds": 0.3,
+            "dcOpInfo_MNCAS:vdsat": 0.1,
+            "dcOpInfo_MNCAS:gm": 180e-6,
+            "dcOpInfo_MNCAS:gds": 8e-6,
+        },
+        {
+            "vdd_v": 0.9,
+            "bias_v": 0.35,
+            "cascode_bias_v": 0.55,
+            "load_resistance_ohm": 20_000.0,
+        },
+    )
+
+    assert metrics["saturation_region"] == 1.0
+    assert metrics["input_device_saturation_margin_v"] == pytest.approx(0.1)
+    assert metrics["cascode_saturation_margin_v"] == pytest.approx(0.2)
+    assert metrics["lower_saturation_headroom_v"] == pytest.approx(0.3)
+    assert metrics["output_swing_margin_v"] == pytest.approx(0.3)
+    assert metrics["cascode_current_mismatch_percent"] == pytest.approx(0.0)
+    assert evidence["device_operating_regions"] == {
+        "MN0": "saturation",
+        "MNCAS": "saturation",
+    }
+    assert evidence["cascode_stack_consistency"] == "matched"
+
+    bad = dict(
+        {
+            "dc_IN": 0.35,
+            "dc_OUT": 0.7,
+            "dc_VDD": 0.9,
+            "dc_VSS": 0.0,
+            "dc_VCAS": 0.55,
+            "dc_NCAS": 0.2,
+            "dc_VDD_SRC:p": -10e-6,
+            "dcOpInfo_MN0:ids": 20e-6,
+            "dcOpInfo_MN0:vgs": 0.35,
+            "dcOpInfo_MN0:vds": 0.2,
+            "dcOpInfo_MN0:vdsat": 0.1,
+            "dcOpInfo_MN0:gm": 200e-6,
+            "dcOpInfo_MN0:gds": 10e-6,
+            "dcOpInfo_MNCAS:ids": 10e-6,
+            "dcOpInfo_MNCAS:vgs": 0.35,
+            "dcOpInfo_MNCAS:vds": 0.5,
+            "dcOpInfo_MNCAS:vdsat": 0.1,
+            "dcOpInfo_MNCAS:gm": 180e-6,
+            "dcOpInfo_MNCAS:gds": 8e-6,
+        }
+    )
+    with pytest.raises(RuntimeError, match="MN0 and MNCAS ids"):
+        _common_source_metrics_from_result(
+            bad,
+            {
+                "vdd_v": 0.9,
+                "bias_v": 0.35,
+                "cascode_bias_v": 0.55,
+                "load_resistance_ohm": 20_000.0,
+            },
+        )
+
+
 def test_source_degenerated_deck_saves_internal_source_node() -> None:
     profile = load_pdk_profile("nics4304_tsmc28").model_dump()
     deck = _common_source_testbench_deck(
@@ -5098,6 +5282,33 @@ def test_source_degenerated_deck_saves_internal_source_node() -> None:
         "/data/xum/virtuoso_bridge_smoke/vda_cs_deg/netlist",
     )
     assert "save IN OUT VDD VSS NSRC" in deck
+
+
+def test_cascode_dc_and_ac_deck_drive_bias_and_save_internal_stack() -> None:
+    profile = load_pdk_profile("nics4304_tsmc28").model_dump()
+    deck = _common_source_testbench_deck(
+        profile,
+        {
+            "device_width_um": 1.0,
+            "length_um": 0.03,
+            "cascode_width_um": 1.5,
+            "cascode_length_um": 0.06,
+            "load_resistance_ohm": 20_000.0,
+            "bias_v": 0.35,
+            "cascode_bias_v": 0.55,
+            "vdd_v": 0.9,
+            "load_ff": 1.0,
+        },
+        "/data/xum/vda_runs/cascode/netlist",
+        analysis="ac",
+        ac_sweep={"start_hz": 1e3, "stop_hz": 1e11},
+    )
+
+    assert "parameters vdd=0.9 vbias=0.35 vcas=0.55" in deck
+    assert "VCAS_SRC (VCAS 0) vsource dc=vcas" in deck
+    assert "save IN OUT VDD VSS VCAS NCAS" in deck
+    assert "save MNCAS:ids MNCAS:vgs MNCAS:vds MNCAS:vdsat" in deck
+    assert "VIN_SRC (IN 0) vsource dc=vbias mag=1 type=dc" in deck
 
 
 def _common_source_readback(*, degenerated: bool) -> dict:
@@ -5291,6 +5502,12 @@ def test_source_label_edit_is_strict_and_parameter_updates_are_partial() -> None
     assert mos_updates == {"MN0": {"wf": "0.5u"}}
     assert "nf" not in mos_updates["MN0"]
     assert "m" not in mos_updates["MN0"]
+    cascode_updates = _common_source_instance_parameter_updates(
+        {"cascode_width_um": 1.5, "cascode_length_um": 0.06}
+    )
+    assert cascode_updates == {
+        "MNCAS": {"wf": "1.5u", "l": "0.06u"}
+    }
 
 
 def test_differential_source_degeneration_edit_is_symmetric_and_owned() -> None:
@@ -5374,7 +5591,7 @@ def test_removal_preflight_is_read_only_and_checks_owned_stubs(monkeypatch) -> N
     assert '"schematic" "schematic" "r"' in captured["skill"]
     assert "target schematic has unsaved changes" in captured["skill"]
     assert 'x~>theLabel == "NSRC"' in captured["skill"]
-    assert captured["skill"].count("length(rbWires) == 1") == 2
+    assert captured["skill"].count("length(rbWires) == 1") == 3
     assert captured["timeout"] == 60
 
 
@@ -5406,6 +5623,7 @@ def test_bridge_payload_preserves_predeclared_topology_direction_and_hashes() ->
             "target": {"library": "vda_test", "cell": "vda_generic"},
             "topology_delta": {
                 "direction": "forward",
+                "expected_output_placement_sha256": "c" * 64,
                 "contract": {
                     "id": "noop",
                     "expected_before_sha256": "a" * 64,
@@ -5420,6 +5638,9 @@ def test_bridge_payload_preserves_predeclared_topology_direction_and_hashes() ->
     payload = SubprocessBridgeAdapter._task_payload(task)
 
     assert payload["topology_delta"]["direction"] == "forward"
+    assert payload["topology_delta"]["expected_output_placement_sha256"] == (
+        "c" * 64
+    )
     assert payload["topology_delta"]["contract"]["id"] == "noop"
     assert (
         payload["topology_delta"]["contract"]["expected_before_sha256"]
@@ -5474,8 +5695,13 @@ def test_generic_topology_compiler_uses_bridge_editor_for_owned_stub_delta() -> 
     assert declarative == ["add_net"]
     assert len(commands) == 4
     assert 'x~>name == "MN0"' in commands[0]
+    assert 'x rbInst~>instTerms x~>name == "S"' in commands[0]
+    assert 'rbInstTerm~>net~>name == "VSS"' in commands[0]
     assert 'x~>theLabel == "VSS"' in commands[0]
     assert 'rbLabel~>theLabel = "NSRC"' in commands[0]
+    assert "length(rbLabels) == 0" in commands[0]
+    assert "length(rbWires) == 0" in commands[0]
+    assert "LABEL:MN0.S=NSRC" in commands[0]
     assert commands[1].startswith("INST:analogLib|res|symbol|RS0|0.0|-1.3|R0")
     assert set(commands[2:]) == {
         "LABEL:RS0.MINUS=VSS",
@@ -5483,17 +5709,136 @@ def test_generic_topology_compiler_uses_bridge_editor_for_owned_stub_delta() -> 
     }
 
 
-def test_generic_topology_compiler_rejects_unverified_pin_writes() -> None:
+def test_generic_topology_compiler_executes_exact_scalar_pin_geometry() -> None:
     from virtuoso_design_agent.topology_delta import (
         AddPinOperation,
+        RemovePinOperation,
         TopologyPin,
     )
 
-    with pytest.raises(RuntimeError, match="dedicated pin-geometry Gate"):
+    pin = TopologyPin(
+        name="VCAS",
+        net="VCAS",
+        direction="input",
+        attributes={
+            "numBits": 1,
+            "master": {"library": "basic", "cell": "ipin", "view": "symbol"},
+            "xy": [2.0, 0.0],
+            "orient": "R0",
+        },
+    )
+    commands, declarative = bridge_worker._compile_generic_topology_commands(
+        [AddPinOperation(pin=pin), RemovePinOperation(expected=pin)],
+        pin_builder=lambda *args, **kwargs: f"PIN:{args!r}:{kwargs!r}",
+    )
+
+    assert declarative == []
+    assert commands[0] == (
+        "PIN:('VCAS', 2.0, 0.0, 'R0'):{'direction': 'input'}"
+    )
+    assert 'rbTerms = setof(x cv~>terminals x~>name == "VCAS")' in commands[1]
+    assert 'rbFig~>cellName == "ipin"' in commands[1]
+    assert "xCoord(rbFig~>xy) - 2" in commands[1]
+    assert "dbDeleteObject(rbTerm)" in commands[1]
+    assert "dbDeleteObject(rbFig)" not in commands[1]
+    assert "rbOrphanFigs = setof(x cv~>instances" in commands[1]
+    assert 'x~>purpose == "pin" || x~>purpose == "cell"' in commands[1]
+    assert "dbDeleteObject(car(rbOrphanFigs))" in commands[1]
+
+
+def test_partial_topology_prefix_resume_requires_bidirectional_hash_proof() -> None:
+    from virtuoso_design_agent.topology_delta import (
+        AddInstanceOperation,
+        AddNetOperation,
+        AddPinOperation,
+        ReconnectTerminalOperation,
+        TopologyInstance,
+        TopologyMaster,
+        TopologyNet,
+        TopologyPin,
+        TopologySnapshot,
+        apply_topology_operations,
+        invert_topology_operations,
+        topology_fingerprint,
+    )
+
+    pin = TopologyPin(
+        name="VCAS",
+        net="VCAS",
+        direction="input",
+        attributes={
+            "numBits": 1,
+            "master": {"library": "basic", "cell": "ipin", "view": "symbol"},
+            "xy": [-1.4, 0.65],
+            "orient": "R0",
+        },
+    )
+    before = TopologySnapshot(
+        instances=[
+            TopologyInstance(
+                name="MN0",
+                master=TopologyMaster(
+                    library="tsmcN28", cell="nch_lvt_mac", view="symbol"
+                ),
+                terminals={"B": "VSS", "D": "OUT", "G": "IN", "S": "VSS"},
+                attributes={"numInst": 1, "orient": "R0", "xy": [0.0, 0.0]},
+            )
+        ],
+        nets=[TopologyNet(name=name) for name in ("IN", "OUT", "VSS")],
+        pins=[],
+    )
+    forward = [
+        AddNetOperation(net=TopologyNet(name="NCAS")),
+        AddNetOperation(net=TopologyNet(name="VCAS")),
+        ReconnectTerminalOperation(
+            instance="MN0", terminal="D", expected_net="OUT", net="NCAS"
+        ),
+        AddInstanceOperation(
+            instance=TopologyInstance(
+                name="MNCAS",
+                master=TopologyMaster(
+                    library="tsmcN28", cell="nch_lvt_mac", view="symbol"
+                ),
+                terminals={"B": "VSS", "D": "OUT", "G": "VCAS", "S": "NCAS"},
+                attributes={"numInst": 1, "orient": "R0", "xy": [0.0, 0.65]},
+            )
+        ),
+        AddPinOperation(pin=pin),
+    ]
+    after = apply_topology_operations(before, forward)
+    inverse = invert_topology_operations(forward)
+    partial = apply_topology_operations(after, inverse[:2])
+    orphan_signature = bridge_worker._topology_pin_signature(pin)
+
+    prefix_length, removed_pins = (
+        bridge_worker._select_partial_generic_topology_prefix(
+            partial,
+            inverse,
+            topology_fingerprint(after),
+            topology_fingerprint(before),
+            [orphan_signature],
+        )
+    )
+
+    assert prefix_length == 2
+    assert removed_pins == [pin]
+    with pytest.raises(RuntimeError, match="matches=0"):
+        bridge_worker._select_partial_generic_topology_prefix(
+            partial,
+            inverse,
+            topology_fingerprint(after),
+            topology_fingerprint(before),
+            [("basic", "opin", "R0", (-1.4, 0.65))],
+        )
+
+
+def test_generic_topology_compiler_rejects_unbound_pin_geometry() -> None:
+    from virtuoso_design_agent.topology_delta import AddPinOperation, TopologyPin
+
+    with pytest.raises(RuntimeError, match="requires input/output/inputOutput"):
         bridge_worker._compile_generic_topology_commands(
             [AddPinOperation(pin=TopologyPin(name="X", net="X"))],
-            instance_builder=lambda *args: "unused",
-            terminal_label_builder=lambda *args: "unused",
+            pin_builder=lambda *args, **kwargs: "unused",
         )
 
 
@@ -5648,6 +5993,70 @@ def test_generic_topology_master_scope_is_existing_or_profile_bound() -> None:
         )
 
 
+def test_pin_geometry_readback_is_structured_and_bound_to_placement() -> None:
+    raw = """PINS
+PIN|IN|input|1|basic|ipin|symbol|(-1.4 0.0)|R0
+PIN|VSS|inputOutput|1|basic|iopin|symbol|(0.7 -0.6)|R0
+END
+"""
+    geometry = bridge_worker._parse_schematic_pin_geometry(raw)
+    placement = _placement_snapshot_from_readback(
+        {
+            "instances": [
+                {
+                    "name": "PIN0",
+                    "lib": "basic",
+                    "cell": "ipin",
+                    "xy": "(-1.4 0.0)",
+                    "orient": "R0",
+                },
+                {
+                    "name": "PIN1",
+                    "lib": "basic",
+                    "cell": "iopin",
+                    "xy": "(0.7 -0.6)",
+                    "orient": "R0",
+                },
+            ],
+            "pins": [
+                {"name": "IN", "direction": "input"},
+                {"name": "VSS", "direction": "inputOutput"},
+            ],
+            "labels": [],
+            "wires": [],
+        }
+    )
+
+    bridge_worker._assert_pin_geometry_matches_placement(geometry, placement)
+    topology = bridge_worker._generic_topology_readback(
+        {
+            "instances": [],
+            "nets": {
+                name: {
+                    "connections": [],
+                    "numBits": 1,
+                    "sigType": "signal",
+                    "isGlobal": False,
+                }
+                for name in geometry
+            },
+            "pins": {
+                "IN": {"direction": "input", "numBits": 1},
+                "VSS": {"direction": "inputOutput", "numBits": 1},
+            },
+        },
+        pin_geometry=geometry,
+    )
+
+    in_pin = next(item for item in topology["pins"] if item["name"] == "IN")
+    assert in_pin["xy"] == [-1.4, 0.0]
+    assert in_pin["master"] == {
+        "library": "basic",
+        "cell": "ipin",
+        "view": "symbol",
+    }
+
+
 def _generic_bridge_source_degeneration_readbacks() -> tuple[dict, dict]:
     before = {
         "instances": [
@@ -5704,10 +6113,31 @@ def _generic_bridge_master_swap_readbacks() -> tuple[dict, dict]:
     return before, after
 
 
+def _stub_generic_geometry_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
+    placement = {
+        "sha256": "1" * 64,
+        "counts": {"instances": 0, "pins": 0, "labels": 0, "wires": 0},
+        "label_texts": [],
+        "canonical_geometry": {
+            "instances": [],
+            "pins": [],
+            "labels": [],
+            "wires": [],
+        },
+    }
+    monkeypatch.setattr(
+        bridge_worker,
+        "_schematic_geometry_bundle",
+        lambda *_args: (None, deepcopy(placement)),
+    )
+
+
 def test_generic_topology_worker_binds_append_write_to_independent_readback(
     monkeypatch,
 ) -> None:
     from virtuoso_design_agent.topology_delta import derive_topology_delta
+
+    _stub_generic_geometry_bundle(monkeypatch)
 
     before, after = _generic_bridge_source_degeneration_readbacks()
     contract = derive_topology_delta(
@@ -5762,6 +6192,8 @@ def test_generic_topology_worker_applies_explicit_master_cdf_migration(
     monkeypatch,
 ) -> None:
     from virtuoso_design_agent.topology_delta import derive_topology_delta
+
+    _stub_generic_geometry_bundle(monkeypatch)
 
     before, after = _generic_bridge_master_swap_readbacks()
     contract = derive_topology_delta(
@@ -5841,6 +6273,8 @@ def test_generic_topology_worker_restores_exact_saved_state_after_audit_failure(
 ) -> None:
     from virtuoso_design_agent.topology_delta import derive_topology_delta
 
+    _stub_generic_geometry_bundle(monkeypatch)
+
     before, after = _generic_bridge_source_degeneration_readbacks()
     drifted_after = deepcopy(after)
     drifted_after["instances"][0]["params"]["Wfg"] = "9u"
@@ -5891,10 +6325,161 @@ def test_generic_topology_worker_restores_exact_saved_state_after_audit_failure(
     assert editor_batches[1][0].startswith("batch:remove_instance")
 
 
+def test_generic_topology_worker_restores_after_saved_placement_mismatch(
+    monkeypatch,
+) -> None:
+    from virtuoso_design_agent.topology_delta import derive_topology_delta
+
+    before, after = _generic_bridge_source_degeneration_readbacks()
+    contract = derive_topology_delta(
+        "generic-source-degeneration-placement",
+        {"topology": bridge_worker._generic_topology_readback(before)},
+        {"topology": bridge_worker._generic_topology_readback(after)},
+    )
+    reads = iter([before, after, after, before])
+
+    def placement(digest: str) -> dict:
+        return {
+            "sha256": digest,
+            "counts": {"instances": 0, "pins": 0, "labels": 0, "wires": 0},
+            "label_texts": [],
+            "canonical_geometry": {
+                "instances": [],
+                "pins": [],
+                "labels": [],
+                "wires": [],
+            },
+        }
+
+    placements = iter(
+        [placement("1" * 64), placement("3" * 64), placement("3" * 64), placement("1" * 64)]
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_schematic_geometry_bundle",
+        lambda *_args: (None, next(placements)),
+    )
+    edit_count = 0
+
+    class Editor:
+        def __enter__(self):
+            nonlocal edit_count
+            edit_count += 1
+            return self
+
+        def add(self, _command):
+            return None
+
+        def __exit__(self, *_args):
+            return False
+
+    client = SimpleNamespace(
+        schematic=SimpleNamespace(edit=lambda *_args, **_kwargs: Editor())
+    )
+    monkeypatch.setattr(bridge_worker, "_client", lambda: client)
+    monkeypatch.setattr(bridge_worker, "_read_schematic", lambda *_args: next(reads))
+    monkeypatch.setattr(
+        bridge_worker,
+        "_compile_generic_topology_commands",
+        lambda operations: ([f"batch:{operations[0].operation}"], []),
+    )
+
+    with pytest.raises(RuntimeError, match='"status": "restored"') as caught:
+        bridge_worker.transform_existing_schematic_topology_delta(
+            {
+                "target": {"library": "vda_test", "cell": "vda_generic"},
+                "profile": {"tech_library": "tsmcN28"},
+                "topology_delta": {
+                    "direction": "forward",
+                    "expected_output_placement_sha256": "2" * 64,
+                    "contract": contract.model_dump(mode="json"),
+                },
+            }
+        )
+
+    assert "output placement fingerprint mismatch" in str(caught.value)
+    assert edit_count == 2
+
+
+def test_generic_topology_recovery_treats_geometry_transport_loss_as_unknown(
+    monkeypatch,
+) -> None:
+    from virtuoso_design_agent.topology_delta import derive_topology_delta
+
+    before, after = _generic_bridge_source_degeneration_readbacks()
+    contract = derive_topology_delta(
+        "generic-source-degeneration-geometry-loss",
+        {"topology": bridge_worker._generic_topology_readback(before)},
+        {"topology": bridge_worker._generic_topology_readback(after)},
+    )
+    reads = iter([before, after, after])
+    geometry_calls = 0
+
+    def geometry(*_args):
+        nonlocal geometry_calls
+        geometry_calls += 1
+        if geometry_calls == 1:
+            return None, {
+                "sha256": "1" * 64,
+                "counts": {"instances": 0, "pins": 0, "labels": 0, "wires": 0},
+                "label_texts": [],
+                "canonical_geometry": {
+                    "instances": [],
+                    "pins": [],
+                    "labels": [],
+                    "wires": [],
+                },
+            }
+        raise OSError("synthetic placement transport loss")
+
+    edit_count = 0
+
+    class Editor:
+        def __enter__(self):
+            nonlocal edit_count
+            edit_count += 1
+            return self
+
+        def add(self, _command):
+            return None
+
+        def __exit__(self, *_args):
+            return False
+
+    client = SimpleNamespace(
+        schematic=SimpleNamespace(edit=lambda *_args, **_kwargs: Editor())
+    )
+    monkeypatch.setattr(bridge_worker, "_client", lambda: client)
+    monkeypatch.setattr(bridge_worker, "_read_schematic", lambda *_args: next(reads))
+    monkeypatch.setattr(bridge_worker, "_schematic_geometry_bundle", geometry)
+    monkeypatch.setattr(
+        bridge_worker,
+        "_compile_generic_topology_commands",
+        lambda _operations: (["compiled-batch"], []),
+    )
+
+    with pytest.raises(RuntimeError, match="state_unknown_no_write"):
+        bridge_worker.transform_existing_schematic_topology_delta(
+            {
+                "target": {"library": "vda_test", "cell": "vda_generic"},
+                "profile": {"tech_library": "tsmcN28"},
+                "topology_delta": {
+                    "direction": "forward",
+                    "contract": contract.model_dump(mode="json"),
+                },
+            }
+        )
+
+    assert geometry_calls == 3
+    assert edit_count == 1
+
+
 def test_generic_topology_worker_refuses_recovery_from_unexpected_topology(
     monkeypatch,
 ) -> None:
     from virtuoso_design_agent.topology_delta import derive_topology_delta
+
+    _stub_generic_geometry_bundle(monkeypatch)
 
     before, after = _generic_bridge_source_degeneration_readbacks()
     unexpected = deepcopy(after)
@@ -5955,6 +6540,8 @@ def test_generic_topology_worker_does_not_write_when_recovery_state_is_unknown(
 ) -> None:
     from virtuoso_design_agent.topology_delta import derive_topology_delta
 
+    _stub_generic_geometry_bundle(monkeypatch)
+
     before, after = _generic_bridge_source_degeneration_readbacks()
     contract = derive_topology_delta(
         "generic-source-degeneration",
@@ -6014,6 +6601,8 @@ def test_generic_master_cdf_failure_restores_original_master_and_parameters(
     monkeypatch,
 ) -> None:
     from virtuoso_design_agent.topology_delta import derive_topology_delta
+
+    _stub_generic_geometry_bundle(monkeypatch)
 
     before, after = _generic_bridge_master_swap_readbacks()
     contract = derive_topology_delta(
@@ -6101,6 +6690,8 @@ def test_generic_topology_worker_purges_unsaved_edit_after_command_failure(
     monkeypatch,
 ) -> None:
     from virtuoso_design_agent.topology_delta import derive_topology_delta
+
+    _stub_generic_geometry_bundle(monkeypatch)
 
     before, after = _generic_bridge_source_degeneration_readbacks()
     contract = derive_topology_delta(
@@ -6203,6 +6794,71 @@ def test_placement_snapshot_is_order_independent_and_shape_sensitive() -> None:
     changed = _placement_snapshot_from_readback(reordered)
     assert changed["sha256"] != baseline["sha256"]
     assert changed["counts"]["wires"] == baseline["counts"]["wires"] + 1
+
+
+def test_logical_pin_bound_placement_ignores_only_oa_pin_autonames() -> None:
+    pin_geometry = {
+        "IN": {
+            "direction": "input",
+            "numBits": 1,
+            "master": {"library": "basic", "cell": "ipin", "view": "symbol"},
+            "xy": [-1.0, 0.0],
+            "orient": "R0",
+        }
+    }
+    first = _placement_snapshot_from_readback(
+        {
+            "instances": [
+                {
+                    "name": "MN0",
+                    "lib": "tsmcN28",
+                    "cell": "nch_lvt_mac",
+                    "xy": "(0 0)",
+                    "orient": "R0",
+                },
+                {
+                    "name": "PIN4",
+                    "lib": "basic",
+                    "cell": "ipin",
+                    "xy": "(-1 0)",
+                    "orient": "R0",
+                },
+            ],
+            "pins": [{"name": "IN", "direction": "input"}],
+            "labels": [{"text": "IN", "xy": "(-0.5 0)"}],
+            "wires": ["((-1 0) (0 0))"],
+        }
+    )
+    autonamed = deepcopy(first["canonical_geometry"])
+    next(item for item in autonamed["instances"] if item["cell"] == "ipin")[
+        "name"
+    ] = "PIN5"
+    second = _placement_snapshot_from_readback(autonamed)
+
+    bound_first = _bind_logical_pin_names_to_placement(pin_geometry, first)
+    bound_second = _bind_logical_pin_names_to_placement(pin_geometry, second)
+
+    assert first["sha256"] != second["sha256"]
+    assert bound_first["logical_pin_bound_sha256"] == bound_second[
+        "logical_pin_bound_sha256"
+    ]
+    assert _placement_fingerprint_match_mode(
+        bound_first["logical_pin_bound_sha256"], bound_second
+    ) == "logical_pin_bound"
+    assert bound_second["logical_pin_bindings"] == [
+        {"logical_pin": "IN", "physical_oa_name": "PIN5"}
+    ]
+
+    renamed_device = deepcopy(second["canonical_geometry"])
+    next(
+        item for item in renamed_device["instances"] if item["cell"] == "nch_lvt_mac"
+    )["name"] = "MN1"
+    rebound_device = _bind_logical_pin_names_to_placement(
+        pin_geometry, _placement_snapshot_from_readback(renamed_device)
+    )
+    assert rebound_device["logical_pin_bound_sha256"] != bound_first[
+        "logical_pin_bound_sha256"
+    ]
 
 
 def test_failed_transform_cleanup_purges_only_unsaved_target_view(monkeypatch) -> None:
@@ -7016,6 +7672,188 @@ def test_common_source_ac_worker_returns_dc_and_complex_ac_evidence(
     sources = result["evidence"]["testbench"]["value_sources"]["ac_sweep"]
     assert sources["start_hz"] == "user_input"
     assert sources["reference_points"] == "software_inference"
+
+
+def test_cascode_common_source_worker_reuses_oa_si_dc_and_ac_flow(
+    monkeypatch,
+) -> None:
+    import sys
+    from types import ModuleType
+
+    frequency_hz = [10.0 ** (4.0 + index / 20.0) for index in range(141)]
+    vin = [1.0 + 0.0j for _ in frequency_hz]
+    vout = [-8.0 / (1.0 + 1j * frequency / 1e9) for frequency in frequency_hz]
+    runner_module = ModuleType("virtuoso_bridge.spectre.runner")
+    current_a = (0.9 - 0.5) / 22_000.0
+
+    class Simulator:
+        _ssh_runner = None
+
+        @classmethod
+        def from_env(cls, **kwargs):
+            return cls()
+
+        def run_simulation(self, netlist, parameters):
+            output_dir = netlist.parent / "cascode_common_source_ac.raw"
+            output_dir.mkdir()
+            (output_dir / "ac.ac").write_text(
+                "fixture cascode complex AC data", encoding="utf-8"
+            )
+            return SimpleNamespace(
+                ok=True,
+                data={
+                    "dc_IN": 0.35,
+                    "dc_OUT": 0.5,
+                    "dc_VDD": 0.9,
+                    "dc_VSS": 0.0,
+                    "dc_VCAS": 0.55,
+                    "dc_NCAS": 0.2,
+                    "dc_VDD_SRC:p": -current_a,
+                    "dcOpInfo_MN0:ids": current_a,
+                    "dcOpInfo_MN0:vgs": 0.35,
+                    "dcOpInfo_MN0:vds": 0.2,
+                    "dcOpInfo_MN0:vdsat": 0.1,
+                    "dcOpInfo_MN0:gm": 300e-6,
+                    "dcOpInfo_MN0:gds": 10e-6,
+                    "dcOpInfo_MNCAS:ids": current_a,
+                    "dcOpInfo_MNCAS:vgs": 0.35,
+                    "dcOpInfo_MNCAS:vds": 0.3,
+                    "dcOpInfo_MNCAS:vdsat": 0.1,
+                    "dcOpInfo_MNCAS:gm": 300e-6,
+                    "dcOpInfo_MNCAS:gds": 10e-6,
+                    "ac_freq": frequency_hz,
+                    "ac_IN": vin,
+                    "ac_OUT": vout,
+                },
+                metadata={"output_dir": str(output_dir)},
+                tool_version="test-spectre-cascode-ac",
+                warnings=[],
+            )
+
+    runner_module.SpectreSimulator = Simulator
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.spectre.runner", runner_module)
+    monkeypatch.setattr(
+        bridge_worker,
+        "_common_source_dc_data_from_result",
+        lambda result: (result.data, {"selection": "cascode fixture"}),
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_client",
+        lambda: SimpleNamespace(ssh_runner=None),
+    )
+    monkeypatch.setattr(bridge_worker, "_read_schematic", lambda *args: {})
+    monkeypatch.setattr(
+        bridge_worker,
+        "_assert_common_source",
+        lambda *args: "cascode_common_source",
+    )
+    oa_parameters = {
+        "device_width_um": 1.0,
+        "length_um": 0.03,
+        "load_resistance_ohm": 22_000.0,
+        "cascode_width_um": 1.0,
+        "cascode_length_um": 0.03,
+    }
+    geometry = {
+        "finger_width_um": 1.0,
+        "fingers": 2.0,
+        "multiplicity": 1.0,
+        "total_width_um": 2.0,
+        "cascode_finger_width_um": 1.0,
+        "cascode_fingers": 2.0,
+        "cascode_multiplicity": 1.0,
+        "cascode_total_width_um": 2.0,
+    }
+    monkeypatch.setattr(
+        bridge_worker,
+        "_common_source_semantic_parameters_from_schematic",
+        lambda data: oa_parameters,
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_common_source_device_geometry_from_schematic",
+        lambda data: geometry,
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_generate_oa_netlist",
+        lambda *args, **kwargs: {
+            "remote_run_dir": "/data/xum/virtuoso_bridge_smoke/vda_cs_cascode_ac",
+            "remote_netlist_path": (
+                "/data/xum/virtuoso_bridge_smoke/vda_cs_cascode_ac/netlist"
+            ),
+            "netlist_sha256": "4" * 64,
+            "parsed": {
+                "semantic_parameters": oa_parameters,
+                "device_geometry": geometry,
+                "topology_variant": "cascode_common_source",
+                "instances": {"MN0": {}, "MNCAS": {}, "RD0": {}},
+            },
+            "si_log_tail": ["End netlisting"],
+        },
+    )
+    monkeypatch.setattr(bridge_worker, "_upload_file", lambda *args, **kwargs: None)
+
+    result = simulate_common_source(
+        {
+            "target": {"library": "vda_test", "cell": "vda_cs_cascode"},
+            "profile": load_pdk_profile("nics4304_tsmc28").model_dump(
+                mode="json"
+            ),
+            "analysis": "ac",
+            "ac_sweep": {
+                "start_hz": 1e4,
+                "stop_hz": 1e11,
+                "points_per_decade": 20,
+                "reference_points": 5,
+                "max_reference_variation_db": 0.5,
+            },
+            "ac_sweep_user_fields": [
+                "start_hz",
+                "stop_hz",
+                "points_per_decade",
+            ],
+            "parameters": {
+                **oa_parameters,
+                "bias_v": 0.35,
+                "cascode_bias_v": 0.55,
+                "vdd_v": 0.9,
+                "load_ff": 2.0,
+            },
+            "timeout_seconds": 60,
+        }
+    )
+
+    assert result["tool_version"] == "test-spectre-cascode-ac"
+    assert result["analysis_complete"] is True
+    assert result["metrics"]["saturation_region"] == 1.0
+    assert result["metrics"]["input_device_saturation_margin_v"] == pytest.approx(
+        0.1
+    )
+    assert result["metrics"]["cascode_saturation_margin_v"] == pytest.approx(0.2)
+    assert result["metrics"]["cascode_current_mismatch_percent"] == pytest.approx(
+        0.0
+    )
+    assert result["metrics"]["low_frequency_gain_v_per_v"] == pytest.approx(
+        8.0, rel=1e-5
+    )
+    assert result["metrics"]["bandwidth_3db_hz"] == pytest.approx(1e9, rel=0.01)
+    assert result["metrics"]["gain_bandwidth_product_hz"] == pytest.approx(
+        8e9, rel=0.01
+    )
+    assert result["evidence"]["schematic_readback"]["topology_variant"] == (
+        "cascode_common_source"
+    )
+    assert result["evidence"]["netlist"]["topology_variant"] == (
+        "cascode_common_source"
+    )
+    assert result["evidence"]["testbench"]["values"]["cascode_bias_v"] == (
+        pytest.approx(0.55)
+    )
+    assert result["evidence"]["operating_point"]["cascode_stack_consistency"] == (
+        "matched"
+    )
 
 
 @pytest.mark.parametrize(

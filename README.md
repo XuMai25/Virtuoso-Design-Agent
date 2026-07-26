@@ -28,14 +28,17 @@ Gate 8 已把 Gate 7D 的真实器件表和 validation hash 编译成六个不�
 
 随后在全新 `vda_diffpair_active_deg_generic_001` 上真实验证“PMOS 电流镜负载 + 对称源极退化”的通用 delta 组合。forward 把五实例 active-load 结构增量变成七实例拓扑，`RS0=RS1=500 Ω` 经 OA 回读并进入同一 `si` 网表；PMOS/RS/尾管 KCL、DC、差模 AC/CMRR、noise、transient/THD、10 点 ICMR 和 nominal PSRR 均复用原 worker。组合结果为 gain `3.5523 V/V`、BW `2.0576 GHz`、GBW `7.3093 GHz`、CMRR `34.446 dB`、输入参考积分噪声 `817.84 µV RMS`；`50 mV_peak` 时 THD `1.411%`，但 P1dB 未包围，PSRR+/- 也只有约 `11.06/13.08 dB`。exact inverse 与独立 generic readback 恢复原 SHA，恢复态 DC 再次成功。当前状态是 **active-load plus symmetric source-degeneration generic-delta and nominal multi-analysis migration live verified**，不是设计质量 closure。详见[组合拓扑 live Gate](docs/validation/2026-07-26-differential-pair-active-source-degeneration-live.md)。
 
+同日又在新 `vda_cs_cascode_gate_001` 上闭合共源→共栅原位微调。通用 delta 只增加 `MNCAS/NCAS/VCAS/VCAS pin` 并重连 `MN0.D`；真实 pin/placement 指纹、post-save 故障自动 inverse、部分恢复后的端子重建、OA CDF `iPar("simM")` 严格解析都经过独立回读。由普通共源真实 OP 生成的同一组 9 个 `(Wcas,Lcas,VCAS)` tuple 先跑 DC、再逐点跑 AC，对应网表 9/9 匹配且两轮都 9/9 可行。AC 的声明离散域最佳点为 `0.75 µm/0.03 µm/0.545 V`，gain `6.4412 V/V`、BW `3.6127 GHz`、GBW `23.2705 GHz`；exact inverse 后普通共源 netlist hash、17 个 DC 指标及两次 28 项 AC/DC 指标完全一致。当前状态是 **recoverable common-source-to-cascode bounded same-source DC/AC selection live verified at nominal top_tt**，仍不是连续最优或完整质量闭环。详见[共栅与恢复 live Gate](docs/validation/2026-07-26-common-source-cascode-and-topology-recovery-live.md)。
+
 ## 当前能做什么
 
 - 将任务编译为带副作用标记的稳定执行计划。
-- 单独规划或执行：`device.characterize`、`schematic.create`、`schematic.inspect`、`schematic.transform`、`parameters.apply`、`ade.prepare`、`ade.capture`、`ade.corners.apply`、`ade.variables.apply`、`ade.setup.apply`、`ade.run`、`simulation.run`、`design.tune`、`design.close_loop`。`device.characterize` 只有远端 scratch/compute，不接受 OA target；当前 `schematic.transform` 开放共源级源极退化的受控 add/remove、反相器 core→ADE source/load testbench、差分对 core→`MNTAIL/BIAS`、真实尾管差分对的对称源极退化 add/remove，以及无源退化真实尾管差分对的 `RD0/RD1 ↔ MP0/MP1` 电流镜负载可逆变换。
-- 每次专用 `schematic.transform` 通过原有模板语义断言后，还会把完整结构回读规范化为通用 topology snapshot，推导只含实例增删、端子重连、master 替换、net/pin 增删的 allowlisted delta，计算前后 SHA-256，并证明自动生成的 inverse patch 精确恢复原结构。参数不混入拓扑指纹，继续由独立 CDF/semantic 回读负责。`existing_schematic` 已真实执行 instance add/remove、terminal reconnect、net add/remove，以及 instance-scoped `replace_master + CDF`：NMOS LVT/SVT round-trip 的 OA master、233 项 CDF、`si` model/W/L、271 点 Spectre AC 和恢复态均已同源验证。worker 还实现保存后审计失败时只在新鲜回读精确等于预期 topology 时自动 inverse；状态未知或存在额外结构漂移时拒绝二次写，但该故障恢复分支仍只有本地注入证据。`vda topology-compile` 可从 operation 文件一并绑定 `master_parameter_migrations`。pin/wire-shape 仍待独立 Gate，因此仍不是任意远端 OA writer。
+- 单独规划或执行：`device.characterize`、`schematic.create`、`schematic.inspect`、`schematic.transform`、`parameters.apply`、`ade.prepare`、`ade.capture`、`ade.corners.apply`、`ade.variables.apply`、`ade.setup.apply`、`ade.run`、`simulation.run`、`design.tune`、`design.close_loop`。`device.characterize` 只有远端 scratch/compute，不接受 OA target；当前 `schematic.transform` 开放共源级源极退化的受控 add/remove、反相器 core→ADE source/load testbench、差分对 core→`MNTAIL/BIAS`、真实尾管差分对的对称源极退化 add/remove，以及无源退化真实尾管差分对的 `RD0/RD1 ↔ MP0/MP1` 电流镜负载可逆变换。预声明通用 delta 还可把既有共源级原位增量变成共栅级，不需要重建整个 cellview；该变体的 OA pin/placement、`si`、DC/AC 和 inverse 已有 live 证据。
+- 每次专用 `schematic.transform` 通过原有模板语义断言后，还会把完整结构回读规范化为通用 topology snapshot，推导只含实例增删、端子重连、master 替换、net/pin 增删的 allowlisted delta，计算前后 SHA-256，并证明自动生成的 inverse patch 精确恢复原结构。参数不混入拓扑指纹，继续由独立 CDF/semantic 回读负责。`existing_schematic` 已真实执行 instance add/remove、terminal reconnect、net add/remove，以及 instance-scoped `replace_master + CDF`：NMOS LVT/SVT round-trip 的 OA master、233 项 CDF、`si` model/W/L、271 点 Spectre AC 和恢复态均已同源验证。逻辑 pin 现与实际 pin-symbol master/坐标/方向绑定，完整实例、pin、label、wire 几何进入独立 placement SHA；`add_pin/remove_pin` 删除完整 terminal/pin figure 层级。保存后审计失败时，worker 只在新鲜回读精确等于预期 topology 时自动 inverse，并已通过真实 PDK callback 故障 Gate；状态未知或存在额外结构漂移时仍拒绝二次写。`vda topology-compile` 可从 operation 文件一并绑定 `master_parameter_migrations`。这仍是受控 contract writer，不是任意远端 OA editor。
 - 用确定性 demo adapter 离线验证闭环、规格判定和参数选择；结果明确标为 `software_inference`。
 - 用独立本地命令 `vda theory` 对 Gate 6 电流镜负载差分对做理论先导尺寸估算。它不接收一份任意手列的 W 候选，而是遍历声明且有来源绑定的有限 gm/Id 表域，对每个输入管/PMOS 负载/尾管工作点组合用 KCL、小信号和一阶极点方程反解满足 BW/GBW 的最小支路电流与三组 W，再检查增益、余量、功耗、面积和宽度边界。输出包括约束裕量、主导电流下界、寄生渐近上限和局部对数敏感性；只称为 `best_in_declared_discrete_characterization_domain`，`continuous_optimum_claim` 与 `global_optimum_claim` 永远为 false。`vda theory-calibrate` 又能从绑定的真实 Bridge run records 拟合并留一验证 topology-local 增益修正和等效输出电容模型；首个 TSMC N28 六点 Gate 的 gain/BW/GBW 最大留一误差为 `0.083%/0.373%/0.457%`，新鲜只读同点复跑误差为 `0.069%/0.320%/0.390%`。Gate 7B/7C/7D 已分别把 nominal 共源、源极退化共源和五管差分对的 OA/`si` 图及实际 DC 偏置绑定到独立表；任何不同器件签名、几何或 PVT 的推荐仍不能直接写 OA。
 - 用 `vda theory-request-from-validation` 从 passed held-out validation 和 exact characterization run 集派生真实 PDK theory request；用 `vda theory-seed-task` 将理论结果编译为带 hash、量化规则和最优性边界的原子候选；再由正常 `design.tune` executor 用 `eda_result` 判规格和选优。`vda theory-seed-validate` 分开报告 shortlist 可行比例与逐点预测误差，防止“候选里有好点”被包装成“理论数值已准确”。Gate 8 已验证这条交接和中断恢复，但预测精度仍为 partial。
+- 共栅级微调使用更小的 `vda cascode-seed` 分析器：它从 hash-bound 的真实共源 DC OP 估计当前器件阈值/过驱动，按声明的下管饱和余量、共栅管宽比和偏置 offset 生成有限原子 `(Wcas,Lcas,VCAS)` tuple；同一 tuple 集随后原样编译进 DC 和 AC 两个普通任务。首个 live Gate 的 DC/AC 9 点顺序和对应 `si` 网表 9/9 匹配，最终选择仍来自 Spectre。seed 是 `software_inference`，只负责缩小候选域，不会宣称连续或全局最优。
 - 用通用 `candidate_set` 表达人工或任意本地优化器产生的完整候选 tuple；semantic/testbench/raw CDF 可以成组出现，固定字段深合并，不会与逐维搜索交叉展开。`vda op-relinearize` 可从 hash-bound real-Bridge run 的 `eda_result` 拟合 anchor-local 一阶响应并执行独立 heldout Gate；每个建模参数还必须在至少一个 heldout 点发生变化，避免一个从未被留出验证的方向伪装成已校准。`vda candidate-task-from-relinearization` 只把 passed 结果编译成普通调优任务；`vda op-relinearization-validate` 再把 exact result/task/real run 绑定起来，分开报告候选执行、推荐一致性和逐点误差。新 result 直接保存每项误差归一化 floor；旧 result 缺少该字段时必须用 `--policy` 提供 result 已绑定 canonical SHA 的原始 policy，任何 hash、来源、metric、scale 或门限漂移都会拒绝。局部筛选可只覆盖适合线性化的连续指标，而最终 task 继续保留 saturation、THD、CMRR 等完整 EDA constraints。
 - 用 `vda small-signal` 对 characterization-bound MOS/R/C 实例图做不依赖拓扑名称的复数矩阵分析。器件点按 model/polarity/L/VGS/VDS/VSB 绑定 `Id/W、gm/Id、gds/Id、gmb/Id`、完整 signed 4×4 `dQi/dVj` 本征电荷导数矩阵和分开的 `cjd/cjs` 结耗尽电容；旧 artifact 仍走显式 legacy 五电容兼容路径。实例 model、L 和偏置不匹配即拒绝。求解器统一组装 `Y(f)`，支持固定 AC 边界、差分输入/输出线性表达式、低频增益、相位、−3 dB 带宽和 GBW；同一核心已用 NMOS/PMOS 共源、源极退化共源和差分对解析值测试。数值层另公开 `ComplexNodalSystem` 的系数/RHS stamping 接口和 `solve_complex_linear_system`，电路专属脚本可增加局部受控源、独立电流探针，或自行组装带辅助未知量的 MNA 方程，而无需复制求解器。`vda small-signal-validate` 又能从 real Bridge run records 自动绑定结构化 `si` 图、EDA DC 偏置、exact W/L/模型参数签名和原始 AC 网格，拒绝长度插值与所有偏置外推，再按固定 policy 对比 DC、每项电荷/结电容、gain、phase、BW 和 GBW。多 MOS 图可用重复 `--additional-characterization-run` 提供多张真实表，每个实例按 model/polarity/W/L/签名选择唯一 artifact，缺失、歧义和未使用表都拒绝。`vda characterization-task-from-run` 可把一个成功、只读的 real-si MOS 实例与用户审查的安全偏置网格合成为 standalone 表征任务，并保留来源哈希；当前自动生成只允许 `nf=1、m=1`。Gate 7D 已用三张真实表通过 nominal held-out 差分对；该层仍不求非线性 DC，也不能替代最终 Spectre。
 - 通过独立 worker 调用本机 `virtuoso-bridge-lite` 环境。反相器支持 `OA -> si -> Spectre transient` 的 timing、过冲/欠冲和周期供电能量；共源级支持同一 `OA -> si` 网表上的 DC OP、复数 AC、相干正弦 transient 幅度 sweep 和普通 noise sweep。可提取 `Id/VGS/VDS/VDSAT/gm/gds`、真实 VDD 功耗与 KCL、低频增益、首个 −3 dB 带宽、GBW、unity、HD2/HD3、THD、P1dB，以及频带积分的输出/输入参考噪声；单项执行与提取均有 live 证据。`analysis: "quality"` 已在一次 OA/`si` 核对后依次运行 AC、linearity、noise，并完成 bias/load、W/RD/RS、L/VDD 搜索、固定设计 TT/SS/FF 验证和显式启用的 PVT-aware bias 调优；每个 PVT 条件保留原始 `eda_result`，跨条件约束和最坏值聚合标为 `software_inference`。
@@ -71,6 +74,30 @@ py -3.13 -m venv .venv
 ```
 
 该示例故意标为 `synthetic_example`，只验证方程、设计域穷尽和最优性边界。真实 PDK 表必须绑定 characterization artifact 的标识与 SHA-256；即使输入来自 PDK，推导指标仍是 `software_inference`，推荐尺寸还要进入同源 Spectre 验证。
+
+共栅级微调先对变换前的共源 OA 做一次只读 DC，再把该 real-Bridge run 的
+SHA-256 写入 policy（模板中的全零 hash 只是故意不可执行的占位符）。以下命令完全
+本地，只生成一个 theory result，并把同一组原子候选分别编译为 DC/AC 任务；它们不会
+连接 Bridge、运行 Spectre 或写 OA：
+
+```powershell
+.\.venv\Scripts\vda.exe cascode-seed `
+  examples\theory\common-source-cascode-seed-policy.template.json `
+  artifacts\runs\common-source-cascode-seed-op-bridge\<RUN_RECORD>.json `
+  --output artifacts\theory\common-source-cascode-seed.json
+.\.venv\Scripts\vda.exe candidate-task-from-cascode-seed `
+  artifacts\theory\common-source-cascode-seed.json `
+  examples\theory\common-source-cascode-dc-task-template.json `
+  --output artifacts\theory\common-source-cascode-dc-task.json
+.\.venv\Scripts\vda.exe candidate-task-from-cascode-seed `
+  artifacts\theory\common-source-cascode-seed.json `
+  examples\theory\common-source-cascode-ac-task-template.json `
+  --output artifacts\theory\common-source-cascode-ac-task.json
+```
+
+生成后的 DC/AC task 都要重新 `plan` 并单独满足远端授权。DC Gate 先核对下管、共栅管、
+负载的 KCL、两管工作区和 stack headroom；只有完成它以后才运行相同候选域的 AC
+gain、首个 −3 dB bandwidth、GBW 与 unity-gain 提取。
 
 已有真实 run record 时，可在本地重建 Gate 6 的有界校准产物；该命令不执行 Bridge、
 不写 OA：
@@ -482,6 +509,8 @@ direct `si`/Spectre 路径还会在每个唯一 `/data/xum/.../vda_<task>_<nonce
 - [2026-07-26 通用 topology-delta 新 cellview 真实 Gate](docs/validation/2026-07-26-generic-topology-delta-live.md)
 - [2026-07-26 topology post-save 恢复与 master/CDF 迁移本地 Gate](docs/validation/2026-07-26-topology-recovery-master-migration-local.md)
 - [2026-07-26 topology master/CDF 迁移真实同源 Gate](docs/validation/2026-07-26-topology-master-migration-live.md)
+- [2026-07-26 共栅微调与 topology recovery 本地 Gate](docs/validation/2026-07-26-common-source-cascode-and-topology-recovery-local.md)
+- [2026-07-26 共栅微调与 topology recovery live Gate](docs/validation/2026-07-26-common-source-cascode-and-topology-recovery-live.md)
 - [2026-07-26 有源负载差分对与对称源退化组合本地 Gate](docs/validation/2026-07-26-differential-pair-active-source-degeneration-local.md)
 - [2026-07-26 有源负载差分对与对称源退化组合 live Gate](docs/validation/2026-07-26-differential-pair-active-source-degeneration-live.md)
 - [延期的人工 ADE Gate](docs/deferred-manual-gates.md)

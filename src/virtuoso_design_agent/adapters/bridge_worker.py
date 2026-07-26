@@ -62,7 +62,9 @@ from virtuoso_design_agent.topology_delta import (
     TopologyDeltaExecutionSpec,
     TopologyInstance,
     TopologySnapshot,
+    apply_topology_operations,
     apply_topology_delta_execution,
+    invert_topology_operations,
     snapshot_from_inspection,
     topology_fingerprint,
     validate_topology_execution_readback,
@@ -89,6 +91,7 @@ _DIFFERENTIAL_PAIR_CURRENT_MIRROR_DEGENERATED_VARIANT = (
     "pmos_current_mirror_load_nmos_differential_pair_with_tail_device_"
     "and_source_degeneration"
 )
+_COMMON_SOURCE_CASCODE_VARIANT = "cascode_common_source"
 
 
 def _differential_pair_has_real_tail(topology_variant: str) -> bool:
@@ -254,6 +257,7 @@ def _placement_snapshot_from_readback(
             for item in canonical["labels"]
             if isinstance(item, dict)
         ),
+        "canonical_geometry": canonical,
     }
 
 
@@ -265,6 +269,324 @@ def _schematic_placement_snapshot(
     return _placement_snapshot_from_readback(
         read_placement(client, library, cell)
     )
+
+
+def _parse_skill_point(value: str, *, context: str) -> list[float]:
+    match = re.fullmatch(
+        r"\(\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)"
+        r"\s+([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*\)",
+        value.strip(),
+    )
+    if match is None:
+        raise RuntimeError(f"invalid {context} point: {value!r}")
+    point = [float(match.group(1)), float(match.group(2))]
+    if any(not math.isfinite(item) for item in point):
+        raise RuntimeError(f"non-finite {context} point: {value!r}")
+    return point
+
+
+def _parse_schematic_pin_geometry(raw: str) -> dict[str, dict[str, Any]]:
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if not lines or lines[0] != "PINS" or lines[-1] != "END":
+        raise RuntimeError("pin geometry readback has invalid section framing")
+    pins: dict[str, dict[str, Any]] = {}
+    for line in lines[1:-1]:
+        parts = line.split("|")
+        if len(parts) != 9 or parts[0] != "PIN":
+            raise RuntimeError(f"invalid pin geometry record: {line!r}")
+        _, name, direction, raw_bits, library, cell, view, raw_xy, orient = parts
+        if name in pins:
+            raise RuntimeError(f"pin geometry readback repeated {name!r}")
+        try:
+            num_bits = int(raw_bits)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"pin geometry readback has invalid numBits for {name!r}"
+            ) from exc
+        pins[name] = {
+            "direction": direction,
+            "numBits": num_bits,
+            "master": {"library": library, "cell": cell, "view": view},
+            "xy": _parse_skill_point(raw_xy, context=f"pin {name!r}"),
+            "orient": orient,
+        }
+    return pins
+
+
+def _read_schematic_pin_geometry(
+    client, library: str, cell: str
+) -> dict[str, dict[str, Any]]:
+    """Read each logical terminal's one physical pin figure without Bridge edits."""
+
+    from virtuoso_bridge import decode_skill_output
+
+    escaped_library = _skill_string(library)
+    escaped_cell = _skill_string(cell)
+    skill = " ".join(
+        [
+            "let((rbCv rbResult rbPin rbFig)",
+            "rbCv = dbOpenCellViewByType("
+            f'"{escaped_library}" "{escaped_cell}" '
+            '"schematic" "schematic" "r")',
+            'unless(rbCv error("target schematic missing during pin geometry readback"))',
+            'rbResult = "PINS\\n"',
+            "foreach(rbTerm rbCv~>terminals",
+            'unless(length(rbTerm~>pins) == 1 error("logical terminal pin selection was not unique"))',
+            "rbPin = car(rbTerm~>pins)",
+            'unless(length(rbPin~>figs) == 1 error("logical terminal figure selection was not unique"))',
+            "rbFig = car(rbPin~>figs)",
+            "unless(rbFig~>objType == \"inst\" && rbFig~>purpose == \"pin\" "
+            'error("logical terminal figure is not one schematic pin instance"))',
+            'rbResult = strcat(rbResult sprintf(nil "PIN|%s|%s|%d|%s|%s|%s|%L|%s\\n" '
+            'rbTerm~>name if(rbTerm~>direction rbTerm~>direction "inputOutput") '
+            "if(rbTerm~>numBits rbTerm~>numBits 1) rbFig~>libName rbFig~>cellName "
+            'if(rbFig~>viewName rbFig~>viewName "symbol") rbFig~>xy '
+            'if(rbFig~>orient rbFig~>orient "R0")))',
+            ")",
+            'strcat(rbResult "END\\n"))',
+        ]
+    )
+    result = client.execute_skill(skill, timeout=60)
+    errors = getattr(result, "errors", None) or []
+    if errors:
+        raise RuntimeError(f"pin geometry readback failed: {errors[0]}")
+    return _parse_schematic_pin_geometry(
+        decode_skill_output(str(getattr(result, "output", "")))
+    )
+
+
+def _assert_pin_geometry_matches_placement(
+    pin_geometry: dict[str, dict[str, Any]],
+    placement: dict[str, Any],
+) -> None:
+    instances = placement.get("canonical_geometry", {}).get("instances", [])
+    if not isinstance(instances, list):
+        raise RuntimeError("placement snapshot is missing canonical instances")
+    expected_pin_cells = {"ipin", "opin", "iopin"}
+    physical_pin_instances = [
+        item
+        for item in instances
+        if isinstance(item, dict)
+        and item.get("lib") == "basic"
+        and item.get("cell") in expected_pin_cells
+    ]
+    if len(physical_pin_instances) != len(pin_geometry):
+        raise RuntimeError(
+            "logical pin geometry count does not match placement pin instances"
+        )
+    for name, geometry in pin_geometry.items():
+        master = geometry["master"]
+        matches = [
+            item
+            for item in physical_pin_instances
+            if item.get("lib") == master["library"]
+            and item.get("cell") == master["cell"]
+            and item.get("orient") == geometry["orient"]
+            and _parse_skill_point(
+                str(item.get("xy")), context=f"placement pin {name!r}"
+            )
+            == geometry["xy"]
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"pin {name!r} geometry does not select one placement instance"
+            )
+
+
+def _placement_pin_signature(item: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        item.get("lib"),
+        item.get("cell"),
+        item.get("orient"),
+        tuple(
+            _parse_skill_point(
+                str(item.get("xy")), context="placement physical pin"
+            )
+        ),
+    )
+
+
+def _bind_logical_pin_names_to_placement(
+    pin_geometry: dict[str, dict[str, Any]],
+    placement: dict[str, Any],
+) -> dict[str, Any]:
+    """Add a stable placement hash that ignores OA's auto pin-figure names.
+
+    Ordinary instance names remain part of the fingerprint.  Only physical
+    basic/ipin, opin, and iopin figures are rebound to the independently read
+    logical pin name after exact master/orientation/coordinate matching.
+    """
+
+    _assert_pin_geometry_matches_placement(pin_geometry, placement)
+    canonical = placement.get("canonical_geometry", {})
+    instances = canonical.get("instances", [])
+    signature_to_pin: dict[tuple[Any, ...], str] = {}
+    for name, geometry in sorted(pin_geometry.items()):
+        signature = (
+            geometry["master"]["library"],
+            geometry["master"]["cell"],
+            geometry["orient"],
+            tuple(geometry["xy"]),
+        )
+        if signature in signature_to_pin:
+            raise RuntimeError(
+                "logical pins do not have unique physical placement signatures"
+            )
+        signature_to_pin[signature] = name
+
+    bindings: list[dict[str, str]] = []
+    rebound_instances: list[dict[str, Any]] = []
+    for item in instances:
+        if not isinstance(item, dict):
+            raise RuntimeError("placement canonical instance is not an object")
+        rebound = dict(item)
+        if item.get("lib") == "basic" and item.get("cell") in {
+            "ipin",
+            "opin",
+            "iopin",
+        }:
+            signature = _placement_pin_signature(item)
+            logical_name = signature_to_pin.get(signature)
+            if logical_name is None:
+                raise RuntimeError(
+                    "physical pin figure has no independently read logical pin binding"
+                )
+            physical_name = str(item.get("name"))
+            rebound["name"] = f"logical-pin:{logical_name}"
+            bindings.append(
+                {
+                    "logical_pin": logical_name,
+                    "physical_oa_name": physical_name,
+                }
+            )
+        rebound_instances.append(rebound)
+
+    rebound_canonical = {
+        field: sorted(
+            rebound_instances if field == "instances" else list(canonical[field]),
+            key=lambda value: json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ),
+        )
+        for field in ("instances", "pins", "labels", "wires")
+    }
+    encoded = json.dumps(
+        rebound_canonical,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return {
+        **placement,
+        "logical_pin_bound_sha256": hashlib.sha256(encoded).hexdigest(),
+        "logical_pin_bindings": sorted(
+            bindings, key=lambda item: item["logical_pin"]
+        ),
+    }
+
+
+def _placement_fingerprint_match_mode(
+    expected_sha256: str,
+    placement: dict[str, Any],
+) -> str | None:
+    if placement.get("sha256") == expected_sha256:
+        return "exact_oa_names"
+    if placement.get("logical_pin_bound_sha256") == expected_sha256:
+        return "logical_pin_bound"
+    return None
+
+
+def _topology_pin_signature(pin: Any) -> tuple[Any, ...]:
+    x, y, orient, library, cell, _view = _generic_pin_geometry(pin)
+    return (library, cell, orient, (x, y))
+
+
+def _unmatched_placement_pin_instances(
+    pin_geometry: dict[str, dict[str, Any]],
+    placement: dict[str, Any],
+) -> list[dict[str, Any]]:
+    instances = placement.get("canonical_geometry", {}).get("instances", [])
+    if not isinstance(instances, list):
+        raise RuntimeError("placement snapshot is missing canonical instances")
+    physical = [
+        item
+        for item in instances
+        if isinstance(item, dict)
+        and item.get("lib") == "basic"
+        and item.get("cell") in {"ipin", "opin", "iopin"}
+    ]
+    unmatched = list(physical)
+    for name, geometry in sorted(pin_geometry.items()):
+        expected = (
+            geometry["master"]["library"],
+            geometry["master"]["cell"],
+            geometry["orient"],
+            tuple(geometry["xy"]),
+        )
+        matches = [
+            item for item in unmatched if _placement_pin_signature(item) == expected
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"logical pin {name!r} does not select one physical placement pin"
+            )
+        unmatched.remove(matches[0])
+    return unmatched
+
+
+def _strip_verified_orphan_pin_instances(
+    schematic: dict[str, Any],
+    orphan_instances: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Exclude only placement-proven orphan pin figures from graph projection."""
+
+    raw_instances = list(schematic.get("instances", []))
+    stripped_names: set[str] = set()
+    for orphan in orphan_instances:
+        orphan_name = str(orphan.get("name"))
+        orphan_signature = _placement_pin_signature(orphan)
+        matches = [
+            item
+            for item in raw_instances
+            if str(item.get("name")) == orphan_name
+            and (
+                item.get("lib"),
+                item.get("cell"),
+                item.get("orient"),
+                tuple(float(value) for value in item.get("xy", [])),
+            )
+            == orphan_signature
+            and item.get("view") == "symbol"
+            and dict(item.get("terms", {})) == {}
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                "orphan placement pin did not select one terminal-free raw "
+                f"instance: {orphan_name!r}"
+            )
+        stripped_names.add(orphan_name)
+    if len(stripped_names) != len(orphan_instances):
+        raise RuntimeError("orphan placement pin instance names were not unique")
+    return {
+        **schematic,
+        "instances": [
+            item
+            for item in raw_instances
+            if str(item.get("name")) not in stripped_names
+        ],
+    }
+
+
+def _schematic_geometry_bundle(
+    client, library: str, cell: str
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    placement = _schematic_placement_snapshot(client, library, cell)
+    pin_geometry = _read_schematic_pin_geometry(client, library, cell)
+    placement = _bind_logical_pin_names_to_placement(pin_geometry, placement)
+    return pin_geometry, placement
 
 
 def _cellview_exists(client, library: str, cell: str, view: str) -> bool:
@@ -368,7 +690,12 @@ def _summary(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _existing_schematic_summary(data: dict[str, Any]) -> dict[str, Any]:
+def _existing_schematic_summary(
+    data: dict[str, Any],
+    *,
+    pin_geometry: dict[str, dict[str, Any]] | None = None,
+    placement: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     instances = [
         {
             "name": item.get("name"),
@@ -379,17 +706,24 @@ def _existing_schematic_summary(data: dict[str, Any]) -> dict[str, Any]:
         }
         for item in data.get("instances", [])
     ]
-    return {
+    summary = {
         "instances": sorted(instances, key=lambda item: str(item["name"])),
         "nets": sorted(data.get("nets", {}).keys()),
         "pins": sorted(data.get("pins", {}).keys()),
         "instance_parameters": _instance_parameters_from_schematic(data),
-        "topology": _generic_topology_readback(data),
+        "topology": _generic_topology_readback(data, pin_geometry=pin_geometry),
         "bridge_schematic": data,
     }
+    if placement is not None:
+        summary["placement"] = placement
+    return summary
 
 
-def _generic_topology_readback(data: dict[str, Any]) -> dict[str, Any]:
+def _generic_topology_readback(
+    data: dict[str, Any],
+    *,
+    pin_geometry: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Project Bridge readback onto the writable generic-topology contract."""
 
     instances = []
@@ -414,10 +748,35 @@ def _generic_topology_readback(data: dict[str, Any]) -> dict[str, Any]:
             if key != "connections"
         }
         nets.append({"name": str(name), **attributes})
+    logical_pin_names = {str(name) for name in data.get("pins", {})}
+    if pin_geometry is not None and set(pin_geometry) != logical_pin_names:
+        raise RuntimeError(
+            "logical pin and physical pin geometry names do not match: "
+            f"logical={sorted(logical_pin_names)}, "
+            f"physical={sorted(pin_geometry)}"
+        )
     pins = []
     for name, item in data.get("pins", {}).items():
         attributes = dict(item or {})
         direction = attributes.pop("direction", None)
+        geometry = pin_geometry.get(str(name)) if pin_geometry is not None else None
+        if geometry is not None:
+            if geometry["direction"] != direction:
+                raise RuntimeError(
+                    f"logical and physical direction differ for pin {name!r}"
+                )
+            logical_num_bits = int(attributes.get("numBits", 1))
+            if geometry["numBits"] != logical_num_bits:
+                raise RuntimeError(
+                    f"logical and physical numBits differ for pin {name!r}"
+                )
+            attributes.update(
+                {
+                    "master": geometry["master"],
+                    "xy": geometry["xy"],
+                    "orient": geometry["orient"],
+                }
+            )
         pins.append(
             {
                 "name": str(name),
@@ -518,10 +877,13 @@ def _assert_common_source(
     names = set(by_name)
     base_names = {"MN0", "RD0"}
     degenerated_names = base_names | {"RS0"}
+    cascode_names = base_names | {"MNCAS"}
     if names == base_names:
         variant = "common_source"
     elif names == degenerated_names:
         variant = "source_degenerated_common_source"
+    elif names == cascode_names:
+        variant = _COMMON_SOURCE_CASCODE_VARIANT
     else:
         raise RuntimeError(
             "existing schematic is not the VDA common-source stage: "
@@ -531,6 +893,9 @@ def _assert_common_source(
     required_nets = set(required_pins)
     if variant == "source_degenerated_common_source":
         required_nets.add("NSRC")
+    elif variant == _COMMON_SOURCE_CASCODE_VARIANT:
+        required_pins.add("VCAS")
+        required_nets.update({"VCAS", "NCAS"})
     missing_pins = required_pins - set(data.get("pins", {}).keys())
     if missing_pins:
         raise RuntimeError(
@@ -545,7 +910,7 @@ def _assert_common_source(
         )
     expected_terminals = {
         "MN0": {
-            "D": "OUT",
+            "D": "NCAS" if variant == _COMMON_SOURCE_CASCODE_VARIANT else "OUT",
             "G": "IN",
             "S": (
                 "NSRC"
@@ -558,6 +923,13 @@ def _assert_common_source(
     }
     if variant == "source_degenerated_common_source":
         expected_terminals["RS0"] = {"PLUS": "NSRC", "MINUS": "VSS"}
+    elif variant == _COMMON_SOURCE_CASCODE_VARIANT:
+        expected_terminals["MNCAS"] = {
+            "D": "OUT",
+            "G": "VCAS",
+            "S": "NCAS",
+            "B": "VSS",
+        }
     for name, expected in expected_terminals.items():
         actual = by_name[name].get("terms", {})
         if actual != expected:
@@ -572,6 +944,11 @@ def _assert_common_source(
         }
         if variant == "source_degenerated_common_source":
             expected_masters["RS0"] = ("analogLib", "res")
+        elif variant == _COMMON_SOURCE_CASCODE_VARIANT:
+            expected_masters["MNCAS"] = (
+                profile["tech_library"],
+                profile["nmos_cell"],
+            )
         for name, expected in expected_masters.items():
             actual = (by_name[name].get("lib"), by_name[name].get("cell"))
             if actual != expected:
@@ -838,6 +1215,20 @@ def _common_source_semantic_parameters_from_schematic(
         semantic_parameters["source_resistance_ohm"] = _resistance_ohm(
             source_resistance
         )
+    if "MNCAS" in by_name:
+        cascode_params = by_name["MNCAS"].get("params", {})
+        cascode_width = cascode_params.get("Wfg", cascode_params.get("w"))
+        cascode_length = cascode_params.get("l")
+        if cascode_width is None or cascode_length is None:
+            raise RuntimeError(
+                "common-source readback is missing MNCAS width/length"
+            )
+        semantic_parameters.update(
+            {
+                "cascode_width_um": _length_um(cascode_width),
+                "cascode_length_um": _length_um(cascode_length),
+            }
+        )
     return semantic_parameters
 
 
@@ -851,27 +1242,77 @@ def _positive_device_count(value: Any, label: str) -> float:
     return count
 
 
-def _common_source_device_geometry_from_schematic(
-    data: dict[str, Any],
+def _resolved_device_count_parameter(
+    params: dict[str, Any],
+    name: str,
+    instance_name: str,
+) -> float:
+    """Resolve one exact CDF iPar indirection without evaluating SKILL."""
+
+    value = params.get(name, 1)
+    normalized = str(value).replace("\\", "")
+    reference = re.fullmatch(
+        r'iPar\("([A-Za-z_][A-Za-z0-9_]*)"\)', normalized
+    )
+    if reference is not None:
+        referenced_name = reference.group(1)
+        if referenced_name not in params:
+            raise RuntimeError(
+                f"cannot resolve {instance_name}.{name}: missing CDF parameter "
+                f"{referenced_name!r}"
+            )
+        value = params[referenced_name]
+        if re.fullmatch(
+            r'iPar\("([A-Za-z_][A-Za-z0-9_]*)"\)',
+            str(value).replace("\\", ""),
+        ):
+            raise RuntimeError(
+                f"cannot resolve {instance_name}.{name}: nested CDF indirection"
+            )
+    return _positive_device_count(value, f"{instance_name}.{name}")
+
+
+def _mos_geometry_from_schematic_instance(
+    instance: dict[str, Any], instance_name: str
 ) -> dict[str, float]:
-    by_name = {str(item.get("name")): item for item in data.get("instances", [])}
-    if "MN0" not in by_name:
-        raise RuntimeError("common-source readback is missing MN0")
-    params = by_name["MN0"].get("params", {})
-    fingers = _positive_device_count(params.get("fingers", 1), "MN0.fingers")
-    multiplicity = _positive_device_count(params.get("m", 1), "MN0.m")
+    params = instance.get("params", {})
+    fingers = _resolved_device_count_parameter(
+        params, "fingers", instance_name
+    )
+    multiplicity = _resolved_device_count_parameter(
+        params, "m", instance_name
+    )
     if params.get("Wfg") is not None:
         finger_width_um = _length_um(params["Wfg"])
     elif params.get("w") is not None:
         finger_width_um = _length_um(params["w"]) / fingers
     else:
-        raise RuntimeError("common-source readback is missing MN0 Wfg/w")
+        raise RuntimeError(
+            f"common-source readback is missing {instance_name} Wfg/w"
+        )
     return {
         "finger_width_um": finger_width_um,
         "fingers": fingers,
         "multiplicity": multiplicity,
         "total_width_um": finger_width_um * fingers * multiplicity,
     }
+
+
+def _common_source_device_geometry_from_schematic(
+    data: dict[str, Any],
+) -> dict[str, float]:
+    by_name = {str(item.get("name")): item for item in data.get("instances", [])}
+    if "MN0" not in by_name:
+        raise RuntimeError("common-source readback is missing MN0")
+    geometry = _mos_geometry_from_schematic_instance(by_name["MN0"], "MN0")
+    if "MNCAS" in by_name:
+        cascode = _mos_geometry_from_schematic_instance(
+            by_name["MNCAS"], "MNCAS"
+        )
+        geometry.update(
+            {f"cascode_{name}": value for name, value in cascode.items()}
+        )
+    return geometry
 
 
 def _common_source_summary(data: dict[str, Any]) -> dict[str, Any]:
@@ -1381,6 +1822,7 @@ def _resolved_parameters(
 def _resolved_common_source_parameters(
     payload: dict[str, Any],
     oa_parameters: dict[str, float] | None = None,
+    topology_variant: str | None = None,
 ) -> dict[str, float]:
     profile = payload["profile"]
     supplied = payload.get("parameters", {})
@@ -1418,6 +1860,33 @@ def _resolved_common_source_parameters(
             if "source_resistance_ohm" in supplied
             else oa_parameters["source_resistance_ohm"]
         )
+    is_cascode = topology_variant == _COMMON_SOURCE_CASCODE_VARIANT
+    if is_cascode:
+        if "cascode_width_um" not in oa_parameters or "cascode_length_um" not in oa_parameters:
+            raise RuntimeError("cascode common-source OA readback is missing MNCAS geometry")
+        if "cascode_bias_v" not in supplied:
+            raise RuntimeError("cascode common-source simulation requires cascode_bias_v")
+        parameters.update(
+            {
+                "cascode_width_um": float(
+                    supplied.get("cascode_width_um", oa_parameters["cascode_width_um"])
+                ),
+                "cascode_length_um": float(
+                    supplied.get("cascode_length_um", oa_parameters["cascode_length_um"])
+                ),
+                "cascode_bias_v": float(supplied["cascode_bias_v"]),
+            }
+        )
+    else:
+        conflicts = sorted(
+            {"cascode_width_um", "cascode_length_um", "cascode_bias_v"}
+            & supplied.keys()
+        )
+        if conflicts:
+            raise RuntimeError(
+                "non-cascode common-source topology rejects cascode parameters: "
+                + ", ".join(conflicts)
+            )
     if "load_ff" in supplied:
         parameters["load_ff"] = float(supplied["load_ff"])
     return parameters
@@ -1588,6 +2057,13 @@ def _common_source_instance_parameter_updates(
         updates["RD0"] = {"r": _ohm(parameters["load_resistance_ohm"])}
     if "source_resistance_ohm" in parameters:
         updates["RS0"] = {"r": _ohm(parameters["source_resistance_ohm"])}
+    cascode_updates: dict[str, str] = {}
+    if "cascode_width_um" in parameters:
+        cascode_updates["wf"] = _um(parameters["cascode_width_um"])
+    if "cascode_length_um" in parameters:
+        cascode_updates["l"] = _um(parameters["cascode_length_um"])
+    if cascode_updates:
+        updates["MNCAS"] = cascode_updates
     return updates
 
 
@@ -1605,6 +2081,8 @@ def _apply_common_source_parameters(
             "length_um",
             "load_resistance_ohm",
             "source_resistance_ohm",
+            "cascode_width_um",
+            "cascode_length_um",
         )
         if name in parameters
     }
@@ -1618,6 +2096,11 @@ def _apply_common_source_parameters(
     ):
         raise RuntimeError(
             "source_resistance_ohm requires a source-degenerated common-source topology"
+        )
+    cascode_fields = {"cascode_width_um", "cascode_length_um"} & persistable.keys()
+    if cascode_fields and variant != _COMMON_SOURCE_CASCODE_VARIANT:
+        raise RuntimeError(
+            "cascode geometry requires a cascode common-source topology"
         )
 
     instance_updates = _common_source_instance_parameter_updates(persistable)
@@ -1647,6 +2130,15 @@ def _apply_common_source_parameters(
             "RS0",
             param_filters=None,
             **instance_updates["RS0"],
+        )
+    if "MNCAS" in instance_updates:
+        _set_target_instance_params(
+            client,
+            library,
+            cell,
+            "MNCAS",
+            param_filters=None,
+            **instance_updates["MNCAS"],
         )
     data = _read_schematic(client, library, cell)
     _assert_common_source(data, profile)
@@ -5816,20 +6308,36 @@ def _instance_terminal_label_selection_operation(
     replacement_label: str,
     instance_name: str,
     terminal: str,
+    missing_label_operation: str | None = None,
 ) -> str:
     instance_name = _skill_string(instance_name)
     terminal = _skill_string(terminal)
     current_label = _skill_string(current_label)
     replacement_label = _skill_string(replacement_label)
-    final_action = (
+    selected_label_action = (
         f'rbLabel~>theLabel = "{replacement_label}" rbLabel'
         if rename
         else "rbLabel"
     )
+    missing_label_action = (
+        missing_label_operation
+        if rename and missing_label_operation is not None
+        else (
+            f'error("{instance_name}.{terminal} {current_label} label is missing")'
+        )
+    )
     return (
-        "let((rbInst rbTerm rbPin rbFig rbBBox rbCtr rbLabels rbLabel rbDx rbDy) "
-        f'rbInst = car(setof(x cv~>instances x~>name == "{instance_name}")) '
-        f'unless(rbInst error("{instance_name} not found during source-degeneration transform")) '
+        "let((rbInsts rbInst rbInstTerms rbInstTerm rbTerm rbPin rbFig rbBBox "
+        "rbCtr rbLabels rbLabel rbWires) "
+        f'rbInsts = setof(x cv~>instances x~>name == "{instance_name}") '
+        f'unless(length(rbInsts) == 1 error("{instance_name} instance selection was not unique during topology transform")) '
+        "rbInst = car(rbInsts) "
+        f'rbInstTerms = setof(x rbInst~>instTerms x~>name == "{terminal}") '
+        f'unless(length(rbInstTerms) == 1 error("{instance_name}.{terminal} instance terminal selection was not unique")) '
+        "rbInstTerm = car(rbInstTerms) "
+        "unless(rbInstTerm~>net && "
+        f'rbInstTerm~>net~>name == "{current_label}" '
+        f'error("{instance_name}.{terminal} connectivity changed before topology reconnect")) '
         f'rbTerm = car(setof(x rbInst~>master~>terminals x~>name == "{terminal}")) '
         f'unless(rbTerm error("{instance_name}.{terminal} not found during topology transform")) '
         "rbPin = car(rbTerm~>pins) "
@@ -5844,9 +6352,21 @@ def _instance_terminal_label_selection_operation(
         "let((dx dy) dx = xCoord(x~>xy) - xCoord(rbCtr) "
         "dy = yCoord(x~>xy) - yCoord(rbCtr) "
         "dx * dx + dy * dy <= 0.02)) "
-        f'unless(length(rbLabels) == 1 error("{instance_name}.{terminal} {current_label} label selection was not unique")) '
+        "rbWires = setof(x cv~>shapes "
+        'x~>objType == "line" && x~>points && '
+        "exists(rbPoint x~>points let((dx dy) "
+        "dx = xCoord(rbPoint) - xCoord(rbCtr) "
+        "dy = yCoord(rbPoint) - yCoord(rbCtr) "
+        "dx * dx + dy * dy <= 1e-8))) "
+        "cond("
+        "(length(rbLabels) == 1 "
+        f'unless(length(rbWires) == 1 error("{instance_name}.{terminal} terminal wire selection was not unique")) '
         "rbLabel = car(rbLabels) "
-        f"{final_action})"
+        f"{selected_label_action}) "
+        "(length(rbLabels) == 0 "
+        f'unless(length(rbWires) == 0 error("{instance_name}.{terminal} unlabeled terminal geometry is ambiguous")) '
+        f"{missing_label_action}) "
+        f'(t error("{instance_name}.{terminal} {current_label} label selection was not unique"))))'
     )
 
 
@@ -5980,6 +6500,159 @@ def _generic_instance_placement(instance: TopologyInstance) -> tuple[float, floa
     return float(xy[0]), float(xy[1]), orient
 
 
+_GENERIC_PIN_MASTER_BY_DIRECTION = {
+    "input": "ipin",
+    "output": "opin",
+    "inputOutput": "iopin",
+}
+_GENERIC_PIN_ORIENTATIONS = {
+    "R0",
+    "R90",
+    "R180",
+    "R270",
+    "MX",
+    "MY",
+    "MXR90",
+    "MYR90",
+}
+
+
+def _generic_pin_geometry(
+    pin: Any,
+) -> tuple[float, float, str, str, str, str]:
+    if pin.name != pin.net:
+        raise RuntimeError(
+            "generic OA pins currently require pin.name == pin.net"
+        )
+    if pin.direction not in _GENERIC_PIN_MASTER_BY_DIRECTION:
+        raise RuntimeError(
+            f"generic OA pin {pin.name!r} requires input/output/inputOutput direction"
+        )
+    attributes = dict(pin.attributes)
+    unknown = sorted(
+        set(attributes) - {"numBits", "master", "xy", "orient"}
+    )
+    if unknown:
+        raise RuntimeError(
+            f"generic OA pin {pin.name!r} has unsupported structural attributes: "
+            f"{unknown}"
+        )
+    if attributes.get("numBits", 1) != 1:
+        raise RuntimeError(
+            "generic OA topology delta currently supports only scalar pins"
+        )
+    xy = attributes.get("xy")
+    if (
+        not isinstance(xy, list)
+        or len(xy) != 2
+        or any(not isinstance(value, (int, float)) for value in xy)
+        or any(not math.isfinite(float(value)) for value in xy)
+    ):
+        raise RuntimeError(
+            f"generic OA pin {pin.name!r} requires finite xy=[x, y]"
+        )
+    orient = attributes.get("orient")
+    if orient not in _GENERIC_PIN_ORIENTATIONS:
+        raise RuntimeError(
+            f"generic OA pin {pin.name!r} has unsupported orientation {orient!r}"
+        )
+    master = attributes.get("master")
+    if not isinstance(master, dict):
+        raise RuntimeError(
+            f"generic OA pin {pin.name!r} requires a physical master"
+        )
+    library = master.get("library")
+    cell = master.get("cell")
+    view = master.get("view")
+    expected_cell = _GENERIC_PIN_MASTER_BY_DIRECTION[str(pin.direction)]
+    if (library, cell, view) != ("basic", expected_cell, "symbol"):
+        raise RuntimeError(
+            f"generic OA pin {pin.name!r} master {(library, cell, view)!r} "
+            f"does not match direction {pin.direction!r}"
+        )
+    return (
+        float(xy[0]),
+        float(xy[1]),
+        str(orient),
+        str(library),
+        str(cell),
+        str(view),
+    )
+
+
+def _generic_delete_pin_operation(pin: Any) -> str:
+    x, y, orient, library, cell, view = _generic_pin_geometry(pin)
+    name = _skill_string(pin.name)
+    direction = _skill_string(str(pin.direction))
+    return " ".join(
+        [
+            "let((rbTerms rbTerm rbPins rbPin rbFigs rbFig rbOrphanFigs)",
+            f'rbTerms = setof(x cv~>terminals x~>name == "{name}")',
+            f'unless(length(rbTerms) == 1 error("{name} logical pin selection was not unique"))',
+            "rbTerm = car(rbTerms)",
+            "unless("
+            f'rbTerm~>direction == "{direction}" && '
+            "if(rbTerm~>numBits rbTerm~>numBits 1) == 1 "
+            f'error("{name} logical pin attributes changed before removal"))',
+            "rbPins = rbTerm~>pins",
+            f'unless(length(rbPins) == 1 error("{name} OA pin selection was not unique"))',
+            "rbPin = car(rbPins)",
+            "rbFigs = rbPin~>figs",
+            f'unless(length(rbFigs) == 1 error("{name} pin figure selection was not unique"))',
+            "rbFig = car(rbFigs)",
+            "unless("
+            'rbFig~>objType == "inst" && rbFig~>purpose == "pin" && '
+            f'rbFig~>libName == "{_skill_string(library)}" && '
+            f'rbFig~>cellName == "{_skill_string(cell)}" && '
+            f'rbFig~>viewName == "{_skill_string(view)}" && '
+            f'rbFig~>orient == "{_skill_string(orient)}" && '
+            f"abs(xCoord(rbFig~>xy) - {x:.12g}) <= 1e-9 && "
+            f"abs(yCoord(rbFig~>xy) - {y:.12g}) <= 1e-9 "
+            f'error("{name} physical pin geometry changed before removal"))',
+            # IC6.1.8 removes the logical term/pin hierarchy but can leave the
+            # pin-symbol figure behind.  Re-select that physical figure from
+            # the cellview after deleting the term, then delete it separately.
+            "dbDeleteObject(rbTerm)",
+            "rbOrphanFigs = setof(x cv~>instances "
+            'x~>objType == "inst" && '
+            '(x~>purpose == "pin" || x~>purpose == "cell") && '
+            f'x~>libName == "{_skill_string(library)}" && '
+            f'x~>cellName == "{_skill_string(cell)}" && '
+            f'x~>viewName == "{_skill_string(view)}" && '
+            f'x~>orient == "{_skill_string(orient)}" && '
+            f"abs(xCoord(x~>xy) - {x:.12g}) <= 1e-9 && "
+            f"abs(yCoord(x~>xy) - {y:.12g}) <= 1e-9)",
+            f'unless(length(rbOrphanFigs) <= 1 error("{name} physical pin cleanup selection was not unique"))',
+            "when(rbOrphanFigs dbDeleteObject(car(rbOrphanFigs)))",
+            "t)",
+        ]
+    )
+
+
+def _generic_delete_orphan_pin_figure_operation(pin: Any) -> str:
+    """Delete one contract-bound physical pin figure with no logical terminal."""
+
+    x, y, orient, library, cell, view = _generic_pin_geometry(pin)
+    name = _skill_string(pin.name)
+    return " ".join(
+        [
+            "let((rbOrphanFigs)",
+            "rbOrphanFigs = setof(x cv~>instances "
+            'x~>objType == "inst" && '
+            '(x~>purpose == "pin" || x~>purpose == "cell") && '
+            f'x~>libName == "{_skill_string(library)}" && '
+            f'x~>cellName == "{_skill_string(cell)}" && '
+            f'x~>viewName == "{_skill_string(view)}" && '
+            f'x~>orient == "{_skill_string(orient)}" && '
+            f"abs(xCoord(x~>xy) - {x:.12g}) <= 1e-9 && "
+            f"abs(yCoord(x~>xy) - {y:.12g}) <= 1e-9)",
+            f'unless(length(rbOrphanFigs) == 1 error("{name} orphan pin figure selection was not unique"))',
+            "dbDeleteObject(car(rbOrphanFigs))",
+            "t)",
+        ]
+    )
+
+
 def _generic_delete_instance_operation(instance: TopologyInstance) -> str:
     operations = [
         _instance_terminal_stub_selection_operation(
@@ -6044,15 +6717,20 @@ def _compile_generic_topology_commands(
     *,
     instance_builder=None,
     terminal_label_builder=None,
+    pin_builder=None,
 ) -> tuple[list[str], list[str]]:
     """Compile bounded graph operations to the existing Bridge editor surface."""
 
-    needs_instance_builders = any(
+    needs_instance_builder = any(
         isinstance(operation, AddInstanceOperation) for operation in operations
     )
-    if needs_instance_builders and (
-        instance_builder is None or terminal_label_builder is None
-    ):
+    needs_terminal_label_builder = any(
+        isinstance(operation, (AddInstanceOperation, ReconnectTerminalOperation))
+        for operation in operations
+    )
+    if (
+        needs_instance_builder and instance_builder is None
+    ) or (needs_terminal_label_builder and terminal_label_builder is None):
         from virtuoso_bridge.virtuoso.schematic.ops import (
             schematic_create_inst_by_master_name,
             schematic_label_instance_term,
@@ -6064,6 +6742,11 @@ def _compile_generic_topology_commands(
         terminal_label_builder = (
             terminal_label_builder or schematic_label_instance_term
         )
+    if any(isinstance(operation, AddPinOperation) for operation in operations):
+        if pin_builder is None:
+            from virtuoso_bridge.virtuoso.schematic.ops import schematic_create_pin
+
+            pin_builder = schematic_create_pin
 
     commands: list[str] = []
     declarative_operations: list[str] = []
@@ -6073,6 +6756,7 @@ def _compile_generic_topology_commands(
             # complete post-readback fingerprint proves creation/removal.
             declarative_operations.append(operation.operation)
         elif isinstance(operation, ReconnectTerminalOperation):
+            assert terminal_label_builder is not None
             commands.append(
                 _instance_terminal_label_selection_operation(
                     rename=True,
@@ -6080,6 +6764,11 @@ def _compile_generic_topology_commands(
                     replacement_label=operation.net,
                     instance_name=operation.instance,
                     terminal=operation.terminal,
+                    missing_label_operation=terminal_label_builder(
+                        operation.instance,
+                        operation.terminal,
+                        operation.net,
+                    ),
                 )
             )
         elif isinstance(operation, AddInstanceOperation):
@@ -6107,12 +6796,21 @@ def _compile_generic_topology_commands(
             commands.append(_generic_delete_instance_operation(operation.expected))
         elif isinstance(operation, ReplaceMasterOperation):
             commands.append(_generic_replace_master_operation(operation))
-        elif isinstance(operation, (AddPinOperation, RemovePinOperation)):
-            raise RuntimeError(
-                f"generic OA compiler does not yet execute {operation.operation}; "
-                "the serializable/local reversible contract supports it, but a "
-                "dedicated pin-geometry Gate is still required"
+        elif isinstance(operation, AddPinOperation):
+            assert pin_builder is not None
+            pin = operation.pin
+            x, y, orient, _library, _cell, _view = _generic_pin_geometry(pin)
+            commands.append(
+                pin_builder(
+                    pin.name,
+                    x,
+                    y,
+                    orient,
+                    direction=pin.direction,
+                )
             )
+        elif isinstance(operation, RemovePinOperation):
+            commands.append(_generic_delete_pin_operation(operation.expected))
         else:  # pragma: no cover - exhaustive typed operation union
             raise AssertionError(f"unsupported generic topology operation: {operation}")
     return commands, declarative_operations
@@ -6687,19 +7385,27 @@ def _attempt_generic_topology_inverse_recovery(
     expected_written_snapshot: TopologySnapshot,
     original_input_summary: dict[str, Any],
     original_input_parameters: dict[str, dict[str, str]],
+    original_input_placement: dict[str, Any],
 ) -> dict[str, Any]:
     """Undo a saved delta only after a fresh read proves its exact output state."""
 
     expected_written_sha256 = topology_fingerprint(expected_written_snapshot)
     try:
         current = _read_schematic(client, library, cell)
+        current_pin_geometry, current_placement = _schematic_geometry_bundle(
+            client, library, cell
+        )
     except Exception as error:
         return {
             "status": "state_unknown_no_write",
             "reason": f"{type(error).__name__}: {error}",
             "decision_source": "system_event",
         }
-    current_summary = _existing_schematic_summary(current)
+    current_summary = _existing_schematic_summary(
+        current,
+        pin_geometry=current_pin_geometry,
+        placement=current_placement,
+    )
     try:
         current_snapshot = snapshot_from_inspection(current_summary)
     except Exception as error:
@@ -6754,7 +7460,14 @@ def _attempt_generic_topology_inverse_recovery(
             recovery_migrations,
         )
         restored = _read_schematic(client, library, cell)
-        restored_summary = _existing_schematic_summary(restored)
+        restored_pin_geometry, restored_placement = _schematic_geometry_bundle(
+            client, library, cell
+        )
+        restored_summary = _existing_schematic_summary(
+            restored,
+            pin_geometry=restored_pin_geometry,
+            placement=restored_placement,
+        )
         audit = validate_topology_execution_readback(
             current_summary,
             restored_summary,
@@ -6781,6 +7494,11 @@ def _attempt_generic_topology_inverse_recovery(
             raise RuntimeError(
                 "inverse recovery did not restore the original topology fingerprint"
             )
+        if restored_placement["sha256"] != original_input_placement["sha256"]:
+            raise RuntimeError(
+                "inverse recovery did not restore the original wire/label/pin "
+                "placement fingerprint"
+            )
         return {
             "status": "restored",
             "recovery_direction": recovery_direction,
@@ -6790,6 +7508,9 @@ def _attempt_generic_topology_inverse_recovery(
             "expected_written_topology_sha256": expected_written_sha256,
             "confirmed_written_topology_sha256": current_sha256,
             "restored_topology_sha256": restored_sha256,
+            "written_placement": current_placement,
+            "restored_placement": restored_placement,
+            "restored_placement_match": True,
             "restored_instance_parameters": True,
             "parameter_restoration": parameter_restoration,
             "contract_audit": audit.model_dump(mode="json"),
@@ -7428,9 +8149,348 @@ def inspect_existing_schematic(payload: dict[str, Any]) -> dict[str, Any]:
             f"target schematic does not exist: {library}/{cell}/schematic"
         )
     data = _read_schematic(client, library, cell)
-    return _attach_targeted_parameter_verification(
-        client, library, cell, payload, _existing_schematic_summary(data)
+    partial_prefix_state: dict[str, Any] | None = None
+    try:
+        pin_geometry, placement = _schematic_geometry_bundle(
+            client, library, cell
+        )
+    except RuntimeError:
+        raw_execution = payload.get("topology_delta")
+        if not isinstance(raw_execution, dict):
+            raise
+        execution = TopologyDeltaExecutionSpec.model_validate(raw_execution)
+        if not execution.resume_partial_prefix:
+            raise
+        placement = _schematic_placement_snapshot(client, library, cell)
+        pin_geometry = _read_schematic_pin_geometry(client, library, cell)
+        orphan_instances = _unmatched_placement_pin_instances(
+            pin_geometry, placement
+        )
+        projected_data = _strip_verified_orphan_pin_instances(
+            data, orphan_instances
+        )
+        partial_summary = _existing_schematic_summary(
+            projected_data,
+            pin_geometry=pin_geometry,
+            placement=placement,
+        )
+        current_snapshot = snapshot_from_inspection(partial_summary)
+        operations = (
+            execution.contract.operations
+            if execution.direction == "forward"
+            else execution.contract.inverse_operations
+        )
+        expected_input_sha256 = (
+            execution.contract.expected_before_sha256
+            if execution.direction == "forward"
+            else execution.contract.expected_after_sha256
+        )
+        expected_output_sha256 = (
+            execution.contract.expected_after_sha256
+            if execution.direction == "forward"
+            else execution.contract.expected_before_sha256
+        )
+        prefix_length, _removed_pins = (
+            _select_partial_generic_topology_prefix(
+                current_snapshot,
+                operations,
+                expected_input_sha256,
+                expected_output_sha256,
+                sorted(
+                    (
+                        _placement_pin_signature(item)
+                        for item in orphan_instances
+                    ),
+                    key=repr,
+                ),
+            )
+        )
+        partial_prefix_state = {
+            "status": "verified_read_only",
+            "already_applied_operation_count": prefix_length,
+            "remaining_operation_count": len(operations) - prefix_length,
+            "orphan_pin_figure_count": len(orphan_instances),
+            "observed_topology_sha256": topology_fingerprint(
+                current_snapshot
+            ),
+            "input_reconstruction_match": True,
+            "output_projection_match": True,
+            "state_readback_source": "bridge_readback",
+            "decision_source": "software_inference",
+        }
+    summary_data = data if partial_prefix_state is None else projected_data
+    summary = _existing_schematic_summary(
+        summary_data,
+        pin_geometry=pin_geometry,
+        placement=placement,
     )
+    raw_execution = payload.get("topology_delta")
+    if partial_prefix_state is None and isinstance(raw_execution, dict):
+        execution = TopologyDeltaExecutionSpec.model_validate(raw_execution)
+        if execution.resume_partial_prefix:
+            current_snapshot = snapshot_from_inspection(summary)
+            expected_input_sha256 = (
+                execution.contract.expected_before_sha256
+                if execution.direction == "forward"
+                else execution.contract.expected_after_sha256
+            )
+            if topology_fingerprint(current_snapshot) != expected_input_sha256:
+                operations = (
+                    execution.contract.operations
+                    if execution.direction == "forward"
+                    else execution.contract.inverse_operations
+                )
+                expected_output_sha256 = (
+                    execution.contract.expected_after_sha256
+                    if execution.direction == "forward"
+                    else execution.contract.expected_before_sha256
+                )
+                prefix_length, _cleanup_pins = (
+                    _select_partial_generic_topology_prefix(
+                        current_snapshot,
+                        operations,
+                        expected_input_sha256,
+                        expected_output_sha256,
+                        [],
+                    )
+                )
+                partial_prefix_state = {
+                    "status": "verified_read_only",
+                    "already_applied_operation_count": prefix_length,
+                    "remaining_operation_count": len(operations) - prefix_length,
+                    "orphan_pin_figure_count": 0,
+                    "observed_topology_sha256": topology_fingerprint(
+                        current_snapshot
+                    ),
+                    "input_reconstruction_match": True,
+                    "output_projection_match": True,
+                    "state_readback_source": "bridge_readback",
+                    "decision_source": "software_inference",
+                }
+    if partial_prefix_state is not None:
+        summary["partial_prefix_state"] = partial_prefix_state
+    return _attach_targeted_parameter_verification(
+        client,
+        library,
+        cell,
+        payload,
+        summary,
+    )
+
+
+def _select_partial_generic_topology_prefix(
+    current_snapshot: TopologySnapshot,
+    operations: list[Any],
+    expected_input_sha256: str,
+    expected_output_sha256: str,
+    actual_orphan_signatures: list[tuple[Any, ...]],
+) -> tuple[int, list[Any]]:
+    matches: list[tuple[int, list[Any]]] = []
+    for prefix_length in range(1, len(operations) + 1):
+        prefix = operations[:prefix_length]
+        removed_pins = [
+            operation.expected
+            for operation in prefix
+            if isinstance(operation, RemovePinOperation)
+        ]
+        if not removed_pins:
+            continue
+        expected_orphan_signatures = sorted(
+            (_topology_pin_signature(pin) for pin in removed_pins), key=repr
+        )
+        if actual_orphan_signatures == expected_orphan_signatures:
+            cleanup_pins = removed_pins
+        elif not actual_orphan_signatures:
+            cleanup_pins = []
+        else:
+            continue
+        try:
+            reconstructed_input = apply_topology_operations(
+                current_snapshot,
+                invert_topology_operations(prefix),
+            )
+            expected_output = apply_topology_operations(
+                current_snapshot,
+                operations[prefix_length:],
+            )
+        except Exception:
+            continue
+        if (
+            topology_fingerprint(reconstructed_input) == expected_input_sha256
+            and topology_fingerprint(expected_output) == expected_output_sha256
+        ):
+            matches.append((prefix_length, cleanup_pins))
+    if len(matches) != 1:
+        raise RuntimeError(
+            "partial-prefix topology state did not select exactly one declared "
+            f"resume boundary; matches={len(matches)}"
+        )
+    return matches[0]
+
+
+def _resume_partial_generic_topology_prefix(
+    client,
+    library: str,
+    cell: str,
+    payload: dict[str, Any],
+    execution: TopologyDeltaExecutionSpec,
+    current: dict[str, Any],
+    pin_geometry: dict[str, dict[str, Any]],
+    placement: dict[str, Any],
+) -> dict[str, Any]:
+    """Resume only one exact operation prefix with contract-bound orphan pins."""
+
+    if execution.contract.master_parameter_migrations:
+        raise RuntimeError(
+            "partial-prefix topology resume does not support master migrations"
+        )
+    if execution.expected_output_placement_sha256 is None:
+        raise RuntimeError(
+            "partial-prefix topology resume requires an expected output placement"
+        )
+    operations = (
+        execution.contract.operations
+        if execution.direction == "forward"
+        else execution.contract.inverse_operations
+    )
+    expected_input_sha256 = (
+        execution.contract.expected_before_sha256
+        if execution.direction == "forward"
+        else execution.contract.expected_after_sha256
+    )
+    expected_output_sha256 = (
+        execution.contract.expected_after_sha256
+        if execution.direction == "forward"
+        else execution.contract.expected_before_sha256
+    )
+    orphan_instances = _unmatched_placement_pin_instances(
+        pin_geometry, placement
+    )
+    projected_current = _strip_verified_orphan_pin_instances(
+        current, orphan_instances
+    )
+    current_summary = _existing_schematic_summary(
+        projected_current,
+        pin_geometry=pin_geometry,
+        placement=placement,
+    )
+    current_snapshot = snapshot_from_inspection(current_summary)
+    actual_orphan_signatures = sorted(
+        (_placement_pin_signature(item) for item in orphan_instances),
+        key=repr,
+    )
+    prefix_length, removed_pins = _select_partial_generic_topology_prefix(
+        current_snapshot,
+        operations,
+        expected_input_sha256,
+        expected_output_sha256,
+        actual_orphan_signatures,
+    )
+    cleanup_commands = [
+        _generic_delete_orphan_pin_figure_operation(pin)
+        for pin in removed_pins
+    ]
+    remaining_commands, declarative_operations = (
+        _compile_generic_topology_commands(operations[prefix_length:])
+    )
+    before_parameters = _instance_parameters_from_schematic(projected_current)
+    commands = cleanup_commands + remaining_commands
+    _run_generic_topology_editor_commands(client, library, cell, commands)
+
+    after = _read_schematic(client, library, cell)
+    after_pin_geometry, after_placement = _schematic_geometry_bundle(
+        client, library, cell
+    )
+    after_summary = _existing_schematic_summary(
+        after,
+        pin_geometry=after_pin_geometry,
+        placement=after_placement,
+    )
+    actual_output_sha256 = topology_fingerprint(
+        snapshot_from_inspection(after_summary)
+    )
+    if actual_output_sha256 != expected_output_sha256:
+        raise RuntimeError(
+            "partial-prefix topology resume output mismatch: expected "
+            f"{expected_output_sha256}, got {actual_output_sha256}"
+        )
+    output_placement_match_mode = _placement_fingerprint_match_mode(
+        execution.expected_output_placement_sha256,
+        after_placement,
+    )
+    if output_placement_match_mode is None:
+        raise RuntimeError(
+            "partial-prefix topology resume placement mismatch: expected "
+            f"{execution.expected_output_placement_sha256}, got "
+            f"exact={after_placement['sha256']}, logical-pin-bound="
+            f"{after_placement.get('logical_pin_bound_sha256')}"
+        )
+    after_parameters = _instance_parameters_from_schematic(after)
+    if after_parameters != before_parameters:
+        changed = sorted(
+            name
+            for name in set(after_parameters) | set(before_parameters)
+            if after_parameters.get(name) != before_parameters.get(name)
+        )
+        raise RuntimeError(
+            "partial-prefix topology resume changed preserved instance "
+            "parameters: " + ", ".join(changed)
+        )
+    allowed_master_libraries = _generic_topology_allowed_master_libraries(
+        current_snapshot,
+        operations[prefix_length:],
+        payload["profile"],
+    )
+    return {
+        "contract_id": execution.contract.id,
+        "direction": execution.direction,
+        "operation_count": len(operations),
+        "operation_kinds": [operation.operation for operation in operations],
+        "compiled_editor_command_count": len(commands),
+        "declarative_net_operations": declarative_operations,
+        "append_mode": True,
+        "replace_existing": False,
+        "allowed_master_libraries": allowed_master_libraries,
+        "input_topology_sha256": expected_input_sha256,
+        "observed_partial_topology_sha256": topology_fingerprint(
+            current_snapshot
+        ),
+        "expected_output_topology_sha256": expected_output_sha256,
+        "actual_output_topology_sha256": actual_output_sha256,
+        "placement_before": placement,
+        "placement_after": after_placement,
+        "expected_output_placement_sha256": (
+            execution.expected_output_placement_sha256
+        ),
+        "output_placement_match": True,
+        "output_placement_match_mode": output_placement_match_mode,
+        "preserved_instance_parameters": True,
+        "preserved_instances": sorted(after_parameters),
+        "master_parameter_migrations": [],
+        "migrated_instance_parameter_tables": {},
+        "automatic_inverse_recovery": {
+            "status": "not_needed",
+            "source": "system_event",
+        },
+        "partial_prefix_resume": {
+            "status": "resumed",
+            "already_applied_operation_count": prefix_length,
+            "remaining_operation_count": len(operations) - prefix_length,
+            "orphan_pin_figure_count": len(orphan_instances),
+            "input_reconstruction_match": True,
+            "output_projection_match": True,
+            "state_readback_source": "bridge_readback",
+            "decision_source": "software_inference",
+        },
+        "contract_audit": {
+            "source": "software_inference",
+            "partial_prefix_resume": True,
+            "input_reconstruction_match": True,
+            "output_readback_match": True,
+            "placement_readback_match": True,
+        },
+        "readback": after_summary,
+    }
 
 
 def transform_existing_schematic_topology_delta(
@@ -7453,8 +8513,52 @@ def transform_existing_schematic_topology_delta(
     client = _client()
     library, cell = _target(payload)
     before = _read_schematic(client, library, cell)
-    before_summary = _existing_schematic_summary(before)
+    try:
+        before_pin_geometry, before_placement = _schematic_geometry_bundle(
+            client, library, cell
+        )
+    except RuntimeError:
+        if not execution.resume_partial_prefix:
+            raise
+        before_placement = _schematic_placement_snapshot(client, library, cell)
+        before_pin_geometry = _read_schematic_pin_geometry(
+            client, library, cell
+        )
+        return _resume_partial_generic_topology_prefix(
+            client,
+            library,
+            cell,
+            payload,
+            execution,
+            before,
+            before_pin_geometry,
+            before_placement,
+        )
+    before_summary = _existing_schematic_summary(
+        before,
+        pin_geometry=before_pin_geometry,
+        placement=before_placement,
+    )
     before_snapshot = snapshot_from_inspection(before_summary)
+    expected_input_sha256 = (
+        execution.contract.expected_before_sha256
+        if execution.direction == "forward"
+        else execution.contract.expected_after_sha256
+    )
+    if (
+        execution.resume_partial_prefix
+        and topology_fingerprint(before_snapshot) != expected_input_sha256
+    ):
+        return _resume_partial_generic_topology_prefix(
+            client,
+            library,
+            cell,
+            payload,
+            execution,
+            before,
+            before_pin_geometry,
+            before_placement,
+        )
     expected_after = apply_topology_delta_execution(before_snapshot, execution)
     # Prove the declared opposite direction locally before opening append mode.
     validate_topology_execution_readback(
@@ -7499,7 +8603,14 @@ def transform_existing_schematic_topology_delta(
             migrations,
         )
         after = _read_schematic(client, library, cell)
-        after_summary = _existing_schematic_summary(after)
+        after_pin_geometry, after_placement = _schematic_geometry_bundle(
+            client, library, cell
+        )
+        after_summary = _existing_schematic_summary(
+            after,
+            pin_geometry=after_pin_geometry,
+            placement=after_placement,
+        )
         audit = validate_topology_execution_readback(
             before_summary,
             after_summary,
@@ -7520,6 +8631,22 @@ def transform_existing_schematic_topology_delta(
                 "generic topology transform changed parameters on preserved "
                 "instances: " + ", ".join(changed_parameters)
             )
+        expected_output_placement = execution.expected_output_placement_sha256
+        output_placement_match_mode = (
+            None
+            if expected_output_placement is None
+            else _placement_fingerprint_match_mode(
+                expected_output_placement,
+                after_placement,
+            )
+        )
+        if expected_output_placement is not None and output_placement_match_mode is None:
+            raise RuntimeError(
+                "generic topology output placement fingerprint mismatch: expected "
+                f"{expected_output_placement}, got exact="
+                f"{after_placement['sha256']}, logical-pin-bound="
+                f"{after_placement.get('logical_pin_bound_sha256')}"
+            )
     except Exception as audit_error:
         if not commands:
             raise
@@ -7531,6 +8658,7 @@ def transform_existing_schematic_topology_delta(
             expected_after,
             before_summary,
             before_parameters,
+            before_placement,
         )
         raise RuntimeError(
             "generic topology post-save audit failed; original_error="
@@ -7554,6 +8682,17 @@ def transform_existing_schematic_topology_delta(
         "input_topology_sha256": topology_fingerprint(before_snapshot),
         "expected_output_topology_sha256": topology_fingerprint(expected_after),
         "actual_output_topology_sha256": actual_after_sha256,
+        "placement_before": before_placement,
+        "placement_after": after_placement,
+        "expected_output_placement_sha256": (
+            execution.expected_output_placement_sha256
+        ),
+        "output_placement_match": (
+            True
+            if execution.expected_output_placement_sha256 is not None
+            else None
+        ),
+        "output_placement_match_mode": output_placement_match_mode,
         "preserved_instance_parameters": True,
         "preserved_instances": preserved_instances,
         "master_parameter_migrations": migration_application,
@@ -7597,6 +8736,8 @@ def apply_common_source_parameters(payload: dict[str, Any]) -> dict[str, Any]:
                 "length_um",
                 "load_resistance_ohm",
                 "source_resistance_ohm",
+                "cascode_width_um",
+                "cascode_length_um",
             )
             if name in payload["parameters"]
         }
@@ -7625,6 +8766,8 @@ def apply_common_source_parameters(payload: dict[str, Any]) -> dict[str, Any]:
                 "length_um",
                 "load_resistance_ohm",
                 "source_resistance_ohm",
+                "cascode_width_um",
+                "cascode_length_um",
             )
             if name in payload.get("parameters", {})
         }
@@ -9994,11 +11137,19 @@ def _parse_common_source_netlist(
     has_source_resistor = any(
         re.match(r"^RS0\s*\(", item) is not None for item in records
     )
+    has_cascode = any(
+        re.match(r"^MNCAS\s*\(", item) is not None for item in records
+    )
+    if has_source_resistor and has_cascode:
+        raise RuntimeError(
+            "si netlist common-source parser does not combine source degeneration "
+            "and cascode devices in one topology Gate"
+        )
     expected = {
         "MN0": {
             "model": profile["nmos_cell"],
             "nodes": [
-                "OUT",
+                "NCAS" if has_cascode else "OUT",
                 "IN",
                 "NSRC" if has_source_resistor else "VSS",
                 "VSS",
@@ -10013,6 +11164,11 @@ def _parse_common_source_netlist(
         expected["RS0"] = {
             "model": "resistor",
             "nodes": ["NSRC", "VSS"],
+        }
+    elif has_cascode:
+        expected["MNCAS"] = {
+            "model": profile["nmos_cell"],
+            "nodes": ["OUT", "VCAS", "NCAS", "VSS"],
         }
     instances: dict[str, dict[str, Any]] = {}
     for name, expected_item in expected.items():
@@ -10046,18 +11202,20 @@ def _parse_common_source_netlist(
                 f"{expected_item['model']!r}"
             )
         instances[name] = {"nodes": nodes, "model": model}
-        if name == "MN0":
+        if name in {"MN0", "MNCAS"}:
             if "w" not in parameters or "l" not in parameters:
-                raise RuntimeError("si netlist is missing w/l for MN0")
+                raise RuntimeError(f"si netlist is missing w/l for {name}")
             fingers = _positive_device_count(
                 parameters.get("nf", 1),
-                "si MN0.nf",
+                f"si {name}.nf",
             )
             if "multi" in parameters and "m" in parameters:
-                raise RuntimeError("si netlist MN0 declares both multi and m")
+                raise RuntimeError(
+                    f"si netlist {name} declares both multi and m"
+                )
             multiplicity = _positive_device_count(
                 parameters.get("multi", parameters.get("m", 1)),
-                "si MN0.multi",
+                f"si {name}.multi",
             )
             netlist_width_um = _length_um(parameters["w"])
             controlled = {"w", "l", "nf", "m", "multi"}
@@ -10095,22 +11253,46 @@ def _parse_common_source_netlist(
         semantic_parameters["source_resistance_ohm"] = instances["RS0"][
             "resistance_ohm"
         ]
+    if has_cascode:
+        semantic_parameters.update(
+            {
+                "cascode_width_um": instances["MNCAS"]["finger_width_um"],
+                "cascode_length_um": instances["MNCAS"]["length_um"],
+            }
+        )
+    device_geometry = {
+        name: instances["MN0"][name]
+        for name in (
+            "finger_width_um",
+            "fingers",
+            "multiplicity",
+            "total_width_um",
+        )
+    }
+    if has_cascode:
+        device_geometry.update(
+            {
+                f"cascode_{name}": instances["MNCAS"][name]
+                for name in (
+                    "finger_width_um",
+                    "fingers",
+                    "multiplicity",
+                    "total_width_um",
+                )
+            }
+        )
     return {
         "instances": instances,
         "semantic_parameters": semantic_parameters,
-        "device_geometry": {
-            name: instances["MN0"][name]
-            for name in (
-                "finger_width_um",
-                "fingers",
-                "multiplicity",
-                "total_width_um",
-            )
-        },
+        "device_geometry": device_geometry,
         "topology_variant": (
-            "source_degenerated_common_source"
-            if has_source_resistor
-            else "common_source"
+            _COMMON_SOURCE_CASCODE_VARIANT
+            if has_cascode
+            else (
+                "source_degenerated_common_source"
+                if has_source_resistor
+                else "common_source"
+            )
         ),
     }
 
@@ -11404,6 +12586,12 @@ def _common_source_metrics_from_result(
     data: dict[str, Any], parameters: dict[str, float]
 ) -> tuple[dict[str, float], dict[str, Any]]:
     source_degenerated = "source_resistance_ohm" in parameters
+    cascode = "cascode_bias_v" in parameters
+    if source_degenerated and cascode:
+        raise RuntimeError(
+            "common-source DC extraction does not combine source degeneration "
+            "and cascode devices in one topology Gate"
+        )
     node_values = {
         "IN": _scalar(data, "dc_IN"),
         "OUT": _scalar(data, "dc_OUT"),
@@ -11412,6 +12600,9 @@ def _common_source_metrics_from_result(
     }
     if source_degenerated:
         node_values["NSRC"] = _scalar(data, "dc_NSRC")
+    elif cascode:
+        node_values["NCAS"] = _scalar(data, "dc_NCAS")
+        node_values["VCAS"] = _scalar(data, "dc_VCAS")
     op_values = {
         "ids_a": _operating_point_scalar(data, "MN0", "ids", "id"),
         "vgs_v": _operating_point_scalar(data, "MN0", "vgs"),
@@ -11421,6 +12612,16 @@ def _common_source_metrics_from_result(
         "gds_s": _operating_point_scalar(data, "MN0", "gds"),
         "supply_source_current_a": _scalar(data, "dc_VDD_SRC:p"),
     }
+    cascode_op_values: dict[str, float] | None = None
+    if cascode:
+        cascode_op_values = {
+            "ids_a": _operating_point_scalar(data, "MNCAS", "ids", "id"),
+            "vgs_v": _operating_point_scalar(data, "MNCAS", "vgs"),
+            "vds_v": _operating_point_scalar(data, "MNCAS", "vds"),
+            "vdsat_v": _operating_point_scalar(data, "MNCAS", "vdsat"),
+            "gm_s": _operating_point_scalar(data, "MNCAS", "gm"),
+            "gds_s": _operating_point_scalar(data, "MNCAS", "gds"),
+        }
     source_tolerance_v = 1e-5
     if abs(node_values["VDD"] - parameters["vdd_v"]) > source_tolerance_v:
         raise RuntimeError("DC VDD does not match the testbench source value")
@@ -11428,10 +12629,18 @@ def _common_source_metrics_from_result(
         raise RuntimeError("DC input does not match the testbench bias value")
     if abs(node_values["VSS"]) > source_tolerance_v:
         raise RuntimeError("DC VSS does not match the testbench source value")
+    if cascode and abs(
+        node_values["VCAS"] - parameters["cascode_bias_v"]
+    ) > source_tolerance_v:
+        raise RuntimeError("DC VCAS does not match the testbench source value")
 
     mos_source_v = node_values["NSRC"] if source_degenerated else node_values["VSS"]
     node_vgs_v = node_values["IN"] - mos_source_v
-    node_vds_v = node_values["OUT"] - mos_source_v
+    node_vds_v = (
+        node_values["NCAS"] - mos_source_v
+        if cascode
+        else node_values["OUT"] - mos_source_v
+    )
     for name, node_value in (("vgs_v", node_vgs_v), ("vds_v", node_vds_v)):
         tolerance = max(abs(node_value) * 1e-4, 1e-5)
         if abs(abs(op_values[name]) - abs(node_value)) > tolerance:
@@ -11440,17 +12649,107 @@ def _common_source_metrics_from_result(
                 f"device={op_values[name]:.12g}"
             )
 
-    metrics = extract_common_source_dc_metrics(
-        vdd_v=node_values["VDD"],
-        vin_v=node_values["IN"],
-        vout_v=node_values["OUT"],
-        vss_v=mos_source_v,
-        drain_current_a=op_values["ids_a"],
-        vdsat_v=op_values["vdsat_v"],
-        gm_s=op_values["gm_s"],
-        gds_s=op_values["gds_s"],
-        load_resistance_ohm=parameters["load_resistance_ohm"],
-    )
+    if cascode:
+        assert cascode_op_values is not None
+        cascode_node_values = {
+            "vgs_v": node_values["VCAS"] - node_values["NCAS"],
+            "vds_v": node_values["OUT"] - node_values["NCAS"],
+        }
+        for name, node_value in cascode_node_values.items():
+            tolerance = max(abs(node_value) * 1e-4, 1e-5)
+            if abs(abs(cascode_op_values[name]) - abs(node_value)) > tolerance:
+                raise RuntimeError(
+                    f"DC node/device mismatch for MNCAS {name}: "
+                    f"node={node_value:.12g}, "
+                    f"device={cascode_op_values[name]:.12g}"
+                )
+
+    if cascode:
+        assert cascode_op_values is not None
+        values = [
+            *node_values.values(),
+            *op_values.values(),
+            *cascode_op_values.values(),
+            parameters["load_resistance_ohm"],
+        ]
+        if any(not math.isfinite(float(value)) for value in values):
+            raise RuntimeError("cascode operating-point values must be finite")
+        if parameters["load_resistance_ohm"] <= 0.0:
+            raise RuntimeError("cascode load resistance must be positive")
+        if abs(op_values["gds_s"]) <= 0.0 or abs(cascode_op_values["gds_s"]) <= 0.0:
+            raise RuntimeError("cascode device gds values must be non-zero")
+        lower_current_a = abs(op_values["ids_a"])
+        upper_current_a = abs(cascode_op_values["ids_a"])
+        resistor_current_a = (
+            node_values["VDD"] - node_values["OUT"]
+        ) / parameters["load_resistance_ohm"]
+        lower_margin_v = abs(op_values["vds_v"]) - abs(op_values["vdsat_v"])
+        upper_margin_v = abs(cascode_op_values["vds_v"]) - abs(
+            cascode_op_values["vdsat_v"]
+        )
+        stack_headroom_v = (
+            node_values["OUT"]
+            - node_values["VSS"]
+            - abs(op_values["vdsat_v"])
+            - abs(cascode_op_values["vdsat_v"])
+        )
+        upper_headroom_v = node_values["VDD"] - node_values["OUT"]
+        resistor_scale_a = max(upper_current_a, abs(resistor_current_a), 1e-18)
+        metrics = {
+            "drain_current_ua": lower_current_a * 1e6,
+            "cascode_drain_current_ua": upper_current_a * 1e6,
+            "vgs_v": node_vgs_v,
+            "vds_v": node_vds_v,
+            "vdsat_v": abs(op_values["vdsat_v"]),
+            "input_device_saturation_margin_v": lower_margin_v,
+            "cascode_vgs_v": cascode_node_values["vgs_v"],
+            "cascode_vds_v": cascode_node_values["vds_v"],
+            "cascode_vdsat_v": abs(cascode_op_values["vdsat_v"]),
+            "cascode_saturation_margin_v": upper_margin_v,
+            "saturation_margin_v": min(lower_margin_v, upper_margin_v),
+            "upper_output_headroom_v": upper_headroom_v,
+            "lower_saturation_headroom_v": stack_headroom_v,
+            "output_swing_margin_v": min(upper_headroom_v, stack_headroom_v),
+            "cascode_node_v": node_values["NCAS"],
+            "cascode_bias_v": node_values["VCAS"],
+            "gm_us": abs(op_values["gm_s"]) * 1e6,
+            "gds_us": abs(op_values["gds_s"]) * 1e6,
+            "intrinsic_gain_v_per_v": abs(op_values["gm_s"])
+            / abs(op_values["gds_s"]),
+            "cascode_gm_us": abs(cascode_op_values["gm_s"]) * 1e6,
+            "cascode_gds_us": abs(cascode_op_values["gds_s"]) * 1e6,
+            "cascode_intrinsic_gain_v_per_v": abs(cascode_op_values["gm_s"])
+            / abs(cascode_op_values["gds_s"]),
+            "resistor_current_ua": abs(resistor_current_a) * 1e6,
+            "current_mismatch_percent": abs(
+                upper_current_a - abs(resistor_current_a)
+            )
+            / resistor_scale_a
+            * 100.0,
+            "cascode_current_mismatch_percent": abs(
+                lower_current_a - upper_current_a
+            )
+            / max(lower_current_a, upper_current_a, 1e-18)
+            * 100.0,
+            "saturation_region": float(
+                lower_current_a > 0.0
+                and upper_current_a > 0.0
+                and lower_margin_v >= 0.0
+                and upper_margin_v >= 0.0
+            ),
+        }
+    else:
+        metrics = extract_common_source_dc_metrics(
+            vdd_v=node_values["VDD"],
+            vin_v=node_values["IN"],
+            vout_v=node_values["OUT"],
+            vss_v=mos_source_v,
+            drain_current_a=op_values["ids_a"],
+            vdsat_v=op_values["vdsat_v"],
+            gm_s=op_values["gm_s"],
+            gds_s=op_values["gds_s"],
+            load_resistance_ohm=parameters["load_resistance_ohm"],
+        )
     metrics.update(
         extract_dc_supply_metrics(
             vdd_v=node_values["VDD"],
@@ -11458,17 +12757,27 @@ def _common_source_metrics_from_result(
         )
     )
     supply_current_a = -float(op_values["supply_source_current_a"])
-    supply_scale_a = max(abs(op_values["ids_a"]), abs(supply_current_a), 1e-18)
+    supply_device_current_a = (
+        abs(cascode_op_values["ids_a"])
+        if cascode_op_values is not None
+        else abs(op_values["ids_a"])
+    )
+    supply_scale_a = max(supply_device_current_a, abs(supply_current_a), 1e-18)
     supply_mismatch = (
-        abs(abs(op_values["ids_a"]) - abs(supply_current_a))
+        abs(supply_device_current_a - abs(supply_current_a))
         / supply_scale_a
         * 100.0
     )
     metrics["supply_current_mismatch_percent"] = supply_mismatch
     if metrics["current_mismatch_percent"] > 1.0:
         raise RuntimeError(
-            "DC KCL mismatch between MN0 ids and RD0 current: "
+            "DC KCL mismatch between drain-stack ids and RD0 current: "
             f"{metrics['current_mismatch_percent']:.6g}%"
+        )
+    if cascode and metrics["cascode_current_mismatch_percent"] > 1.0:
+        raise RuntimeError(
+            "DC KCL mismatch between MN0 and MNCAS ids: "
+            f"{metrics['cascode_current_mismatch_percent']:.6g}%"
         )
     if supply_mismatch > 1.0:
         raise RuntimeError(
@@ -11505,14 +12814,47 @@ def _common_source_metrics_from_result(
     )
     return metrics, {
         "node_values_v": node_values,
-        "device_values": op_values,
+        "device_values": (
+            {
+                "MN0": {
+                    name: value
+                    for name, value in op_values.items()
+                    if name != "supply_source_current_a"
+                },
+                "MNCAS": cascode_op_values,
+                "supply_source_current_a": op_values["supply_source_current_a"],
+            }
+            if cascode
+            else op_values
+        ),
         "operating_region": operating_region,
-        "region_rule": "saturation when |VDS| >= |VDSAT| and |IDS| > 0",
+        "region_rule": (
+            "both MN0 and MNCAS require |VDS| >= |VDSAT| and |IDS| > 0"
+            if cascode
+            else "saturation when |VDS| >= |VDSAT| and |IDS| > 0"
+        ),
+        "device_operating_regions": (
+            {
+                "MN0": (
+                    "saturation"
+                    if metrics["input_device_saturation_margin_v"] >= 0.0
+                    else "non_saturation"
+                ),
+                "MNCAS": (
+                    "saturation"
+                    if metrics["cascode_saturation_margin_v"] >= 0.0
+                    else "non_saturation"
+                ),
+            }
+            if cascode
+            else {"MN0": operating_region}
+        ),
         "node_device_consistency": "matched",
         "kcl_consistency": "matched",
         "source_degeneration_consistency": (
             "matched" if source_degenerated else "not_applicable"
         ),
+        "cascode_stack_consistency": "matched" if cascode else "not_applicable",
     }
 
 
@@ -12363,13 +13705,25 @@ def _common_source_testbench_deck(
     model_configuration, temperature_c = _common_source_model_configuration(
         profile, operating_condition
     )
+    cascode = "cascode_bias_v" in parameters
     saved_nodes = "IN OUT VDD VSS" + (
         " NSRC" if "source_resistance_ohm" in parameters else ""
     )
+    if cascode:
+        saved_nodes += " VCAS NCAS"
     if analysis not in {"dc", "ac", "transient", "noise"}:
         raise ValueError(f"unsupported common-source analysis: {analysis}")
     source = "VIN_SRC (IN 0) vsource dc=vbias"
-    extra_parameters = ""
+    extra_parameters = (
+        f' vcas={parameters["cascode_bias_v"]:.12g}' if cascode else ""
+    )
+    cascode_source = "VCAS_SRC (VCAS 0) vsource dc=vcas" if cascode else ""
+    cascode_save = (
+        "save MNCAS:ids MNCAS:vgs MNCAS:vds MNCAS:vdsat "
+        "MNCAS:gm MNCAS:gds\n"
+        if cascode
+        else ""
+    )
     load = ""
     analysis_statement = ""
     if analysis == "ac":
@@ -12396,7 +13750,7 @@ def _common_source_testbench_deck(
         # Spectre may omit the requested stop point from a strobed transient.
         # One extra strobe guarantees coverage of the exact coherent window.
         stop_s = total_cycles / frequency_hz + sample_step_s
-        extra_parameters = (
+        extra_parameters += (
             f" vinamp={amplitudes[0]:.12g} flinearity={frequency_hz:.12g}"
         )
         source = (
@@ -12436,6 +13790,7 @@ parameters vdd={parameters["vdd_v"]:.12g} vbias={parameters["bias_v"]:.12g}{extr
 VDD_SRC (VDD 0) vsource dc=vdd
 VSS_SRC (VSS 0) vsource dc=0
 {source}
+{cascode_source}
 {load}
 
 simulatorOptions options{temperature_option} psfversion="1.4.0" reltol=1e-4 vabstol=1e-6 iabstol=1e-12
@@ -12443,7 +13798,7 @@ dcOp dc write="spectre.dc" maxiters=150 maxsteps=10000 annotate=status
 dcOpInfo info what=oppoint where=rawfile
 {analysis_statement}save {saved_nodes} VDD_SRC:p VIN_SRC:p
 save MN0:ids MN0:vgs MN0:vds MN0:vdsat MN0:gm MN0:gds
-saveOptions options save=allpub
+{cascode_save}saveOptions options save=allpub
 '''
 
 
@@ -13096,6 +14451,8 @@ def simulate_common_source(
             "length_um",
             "load_resistance_ohm",
             "source_resistance_ohm",
+            "cascode_width_um",
+            "cascode_length_um",
         )
         if name in payload.get("parameters", {})
     }
@@ -13105,7 +14462,11 @@ def simulate_common_source(
         expected_label="requested candidate",
         actual_label="OA readback",
     )
-    parameters = _resolved_common_source_parameters(payload, oa_parameters)
+    parameters = _resolved_common_source_parameters(
+        payload,
+        oa_parameters,
+        topology_variant,
+    )
     with tempfile.TemporaryDirectory(prefix="vda_common_source_") as temp_dir:
         work_dir = Path(temp_dir)
         if _bundle_cache is not None and "netlist_evidence" in _bundle_cache:
@@ -13300,6 +14661,13 @@ def simulate_common_source(
                 for name in ("bias_v", "vdd_v")
             },
         }
+        if topology_variant == _COMMON_SOURCE_CASCODE_VARIANT:
+            testbench_values["cascode_bias_v"] = parameters["cascode_bias_v"]
+            testbench_value_sources["cascode_bias_v"] = (
+                "user_input"
+                if "cascode_bias_v" in payload.get("parameters", {})
+                else "software_inference"
+            )
         operating_condition = payload.get("operating_condition")
         model_manifest = _common_source_model_manifest(
             profile,

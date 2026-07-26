@@ -59,7 +59,11 @@ _OA_SEMANTIC_PARAMETERS = {
     ),
 }
 
-_COMMON_SOURCE_OPTIONAL_OA_PARAMETERS = ("source_resistance_ohm",)
+_COMMON_SOURCE_OPTIONAL_OA_PARAMETERS = (
+    "source_resistance_ohm",
+    "cascode_width_um",
+    "cascode_length_um",
+)
 _DIFFERENTIAL_PAIR_OPTIONAL_OA_PARAMETERS = (
     "tail_width_um",
     "tail_length_um",
@@ -3461,15 +3465,35 @@ class TaskExecutor:
                 )
                 if task.circuit is CircuitKind.EXISTING_SCHEMATIC:
                     assert task.topology_delta is not None
-                    audit = validate_topology_execution_readback(
-                        before.data,
-                        after.data,
-                        task.topology_delta,
-                    )
+                    partial_before = before.data.get("partial_prefix_state")
+                    if partial_before is not None:
+                        partial_resume = transformed.data.get(
+                            "partial_prefix_resume"
+                        )
+                        if (
+                            not isinstance(partial_resume, dict)
+                            or partial_resume.get("status") != "resumed"
+                        ):
+                            raise RuntimeError(
+                                "partial-prefix topology readback was verified, "
+                                "but transform did not confirm an exact resume"
+                            )
+                        audit_data = {
+                            **dict(transformed.data.get("contract_audit", {})),
+                            "before_partial_prefix_state": partial_before,
+                            "transform_partial_prefix_resume": partial_resume,
+                        }
+                    else:
+                        audit = validate_topology_execution_readback(
+                            before.data,
+                            after.data,
+                            task.topology_delta,
+                        )
+                        audit_data = audit.model_dump(mode="json")
                     self._action(
                         "schematic.transform.topology-delta.predeclared-audit",
                         lambda: AdapterResult(
-                            data=audit.model_dump(mode="json"),
+                            data=audit_data,
                             evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
                         ),
                     )

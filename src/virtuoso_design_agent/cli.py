@@ -13,6 +13,11 @@ from pydantic import ValidationError
 from .adapters import DeterministicDemoAdapter, SubprocessBridgeAdapter
 from .adapters.subprocess_bridge import BridgeWorkerError
 from .catalog import UnsupportedCapability, catalog_as_dicts
+from .cascode_seed import (
+    CascodeSeedPolicy,
+    build_task_from_cascode_seed,
+    derive_cascode_seed,
+)
 from .characterization_seed import (
     DeviceCharacterizationGridTemplate,
     derive_device_characterization_task,
@@ -178,6 +183,32 @@ def _cmd_theory_seed_validate(args: argparse.Namespace) -> int:
         args.output.write_text(payload + "\n", encoding="utf-8")
     print(payload)
     return 0 if result.status is RunStatus.SUCCEEDED else 1
+
+
+def _cmd_cascode_seed(args: argparse.Namespace) -> int:
+    policy = CascodeSeedPolicy.model_validate_json(
+        args.policy.read_text(encoding="utf-8")
+    )
+    result = derive_cascode_seed(policy, args.source_run)
+    payload = result.model_dump_json(indent=2)
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(payload + "\n", encoding="utf-8")
+    print(payload)
+    return 0
+
+
+def _cmd_candidate_task_from_cascode_seed(args: argparse.Namespace) -> int:
+    task = build_task_from_cascode_seed(args.result, args.task_template)
+    payload = task.model_dump_json(
+        indent=2,
+        exclude_none=True,
+        exclude_unset=True,
+    )
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(payload + "\n", encoding="utf-8")
+    print(payload)
+    return 0
 
 
 def _cmd_theory_request_from_validation(args: argparse.Namespace) -> int:
@@ -563,6 +594,29 @@ def build_parser() -> argparse.ArgumentParser:
     theory_seed_validate.add_argument("run_record", type=Path)
     theory_seed_validate.add_argument("--output", type=Path)
     theory_seed_validate.set_defaults(handler=_cmd_theory_seed_validate)
+
+    cascode_seed = subparsers.add_parser(
+        "cascode-seed",
+        help=(
+            "derive a bounded cascode width/bias neighborhood from one hash-bound "
+            "real operating point"
+        ),
+    )
+    cascode_seed.add_argument("policy", type=Path)
+    cascode_seed.add_argument("source_run", type=Path)
+    cascode_seed.add_argument("--output", type=Path)
+    cascode_seed.set_defaults(handler=_cmd_cascode_seed)
+
+    cascode_seed_task = subparsers.add_parser(
+        "candidate-task-from-cascode-seed",
+        help=(
+            "compile a hash-bound cascode seed into an atomic DC or AC tuning task"
+        ),
+    )
+    cascode_seed_task.add_argument("result", type=Path)
+    cascode_seed_task.add_argument("task_template", type=Path)
+    cascode_seed_task.add_argument("--output", type=Path, required=True)
+    cascode_seed_task.set_defaults(handler=_cmd_candidate_task_from_cascode_seed)
 
     theory_request = subparsers.add_parser(
         "theory-request-from-validation",

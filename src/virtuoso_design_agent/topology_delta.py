@@ -240,6 +240,11 @@ class TopologyDeltaExecutionSpec(_StrictModel):
 
     direction: Literal["forward", "inverse"] = "forward"
     contract: TopologyDeltaContract
+    expected_output_placement_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
+    resume_partial_prefix: bool = False
 
 
 class TopologyDeltaAudit(_StrictModel):

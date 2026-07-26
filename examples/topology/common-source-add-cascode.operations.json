@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "operations": [
+    {
+      "operation": "add_net",
+      "net": {
+        "name": "NCAS",
+        "attributes": {
+          "isGlobal": false,
+          "numBits": 1,
+          "sigType": "signal"
+        }
+      }
+    },
+    {
+      "operation": "add_net",
+      "net": {
+        "name": "VCAS",
+        "attributes": {
+          "isGlobal": false,
+          "numBits": 1,
+          "sigType": "signal"
+        }
+      }
+    },
+    {
+      "operation": "reconnect_terminal",
+      "instance": "MN0",
+      "terminal": "D",
+      "expected_net": "OUT",
+      "net": "NCAS"
+    },
+    {
+      "operation": "add_instance",
+      "instance": {
+        "name": "MNCAS",
+        "master": {
+          "library": "tsmcN28",
+          "cell": "nch_lvt_mac",
+          "view": "symbol"
+        },
+        "terminals": {
+          "B": "VSS",
+          "D": "OUT",
+          "G": "VCAS",
+          "S": "NCAS"
+        },
+        "attributes": {
+          "numInst": 1,
+          "orient": "R0",
+          "xy": [0.0, 0.65]
+        }
+      }
+    },
+    {
+      "operation": "add_pin",
+      "pin": {
+        "name": "VCAS",
+        "net": "VCAS",
+        "direction": "input",
+        "attributes": {
+          "numBits": 1,
+          "master": {
+            "library": "basic",
+            "cell": "ipin",
+            "view": "symbol"
+          },
+          "xy": [-1.4, 0.65],
+          "orient": "R0"
+        }
+      }
+    }
+  ]
+}

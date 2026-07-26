@@ -53,6 +53,8 @@ OA_SEMANTIC_PARAMETER_NAMES: dict[CircuitKind, frozenset[str]] = {
             "length_um",
             "load_resistance_ohm",
             "source_resistance_ohm",
+            "cascode_width_um",
+            "cascode_length_um",
         }
     ),
     CircuitKind.DIFFERENTIAL_PAIR: frozenset(
@@ -126,17 +128,18 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
         evidence_gate=(
             "unfiltered Bridge schematic readback + targeted CDF value verification + "
             "predeclared topology-delta CAS with bounded add/remove-instance, "
-            "terminal reconnect, net operations, complete independent readback and "
+            "terminal reconnect, net/pin operations, complete independent readback and "
             "exact inverse restoration live on a non-overwrite TSMC N28 cell + "
-            "local exact-state post-save inverse recovery + live instance-scoped "
+            "local logical/physical pin and full-placement binding + exact-state "
+            "post-save inverse recovery + live instance-scoped "
             "NMOS symbol-master/CDF-subset OA-to-si-to-Spectre round-trip + "
             "live non-overwrite ADE prepare/setup patch/background run-resume + exact-"
             "history/result/log and OA-to-runtime-input consistency; native Maestro "
             "CL and VDDxCL sweep setup/input-bundle/RDB point binding and pinned "
             "scalar-to-constraint mapping plus test-scope CL x environmental-corner "
-            "raw-result binding live on TSMC N28; post-save automatic recovery still "
-            "requires live fault injection; PMOS master migration, pin geometry, "
-            "human capture, real PVT corners, and multi-test/multi-analysis mapping "
+            "raw-result binding live on TSMC N28; post-save automatic recovery and "
+            "pin/placement replay still require live fault injection; PMOS master "
+            "migration, human capture, real PVT corners, and multi-test/multi-analysis mapping "
             "remain pending"
         ),
     ),
@@ -173,6 +176,9 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "length_um",
             "load_resistance_ohm",
             "source_resistance_ohm",
+            "cascode_width_um",
+            "cascode_length_um",
+            "cascode_bias_v",
             "bias_v",
             "vdd_v",
             "load_ff",
@@ -192,6 +198,9 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "live with 6/6 feasible points, recommendation agreement, 60/60 "
             "pointwise comparisons passing, checkpoint recovery, and independent "
             "best-point OA readback; RS sensitivity and PVT are not extrapolated; "
+            "a cascode-common-source topology, two-device DC/KCL gate, complex AC "
+            "path, and hash-bound OP-derived atomic W/L/VCAS seeds are locally "
+            "verified but still require a live OA-to-si-to-Spectre Gate; "
             "non-overwrite ADE "
             "prepare/setup/background exact-history run-resume is live on the "
             "inverter handoff; live PVT-aware OA-design-variable writeback and "
@@ -405,7 +414,9 @@ def validate_task_capability(task: TaskSpec) -> None:
         task.circuit is CircuitKind.COMMON_SOURCE
         and task.operation in {Operation.SCHEMATIC_CREATE, Operation.PARAMETERS_APPLY}
     ):
-        testbench_only = sorted(supplied & {"bias_v", "vdd_v", "load_ff"})
+        testbench_only = sorted(
+            supplied & {"bias_v", "cascode_bias_v", "vdd_v", "load_ff"}
+        )
         if testbench_only:
             raise UnsupportedCapability(
                 f"{task.operation.value} cannot persist testbench-only parameters: "
@@ -490,6 +501,16 @@ def validate_task_capability(task: TaskSpec) -> None:
         raise UnsupportedCapability(
             "schematic.create builds the nominal common-source topology; use "
             "schematic.transform to add source degeneration to an existing cellview"
+        )
+    if (
+        task.circuit is CircuitKind.COMMON_SOURCE
+        and task.operation is Operation.SCHEMATIC_CREATE
+        and supplied & {"cascode_width_um", "cascode_length_um"}
+    ):
+        raise UnsupportedCapability(
+            "schematic.create builds the nominal common-source topology; use a "
+            "generic topology_delta to add MNCAS/VCAS/NCAS before applying "
+            "cascode geometry"
         )
 
 

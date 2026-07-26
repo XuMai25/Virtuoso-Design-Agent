@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "common-source-cascode-geometry-apply",
+  "operation": "parameters.apply",
+  "circuit": "common_source",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_cs_cascode_gate_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "parameters": {
+    "cascode_width_um": 1.0,
+    "cascode_length_um": 0.03
+  },
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}
