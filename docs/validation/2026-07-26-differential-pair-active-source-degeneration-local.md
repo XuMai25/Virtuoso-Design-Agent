@@ -2,7 +2,7 @@
 
 ## 结论
 
-状态：**active-load plus symmetric source-degeneration contract and analysis routing locally verified; live OA/Spectre Gate pending**。
+状态：**active-load plus symmetric source-degeneration contract and analysis routing locally verified**。该文档保留 live 前的本地实现与授权边界；随后新 cellview 的 OA/si/Spectre、多 analysis 和 exact inverse 已真实通过，见[组合拓扑 live Gate](2026-07-26-differential-pair-active-source-degeneration-live.md)。
 
 本轮没有写远端 OA、没有运行 Spectre，也没有修改 `virtuoso-bridge-lite`。VDA 现能把已经支持的 PMOS 电流镜负载差分对，与通用 topology-delta 增加的两支对称源电阻组合成一个正式可识别拓扑；不是为本次 smoke 写一套新的网表模板或分析器。
 

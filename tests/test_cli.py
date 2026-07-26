@@ -63,9 +63,11 @@ def test_topology_compile_uses_successful_inspection_and_writes_inverse(
                         "action": "schematic.inspect",
                         "status": "succeeded",
                         "details": {
-                            "instances": [],
-                            "nets": ["VSS"],
-                            "pins": ["VSS"],
+                            "topology": {
+                                "instances": [],
+                                "nets": ["VSS"],
+                                "pins": ["VSS"],
+                            },
                         },
                     }
                 ]
@@ -104,6 +106,57 @@ def test_topology_compile_uses_successful_inspection_and_writes_inverse(
     assert contract["inverse_operations"][0]["operation"] == "remove_net"
     assert contract["expected_before_sha256"] != contract["expected_after_sha256"]
     assert "add-nsrc" in capsys.readouterr().out
+
+
+def test_topology_compile_rejects_circuit_specific_inspection_summary(
+    tmp_path,
+    capsys,
+) -> None:
+    readback = tmp_path / "inspect.json"
+    operations = tmp_path / "operations.json"
+    output = tmp_path / "contract.json"
+    readback.write_text(
+        json.dumps(
+            {
+                "actions": [
+                    {
+                        "action": "schematic.inspect",
+                        "status": "succeeded",
+                        "details": {
+                            "instances": [],
+                            "nets": ["VSS"],
+                            "pins": ["VSS"],
+                            "semantic_parameters": {"input_width_um": 1.0},
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    operations.write_text(
+        json.dumps(
+            {"operations": [{"operation": "add_net", "net": {"name": "NSRC"}}]}
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "topology-compile",
+                str(readback),
+                str(operations),
+                "--id",
+                "add-nsrc",
+                "--output",
+                str(output),
+            ]
+        )
+        == 2
+    )
+    assert "existing_schematic inspection" in capsys.readouterr().err
+    assert not output.exists()
 
 
 def test_tuning_run_creates_complete_checkpoint_by_default(tmp_path, capsys) -> None:

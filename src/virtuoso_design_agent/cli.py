@@ -262,7 +262,14 @@ def _inspection_details(payload: object) -> dict:
                 and str(action.get("action", "")).startswith("schematic.inspect")
                 and isinstance(action.get("details"), dict)
             ):
-                return action["details"]
+                topology = action["details"].get("topology")
+                if isinstance(topology, dict):
+                    return topology
+                raise ValueError(
+                    "successful schematic.inspect action has no canonical topology; "
+                    "compile the contract from an existing_schematic inspection so "
+                    "the compiler and topology writer use the same structure summary"
+                )
         raise ValueError(
             "run record has no successful schematic.inspect action with details"
         )

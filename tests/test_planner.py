@@ -56,6 +56,28 @@ def test_psrr_length_task_is_an_eight_point_guarded_oa_search() -> None:
     assert task.safety.replace_existing is False
 
 
+def test_active_degenerated_icmr_example_is_testbench_only() -> None:
+    task_path = (
+        ROOT
+        / "examples"
+        / "tasks"
+        / "differential-pair-active-degenerated-icmr.bridge.json"
+    )
+    task = TaskSpec.model_validate(json.loads(task_path.read_text(encoding="utf-8")))
+    plan = build_plan(task)
+    stage = next(step for step in plan.steps if step.capability == "parameters.stage")
+    finalize = next(
+        step for step in plan.steps if step.capability == "parameters.finalize"
+    )
+
+    assert set(task.parameter_space) == {"common_mode_v"}
+    assert "source_resistance_ohm" not in task.parameters
+    assert not plan.requires_remote_write
+    assert plan.requires_remote_compute
+    assert stage.side_effect is SideEffect.READ_ONLY
+    assert finalize.side_effect is SideEffect.READ_ONLY
+
+
 def test_common_source_pvt_plan_discloses_finite_worst_case_gate() -> None:
     task = TaskSpec.model_validate(
         {
