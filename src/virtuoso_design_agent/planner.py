@@ -766,13 +766,20 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 else contract.expected_before_sha256
             )
             capability = f"schematic.transform.topology-delta.{direction}"
+            if contract.master_parameter_migrations:
+                parameter_clause = (
+                    f"另对 {len(contract.master_parameter_migrations)} 个被替换实例"
+                    "执行契约绑定的旧 CDF 值 CAS、新值 callback 写入及独立回读；"
+                )
+            else:
+                parameter_clause = "不改设备参数；"
             description = (
                 f"对现有 schematic 执行预声明 topology delta {contract.id!r} 的"
                 f"{direction}方向，共 "
                 f"{len(contract.operations if direction == 'forward' else contract.inverse_operations)} "
                 "个 allowlisted 结构操作；写前完整结构 SHA-256 必须等于 "
                 f"{input_sha256}，写后独立完整回读必须等于 {output_sha256}；"
-                "不改设备参数，不创建或替换目标 cellview"
+                f"{parameter_clause}不创建或替换目标 cellview"
             )
         elif task.circuit is CircuitKind.INVERTER:
             capability = "schematic.transform.inverter-testbench"

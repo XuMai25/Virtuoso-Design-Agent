@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "operations": [
+    {
+      "operation": "replace_master",
+      "instance": "MN0",
+      "expected_master": {
+        "library": "tsmcN28",
+        "cell": "nch_lvt_mac",
+        "view": "symbol"
+      },
+      "master": {
+        "library": "tsmcN28",
+        "cell": "nch_mac",
+        "view": "symbol"
+      }
+    }
+  ],
+  "master_parameter_migrations": [
+    {
+      "instance": "MN0",
+      "expected_parameters": {"Wfg": "1u", "l": "30n"},
+      "parameters": {"Wfg": "1u", "l": "30n"},
+      "undeclared_parameter_policy": "record_only"
+    }
+  ]
+}

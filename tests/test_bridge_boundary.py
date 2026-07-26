@@ -5483,17 +5483,123 @@ def test_generic_topology_compiler_uses_bridge_editor_for_owned_stub_delta() -> 
     }
 
 
-def test_generic_topology_compiler_rejects_unverified_master_and_pin_writes() -> None:
+def test_generic_topology_compiler_rejects_unverified_pin_writes() -> None:
     from virtuoso_design_agent.topology_delta import (
         AddPinOperation,
         TopologyPin,
     )
 
-    with pytest.raises(RuntimeError, match="dedicated OA/CDF or pin-geometry Gate"):
+    with pytest.raises(RuntimeError, match="dedicated pin-geometry Gate"):
         bridge_worker._compile_generic_topology_commands(
             [AddPinOperation(pin=TopologyPin(name="X", net="X"))],
             instance_builder=lambda *args: "unused",
             terminal_label_builder=lambda *args: "unused",
+        )
+
+
+def test_generic_topology_compiler_uses_instance_scoped_master_cas() -> None:
+    from virtuoso_design_agent.topology_delta import (
+        ReplaceMasterOperation,
+        TopologyMaster,
+    )
+
+    commands, declarative = bridge_worker._compile_generic_topology_commands(
+        [
+            ReplaceMasterOperation(
+                instance="MN0",
+                expected_master=TopologyMaster(
+                    library="tsmcN28", cell="nch_lvt_mac", view="symbol"
+                ),
+                master=TopologyMaster(
+                    library="tsmcN28", cell="nch_rvt_mac", view="symbol"
+                ),
+            )
+        ],
+        instance_builder=lambda *args: "unused",
+        terminal_label_builder=lambda *args: "unused",
+    )
+
+    assert declarative == []
+    assert len(commands) == 1
+    assert 'x~>name == "MN0"' in commands[0]
+    assert 'rbInst~>cellName == "nch_lvt_mac"' in commands[0]
+    assert '"tsmcN28" "nch_rvt_mac" "symbol" "schematicSymbol" "r"' in commands[0]
+    assert "rbInst~>master = rbMaster" in commands[0]
+    assert 'rbInst~>cellName == "nch_rvt_mac"' in commands[0]
+
+
+def test_generic_master_preflight_checks_terminal_geometry_and_new_cdf() -> None:
+    from virtuoso_design_agent.topology_delta import (
+        MasterParameterMigration,
+        ReplaceMasterOperation,
+        TopologyMaster,
+        snapshot_from_inspection,
+    )
+
+    before, _ = _generic_bridge_master_swap_readbacks()
+    snapshot = snapshot_from_inspection(
+        {"topology": bridge_worker._generic_topology_readback(before)}
+    )
+    operation = ReplaceMasterOperation(
+        instance="MN0",
+        expected_master=TopologyMaster(
+            library="tsmcN28", cell="nch_lvt_mac", view="symbol"
+        ),
+        master=TopologyMaster(
+            library="tsmcN28", cell="nch_rvt_mac", view="symbol"
+        ),
+    )
+    migration = MasterParameterMigration(
+        instance="MN0",
+        expected_parameters={"Wfg": "1u", "l": "30n"},
+        parameters={"Wfg": "1u", "l": "30n"},
+        undeclared_parameter_policy="record_only",
+    )
+    captured: dict[str, object] = {}
+
+    class Client:
+        def execute_skill(self, skill, timeout):
+            captured.update({"skill": skill, "timeout": timeout})
+            return SimpleNamespace(output="t", errors=[])
+
+    bridge_worker._preflight_generic_master_replacements(
+        Client(),
+        "vda_test",
+        "vda_generic",
+        snapshot,
+        [operation],
+        [migration],
+    )
+
+    skill = str(captured["skill"])
+    assert '"nch_rvt_mac" "symbol" "schematicSymbol" "r"' in skill
+    assert "length(rbMaster~>terminals) == 4" in skill
+    assert skill.count("length(rbOldTerm~>pins) == 1") == 4
+    assert skill.count("length(rbNewTerm~>pins) == 1") == 4
+    assert skill.count("length(rbOldPin~>figs) == 1") == 4
+    assert skill.count("length(rbNewPin~>figs) == 1") == 4
+    assert skill.count("equal(rbOldFig~>bBox rbNewFig~>bBox)") == 4
+    assert 'get(rbCellCDF "Wfg")' in skill
+    assert 'get(rbCellCDF "l")' in skill
+    assert captured["timeout"] == 60
+
+
+def test_generic_master_execution_requires_explicit_cdf_migration() -> None:
+    from virtuoso_design_agent.topology_delta import (
+        TopologyDeltaExecutionSpec,
+        derive_topology_delta,
+    )
+
+    before, after = _generic_bridge_master_swap_readbacks()
+    contract = derive_topology_delta(
+        "master-without-cdf-contract",
+        {"topology": bridge_worker._generic_topology_readback(before)},
+        {"topology": bridge_worker._generic_topology_readback(after)},
+    )
+
+    with pytest.raises(RuntimeError, match="one explicit CDF parameter migration"):
+        bridge_worker._directed_master_parameter_migrations(
+            TopologyDeltaExecutionSpec(direction="forward", contract=contract)
         )
 
 
@@ -5591,6 +5697,13 @@ def _generic_bridge_source_degeneration_readbacks() -> tuple[dict, dict]:
     return before, after
 
 
+def _generic_bridge_master_swap_readbacks() -> tuple[dict, dict]:
+    before, _ = _generic_bridge_source_degeneration_readbacks()
+    after = deepcopy(before)
+    after["instances"][0]["cell"] = "nch_rvt_mac"
+    return before, after
+
+
 def test_generic_topology_worker_binds_append_write_to_independent_readback(
     monkeypatch,
 ) -> None:
@@ -5643,6 +5756,345 @@ def test_generic_topology_worker_binds_append_write_to_independent_readback(
     assert result["preserved_instance_parameters"] is True
     assert result["actual_output_topology_sha256"] == contract.expected_after_sha256
     assert result["contract_audit"]["source"] == "software_inference"
+
+
+def test_generic_topology_worker_applies_explicit_master_cdf_migration(
+    monkeypatch,
+) -> None:
+    from virtuoso_design_agent.topology_delta import derive_topology_delta
+
+    before, after = _generic_bridge_master_swap_readbacks()
+    contract = derive_topology_delta(
+        "generic-master-swap",
+        {"topology": bridge_worker._generic_topology_readback(before)},
+        {"topology": bridge_worker._generic_topology_readback(after)},
+        master_parameter_migrations=[
+            {
+                "instance": "MN0",
+                "expected_parameters": {"Wfg": "1u", "l": "30n"},
+                "parameters": {"Wfg": "1u", "l": "30n"},
+                "undeclared_parameter_policy": "record_only",
+            }
+        ],
+    )
+    reads = iter([before, after])
+    commands: list[str] = []
+    parameter_writes: list[tuple[str, dict[str, str]]] = []
+
+    class Editor:
+        def __enter__(self):
+            return self
+
+        def add(self, command):
+            commands.append(command)
+
+        def __exit__(self, *_args):
+            return False
+
+    client = SimpleNamespace(
+        schematic=SimpleNamespace(edit=lambda *_args, **_kwargs: Editor())
+    )
+    monkeypatch.setattr(bridge_worker, "_client", lambda: client)
+    monkeypatch.setattr(bridge_worker, "_read_schematic", lambda *_args: next(reads))
+    monkeypatch.setattr(
+        bridge_worker,
+        "_preflight_generic_master_replacements",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_verify_instance_parameter_values",
+        lambda _client, _library, _cell, expected: deepcopy(expected),
+    )
+
+    def set_parameters(_client, _library, _cell, instance, **parameters):
+        parameters.pop("param_filters")
+        parameters.pop("strict")
+        parameter_writes.append((instance, dict(parameters)))
+        return parameters
+
+    monkeypatch.setattr(bridge_worker, "_set_target_instance_params", set_parameters)
+
+    result = bridge_worker.transform_existing_schematic_topology_delta(
+        {
+            "target": {"library": "vda_test", "cell": "vda_generic"},
+            "profile": {"tech_library": "tsmcN28"},
+            "topology_delta": {
+                "direction": "forward",
+                "contract": contract.model_dump(mode="json"),
+            },
+        }
+    )
+
+    assert len(commands) == 1
+    assert "rbInst~>master = rbMaster" in commands[0]
+    assert parameter_writes == [("MN0", {"Wfg": "1u", "l": "30n"})]
+    assert result["preserved_instances"] == []
+    assert result["master_parameter_migrations"]["confirmed"] == {
+        "MN0": {"Wfg": "1u", "l": "30n"}
+    }
+    assert result["actual_output_topology_sha256"] == contract.expected_after_sha256
+
+
+def test_generic_topology_worker_restores_exact_saved_state_after_audit_failure(
+    monkeypatch,
+) -> None:
+    from virtuoso_design_agent.topology_delta import derive_topology_delta
+
+    before, after = _generic_bridge_source_degeneration_readbacks()
+    drifted_after = deepcopy(after)
+    drifted_after["instances"][0]["params"]["Wfg"] = "9u"
+    contract = derive_topology_delta(
+        "generic-source-degeneration",
+        {"topology": bridge_worker._generic_topology_readback(before)},
+        {"topology": bridge_worker._generic_topology_readback(after)},
+    )
+    reads = iter([before, drifted_after, drifted_after, before])
+    editor_batches: list[list[str]] = []
+
+    class Editor:
+        def __enter__(self):
+            editor_batches.append([])
+            return self
+
+        def add(self, command):
+            editor_batches[-1].append(command)
+
+        def __exit__(self, *_args):
+            return False
+
+    client = SimpleNamespace(
+        schematic=SimpleNamespace(edit=lambda *_args, **_kwargs: Editor())
+    )
+    monkeypatch.setattr(bridge_worker, "_client", lambda: client)
+    monkeypatch.setattr(bridge_worker, "_read_schematic", lambda *_args: next(reads))
+    monkeypatch.setattr(
+        bridge_worker,
+        "_compile_generic_topology_commands",
+        lambda operations: ([f"batch:{operations[0].operation}"], []),
+    )
+
+    with pytest.raises(RuntimeError, match='"status": "restored"'):
+        bridge_worker.transform_existing_schematic_topology_delta(
+            {
+                "target": {"library": "vda_test", "cell": "vda_generic"},
+                "profile": {"tech_library": "tsmcN28"},
+                "topology_delta": {
+                    "direction": "forward",
+                    "contract": contract.model_dump(mode="json"),
+                },
+            }
+        )
+
+    assert len(editor_batches) == 2
+    assert editor_batches[0][0].startswith("batch:add_net")
+    assert editor_batches[1][0].startswith("batch:remove_instance")
+
+
+def test_generic_topology_worker_refuses_recovery_from_unexpected_topology(
+    monkeypatch,
+) -> None:
+    from virtuoso_design_agent.topology_delta import derive_topology_delta
+
+    before, after = _generic_bridge_source_degeneration_readbacks()
+    unexpected = deepcopy(after)
+    unexpected["nets"]["UNDECLARED"] = {
+        "connections": [],
+        "numBits": 1,
+        "sigType": "signal",
+        "isGlobal": False,
+    }
+    contract = derive_topology_delta(
+        "generic-source-degeneration",
+        {"topology": bridge_worker._generic_topology_readback(before)},
+        {"topology": bridge_worker._generic_topology_readback(after)},
+    )
+    reads = iter([before, unexpected, unexpected])
+    edit_count = 0
+
+    class Editor:
+        def __enter__(self):
+            nonlocal edit_count
+            edit_count += 1
+            return self
+
+        def add(self, _command):
+            return None
+
+        def __exit__(self, *_args):
+            return False
+
+    client = SimpleNamespace(
+        schematic=SimpleNamespace(edit=lambda *_args, **_kwargs: Editor())
+    )
+    monkeypatch.setattr(bridge_worker, "_client", lambda: client)
+    monkeypatch.setattr(bridge_worker, "_read_schematic", lambda *_args: next(reads))
+    monkeypatch.setattr(
+        bridge_worker,
+        "_compile_generic_topology_commands",
+        lambda _operations: (["compiled-batch"], []),
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected_topology_no_write"):
+        bridge_worker.transform_existing_schematic_topology_delta(
+            {
+                "target": {"library": "vda_test", "cell": "vda_generic"},
+                "profile": {"tech_library": "tsmcN28"},
+                "topology_delta": {
+                    "direction": "forward",
+                    "contract": contract.model_dump(mode="json"),
+                },
+            }
+        )
+
+    assert edit_count == 1
+
+
+def test_generic_topology_worker_does_not_write_when_recovery_state_is_unknown(
+    monkeypatch,
+) -> None:
+    from virtuoso_design_agent.topology_delta import derive_topology_delta
+
+    before, after = _generic_bridge_source_degeneration_readbacks()
+    contract = derive_topology_delta(
+        "generic-source-degeneration",
+        {"topology": bridge_worker._generic_topology_readback(before)},
+        {"topology": bridge_worker._generic_topology_readback(after)},
+    )
+    read_count = 0
+    edit_count = 0
+
+    def read(*_args):
+        nonlocal read_count
+        read_count += 1
+        if read_count == 1:
+            return before
+        raise OSError("synthetic transport loss")
+
+    class Editor:
+        def __enter__(self):
+            nonlocal edit_count
+            edit_count += 1
+            return self
+
+        def add(self, _command):
+            return None
+
+        def __exit__(self, *_args):
+            return False
+
+    client = SimpleNamespace(
+        schematic=SimpleNamespace(edit=lambda *_args, **_kwargs: Editor())
+    )
+    monkeypatch.setattr(bridge_worker, "_client", lambda: client)
+    monkeypatch.setattr(bridge_worker, "_read_schematic", read)
+    monkeypatch.setattr(
+        bridge_worker,
+        "_compile_generic_topology_commands",
+        lambda _operations: (["compiled-batch"], []),
+    )
+
+    with pytest.raises(RuntimeError, match="state_unknown_no_write"):
+        bridge_worker.transform_existing_schematic_topology_delta(
+            {
+                "target": {"library": "vda_test", "cell": "vda_generic"},
+                "profile": {"tech_library": "tsmcN28"},
+                "topology_delta": {
+                    "direction": "forward",
+                    "contract": contract.model_dump(mode="json"),
+                },
+            }
+        )
+
+    assert read_count == 3
+    assert edit_count == 1
+
+
+def test_generic_master_cdf_failure_restores_original_master_and_parameters(
+    monkeypatch,
+) -> None:
+    from virtuoso_design_agent.topology_delta import derive_topology_delta
+
+    before, after = _generic_bridge_master_swap_readbacks()
+    contract = derive_topology_delta(
+        "generic-master-swap",
+        {"topology": bridge_worker._generic_topology_readback(before)},
+        {"topology": bridge_worker._generic_topology_readback(after)},
+        master_parameter_migrations=[
+            {
+                "instance": "MN0",
+                "expected_parameters": {"Wfg": "1u", "l": "30n"},
+                "parameters": {"Wfg": "1u", "l": "30n"},
+                "undeclared_parameter_policy": "record_only",
+            }
+        ],
+    )
+    reads = iter([before, after, before])
+    edit_count = 0
+    migration_calls = 0
+
+    class Editor:
+        def __enter__(self):
+            nonlocal edit_count
+            edit_count += 1
+            return self
+
+        def add(self, _command):
+            return None
+
+        def __exit__(self, *_args):
+            return False
+
+    client = SimpleNamespace(
+        schematic=SimpleNamespace(edit=lambda *_args, **_kwargs: Editor())
+    )
+    monkeypatch.setattr(bridge_worker, "_client", lambda: client)
+    monkeypatch.setattr(bridge_worker, "_read_schematic", lambda *_args: next(reads))
+    monkeypatch.setattr(
+        bridge_worker,
+        "_preflight_generic_master_replacements",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_verify_instance_parameter_values",
+        lambda _client, _library, _cell, expected: deepcopy(expected),
+    )
+
+    def migrate(_client, _library, _cell, migrations):
+        nonlocal migration_calls
+        migration_calls += 1
+        if migration_calls == 1:
+            raise RuntimeError("synthetic CDF callback failure")
+        return {
+            "requested": {
+                item.instance: dict(item.parameters) for item in migrations
+            },
+            "confirmed": {
+                item.instance: dict(item.parameters) for item in migrations
+            },
+        }
+
+    monkeypatch.setattr(
+        bridge_worker,
+        "_apply_exact_master_parameter_migrations",
+        migrate,
+    )
+
+    with pytest.raises(RuntimeError, match='"status": "restored"'):
+        bridge_worker.transform_existing_schematic_topology_delta(
+            {
+                "target": {"library": "vda_test", "cell": "vda_generic"},
+                "profile": {"tech_library": "tsmcN28"},
+                "topology_delta": {
+                    "direction": "forward",
+                    "contract": contract.model_dump(mode="json"),
+                },
+            }
+        )
+
+    assert edit_count == 2
+    assert migration_calls == 2
 
 
 def test_generic_topology_worker_purges_unsaved_edit_after_command_failure(

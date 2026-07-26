@@ -15,7 +15,15 @@ from collections.abc import Iterable, Mapping, Sequence
 from copy import deepcopy
 from typing import Annotated, Any, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictStr,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _IDENTIFIER_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
@@ -142,6 +150,21 @@ class ReplaceMasterOperation(_StrictModel):
     master: TopologyMaster
 
 
+class MasterParameterMigration(_StrictModel):
+    """Explicit writable CDF values paired with one master replacement.
+
+    These values remain outside the structural fingerprint, but serializing
+    them inside the immutable contract binds both the old-value CAS and the
+    requested new values to the execution token.  The two maps may use
+    different names when the masters expose different CDFs.
+    """
+
+    instance: StrictStr = Field(min_length=1)
+    expected_parameters: dict[StrictStr, StrictStr] = Field(min_length=1)
+    parameters: dict[StrictStr, StrictStr] = Field(min_length=1)
+    undeclared_parameter_policy: Literal["record_only"]
+
+
 class AddNetOperation(_StrictModel):
     operation: Literal["add_net"] = "add_net"
     net: TopologyNet
@@ -187,6 +210,29 @@ class TopologyDeltaContract(_StrictModel):
         default_factory=list,
         max_length=128,
     )
+    master_parameter_migrations: list[MasterParameterMigration] = Field(
+        default_factory=list,
+        max_length=32,
+    )
+
+    @model_validator(mode="after")
+    def validate_master_parameter_migrations(self) -> "TopologyDeltaContract":
+        migration_instances = [
+            migration.instance for migration in self.master_parameter_migrations
+        ]
+        _require_unique(migration_instances, "master parameter migration instance")
+        replacement_instances = [
+            operation.instance
+            for operation in self.operations
+            if isinstance(operation, ReplaceMasterOperation)
+        ]
+        for instance in migration_instances:
+            if replacement_instances.count(instance) != 1:
+                raise ValueError(
+                    "master parameter migration requires exactly one forward "
+                    f"replace_master operation for instance {instance!r}"
+                )
+        return self
 
 
 class TopologyDeltaExecutionSpec(_StrictModel):
@@ -588,6 +634,10 @@ def compile_topology_delta(
     contract_id: str,
     before: TopologySnapshot | Mapping[str, Any],
     operations: Sequence[TopologyOperation | Mapping[str, Any]],
+    *,
+    master_parameter_migrations: Sequence[
+        MasterParameterMigration | Mapping[str, Any]
+    ] = (),
 ) -> TopologyDeltaContract:
     """Compile operations against one exact before-state and prove rollback."""
 
@@ -609,6 +659,7 @@ def compile_topology_delta(
         expected_after_sha256=topology_fingerprint(after_snapshot),
         operations=parsed,
         inverse_operations=inverse,
+        master_parameter_migrations=list(master_parameter_migrations),
     )
 
 
@@ -797,6 +848,10 @@ def derive_topology_delta(
     contract_id: str,
     before_readback: TopologySnapshot | Mapping[str, Any],
     after_readback: TopologySnapshot | Mapping[str, Any],
+    *,
+    master_parameter_migrations: Sequence[
+        MasterParameterMigration | Mapping[str, Any]
+    ] = (),
 ) -> TopologyDeltaContract:
     """Derive the supported minimal delta between two complete readbacks."""
 
@@ -884,7 +939,12 @@ def derive_topology_delta(
     for name in sorted(before_nets.keys() - after_nets.keys()):
         operations.append(RemoveNetOperation(expected=before_nets[name]))
 
-    contract = compile_topology_delta(contract_id, before, operations)
+    contract = compile_topology_delta(
+        contract_id,
+        before,
+        operations,
+        master_parameter_migrations=master_parameter_migrations,
+    )
     if topology_fingerprint(after) != contract.expected_after_sha256:
         raise TopologyDeltaError(
             "readback difference contains a change outside the derived operations"

@@ -1,0 +1,6 @@
+{
+  "extends": "nics4304_tsmc28",
+  "name": "nics4304_tsmc28_svt",
+  "nmos_cell": "nch_mac",
+  "pmos_cell": "pch_mac"
+}

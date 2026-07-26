@@ -5326,6 +5326,87 @@ def test_predeclared_generic_topology_executes_forward_then_exact_inverse() -> N
     ) == contract.expected_before_sha256
 
 
+def test_demo_generic_master_migration_applies_and_restores_declared_cdf_values() -> None:
+    from virtuoso_design_agent.topology_delta import (
+        derive_topology_delta,
+        snapshot_from_inspection,
+    )
+
+    before = {
+        "instances": [
+            {
+                "name": "MN0",
+                "library": "tsmcN28",
+                "cell": "nch_lvt_mac",
+                "view": "symbol",
+                "terminals": {"D": "OUT", "G": "IN", "S": "VSS", "B": "VSS"},
+                "xy": [0.0, 0.0],
+                "orient": "R0",
+                "numInst": 1,
+            }
+        ],
+        "nets": ["IN", "OUT", "VSS"],
+        "pins": ["IN", "OUT", "VSS"],
+    }
+    after = json.loads(json.dumps(before))
+    after["instances"][0]["cell"] = "nch_rvt_mac"
+    contract = derive_topology_delta(
+        "generic-master-migration",
+        before,
+        after,
+        master_parameter_migrations=[
+            {
+                "instance": "MN0",
+                "expected_parameters": {"Wfg": "1u", "l": "30n"},
+                "parameters": {"Wfg": "1.2u", "l": "30n"},
+                "undeclared_parameter_policy": "record_only",
+            }
+        ],
+    )
+    adapter = DeterministicDemoAdapter()
+    adapter._schematics[("vda_test", "vda_master")] = {
+        "instances": before["instances"],
+        "nets": before["nets"],
+        "pins": before["pins"],
+        "parameters": {},
+        "semantic_parameters": {},
+        "instance_parameters": {"MN0": {"Wfg": "1u", "l": "30n"}},
+        "topology": snapshot_from_inspection(before).model_dump(mode="json"),
+    }
+
+    def run(direction: str) -> None:
+        task = TaskSpec.model_validate(
+            {
+                "id": f"generic-master-{direction}",
+                "operation": "schematic.transform",
+                "circuit": "existing_schematic",
+                "target": {"library": "vda_test", "cell": "vda_master"},
+                "topology_delta": {
+                    "direction": direction,
+                    "contract": contract.model_dump(mode="json"),
+                },
+                "safety": {
+                    "allow_remote_write": True,
+                    "allowed_library": "vda_test",
+                },
+            }
+        )
+        plan = build_plan(task)
+        record = TaskExecutor(adapter).execute(
+            task, plan, token=plan.confirmation_token
+        )
+        assert record.status is RunStatus.SUCCEEDED
+
+    run("forward")
+    assert adapter._schematics[("vda_test", "vda_master")][
+        "instance_parameters"
+    ]["MN0"] == {"Wfg": "1.2u", "l": "30n"}
+    run("inverse")
+    assert adapter._schematics[("vda_test", "vda_master")][
+        "instance_parameters"
+    ]["MN0"] == {"Wfg": "1u", "l": "30n"}
+
+
 def test_source_degeneration_transform_is_idempotent_and_can_retarget_only_rs0() -> None:
     adapter = DeterministicDemoAdapter()
     first = _source_degeneration_transform()

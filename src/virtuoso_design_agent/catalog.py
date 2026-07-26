@@ -128,13 +128,16 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "predeclared topology-delta CAS with bounded add/remove-instance, "
             "terminal reconnect, net operations, complete independent readback and "
             "exact inverse restoration live on a non-overwrite TSMC N28 cell + "
+            "local exact-state post-save inverse recovery and instance-scoped "
+            "symbol-master/CDF-subset migration contract + "
             "live non-overwrite ADE prepare/setup patch/background run-resume + exact-"
             "history/result/log and OA-to-runtime-input consistency; native Maestro "
             "CL and VDDxCL sweep setup/input-bundle/RDB point binding and pinned "
             "scalar-to-constraint mapping plus test-scope CL x environmental-corner "
-            "raw-result binding live on TSMC N28; generic master replacement, pin "
-            "geometry, post-save rollback, human capture, real PVT corners, and "
-            "multi-test/multi-analysis mapping pending"
+            "raw-result binding live on TSMC N28; generic master replacement and "
+            "post-save recovery still require live OA/si verification; pin geometry, "
+            "human capture, real PVT corners, and multi-test/multi-analysis mapping "
+            "remain pending"
         ),
     ),
     CircuitKind.INVERTER: CircuitCapability(

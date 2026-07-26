@@ -19,7 +19,7 @@
 
 L5A 不允许自行发明无限搜索范围、修改 PDK、覆盖未知 cell、把 demo 模型当 EDA 结果，或在缺少证据时宣布 closure。
 
-PDK 路线默认按晶圆厂 CMOS 工艺推进：当前以 TSMC N28 为基线，后续优先通过独立 profile 接入 TSMC/SMIC 的实际晶体管 PDK。TSV、hybrid-bonding 等封装/3D PDK 不进入普通电路设计的默认路径；若未来需要，将作为显式选择和独立 Gate，而不是当前 profile 的替代品。
+PDK 路线默认按晶圆厂 CMOS 工艺推进：当前以 TSMC N28 LVT profile 为缺省；同工艺的 `nch_mac/pch_mac` 通过继承式 `nics4304_tsmc28_svt` 显式选择，已过只读 symbol/CDF 兼容探针但尚未过 OA/`si`/Spectre。后续优先通过独立 profile 接入 TSMC/SMIC 的实际晶体管 PDK。profile 继承只复用静态工艺配置，不复用性能证据。TSV、hybrid-bonding 等封装/3D PDK 不进入普通电路设计的默认路径；若未来需要，将作为显式选择和独立 Gate，而不是当前 profile 的替代品。
 
 当前实现状态：`OA schematic -> si -> Spectre -> metrics`、供电能量积分、失败注入和候选级 checkpoint/resume 已通过本地测试。2026-07-19 live 结果覆盖 OA/`si` 参数一致性、非空 timing/current 波形、收紧规格、不可行 + 预算耗尽恢复，以及一个经历 3 次 tunnel 中断后仍完成 9/9 候选、最佳参数写回和独立 OA 回读的恢复任务。反相器 L5A 的同源有限闭环与显式恢复 Gate 已通过；Bridge 本地隔离补丁又通过强制断链只读 smoke，闭合 Windows stale state 与调用边界自动重建。运行中传输的随机 reset/timeout 仍是跨 Gate 的底层可靠性债务。
 
@@ -109,9 +109,11 @@ Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发�
 
 2026-07-25 又完成 Bridge/Spectre/ADE 资源生命周期 Gate。重复 10 次真实只读 worker 请求没有新增本地 Python/Spectre/SSH、句柄或 `vda_*` temp；合成超时先证伪 `taskkill /T`，随后 Windows Job Object 真实杀净 worker 的 120 秒后代进程。远端 direct Spectre 使用已哈希回读的 timeout guard。follow-up 再加入 cancel marker/父进程 watchdog，让 Python `finally` 在强杀前有 30 秒恢复 Maestro runtime、关闭 session/client；既有 Maestro view 的真实 timeout 故障注入后，独立 inventory 得到 Spectre/si/Maestro session 均为 0，空诊断 root 经逐层检查后精确删除。`vda resources [--remote]` 现可只读盘点本地 temp、持久 evidence、远端 EDA process/session、age/size 和 exact pin；默认不删除。状态升级为 **known VDA-owned process lifecycles bounded, Maestro cancellation live-verified, and retained evidence inventory available**。硬件/OS 崩溃与历史 evidence 的用户确认删除仍不是自动 GC。
 
-2026-07-26 先完成通用 topology-delta 的本地契约 Gate，随后在全新 `vda_generic_topology_delta_001` 上完成首个 live Gate。结构 snapshot 对实例 master/端子/位置属性、net 和 pin 做确定性 SHA-256；八类 operation 可序列化并自动生成逆向 patch。`existing_schematic` 的真实 worker 当前只执行已验证的 add/remove instance、reconnect terminal 和 add/remove net 子集，`replace_master` 与 pin operation 仍明确拒绝。live contract 把普通共源级增量变为 `MN0.S→NSRC + RS0(NSRC,VSS)`，before/after SHA 分别为 `4471c939...d4dea9`/`68e0cbcd...a67ed`；RS0=`1K` 经过 OA 回读并进入 `si`，退化 DC 的 source current mismatch 为 `0.002723%`。inverse 后独立 readback 精确恢复 before SHA，普通共源 DC 再次成功。状态升级为 **bounded generic topology-delta OA execution, same-source netlisting, and exact inverse restoration verified**。
+2026-07-26 先完成通用 topology-delta 的本地契约 Gate，随后在全新 `vda_generic_topology_delta_001` 上完成首个 live Gate。结构 snapshot 对实例 master/端子/位置属性、net 和 pin 做确定性 SHA-256；八类 operation 可序列化并自动生成逆向 patch。live contract 把普通共源级增量变为 `MN0.S→NSRC + RS0(NSRC,VSS)`，before/after SHA 分别为 `4471c939...d4dea9`/`68e0cbcd...a67ed`；RS0=`1K` 经过 OA 回读并进入 `si`，退化 DC 的 source current mismatch 为 `0.002723%`。inverse 后独立 readback 精确恢复 before SHA，普通共源 DC 再次成功。状态升级为 **bounded generic topology-delta OA execution, same-source netlisting, and exact inverse restoration verified**。
 
-同日又在新 `vda_diffpair_active_deg_generic_001` 上把同一 contract 组合到 Gate 6 PMOS 电流镜负载：before/after SHA 为 `d3fe4b73...31b93`/`68c9d2e2...559a`，`RS0=RS1=500 ohm` 经过 OA 回读并进入七实例 `si` 网表；DC 的 PMOS/RS/尾管 KCL 全部 matched，随后差模 AC/CMRR、noise、transient/THD、十点 ICMR 和 nominal PSRR 均复用既有 worker。真实结果为增益 `3.5523 V/V`、BW `2.0576 GHz`、GBW `7.3093 GHz`、低频 CMRR `34.446 dB`、输入参考积分噪声 `817.84 uV RMS`；`50 mV_peak` 时 THD `1.411%` 且 P1dB 未包围，PSRR+/- 只有约 `11.06/13.08 dB`。inverse 后独立 readback 精确恢复 before SHA，恢复态 DC 再次成功。状态升级为 **active-load plus symmetric source-degeneration generic-delta and full nominal analysis migration live verified**。参数值继续走独立 CDF/semantic 契约；通用 wire/shape snapshot、post-save 自动回滚、master/CDF 替换、pin 几何和并发 editor 尚未闭合。
+同日继续完成 post-save recovery 与 `replace_master + CDF` 本地 Gate。worker 现在可对单实例 symbol master 做旧 master CAS；写前要求新旧端子名称、数量、方向和 pin figure bBox 完全兼容，并要求新 master 含全部声明的新 CDF 字段。`master_parameter_migrations` 将旧/新可写 CDF 字符串及 `record_only` 未声明字段策略绑定进 contract/token，forward/inverse 自动交换。保存后的 callback 或审计失败只有在新鲜回读精确等于预期输出 topology 时才自动 inverse，并要求 topology 与完整实例参数表都恢复；状态未知或有额外漂移则不写。故障注入和 demo round-trip 已通过，但真实 OA master swap、自动恢复、`si` 网表与 Spectre 尚未执行，当前只称 **exact-state topology recovery and controlled master/CDF migration locally verified**。
+
+同日又在新 `vda_diffpair_active_deg_generic_001` 上把同一 contract 组合到 Gate 6 PMOS 电流镜负载：before/after SHA 为 `d3fe4b73...31b93`/`68c9d2e2...559a`，`RS0=RS1=500 ohm` 经过 OA 回读并进入七实例 `si` 网表；DC 的 PMOS/RS/尾管 KCL 全部 matched，随后差模 AC/CMRR、noise、transient/THD、十点 ICMR 和 nominal PSRR 均复用既有 worker。真实结果为增益 `3.5523 V/V`、BW `2.0576 GHz`、GBW `7.3093 GHz`、低频 CMRR `34.446 dB`、输入参考积分噪声 `817.84 uV RMS`；`50 mV_peak` 时 THD `1.411%` 且 P1dB 未包围，PSRR+/- 只有约 `11.06/13.08 dB`。inverse 后独立 readback 精确恢复 before SHA，恢复态 DC 再次成功。状态升级为 **active-load plus symmetric source-degeneration generic-delta and full nominal analysis migration live verified**。参数值继续走独立 CDF/semantic 契约；通用 wire/shape snapshot、pin 几何和并发 editor 尚未闭合，post-save recovery 与 master/CDF 替换虽已本地实现但仍待 live Gate。
 
 ## L5B：单模块设计代理（产品目标）
 
@@ -164,7 +166,7 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> theory-seeded 差分对有限优化与 Spectre 复核（Gate 8 已 live；候选生成通过、逐点预测精度 partial，PVT 可选未跑）
   -> 通用原子 candidate_set + real-EDA OP 局部重线性化（共源首轮、新 anchor W/RD 和差分对 Wn/Wp/Wtail 六点均已 live、写回并完成 exact 审计；共源 RS 需独立探针）
   -> 差分对 PSRR+/PSRR- 三次同网表 AC（nominal、bias/load 只读与三种 L 的 OA 八点搜索已 live；临时 20 dB 门仍未闭合）
-  -> 通用 topology-delta 契约（本地 allowlist/CAS/完整指纹与新 cellview forward→si/Spectre→inverse 已过；master/pin 与通用 rollback 待 Gate）
+  -> 通用 topology-delta 契约（add/remove/reconnect 的新 cellview forward→si/Spectre→inverse 已过；exact-state post-save recovery 与 master/CDF 迁移本地已过、live 待验证；pin/shape 待 Gate）
   -> active-load + 对称源极退化组合拓扑（新 cellview forward/readback/七实例 si/DC/AC/CMRR/noise/transient/ICMR/PSRR/inverse/恢复态 DC 均已 live；质量闭环未过）
   -> L5B 单模块闭环
   -> layout/DRC/LVS/PEX Gate

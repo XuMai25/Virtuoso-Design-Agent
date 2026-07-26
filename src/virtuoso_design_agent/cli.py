@@ -288,7 +288,19 @@ def _cmd_topology_compile(args: argparse.Namespace) -> int:
     )
     if not isinstance(operations, list):
         raise ValueError("topology operations JSON must be a list or an operations list")
-    contract = compile_topology_delta(args.id, readback, operations)
+    migrations = (
+        raw_operations.get("master_parameter_migrations", [])
+        if isinstance(raw_operations, dict)
+        else []
+    )
+    if not isinstance(migrations, list):
+        raise ValueError("master_parameter_migrations must be a list")
+    contract = compile_topology_delta(
+        args.id,
+        readback,
+        operations,
+        master_parameter_migrations=migrations,
+    )
     payload = contract.model_dump_json(indent=2)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(payload + "\n", encoding="utf-8")

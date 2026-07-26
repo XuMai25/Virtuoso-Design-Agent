@@ -34,7 +34,7 @@ VDA 不嵌入一个新的通用 LLM。Codex 负责开放式推理，VDA 负责�
 
 ## PDK 选择边界
 
-VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PDK_PROFILE=nics4304_tsmc28`，其当前工艺身份是 TSMC N28/`tsmcN28`。未来 TSMC、SMIC 等工艺各用独立 profile 绑定器件库、model、默认电压和远端路径，并单独通过 smoke；profile 之间不共享性能结论。TSV、hybrid-bonding 等封装/3D PDK 不参与默认选择或 fallback，必须由任务显式指定并使用专门 Gate。见[决策 0002](decisions/0002-foundry-cmos-pdk-default.md)。
+VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PDK_PROFILE=nics4304_tsmc28`，其当前工艺身份是 TSMC N28/`tsmcN28`，默认器件为 `nch_lvt_mac/pch_lvt_mac`。profile loader 支持显式单继承，避免同一工艺的 device-flavor profile 复制 model/corner/远端路径；`nics4304_tsmc28_svt` 只覆盖为只读探针确认存在且 symbol pin 兼容的 `nch_mac/pch_mac`。继承不继承性能证据，SVT 的 OA/`si`/Spectre 仍需独立 smoke。未来 TSMC、SMIC 等工艺各用独立 profile 绑定器件库、model、默认电压和远端路径，并单独通过 smoke；profile 之间不共享性能结论。TSV、hybrid-bonding 等封装/3D PDK 不参与默认选择或 fallback，必须由任务显式指定并使用专门 Gate。见[决策 0002](decisions/0002-foundry-cmos-pdk-default.md)。
 
 ## 任务与局部能力
 
@@ -65,15 +65,19 @@ VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PD
 
 `schematic.transform` 不等同于重建模板。共源 transform 的 `add_source_degeneration` 把 `MN0.S: VSS -> NSRC` 并新增 `RS0(NSRC,VSS)`；remove 只删除 VDA 创建的 RS0 两条端子 stub/标签并恢复 VSS。差分对先由 `add_tail_device` 在精确 nominal core 上增加 `MNTAIL(TAIL,BIAS,VSS,VSS)` 与 `BIAS` pin；只有该真实尾管变体可以继续执行对称 `add_source_degeneration`：`MN0.S/MN1.S: TAIL -> NSP/NSN`，并新增等值 `RS0(NSP,TAIL)`、`RS1(NSN,TAIL)`。差分对 source-degeneration remove 不接受参数，只删除这四条 VDA 自有 wire/label stub 与两只电阻并恢复两管源极到 TAIL。另一条互斥路径 `replace_resistive_load_with_current_mirror` 只接受未退化的真实尾管拓扑，删除 RD0/RD1 自有 stub 后加入固定 MP0/MP1 电流镜；`restore_resistive_load` 删除 MP0/MP1 自有 stub 并按显式 `load_resistance_ohm` 恢复两只电阻。非对称器件、缺失任一支路、混合 R/PM 负载或额外连接都会拒绝。
 
-两种 remove 都可带 `expected_restored_placement_sha256`，把 add 前 Bridge placement 回读中的实例、pin、标签和导线完整绑定进 plan token，并在保存后强制相等。反相器 testbench transform 则要求现有 cell 是 MN0/MP0 core 或已经完成同一变更；它保留 MOS/pins，只把地归一到 `gnd!` 并增加固定的 `VDD0/VIN0/CL0/GND0`。所有已有对象编辑都强制 Bridge editor append mode；preflight 拒绝未保存改动，编辑 batch 失败时只 purge 未保存缓存且不保存。前后回读必须证明未点名器件的完整参数、master、位置和顶层 pins 保持，重复调用幂等。若保存已成功而后置审计失败，会保留失败和真实 OA 状态，尚没有通用 snapshot 回滚。
+两种 remove 都可带 `expected_restored_placement_sha256`，把 add 前 Bridge placement 回读中的实例、pin、标签和导线完整绑定进 plan token，并在保存后强制相等。反相器 testbench transform 则要求现有 cell 是 MN0/MP0 core 或已经完成同一变更；它保留 MOS/pins，只把地归一到 `gnd!` 并增加固定的 `VDD0/VIN0/CL0/GND0`。所有已有对象编辑都强制 Bridge editor append mode；preflight 拒绝未保存改动，编辑 batch 失败时只 purge 未保存缓存且不保存。前后回读必须证明未点名器件的完整参数、master、位置和顶层 pins 保持，重复调用幂等。旧的专用 transform 在保存后审计失败时仍保留失败和真实 OA 状态；下述预声明通用 topology-delta 才具备受限的 exact-state inverse 恢复，不能把它外推成所有写入的远端事务。
 
 2026-07-26 增加了 Bridge 之上的通用 topology-delta 契约，但没有把任意 SKILL 或字符串脚本开放成图重写接口。契约可序列化八类结构操作：添加/删除实例、重连已有端子、替换实例 master、添加/删除 net、添加/删除 pin。每个删除、重连和 master 替换都携带 exact 旧状态 CAS；添加要求名称不存在且所有引用 net 已存在；删除 net 要求已无 instance terminal 或 pin 引用。实例移动、reshape、端子集合变化和同名 net 属性突变不在首版 allowlist 中。
 
 Bridge/demo 的完整 `instances/nets/pins` 回读先被规范化并排序，再计算确定性 SHA-256。`parameters/params` 与顶层 parameter 表不进入结构指纹，因为 CDF 参数仍由既有写入、callback 和双重回读契约负责；master、端子连接、view、位置及其余结构属性进入指纹。`vda topology-compile` 从一次成功的 `schematic.inspect` 与显式 operation 列表生成前向/逆向契约。对 run record，编译器只接受 `existing_schematic` inspect 返回的 canonical `details.topology`；电路专用 semantic summary 即使也含 `instances/nets/pins` 也会拒绝，确保 compile 与真实 topology writer 使用同一结构真源。编译器先在本地应用前向 operations，生成逆序 inverse operations，并证明 inverse 精确恢复 before fingerprint。验证器再把实际 after 完整结构与预期结构比较；缺实例、额外 pin、旧状态漂移、悬空 net 或未声明 placement 变化都会失败。现有每个专用 `schematic.transform` 在原有模板语义断言通过后，会追加 `schematic.transform.topology-delta.audit`；真实前后 inspect 仍是 `bridge_readback`，契约推导、哈希和逆向证明明确是 `software_inference`。
 
-`existing_schematic + schematic.transform` 现在可以执行契约的 `forward` 或 `inverse` 方向。worker 只把其中已验证的 `add/remove_instance`、`reconnect_terminal` 和 `add/remove_net` 编译到 Bridge 现有 append editor/reader；新实例必须有有限 placement，master library 只能来自原结构、profile tech library 或 `analogLib`，保留实例的参数表必须逐项不变。net 仍由端子 label/stub 在 OA 中物化，最终以完整独立 readback 指纹而不是 editor return code 判定。`replace_master` 与 `add/remove_pin` 仍只可序列化和本地验证，真实 worker 会明确拒绝，等待独立 CDF/pin-geometry Gate。
+`existing_schematic + schematic.transform` 现在可以执行契约的 `forward` 或 `inverse` 方向。worker 把 `add/remove_instance`、`reconnect_terminal`、`add/remove_net` 和 instance-scoped `replace_master` 编译到 Bridge 现有 append editor/reader；新实例必须有有限 placement，master library 只能来自原结构、profile tech library 或 `analogLib`，未替换实例的参数表必须逐项不变。net 仍由端子 label/stub 在 OA 中物化，最终以完整独立 readback 指纹而不是 editor return code 判定。`replace_master` 当前只接受 `symbol` view，并在写前验证目标 master 存在、端子名称/数量/方向完全一致，而且每个端子在新旧 symbol 上都恰有一个 pin/figure 且 bBox 相等；写命令再次对实例名和旧 master 做 CAS，再只修改该实例的 `master`。这里使用 Bridge 的通用 SKILL channel 和 append editor，没有给第三方 Bridge 打补丁。
 
-首个 live Gate 在全新 `vda_generic_topology_delta_001` 上把普通共源级增量变成 `MN0.S→NSRC + RS0(NSRC,VSS)`，随后自动 `si`/Spectre DC，再执行 inverse；最终独立 topology SHA-256 与变换前完全相同，恢复后的普通共源 DC 也重新执行成功。这证明已开放子集的真实增量写入、同源网表和可逆恢复，不等于任意图编辑事务：wire/label/shape 没有进入通用 snapshot，保存成功但 post-readback 失败时仍没有自动逆向写回，未知 master/CDF callback、pin 几何和并发 editor 也未验证。
+每个真实 `replace_master` 还必须在同一 topology contract 中提供一条 `master_parameter_migrations`：旧值和新值都用实际 CDF 字符串逐项声明，写前对旧值做定向 readback CAS，换 master 后复用 Bridge 公共 `set_instance_params(..., param_filters=None)` 触发 callback/save，再独立逐项读取新值。forward/inverse 自动交换两组值。结构 SHA 有意仍不包含参数，但完整 task/token 包含迁移对象；`undeclared_parameter_policy` 必须显式为 `record_only`，表示未列出的 CDF 字段只保存完整前后 Bridge readback，不声称保持、可写或已迁移。该协议支持参数名映射不同的 master，但不会把少量声明包装成全 CDF 兼容。
+
+通用 worker 在 editor batch 抛错时仍只 purge 未保存 edit。若 editor 已正常退出而参数 callback、完整结构审计或保留参数审计随后失败，它会再做一次独立 readback：只有当前 topology SHA 精确等于本次契约预期输出，才执行相反方向的预声明 operations、恢复已声明的旧 CDF 值，并要求最终 topology SHA 与全部实例参数表都等于初始 readback。请求本身仍返回失败，恢复证据写入错误记录；新鲜 readback 失败或出现任何额外/缺失结构时状态分别记为 `state_unknown_no_write` 或 `unexpected_topology_no_write`，不做第二次 OA 写入。这个恢复边界已通过本地故障注入，尚未 live 验证。
+
+首个 live Gate 在全新 `vda_generic_topology_delta_001` 上把普通共源级增量变成 `MN0.S→NSRC + RS0(NSRC,VSS)`，随后自动 `si`/Spectre DC，再执行 inverse；最终独立 topology SHA-256 与变换前完全相同，恢复后的普通共源 DC 也重新执行成功。这证明已开放子集的真实增量写入、同源网表和显式 inverse，不等于任意图编辑事务。后续本地 Gate 已补上上述 exact-state post-save recovery 与 master/CDF compiler，但两者尚未在真实 OA 触发；wire/label/shape 没有进入通用 snapshot，pin 写入、不同 symbol 几何迁移和并发 editor 仍未验证。
 
 ## 两层参数契约
 

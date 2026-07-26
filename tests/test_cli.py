@@ -108,6 +108,88 @@ def test_topology_compile_uses_successful_inspection_and_writes_inverse(
     assert "add-nsrc" in capsys.readouterr().out
 
 
+def test_topology_compile_binds_explicit_master_parameter_migration(
+    tmp_path,
+) -> None:
+    readback = tmp_path / "inspect.json"
+    operations = tmp_path / "operations.json"
+    output = tmp_path / "contract.json"
+    topology = {
+        "instances": [
+            {
+                "name": "MN0",
+                "library": "tsmcN28",
+                "cell": "nch_lvt_mac",
+                "view": "symbol",
+                "terminals": {"D": "OUT", "G": "IN", "S": "VSS", "B": "VSS"},
+                "xy": [0.0, 0.0],
+                "orient": "R0",
+                "numInst": 1,
+            }
+        ],
+        "nets": ["IN", "OUT", "VSS"],
+        "pins": ["IN", "OUT", "VSS"],
+    }
+    readback.write_text(json.dumps(topology), encoding="utf-8")
+    operations.write_text(
+        json.dumps(
+            {
+                "operations": [
+                    {
+                        "operation": "replace_master",
+                        "instance": "MN0",
+                        "expected_master": {
+                            "library": "tsmcN28",
+                            "cell": "nch_lvt_mac",
+                            "view": "symbol",
+                        },
+                        "master": {
+                            "library": "tsmcN28",
+                            "cell": "nch_rvt_mac",
+                            "view": "symbol",
+                        },
+                    }
+                ],
+                "master_parameter_migrations": [
+                    {
+                        "instance": "MN0",
+                        "expected_parameters": {"Wfg": "1u", "l": "30n"},
+                        "parameters": {"Wfg": "1u", "l": "30n"},
+                        "undeclared_parameter_policy": "record_only",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "topology-compile",
+                str(readback),
+                str(operations),
+                "--id",
+                "swap-mn0-master",
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    contract = json.loads(output.read_text(encoding="utf-8"))
+    assert contract["operations"][0]["operation"] == "replace_master"
+    assert contract["inverse_operations"][0]["master"]["cell"] == "nch_lvt_mac"
+    assert contract["master_parameter_migrations"] == [
+        {
+            "instance": "MN0",
+            "expected_parameters": {"Wfg": "1u", "l": "30n"},
+            "parameters": {"Wfg": "1u", "l": "30n"},
+            "undeclared_parameter_policy": "record_only",
+        }
+    ]
+
+
 def test_topology_compile_rejects_circuit_specific_inspection_summary(
     tmp_path,
     capsys,

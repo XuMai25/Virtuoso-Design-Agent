@@ -8,6 +8,7 @@ from virtuoso_design_agent.topology_delta import (
     AddInstanceOperation,
     AddNetOperation,
     AddPinOperation,
+    MasterParameterMigration,
     ReconnectTerminalOperation,
     RemoveInstanceOperation,
     RemoveNetOperation,
@@ -197,6 +198,62 @@ def test_allowlisted_operations_apply_and_restore_exact_structure() -> None:
     assert next(item for item in after.instances if item.name == "M0").master == (
         new_master
     )
+
+
+def test_master_parameter_migration_is_token_bound_but_not_structural() -> None:
+    before = snapshot_from_inspection(_common_source_before())
+    old_master = next(
+        item.master for item in before.instances if item.name == "MN0"
+    )
+    new_master = TopologyMaster(
+        library="tsmcN28", cell="nch_rvt_mac", view="symbol"
+    )
+    migration = MasterParameterMigration(
+        instance="MN0",
+        expected_parameters={"Wfg": "1u", "l": "30n"},
+        parameters={"Wfg": "1u", "l": "30n"},
+        undeclared_parameter_policy="record_only",
+    )
+
+    contract = compile_topology_delta(
+        "master-with-cdf-migration",
+        before,
+        [
+            ReplaceMasterOperation(
+                instance="MN0",
+                expected_master=old_master,
+                master=new_master,
+            )
+        ],
+        master_parameter_migrations=[migration],
+    )
+
+    assert contract.master_parameter_migrations == [migration]
+    assert TopologyDeltaContract.model_validate_json(
+        contract.model_dump_json()
+    ) == contract
+    assert contract.expected_before_sha256 == topology_fingerprint(before)
+    assert apply_topology_delta(before, contract).instances[0].master == new_master
+
+
+def test_master_parameter_migration_requires_exactly_one_forward_replacement() -> None:
+    with pytest.raises(
+        ValueError,
+        match="requires exactly one forward replace_master operation",
+    ):
+        TopologyDeltaContract(
+            id="orphan-cdf-migration",
+            expected_before_sha256="a" * 64,
+            expected_after_sha256="b" * 64,
+            master_parameter_migrations=[
+                {
+                    "instance": "MN0",
+                    "expected_parameters": {"Wfg": "1u"},
+                    "parameters": {"Wfg": "2u"},
+                    "undeclared_parameter_policy": "record_only",
+                }
+            ],
+        )
 
 
 def test_contract_rejects_stale_before_fingerprint() -> None:

@@ -977,7 +977,76 @@ def test_generic_topology_plan_discloses_direction_hashes_and_append_scope() -> 
     assert "add-rs0" in transform.description
     assert "a" * 64 in transform.description
     assert "b" * 64 in transform.description
+    assert "不改设备参数" in transform.description
     assert "不创建或替换" in transform.description
+
+
+def test_generic_master_plan_discloses_cdf_cas_and_readback() -> None:
+    task = TaskSpec.model_validate(
+        {
+            "id": "generic-master-forward",
+            "operation": "schematic.transform",
+            "circuit": "existing_schematic",
+            "target": {"library": "vda_test", "cell": "vda_generic"},
+            "topology_delta": {
+                "direction": "forward",
+                "contract": {
+                    "id": "swap-mn0-master",
+                    "expected_before_sha256": "a" * 64,
+                    "expected_after_sha256": "b" * 64,
+                    "operations": [
+                        {
+                            "operation": "replace_master",
+                            "instance": "MN0",
+                            "expected_master": {
+                                "library": "tsmcN28",
+                                "cell": "nch_lvt_mac",
+                                "view": "symbol",
+                            },
+                            "master": {
+                                "library": "tsmcN28",
+                                "cell": "nch_rvt_mac",
+                                "view": "symbol",
+                            },
+                        }
+                    ],
+                    "inverse_operations": [
+                        {
+                            "operation": "replace_master",
+                            "instance": "MN0",
+                            "expected_master": {
+                                "library": "tsmcN28",
+                                "cell": "nch_rvt_mac",
+                                "view": "symbol",
+                            },
+                            "master": {
+                                "library": "tsmcN28",
+                                "cell": "nch_lvt_mac",
+                                "view": "symbol",
+                            },
+                        }
+                    ],
+                    "master_parameter_migrations": [
+                        {
+                            "instance": "MN0",
+                            "expected_parameters": {"Wfg": "1u", "l": "30n"},
+                            "parameters": {"Wfg": "1u", "l": "30n"},
+                            "undeclared_parameter_policy": "record_only",
+                        }
+                    ],
+                },
+            },
+        }
+    )
+
+    transform = next(
+        step
+        for step in build_plan(task).steps
+        if step.capability == "schematic.transform.topology-delta.forward"
+    )
+    assert "旧 CDF 值 CAS" in transform.description
+    assert "callback 写入" in transform.description
+    assert "独立回读" in transform.description
 
 
 def test_source_degeneration_removal_plan_discloses_exact_inverse_delta() -> None:

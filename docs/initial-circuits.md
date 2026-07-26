@@ -40,7 +40,7 @@
 
 跨拓扑的基础有两条。`existing_schematic` 可以不依赖固定模板读取已有 schematic，并用 `instance_parameter_updates` 人工指定实例原始 CDF 参数和值字符串；固定模板还可把它与 W/L/R semantic parameters 组合。写入必须经过 callback、立即定向 OA 回读和独立再次回读。已有真实仿真 adapter 的固定模板可进一步用 `instance_parameter_space` 显式选择少量实际 CDF 字段参与有限调优，但不会自动枚举或猜别名。ADE 路径保留 prepare/capture/corner/variable/setup/run 的正交能力和明确真源；当前 ADE live 证据仍不证明真实 process/temperature corner、history 名唯一或 multi-test 通用映射。direct `si`/Spectre 已证明三条件 PVT，但不会把该状态静默包装成 Maestro setup。通用 OA smoke 已枚举 MN0 的 233 个 CDF 字段；专用新 cell 上又真实闭合 `MN0.fingers=2` 和 `RD0.r=22K` 的双重回读。`MN0.m=2` 被当前 PDK callback 恢复为 `1`，因此保留为字段不可持久化边界。这些能力只证明“按名字修改并以 OA 值确认”“对显式有限字段执行有证据搜索”或“准备、修改声明 setup 范围、运行当前 ADE 状态”，不证明 VDA 理解任意参数的物理作用。
 
-Gate 2 已分别覆盖 bias/load、W/RD/RS 和 L/VDD 网格，能对固定 OA 设计执行有限 PVT 验证，也能在任务显式要求时让每个 testbench 候选跨相同 PVT 集合评估；该能力不默认启用，也没有把全部维度塞入一个爆炸式联合搜索。OA 设计变量跨 PVT 的写回路径已有本地测试，尚未 live。实现不要求为源极退化新建模板或复制执行器：`schematic.transform` 在同一 common-source cellview 上应用固定 add/remove delta，`source_resistance_ohm` 随后直接进入原有 `parameters.apply`/`design.tune`。remove 可绑定 add 前 placement 哈希，但保存成功后的任意后置失败仍没有通用 OA snapshot 回滚；任何拓扑都必须先满足偏置和工作区，再比较增益/带宽。
+Gate 2 已分别覆盖 bias/load、W/RD/RS 和 L/VDD 网格，能对固定 OA 设计执行有限 PVT 验证，也能在任务显式要求时让每个 testbench 候选跨相同 PVT 集合评估；该能力不默认启用，也没有把全部维度塞入一个爆炸式联合搜索。OA 设计变量跨 PVT 的写回路径已有本地测试，尚未 live。实现不要求为源极退化新建模板或复制执行器：`schematic.transform` 在同一 common-source cellview 上应用固定 add/remove delta，`source_resistance_ohm` 随后直接进入原有 `parameters.apply`/`design.tune`。remove 可绑定 add 前 placement 哈希；该专用旧路径保存后的任意后置失败仍没有 snapshot 回滚，不能借用后续通用 topology-delta 的本地恢复能力来宣称已闭合。任何拓扑都必须先满足偏置和工作区，再比较增益/带宽。
 
 ## Gate 3：差分对
 
@@ -259,6 +259,19 @@ transient/P1dB 和 ICMR，不能把 Gate 8 旧宽度的 follow-up 结果直接�
 [`2026-07-26-common-source-op-refresh-2d-live.md`](validation/2026-07-26-common-source-op-refresh-2d-live.md)，
 差分对 live 结果见
 [`2026-07-26-differential-pair-op-relinearization-live.md`](validation/2026-07-26-differential-pair-op-relinearization-live.md)。
+
+## 跨电路 Gate：通用微调事务
+
+状态：instance/net/reconnect 子集已在共源和“电流镜负载 + 对称源退化”两个新 cellview 完成真实 OA/`si`/Spectre forward 与 exact inverse；2026-07-26 又在本地补齐 **exact-state post-save recovery and controlled symbol-master/CDF migration**。
+
+- 保存后审计失败不会盲目 inverse。只有独立回读证明当前 topology 正好是该次契约的预期输出，才执行相反方向；状态未知或存在额外结构漂移时不写。
+- `replace_master` 只作用于一个具名实例并对旧 master 做 CAS。新旧 symbol 必须有完全相同的端子集合、方向和 pin bBox；目标 master/CDF 字段也要在写前只读验证。
+- 每个替换必须声明旧/新 CDF 字符串子集。未声明字段的策略固定为 `record_only`，因此完整前后参数表属于 `bridge_readback` 证据，但不声称全部字段可迁移。
+- 正向/反向与故障恢复都复用同一契约。请求失败但恢复成功时仍记失败，不把“已恢复”包装成变换成功。
+- Bridge 仓库没有修改。当前 master/CDF 与自动恢复只有本地故障注入证据；下一步必须在新 `vda_` cellview 真实验证 OA 回读、`si` master/model/W/L 和 Spectre，再验证 inverse 恢复。pin 创建/删除及通用 wire/shape snapshot 仍在后面。
+
+详见
+[`2026-07-26-topology-recovery-master-migration-local.md`](validation/2026-07-26-topology-recovery-master-migration-local.md)。
 
 ## 升级原则
 

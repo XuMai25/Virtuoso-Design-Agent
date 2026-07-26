@@ -36,6 +36,19 @@ def test_default_pdk_is_the_verified_tsmc_n28_foundry_profile() -> None:
     assert profile.default_inverter_pmos_to_nmos_width_ratio == pytest.approx(1.2)
 
 
+def test_tsmc_n28_standard_vt_profile_inherits_process_and_changes_masters() -> None:
+    base = load_pdk_profile("nics4304_tsmc28")
+    standard_vt = load_pdk_profile("nics4304_tsmc28_svt")
+
+    assert standard_vt.name == "nics4304_tsmc28_svt"
+    assert standard_vt.nmos_cell == "nch_mac"
+    assert standard_vt.pmos_cell == "pch_mac"
+    assert standard_vt.tech_library == base.tech_library
+    assert standard_vt.model_include == base.model_include
+    assert standard_vt.process_corners == base.process_corners
+    assert standard_vt.remote_run_root == base.remote_run_root
+
+
 def test_common_source_simulation_accepts_explicit_finite_pvt_conditions() -> None:
     task = TaskSpec.model_validate(
         {

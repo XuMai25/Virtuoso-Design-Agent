@@ -53,6 +53,7 @@ from virtuoso_design_agent.topology_delta import (
     AddInstanceOperation,
     AddNetOperation,
     AddPinOperation,
+    MasterParameterMigration,
     ReconnectTerminalOperation,
     RemoveInstanceOperation,
     RemoveNetOperation,
@@ -60,6 +61,7 @@ from virtuoso_design_agent.topology_delta import (
     ReplaceMasterOperation,
     TopologyDeltaExecutionSpec,
     TopologyInstance,
+    TopologySnapshot,
     apply_topology_delta_execution,
     snapshot_from_inspection,
     topology_fingerprint,
@@ -5998,6 +6000,45 @@ def _generic_delete_instance_operation(instance: TopologyInstance) -> str:
     return " ".join(operations)
 
 
+def _generic_replace_master_operation(operation: ReplaceMasterOperation) -> str:
+    """Build an instance-scoped master CAS without changing Bridge itself."""
+
+    expected_view = operation.expected_master.view or "symbol"
+    replacement_view = operation.master.view or "symbol"
+    if expected_view != "symbol" or replacement_view != "symbol":
+        raise RuntimeError(
+            "generic OA master replacement currently requires symbol views"
+        )
+    name = _skill_string(operation.instance)
+    old_library = _skill_string(operation.expected_master.library)
+    old_cell = _skill_string(operation.expected_master.cell)
+    new_library = _skill_string(operation.master.library)
+    new_cell = _skill_string(operation.master.cell)
+    return " ".join(
+        [
+            "let((rbInsts rbInst rbMaster)",
+            f'rbInsts = setof(x cv~>instances x~>name == "{name}")',
+            f'unless(length(rbInsts) == 1 error("{name} instance selection was not unique during master replacement"))',
+            "rbInst = car(rbInsts)",
+            "unless("
+            f'rbInst~>libName == "{old_library}" && '
+            f'rbInst~>cellName == "{old_cell}" && '
+            'rbInst~>viewName == "symbol" '
+            f'error("{name} master changed before replacement"))',
+            "rbMaster = dbOpenCellViewByType("
+            f'"{new_library}" "{new_cell}" "symbol" "schematicSymbol" "r")',
+            f'unless(rbMaster error("replacement master unavailable for {name}"))',
+            "rbInst~>master = rbMaster",
+            "unless("
+            f'rbInst~>libName == "{new_library}" && '
+            f'rbInst~>cellName == "{new_cell}" && '
+            'rbInst~>viewName == "symbol" '
+            f'error("{name} master replacement did not apply"))',
+            "t)",
+        ]
+    )
+
+
 def _compile_generic_topology_commands(
     operations: list[Any],
     *,
@@ -6006,7 +6047,12 @@ def _compile_generic_topology_commands(
 ) -> tuple[list[str], list[str]]:
     """Compile bounded graph operations to the existing Bridge editor surface."""
 
-    if instance_builder is None or terminal_label_builder is None:
+    needs_instance_builders = any(
+        isinstance(operation, AddInstanceOperation) for operation in operations
+    )
+    if needs_instance_builders and (
+        instance_builder is None or terminal_label_builder is None
+    ):
         from virtuoso_bridge.virtuoso.schematic.ops import (
             schematic_create_inst_by_master_name,
             schematic_label_instance_term,
@@ -6037,6 +6083,8 @@ def _compile_generic_topology_commands(
                 )
             )
         elif isinstance(operation, AddInstanceOperation):
+            assert instance_builder is not None
+            assert terminal_label_builder is not None
             instance = operation.instance
             x, y, orient = _generic_instance_placement(instance)
             commands.append(
@@ -6057,14 +6105,13 @@ def _compile_generic_topology_commands(
         elif isinstance(operation, RemoveInstanceOperation):
             _generic_instance_placement(operation.expected)
             commands.append(_generic_delete_instance_operation(operation.expected))
-        elif isinstance(
-            operation,
-            (ReplaceMasterOperation, AddPinOperation, RemovePinOperation),
-        ):
+        elif isinstance(operation, ReplaceMasterOperation):
+            commands.append(_generic_replace_master_operation(operation))
+        elif isinstance(operation, (AddPinOperation, RemovePinOperation)):
             raise RuntimeError(
                 f"generic OA compiler does not yet execute {operation.operation}; "
                 "the serializable/local reversible contract supports it, but a "
-                "dedicated OA/CDF or pin-geometry Gate is still required"
+                "dedicated pin-geometry Gate is still required"
             )
         else:  # pragma: no cover - exhaustive typed operation union
             raise AssertionError(f"unsupported generic topology operation: {operation}")
@@ -6095,6 +6142,242 @@ def _generic_topology_allowed_master_libraries(
             "existing/profile boundary: " + ", ".join(disallowed)
         )
     return sorted(allowed)
+
+
+def _directed_master_parameter_migrations(
+    execution: TopologyDeltaExecutionSpec,
+) -> list[MasterParameterMigration]:
+    operations = (
+        execution.contract.operations
+        if execution.direction == "forward"
+        else execution.contract.inverse_operations
+    )
+    replacement_instances = [
+        operation.instance
+        for operation in operations
+        if isinstance(operation, ReplaceMasterOperation)
+    ]
+    if len(replacement_instances) != len(set(replacement_instances)):
+        raise RuntimeError(
+            "generic OA execution supports at most one master replacement per instance"
+        )
+    migrations = execution.contract.master_parameter_migrations
+    migration_instances = {migration.instance for migration in migrations}
+    if set(replacement_instances) != migration_instances:
+        missing = sorted(set(replacement_instances) - migration_instances)
+        extra = sorted(migration_instances - set(replacement_instances))
+        raise RuntimeError(
+            "generic OA master replacement requires one explicit CDF parameter "
+            f"migration per replaced instance: missing={missing}, extra={extra}"
+        )
+    if execution.direction == "forward":
+        return list(migrations)
+    return [
+        MasterParameterMigration(
+            instance=migration.instance,
+            expected_parameters=migration.parameters,
+            parameters=migration.expected_parameters,
+            undeclared_parameter_policy=migration.undeclared_parameter_policy,
+        )
+        for migration in migrations
+    ]
+
+
+def _preflight_generic_master_replacements(
+    client,
+    library: str,
+    cell: str,
+    before_snapshot: TopologySnapshot,
+    operations: list[Any],
+    migrations: list[MasterParameterMigration],
+) -> None:
+    replacements = [
+        operation
+        for operation in operations
+        if isinstance(operation, ReplaceMasterOperation)
+    ]
+    if not replacements:
+        return
+    by_instance = {item.name: item for item in before_snapshot.instances}
+    migration_by_instance = {item.instance: item for item in migrations}
+    checks: list[str] = []
+    for operation in replacements:
+        expected_view = operation.expected_master.view or "symbol"
+        replacement_view = operation.master.view or "symbol"
+        if expected_view != "symbol" or replacement_view != "symbol":
+            raise RuntimeError(
+                "generic OA master replacement currently requires symbol views"
+            )
+        instance = by_instance.get(operation.instance)
+        if instance is None:
+            raise RuntimeError(
+                f"master replacement instance missing from input: {operation.instance}"
+            )
+        migration = migration_by_instance[operation.instance]
+        name = _skill_string(operation.instance)
+        old_library = _skill_string(operation.expected_master.library)
+        old_cell = _skill_string(operation.expected_master.cell)
+        new_library = _skill_string(operation.master.library)
+        new_cell = _skill_string(operation.master.cell)
+        checks.extend(
+            [
+                f'rbInsts = setof(x rbCv~>instances x~>name == "{name}")',
+                f'unless(length(rbInsts) == 1 error("{name} instance selection was not unique during master preflight"))',
+                "rbInst = car(rbInsts)",
+                "unless("
+                f'rbInst~>libName == "{old_library}" && '
+                f'rbInst~>cellName == "{old_cell}" && '
+                'rbInst~>viewName == "symbol" '
+                f'error("{name} master changed before preflight"))',
+                "rbMaster = dbOpenCellViewByType("
+                f'"{new_library}" "{new_cell}" "symbol" "schematicSymbol" "r")',
+                f'unless(rbMaster error("replacement master unavailable for {name}"))',
+                "unless(length(rbMaster~>terminals) == "
+                f'{len(instance.terminals)} error("replacement terminal count mismatch for {name}"))',
+            ]
+        )
+        for terminal in sorted(instance.terminals):
+            escaped_terminal = _skill_string(terminal)
+            checks.extend(
+                [
+                    "rbOldTerm = car(setof(x rbInst~>master~>terminals "
+                    f'x~>name == "{escaped_terminal}"))',
+                    "rbNewTerm = car(setof(x rbMaster~>terminals "
+                    f'x~>name == "{escaped_terminal}"))',
+                    f'unless(rbOldTerm && rbNewTerm error("replacement terminal missing for {name}.{escaped_terminal}"))',
+                    "unless(length(rbOldTerm~>pins) == 1 && "
+                    "length(rbNewTerm~>pins) == 1 "
+                    f'error("replacement pin count mismatch for {name}.{escaped_terminal}"))',
+                    "rbOldPin = car(rbOldTerm~>pins)",
+                    "rbNewPin = car(rbNewTerm~>pins)",
+                    f'unless(rbOldPin && rbNewPin error("replacement pin figure missing for {name}.{escaped_terminal}"))',
+                    "unless(length(rbOldPin~>figs) == 1 && "
+                    "length(rbNewPin~>figs) == 1 "
+                    f'error("replacement terminal figure count mismatch for {name}.{escaped_terminal}"))',
+                    "rbOldFig = car(rbOldPin~>figs)",
+                    "rbNewFig = car(rbNewPin~>figs)",
+                    f'unless(rbOldFig && rbNewFig error("replacement terminal figure missing for {name}.{escaped_terminal}"))',
+                    "unless(equal(rbOldFig~>bBox rbNewFig~>bBox) "
+                    f'error("replacement terminal geometry mismatch for {name}.{escaped_terminal}"))',
+                    "unless(rbOldTerm~>direction == rbNewTerm~>direction "
+                    f'error("replacement terminal direction mismatch for {name}.{escaped_terminal}"))',
+                ]
+            )
+        checks.extend(
+            [
+                "rbCellCDF = cdfGetCellCDF("
+                f'ddGetObj("{new_library}" "{new_cell}"))',
+                f'unless(rbCellCDF error("replacement cell CDF unavailable for {name}"))',
+            ]
+        )
+        checks.extend(
+            f'unless(get(rbCellCDF "{_skill_string(parameter)}") '
+            f'error("replacement CDF parameter missing for {name}.{_skill_string(parameter)}"))'
+            for parameter in migration.parameters
+        )
+    skill = " ".join(
+        [
+            "let((rbCv rbInsts rbInst rbMaster rbCellCDF rbOldTerm rbNewTerm "
+            "rbOldPin rbNewPin rbOldFig rbNewFig)",
+            "rbCv = dbOpenCellViewByType("
+            f'"{_skill_string(library)}" "{_skill_string(cell)}" '
+            '"schematic" "schematic" "r")',
+            'unless(rbCv error("target schematic missing during master preflight"))',
+            'when(rbCv~>modified error("target schematic has unsaved changes"))',
+            *checks,
+            "t)",
+        ]
+    )
+    result = client.execute_skill(skill, timeout=60)
+    errors = getattr(result, "errors", None) or []
+    if errors:
+        raise RuntimeError(f"generic master replacement preflight failed: {errors[0]}")
+    output = str(getattr(result, "output", "")).strip().strip('"').lower()
+    if output != "t":
+        raise RuntimeError(
+            f"unexpected generic master replacement preflight result: {output!r}"
+        )
+
+
+def _apply_exact_master_parameter_migrations(
+    client,
+    library: str,
+    cell: str,
+    migrations: list[MasterParameterMigration],
+) -> dict[str, Any]:
+    requested = {
+        migration.instance: dict(migration.parameters) for migration in migrations
+    }
+    if not requested:
+        return {
+            "requested": {},
+            "applied": {},
+            "confirmed": {},
+            "application_method": "not_applicable",
+        }
+    applied: dict[str, dict[str, str]] = {}
+    for instance, parameters in requested.items():
+        result = _set_target_instance_params(
+            client,
+            library,
+            cell,
+            instance,
+            param_filters=None,
+            strict=True,
+            **parameters,
+        )
+        normalized = {
+            str(name): str(value) for name, value in dict(result or {}).items()
+        }
+        if normalized != parameters:
+            raise RuntimeError(
+                "master parameter migration did not apply the exact declared map "
+                f"for {instance}: requested={parameters!r}, applied={normalized!r}"
+            )
+        applied[instance] = normalized
+    application_method = "bridge_batch"
+    try:
+        confirmed = _verify_instance_parameter_values(
+            client, library, cell, requested
+        )
+    except ParameterReadbackMismatch:
+        application_method = "bridge_batch_then_ordered_replay"
+        for instance, parameters in requested.items():
+            replayed: dict[str, str] = {}
+            for name, value in parameters.items():
+                result = _set_target_instance_params(
+                    client,
+                    library,
+                    cell,
+                    instance,
+                    param_filters=None,
+                    strict=True,
+                    **{name: value},
+                )
+                replayed.update(
+                    {
+                        str(actual_name): str(actual_value)
+                        for actual_name, actual_value in dict(result or {}).items()
+                    }
+                )
+            if replayed != parameters:
+                raise RuntimeError(
+                    "ordered master parameter migration replay did not apply the "
+                    f"exact declared map for {instance}"
+                )
+        confirmed = _verify_instance_parameter_values(
+            client, library, cell, requested
+        )
+    return {
+        "requested": requested,
+        "requested_evidence_source": "user_input",
+        "applied": applied,
+        "confirmed": confirmed,
+        "confirmed_evidence_source": "bridge_readback",
+        "confirmation_method": "independent_targeted_cdf_equality",
+        "application_method": application_method,
+        "undeclared_parameter_policy": "record_only",
+    }
 
 
 def _preflight_mn0_source_label(client, library: str, cell: str) -> None:
@@ -6371,6 +6654,157 @@ def _discard_failed_existing_schematic_edit(
     errors = getattr(result, "errors", None) or []
     if errors:
         raise RuntimeError(f"failed-edit cleanup failed: {errors[0]}")
+
+
+def _run_generic_topology_editor_commands(
+    client,
+    library: str,
+    cell: str,
+    commands: list[str],
+) -> None:
+    if not commands:
+        return
+    try:
+        with _edit_existing_schematic(client, library, cell, timeout=120) as schematic:
+            for command in commands:
+                schematic.add(command)
+    except Exception as edit_error:
+        try:
+            _discard_failed_existing_schematic_edit(client, library, cell)
+        except Exception as cleanup_error:
+            raise RuntimeError(
+                "generic topology edit failed and unsaved-edit cleanup also "
+                f"failed: {cleanup_error}"
+            ) from edit_error
+        raise
+
+
+def _attempt_generic_topology_inverse_recovery(
+    client,
+    library: str,
+    cell: str,
+    execution: TopologyDeltaExecutionSpec,
+    expected_written_snapshot: TopologySnapshot,
+    original_input_summary: dict[str, Any],
+    original_input_parameters: dict[str, dict[str, str]],
+) -> dict[str, Any]:
+    """Undo a saved delta only after a fresh read proves its exact output state."""
+
+    expected_written_sha256 = topology_fingerprint(expected_written_snapshot)
+    try:
+        current = _read_schematic(client, library, cell)
+    except Exception as error:
+        return {
+            "status": "state_unknown_no_write",
+            "reason": f"{type(error).__name__}: {error}",
+            "decision_source": "system_event",
+        }
+    current_summary = _existing_schematic_summary(current)
+    try:
+        current_snapshot = snapshot_from_inspection(current_summary)
+    except Exception as error:
+        return {
+            "status": "state_unverifiable_no_write",
+            "reason": f"{type(error).__name__}: {error}",
+            "state_readback_source": "bridge_readback",
+            "decision_source": "software_inference",
+        }
+    current_sha256 = topology_fingerprint(current_snapshot)
+    if current_sha256 != expected_written_sha256:
+        return {
+            "status": "unexpected_topology_no_write",
+            "expected_written_topology_sha256": expected_written_sha256,
+            "actual_topology_sha256": current_sha256,
+            "state_readback_source": "bridge_readback",
+            "decision_source": "software_inference",
+        }
+
+    recovery_direction = "inverse" if execution.direction == "forward" else "forward"
+    recovery_execution = TopologyDeltaExecutionSpec(
+        direction=recovery_direction,
+        contract=execution.contract,
+    )
+    recovery_operations = (
+        recovery_execution.contract.operations
+        if recovery_direction == "forward"
+        else recovery_execution.contract.inverse_operations
+    )
+    recovery_migrations = _directed_master_parameter_migrations(
+        recovery_execution
+    )
+    try:
+        _preflight_generic_master_replacements(
+            client,
+            library,
+            cell,
+            current_snapshot,
+            recovery_operations,
+            recovery_migrations,
+        )
+        commands, declarative_operations = _compile_generic_topology_commands(
+            recovery_operations
+        )
+        _run_generic_topology_editor_commands(
+            client, library, cell, commands
+        )
+        parameter_restoration = _apply_exact_master_parameter_migrations(
+            client,
+            library,
+            cell,
+            recovery_migrations,
+        )
+        restored = _read_schematic(client, library, cell)
+        restored_summary = _existing_schematic_summary(restored)
+        audit = validate_topology_execution_readback(
+            current_summary,
+            restored_summary,
+            recovery_execution,
+        )
+        restored_parameters = _instance_parameters_from_schematic(restored)
+        if restored_parameters != original_input_parameters:
+            changed = sorted(
+                name
+                for name in set(restored_parameters) | set(original_input_parameters)
+                if restored_parameters.get(name) != original_input_parameters.get(name)
+            )
+            raise RuntimeError(
+                "inverse topology restored but complete instance parameters did "
+                "not return to the input readback: " + ", ".join(changed)
+            )
+        restored_sha256 = topology_fingerprint(
+            snapshot_from_inspection(restored_summary)
+        )
+        original_sha256 = topology_fingerprint(
+            snapshot_from_inspection(original_input_summary)
+        )
+        if restored_sha256 != original_sha256:
+            raise RuntimeError(
+                "inverse recovery did not restore the original topology fingerprint"
+            )
+        return {
+            "status": "restored",
+            "recovery_direction": recovery_direction,
+            "recovery_operation_count": len(recovery_operations),
+            "compiled_editor_command_count": len(commands),
+            "declarative_net_operations": declarative_operations,
+            "expected_written_topology_sha256": expected_written_sha256,
+            "confirmed_written_topology_sha256": current_sha256,
+            "restored_topology_sha256": restored_sha256,
+            "restored_instance_parameters": True,
+            "parameter_restoration": parameter_restoration,
+            "contract_audit": audit.model_dump(mode="json"),
+            "state_readback_source": "bridge_readback",
+            "decision_source": "software_inference",
+        }
+    except Exception as error:
+        return {
+            "status": "recovery_failed",
+            "reason": f"{type(error).__name__}: {error}",
+            "expected_written_topology_sha256": expected_written_sha256,
+            "confirmed_written_topology_sha256": current_sha256,
+            "state_readback_source": "bridge_readback",
+            "decision_source": "system_event",
+        }
 
 
 def _mn0_ground_label_selection_operation(
@@ -7033,45 +7467,77 @@ def transform_existing_schematic_topology_delta(
         operations,
         payload["profile"],
     )
+    migrations = _directed_master_parameter_migrations(execution)
+    if migrations:
+        _verify_instance_parameter_values(
+            client,
+            library,
+            cell,
+            {
+                migration.instance: dict(migration.expected_parameters)
+                for migration in migrations
+            },
+        )
+    _preflight_generic_master_replacements(
+        client,
+        library,
+        cell,
+        before_snapshot,
+        operations,
+        migrations,
+    )
     commands, declarative_operations = _compile_generic_topology_commands(operations)
     before_parameters = _instance_parameters_from_schematic(before)
 
-    if commands:
-        try:
-            with _edit_existing_schematic(
-                client, library, cell, timeout=120
-            ) as schematic:
-                for command in commands:
-                    schematic.add(command)
-        except Exception as edit_error:
-            try:
-                _discard_failed_existing_schematic_edit(client, library, cell)
-            except Exception as cleanup_error:
-                raise RuntimeError(
-                    "generic topology edit failed and unsaved-edit cleanup also "
-                    f"failed: {cleanup_error}"
-                ) from edit_error
-            raise
+    _run_generic_topology_editor_commands(client, library, cell, commands)
 
-    after = _read_schematic(client, library, cell)
-    after_summary = _existing_schematic_summary(after)
-    audit = validate_topology_execution_readback(
-        before_summary,
-        after_summary,
-        execution,
-    )
-    after_parameters = _instance_parameters_from_schematic(after)
-    preserved_instances = sorted(set(before_parameters) & set(after_parameters))
-    changed_parameters = [
-        name
-        for name in preserved_instances
-        if before_parameters[name] != after_parameters[name]
-    ]
-    if changed_parameters:
-        raise RuntimeError(
-            "generic topology transform changed parameters on preserved instances: "
-            + ", ".join(changed_parameters)
+    try:
+        migration_application = _apply_exact_master_parameter_migrations(
+            client,
+            library,
+            cell,
+            migrations,
         )
+        after = _read_schematic(client, library, cell)
+        after_summary = _existing_schematic_summary(after)
+        audit = validate_topology_execution_readback(
+            before_summary,
+            after_summary,
+            execution,
+        )
+        after_parameters = _instance_parameters_from_schematic(after)
+        migrated_instances = {migration.instance for migration in migrations}
+        preserved_instances = sorted(
+            (set(before_parameters) & set(after_parameters)) - migrated_instances
+        )
+        changed_parameters = [
+            name
+            for name in preserved_instances
+            if before_parameters[name] != after_parameters[name]
+        ]
+        if changed_parameters:
+            raise RuntimeError(
+                "generic topology transform changed parameters on preserved "
+                "instances: " + ", ".join(changed_parameters)
+            )
+    except Exception as audit_error:
+        if not commands:
+            raise
+        recovery = _attempt_generic_topology_inverse_recovery(
+            client,
+            library,
+            cell,
+            execution,
+            expected_after,
+            before_summary,
+            before_parameters,
+        )
+        raise RuntimeError(
+            "generic topology post-save audit failed; original_error="
+            f"{type(audit_error).__name__}: {audit_error}; "
+            "automatic_inverse_recovery="
+            + json.dumps(recovery, ensure_ascii=False, sort_keys=True)
+        ) from audit_error
     actual_after_sha256 = topology_fingerprint(
         snapshot_from_inspection(after_summary)
     )
@@ -7090,6 +7556,19 @@ def transform_existing_schematic_topology_delta(
         "actual_output_topology_sha256": actual_after_sha256,
         "preserved_instance_parameters": True,
         "preserved_instances": preserved_instances,
+        "master_parameter_migrations": migration_application,
+        "migrated_instance_parameter_tables": {
+            migration.instance: {
+                "before": before_parameters.get(migration.instance, {}),
+                "after": after_parameters.get(migration.instance, {}),
+                "readback_source": "bridge_readback",
+            }
+            for migration in migrations
+        },
+        "automatic_inverse_recovery": {
+            "status": "not_needed",
+            "source": "system_event",
+        },
         "contract_audit": {
             "source": "software_inference",
             **audit.model_dump(mode="json"),

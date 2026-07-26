@@ -436,6 +436,27 @@ class DeterministicDemoAdapter:
                 name: dict(parameters)
                 for name, parameters in schematic["instance_parameters"].items()
             }
+            migrations = task.topology_delta.contract.master_parameter_migrations
+            for migration in migrations:
+                expected = (
+                    migration.expected_parameters
+                    if task.topology_delta.direction == "forward"
+                    else migration.parameters
+                )
+                requested = (
+                    migration.parameters
+                    if task.topology_delta.direction == "forward"
+                    else migration.expected_parameters
+                )
+                current = prior_parameters.get(migration.instance)
+                if current is None or any(
+                    current.get(name) != value for name, value in expected.items()
+                ):
+                    raise RuntimeError(
+                        "demo master parameter migration precondition mismatch for "
+                        f"{migration.instance}"
+                    )
+                prior_parameters[migration.instance].update(requested)
             schematic["topology"] = after.model_dump(mode="json")
             schematic["instances"] = [
                 {
@@ -470,6 +491,14 @@ class DeterministicDemoAdapter:
                     "direction": task.topology_delta.direction,
                     "input_topology_sha256": topology_fingerprint(before),
                     "actual_output_topology_sha256": topology_fingerprint(after),
+                    "master_parameter_migrations": {
+                        migration.instance: dict(
+                            migration.parameters
+                            if task.topology_delta.direction == "forward"
+                            else migration.expected_parameters
+                        )
+                        for migration in migrations
+                    },
                     "source": "software_inference",
                 },
                 evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
