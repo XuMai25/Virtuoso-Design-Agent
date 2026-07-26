@@ -121,4 +121,11 @@ AC 完成后执行 exact inverse，并独立 inspect 恢复普通共源 topology
 - 当前是受控 contract 中的最小 topology delta，不是从任意自然语言自动综合任意电路。
 - 并发人工 editor、任意 shape/annotation、layout、DRC/LVS/PEX 和旧 ADE L 非覆盖迁移仍未闭合。
 
-下一道有用的 Gate 应是固定同一输入条件，比较普通共源与共栅候选的 gain/BW/GBW、摆幅、功耗、noise 和线性度，并让完整质量规格而非单一 gain objective 决定是否保留共栅拓扑；可选 PVT 只在 nominal 质量点成立后追加。
+2026-07-27 的后续复盘取消了“先跑完整 A/B quality bundle”的默认顺序。已有 OP 的
+两节点通用矩阵已在本地给出普通共源/共栅增益 `4.59574/6.39965 V/V`，与本 Gate
+已有 Spectre AC 的 `4.58848/6.44124 V/V` 只差 `0.158%/0.646%`；理论/实测增益
+提升为 `39.25%/40.38%`。因此再用 noise/linearity sweep 去发现低频输出电阻上升是
+冗余的。新的默认顺序是：PDK/工作点理论 → 必要 DC → OP 导数矩阵 → 仅对可能改变
+拓扑选择的未覆盖 residual 做最小 Spectre 验证。旧 run 缺少 `gmb` 与动态电荷导数，
+所以 BW/GBW/noise/linearity 仍保持未闭合，但它们不再无条件触发远端批量仿真。详见
+[OP 理论线性化本地 Gate](2026-07-27-common-source-cascode-op-linearization-local.md)。

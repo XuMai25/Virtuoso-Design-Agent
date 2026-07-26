@@ -34,6 +34,10 @@ from .models import (
     RunStatus,
     TaskSpec,
 )
+from .op_small_signal import (
+    OperatingPointSmallSignalPolicy,
+    analyze_operating_point_small_signal_run,
+)
 from .op_relinearization import (
     OperatingPointRelinearizationPolicy,
     build_task_from_relinearization,
@@ -277,6 +281,19 @@ def _cmd_small_signal(args: argparse.Namespace) -> int:
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(payload, encoding="utf-8")
+    print(payload)
+    return 0
+
+
+def _cmd_small_signal_from_run(args: argparse.Namespace) -> int:
+    policy = OperatingPointSmallSignalPolicy.model_validate_json(
+        args.policy.read_text(encoding="utf-8")
+    )
+    result = analyze_operating_point_small_signal_run(policy, args.circuit_run)
+    payload = result.model_dump_json(indent=2)
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(payload + "\n", encoding="utf-8")
     print(payload)
     return 0
 
@@ -691,6 +708,18 @@ def build_parser() -> argparse.ArgumentParser:
     small_signal.add_argument("request", type=Path)
     small_signal.add_argument("--output", type=Path)
     small_signal.set_defaults(handler=_cmd_small_signal)
+
+    small_signal_from_run = subparsers.add_parser(
+        "small-signal-from-run",
+        help=(
+            "linearize one structured si graph from the same action's exact "
+            "Spectre operating-point derivatives"
+        ),
+    )
+    small_signal_from_run.add_argument("policy", type=Path)
+    small_signal_from_run.add_argument("circuit_run", type=Path)
+    small_signal_from_run.add_argument("--output", type=Path)
+    small_signal_from_run.set_defaults(handler=_cmd_small_signal_from_run)
 
     small_signal_validate = subparsers.add_parser(
         "small-signal-validate",

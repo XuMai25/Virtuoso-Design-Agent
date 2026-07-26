@@ -12809,6 +12809,11 @@ def _common_source_metrics_from_result(
                 "DC KCL mismatch between MN0 ids and RS0 current: "
                 f"{source_mismatch:.6g}%"
             )
+    op_values.update(_optional_mos_small_signal_operating_point(data, "MN0"))
+    if cascode_op_values is not None:
+        cascode_op_values.update(
+            _optional_mos_small_signal_operating_point(data, "MNCAS")
+        )
     operating_region = (
         "saturation" if metrics["saturation_region"] == 1.0 else "non_saturation"
     )
@@ -13721,9 +13726,11 @@ def _common_source_testbench_deck(
     cascode_save = (
         "save MNCAS:ids MNCAS:vgs MNCAS:vds MNCAS:vdsat "
         "MNCAS:gm MNCAS:gds\n"
+        + _mos_small_signal_operating_point_save("MNCAS")
         if cascode
         else ""
     )
+    input_device_small_signal_save = _mos_small_signal_operating_point_save("MN0")
     load = ""
     analysis_statement = ""
     if analysis == "ac":
@@ -13798,7 +13805,7 @@ dcOp dc write="spectre.dc" maxiters=150 maxsteps=10000 annotate=status
 dcOpInfo info what=oppoint where=rawfile
 {analysis_statement}save {saved_nodes} VDD_SRC:p VIN_SRC:p
 save MN0:ids MN0:vgs MN0:vds MN0:vdsat MN0:gm MN0:gds
-{cascode_save}saveOptions options save=allpub
+{input_device_small_signal_save}{cascode_save}saveOptions options save=allpub
 '''
 
 

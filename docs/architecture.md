@@ -339,6 +339,24 @@ Spectre 的通用 `dcOpInfo` 在当前 Bridge parser 中以器件聚合对象出
 
 共栅级继续走同一个 common-source action，而不是新增一套 netlister 或 executor。其结构变体必须精确为 `MN0(NCAS,IN,VSS,VSS)`、`MNCAS(OUT,VCAS,NCAS,VSS)` 与 `RD0(VDD,OUT)`，并存在独立 `VCAS` pin；混入 RS 或其他 MOS 会拒绝。OA semantic 增加共栅管 W/L，`cascode_bias_v` 只属于 testbench。`si` parser 要求两只 MOS 的 model、W/L 和端子顺序匹配回读；DC wrapper 另外保存 `VCAS/NCAS` 与 `MNCAS:ids/vgs/vds/vdsat/gm/gds`，逐项检查输入管↔共栅管、共栅管↔RD、RD↔VDD supply 的电流一致性、两管饱和余量和堆叠余量。AC 只有 VIN 带 unit AC，VCAS 是纯 DC 源，避免把共栅偏置误作第二输入。真实 Gate 已完成增量 OA 写入、独立 pin/placement/CDF 回读、9 点 DC、相同 9 点 AC、checkpoint resume 和 exact inverse；恢复前后普通共源网表以及全部已记录 DC/AC 标量一致。该结论只覆盖 nominal `top_tt` 与声明离散域。
 
+候选分析现在增加一条 theory-first 快路径。`vda small-signal-from-run` 不根据
+`topology_variant` 选择共源或共栅解析式，而是读取一个成功 real-Bridge action 中的
+结构化 `si` MOS/R 图、DC 节点和器件 OP，再把每只 MOS 的 `Id/gm/gds/gmb`、signed
+`dQi/dVj` 与独立 `cjd/cjs` 规范化成 `eda_operating_point` artifact，交给既有通用
+`Y(f)` 矩阵核心。policy 只声明 polarity、AC 固定边界、输入/输出线性表达式、外部电容
+和频率网格；run/action/netlist/policy 均有 SHA-256 绑定。它的主要用途是在新拓扑先取得
+一个必要的 DC 工作点后，用局部导数筛掉明显不值得跑 AC 的候选，再只对 shortlist 做
+Spectre AC/noise/transient。它不是独立 DC 求解器，也不能从一个 OP 外推大范围非线性变化。
+
+2026-07-27 用此前已经存在的普通共源与共栅 AC run 做了零远端调用的校验：通用矩阵
+分别预测低频增益 `4.59574/6.39965 V/V`，已有 Spectre 为 `4.58848/6.44124 V/V`，
+误差 `0.158%/0.646%`；预测/实测增益提升为 `39.25%/40.38%`。因此默认不再追加一组
+noise/linearity A/B 来“发现”共栅会提高低频输出电阻。旧 run 没有保存 `gmb` 或动态
+电荷导数，级联结果明确标为 partial，BW/GBW/noise/非线性仍未由该理论产物覆盖。为使
+后续一次 DC 能支持更完整的频率预测，common-source wrapper 已补请求两管的
+`gmb + dQi/dVj + cjd/cjs` 并将返回值纳入 OP evidence；这一新增采集行为当前只有本地
+deck/parser 测试，尚无 live 证据。
+
 AC 没有第二套 topology、netlister 或 executor。相同 wrapper 保留 `dcOp/info`，把 VIN 设为 DC bias + unit AC source，可选加入任务声明的 `CL0=load_ff`，再运行对数 AC sweep。Bridge 现有 PSFASCII parser 原样返回 `ac_freq/ac_IN/ac_OUT` 的复数向量；VDA 不修改 Bridge，也不把幅度解析复制回第三方库，而是在 worker 内计算复数传递函数 `H(f)=VOUT/VIN`。
 
 低频参考定义为前 `reference_points` 个复数 H 的均值，并要求该窗口的幅度变化不超过 `max_reference_variation_db`。带宽是相对该参考下降半功率（`10 log10(2)` dB）的首个向下交点，按 dB 对 `log10(f)` 插值；`gain_bandwidth_product_hz` 明确定义为低频线性增益乘该带宽。`unity_gain_frequency_hz` 则是首个向下 0 dB 交点，单独报告，不能与 GBW 混用。非单调响应若有多个 −3 dB 交点，保留“采用首个下降交点”和再次穿越警告。

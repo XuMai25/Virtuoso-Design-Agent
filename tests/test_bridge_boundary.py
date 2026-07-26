@@ -4250,6 +4250,8 @@ def test_common_source_deck_uses_oa_topology_and_requests_dc_op() -> None:
     assert "dcOp dc" in deck
     assert "dcOpInfo info what=oppoint where=rawfile" in deck
     assert "save MN0:ids MN0:vgs MN0:vds MN0:vdsat MN0:gm MN0:gds" in deck
+    assert "save MN0:gmb MN0:cgg MN0:cgd MN0:cgs MN0:cgb" in deck
+    assert "MN0:cjd MN0:cjs" in deck
     assert "MN0 (" not in deck
     assert "RD0 (" not in deck
 
@@ -5267,6 +5269,57 @@ def test_cascode_dc_requires_two_saturated_devices_and_three_way_kcl() -> None:
         )
 
 
+def test_cascode_dc_evidence_retains_full_small_signal_derivatives() -> None:
+    matrix = {
+        name: (1e-15 if name in {"cgg", "cdd", "css", "cbb"} else 0.0)
+        for name in bridge_worker.MOS_CHARGE_DERIVATIVE_NAMES
+    }
+    data = {
+        "dc_IN": 0.35,
+        "dc_OUT": 0.5,
+        "dc_VDD": 0.9,
+        "dc_VSS": 0.0,
+        "dc_VCAS": 0.55,
+        "dc_NCAS": 0.2,
+        "dc_VDD_SRC:p": -20e-6,
+    }
+    for instance, gm_s, gds_s in (
+        ("MN0", 200e-6, 10e-6),
+        ("MNCAS", 180e-6, 8e-6),
+    ):
+        values = {
+            "ids": 20e-6,
+            "vgs": 0.35,
+            "vds": 0.2 if instance == "MN0" else 0.3,
+            "vdsat": 0.1,
+            "gm": gm_s,
+            "gds": gds_s,
+            "gmb": 20e-6,
+            "cjd": 2e-16,
+            "cjs": 3e-16,
+            **matrix,
+        }
+        for quantity, value in values.items():
+            data[f"dcOpInfo_{instance}:{quantity}"] = value
+
+    _, evidence = _common_source_metrics_from_result(
+        data,
+        {
+            "vdd_v": 0.9,
+            "bias_v": 0.35,
+            "cascode_bias_v": 0.55,
+            "load_resistance_ohm": 20_000.0,
+        },
+    )
+
+    for instance in ("MN0", "MNCAS"):
+        device = evidence["device_values"][instance]
+        assert device["gmb_s"] == pytest.approx(20e-6)
+        assert device["charge_derivative_matrix_f"] == matrix
+        assert device["cjd_f"] == pytest.approx(2e-16)
+        assert device["cjs_f"] == pytest.approx(3e-16)
+
+
 def test_source_degenerated_deck_saves_internal_source_node() -> None:
     profile = load_pdk_profile("nics4304_tsmc28").model_dump()
     deck = _common_source_testbench_deck(
@@ -5308,6 +5361,8 @@ def test_cascode_dc_and_ac_deck_drive_bias_and_save_internal_stack() -> None:
     assert "VCAS_SRC (VCAS 0) vsource dc=vcas" in deck
     assert "save IN OUT VDD VSS VCAS NCAS" in deck
     assert "save MNCAS:ids MNCAS:vgs MNCAS:vds MNCAS:vdsat" in deck
+    assert "save MNCAS:gmb MNCAS:cgg MNCAS:cgd MNCAS:cgs MNCAS:cgb" in deck
+    assert "MNCAS:cjd MNCAS:cjs" in deck
     assert "VIN_SRC (IN 0) vsource dc=vbias mag=1 type=dc" in deck
 
 

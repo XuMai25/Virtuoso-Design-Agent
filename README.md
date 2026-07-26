@@ -125,6 +125,25 @@ gain、首个 −3 dB bandwidth、GBW 与 unity-gain 提取。
 和网络推导分别保持 `software_inference`。详见
 [通用小信号本地 Gate](docs/validation/2026-07-24-generic-small-signal-local.md)。
 
+已有成功的 OA→`si`→Spectre DC/AC run record 时，还可以直接把同一次 action 的
+结构化 `si` 图与精确 OP 导数送入该矩阵核心，而不再为每个候选盲跑 AC：
+
+```powershell
+.\.venv\Scripts\vda.exe small-signal-from-run `
+  examples\theory\common-source-cascode-op-small-signal-policy.json `
+  artifacts\runs\common-source-cascode-ac-seeded\run-20260726T-live-real-network.json `
+  --output artifacts\theory\common-source-cascode-op-small-signal-20260727.json
+```
+
+policy 只声明 MOS polarity、AC 固定边界、输入/输出表达式和频率，不声明专用拓扑
+方程；拓扑来自 run record 中的 `si` 实例/节点。原始 OP 是 `eda_result`，归一化和
+矩阵解是 `software_inference`。旧共源/共栅 run 只保存了 `gm/gds`，因此当前产物只
+覆盖低频电导模型：普通共源与共栅预测相对已有 AC 的增益误差分别为 `0.158%` 和
+`0.646%`；缺失的 `gmb`、电荷导数和结电容被显式列出，不能据此声称 BW/GBW/noise
+已闭合。后续 common-source wrapper 已请求保存 `gmb + signed dQi/dVj + cjd/cjs`，
+但该新增保存面仍需一次只读 live capture 才能升级为真实动态预测证据。详见
+[共源/共栅 OP 理论线性化本地 Gate](docs/validation/2026-07-27-common-source-cascode-op-linearization-local.md)。
+
 生成独立 MOS 表征计划（真实运行仍需 `--execute`、本次 plan token 和
 `allow_remote_compute=true`）：
 
