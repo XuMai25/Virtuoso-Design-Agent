@@ -71,12 +71,14 @@ one nominal TSMC N28 differential-pair local domain**。gain/BW/GBW/power 最大
 为正常 OA task，但本轮没有重复执行；约 `354.176 s` 的两级时间是从完整 run 的前三点
 动作重建的估算，不是独立三点实测。
 
-下一步不再为这个已知八点域追加随机点。更有产品价值的 Gate 是把“理论/局部模型生成候选
-→ standalone preview → 冻结 shortlist → 获授权后只跑 shortlist OA → 最终质量复核”收敛
-成一个可中断、每阶段仍可单独调用的编排流程，并在 active-load + source-degeneration 这类
-已有 topology-delta、但 preview 尚未校准的结构上默认只跑 shortlist。完整域只作为周期性
-审计或 near-boundary 复核；当粗约束靠近绝对误差带时，应使用显式 guard band 或升级到 OA，
-不能靠放宽误差门维持筛选结论。PVT 继续可选，不默认附加。
+本次之后不再安排“换一种拓扑再跑完整域”来重复证明这条能力，也不为已知八点域追加随机
+点。已经验证的机制被提炼为项目默认快速工作流：4 个及以上显式候选先检查
+`Tpreview < (N-k)*Toa_per_candidate`，成立时只运行一次批量 preview、在真值前冻结 top-3、
+再执行一个 checkpointed OA shortlist task，最后只对真实 winner 补必要质量项。完整 OA 域
+退到筛选代码/PDK 条件变化、shortlist 失效/near-boundary 或计划性周期审计；PVT 继续可选。
+流程、跳过条件、授权点、失败恢复和最小证据链固定在
+[`fast-preview-shortlist-workflow.md`](fast-preview-shortlist-workflow.md)，以后直接复用，不再靠
+每轮对话重新推导。
 
 PDK 路线默认按晶圆厂 CMOS 工艺推进：当前以 TSMC N28 LVT profile 为缺省；同工艺的 `nch_mac/pch_mac` 通过继承式 `nics4304_tsmc28_svt` 显式选择。NMOS 共源的 LVT/SVT OA/`si`/Spectre round-trip 已 live，PMOS 和其他拓扑仍需独立 Gate。后续优先通过独立 profile 接入 TSMC/SMIC 的实际晶体管 PDK。profile 继承只复用静态工艺配置，不复用性能证据。TSV、hybrid-bonding 等封装/3D PDK 不进入普通电路设计的默认路径；若未来需要，将作为显式选择和独立 Gate，而不是当前 profile 的替代品。
 
@@ -233,7 +235,7 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> 共源→共栅原位微调（新 cellview 已完成同一 9 点 DC→AC、对应网表 9/9 匹配、checkpoint、exact inverse 和基线身份检查；完整 quality A/B 不再默认，未覆盖 residual 只在可能改变 objective 时补）
   -> OP 导数驱动的通用小信号预筛（既有共源/共栅真实 run 本地重放：增益误差 0.158%/0.646%；未来 gmb+dQi/dVj+cjd/cjs 保存面已实现、本地测试通过、live capture 待做）
   -> 结构化 standalone Spectre 轻量 A/B（共源/共栅级联已完成无 OA/si/Maestro 的 TSMC N28 live preview、完整 manifest 和进程归零；方向与 OA→si 一致，绝对值不作同源复现）
-  -> preview shortlist → 普通 OA 同源复核（已知九点域 3/3 live；未见差分对八点域已先冻结 top-3、后跑完整真值并以 ρ=1.0 保留 winner；下一步把 prospective 两级流程用于新结构的 shortlist-only 正常设计）
+  -> preview shortlist → 普通 OA 同源复核（已知九点域 3/3 live；未见差分对八点域先冻结 top-3、后跑完整真值并以 ρ=1.0 保留 winner；机制已提炼为默认 fast path，不再安排独立应用 Gate）
   -> active-load + 对称源极退化组合拓扑（新 cellview forward/readback/七实例 si/DC/AC/CMRR/noise/transient/ICMR/PSRR/inverse/恢复态 DC 均已 live；质量闭环未过）
   -> L5B 单模块闭环
   -> layout/DRC/LVS/PEX Gate

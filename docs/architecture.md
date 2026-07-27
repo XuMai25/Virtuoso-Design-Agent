@@ -252,6 +252,10 @@ OA wall time 为 229.924 s，比原 9 点的 811.503 s 少 71.667%。preview 与
 自动编译为正常 OA 任务但没有重复执行；根据同一完整 run 中前三点的 stage/simulation
 动作估算 preview+3 点约 `354.176 s`，不是独立三点实测。完整证据见
 [`validation/2026-07-28-differential-pair-preview-prospective-live.md`](validation/2026-07-28-differential-pair-preview-prospective-live.md)。
+这条能力完成验证后不再要求立即换一个拓扑重复跑完整 truth domain。日常设计默认只执行
+冻结 shortlist 的 OA 真值任务；完整域退到筛选代码/PDK 条件变化、shortlist 失效或周期性
+审计。候选数、成本判据、一次批处理、授权点和质量 follow-up 的固定规则见
+[`fast-preview-shortlist-workflow.md`](fast-preview-shortlist-workflow.md)。
 HSPICE 没有加入默认链路：现有 Spectre runner 的调用复杂度相同，并且与最终
 foundry-model 真源一致。完整证据见
 [`validation/2026-07-27-standalone-netlist-preview-live.md`](validation/2026-07-27-standalone-netlist-preview-live.md)。候选编译器的本地证据见

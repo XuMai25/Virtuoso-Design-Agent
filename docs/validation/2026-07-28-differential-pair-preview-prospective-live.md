@@ -241,7 +241,8 @@ retrospective `preview-select` 默认行为和所有正交 task operation 保持
 - candidate 6 timeout、SSH reset、失败恢复：`system_event`。
 
 本 Gate 没有把 return code 0、OA 对象存在或 shortlist winner 单独表述为设计完成。当前只
-证明一个 nominal TSMC N28 差分对局部域的 prospective 排名 utility。下一道有产品价值的
-Gate 应把这套两阶段流程用于尚未校准的 active-load + source-degeneration 等结构，并在
-正常设计中默认只执行冻结 shortlist 的 OA 真值复核；完整域改为周期性审计或 near-boundary
-复核，而不是继续在本八点域增加随机测试。PVT 仍为可选项，不默认附加。
+证明一个 nominal TSMC N28 差分对局部域的 prospective 排名 utility。它已经足以把两阶段
+机制提炼为正常设计的默认 fast path，不需要立即在 active-load + source-degeneration 或
+其他新拓扑上再跑一个完整域“应用 Gate”。以后实际设计只执行冻结 shortlist 的 OA 真值
+复核；完整域改为筛选代码/PDK 变化、失效/near-boundary 或计划性周期审计。固定工作流见
+[`../fast-preview-shortlist-workflow.md`](../fast-preview-shortlist-workflow.md)，PVT 仍为可选项。

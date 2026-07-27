@@ -36,6 +36,14 @@
 - 首版只实现反相器真实 adapter；共源/源极退化和差分对先作为明确的后续验收门，不写空壳执行器。
 - 不引入 Web UI、数据库、多智能体框架或云端 LLM 依赖，除非真实工作流证明有必要。
 
+## 默认快速筛选工作流
+
+- 对 4 个及以上的显式有限候选，默认先用一次 standalone Spectre preview 批处理，真值前冻结 top-3，再把 shortlist 编译为一个普通 checkpointed OA→`si` 任务；不逐候选启动 Bridge。
+- 1–3 个候选、人工指定的单次参数修改、单项建图/读图/仿真应直接走原正交 operation，不强迫使用 preview。
+- 完整 OA 候选域不是日常必经步骤，只在筛选实现或 PDK/模型条件改变、shortlist 失效/近边界，或计划性周期审计时运行。不得为了重复证明工作流而立即换一个拓扑再跑全域。
+- preview 只做排序和明显工作区证伪；最终规格、winner、写回与质量复核只服从 OA→`si`/ADE 的真实结果。PVT、noise、linearity 等昂贵分析默认只对真实 winner 且按任务需要运行。
+- 执行前先用最近同路径 action time 检查 `Tpreview < (N-k)*Toa_per_candidate`；无法证明节省时直接走 OA。详细步骤见 `docs/fast-preview-shortlist-workflow.md`。
+
 ## ADE 人工交接
 
 - VDA 的自动规划、搜索和选优不得取消人工打开、调整、运行和保存 ADE setup/history 的能力。
