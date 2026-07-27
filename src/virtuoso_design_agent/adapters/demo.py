@@ -96,6 +96,9 @@ class DeterministicDemoAdapter:
             evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
         )
 
+    def probe_simulator(self, pdk_profile: str) -> AdapterResult:
+        return self.probe(pdk_profile)
+
     def characterize_devices(self, task: TaskSpec) -> AdapterResult:
         raise RuntimeError(
             "device.characterize requires real Spectre/PDK evidence and is not "
@@ -1274,6 +1277,11 @@ class DeterministicDemoAdapter:
     def simulate(
         self, task: TaskSpec, parameters: dict[str, float]
     ) -> AdapterResult:
+        if task.circuit is CircuitKind.NETLIST_PREVIEW:
+            raise RuntimeError(
+                "netlist_preview requires real Spectre/PDK evidence and is not "
+                "available through the demo adapter"
+            )
         if task.operating_conditions:
             base_task = task.model_copy(update={"operating_conditions": []})
             rows: list[dict[str, Any]] = []

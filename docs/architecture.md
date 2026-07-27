@@ -145,6 +145,43 @@ signature 的 SHA-256 binding；来源实例是 `eda_result`，任务推导是
 另立证据，不按线性宽度缩放猜测。下游复用按 model/W/L/signature 匹配，不要求其他
 cell 沿用来源实例名；来源名只用于追溯。
 
+## 轻量 standalone 网表预评估
+
+`circuit: netlist_preview` 是理论分析与 OA 同源 Gate 之间的低成本 EDA 层。它仍使用
+`simulation.run`、计划 token 和 `allow_remote_compute`，但不接受 OA target、remote-write、
+ADE、semantic/raw 参数写入或搜索字段。输入是一份受校验的 MOS/R/C/独立电压源实例图：
+每个器件显式给出端子、W/L/fingers/multiplicity 或无源值；多个变体共享同一组激励、
+供电和可选负载。MOS 附加模型参数只允许 numeric Spectre literal，不能覆盖
+`w/l/nf/m/multi`；接口不接受任意 raw Spectre 文本。
+
+executor 对该 circuit 使用 `bridge.spectre.probe`，不会调用 Virtuoso SKILL 或
+`schematic.inspect`。worker 复用 Bridge 已有 SSH client 和 `SpectreSimulator`，从 VDA
+PDK profile 取得 foundry model include/section，在唯一
+`/data/xum/.../vda_netlist_preview_<task>_<nonce>/<variant>` 下为每个变体生成并运行一份
+deterministic deck。每份运行都经过现有远端 timeout/TERM/KILL guard、下载原始 DC/OP/AC
+和日志、记录逐文件及聚合 SHA-256；worker 的 SSH 资源仍由统一 `finally` 关闭，Windows
+worker 继续受 Job Object 与 cancel/watchdog 清理，不新增 PowerShell 执行层或第三方
+Bridge 补丁。远端 evidence root 有意保留并可由 `vda resources --remote` 盘点，不属于
+进程泄漏。
+
+DC 会核对所有声明电压源的实际节点差，提取逐 MOS 的 Id/VGS/VDS/VBS/VDSAT/gm/gds/gmb、
+饱和余量、真实供电电流/功耗和面积代理。AC 直接从复数输入/输出节点表达式提取低频增益、
+相位、首个 −3 dB bandwidth、GBW 和 unity；空波形、非平坦参考窗或未包围 bandwidth
+保持失败/不完整。每个变体的 simulator metrics 是 `eda_result`；工作区布尔值、面积代理
+和跨变体 delta/ratio 是 `software_inference`；可选来源 hash 是 `user_input`。结果明确
+记录 `oa_access=false`、`si_netlisting=false`、`maestro_access=false`，因此不能被包装成
+schematic-driven 或 design closure。
+
+推荐顺序是：理论/KCL/gm-Id 先缩小结构和参数域，`netlist_preview` 对少量具体候选做
+nonlinear PDK DC/AC 证伪，只有可能胜出的结构才创建/微调 OA 并走 `si` 或 ADE。当前
+共源/共栅级联同条件示例已完成 nics4304 live smoke：两份 241 点 AC、DC OP、逐文件
+SHA-256 manifest 和执行后零 Spectre/si/Maestro 进程均通过。preview 的级联/共源
+gain/BW/GBW 比为 `1.538/0.489/0.753`，既有 OA→`si` 对照为
+`1.404/0.534/0.750`，主要方向一致；但单结构绝对值误差最高超过 20%，因此只证明方向性
+筛选价值，不替代已验证的 OA→`si` 结果。HSPICE 没有加入默认链路：现有 Spectre runner
+的调用复杂度相同，并且与最终 foundry-model 真源一致。完整证据见
+[`validation/2026-07-27-standalone-netlist-preview-live.md`](validation/2026-07-27-standalone-netlist-preview-live.md)。
+
 ## 理论先导尺寸分析
 
 `vda theory` 是 Bridge 之前的纯本地分析面，不属于远端 task operation，也不生成计划 token、OA 写入或 Spectre 结果。首版只支持已经进入 Gate 6 的固定拓扑 `nmos_differential_pair_pmos_current_mirror_load_with_tail_device`，不把一个通用方程求解器伪装成任意电路综合。

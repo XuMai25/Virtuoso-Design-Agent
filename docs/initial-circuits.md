@@ -260,6 +260,34 @@ transient/P1dB 和 ICMR，不能把 Gate 8 旧宽度的 follow-up 结果直接�
 差分对 live 结果见
 [`2026-07-26-differential-pair-op-relinearization-live.md`](validation/2026-07-26-differential-pair-op-relinearization-live.md)。
 
+## 跨拓扑轻量 netlist preview
+
+状态：2026-07-27 已完成 **structured standalone TSMC N28 topology-preview live
+verified for one common-source/cascode A/B**。它不是新的固定电路模板，而是理论结果与
+OA Gate 之间的通用初筛面；绝对值与 OA→`si` 不等同。
+
+- `circuit=netlist_preview` 只支持独立 `simulation.run` 的 DC/AC，不需要 OA target，
+  也禁止 remote write、ADE、topology delta、参数写入和任意 raw deck。
+- 一份任务把共享 VIN/VDD/偏置/负载与每个变体自己的 MOS 连线分开。当前示例让普通
+  共源与 `MN0+MNCAS` 共栅级联共享 0.9 V VDD、0.35 V VIN、20 kΩ RD 和 2 fF CL；
+  W/L/VCAS 来自既有真实 OP/AC 记录的 hash-bound 条件，不是随机候选。
+- 每个变体的 deck、DC/OP/AC PSF、log 和 manifest 都绑定 SHA-256；空波形、源电压不一致、
+  非有限 OP、未包围 −3 dB bandwidth 或 Spectre failure 不会降级成可行电路。
+- OP、复数 AC、功耗和连续指标是 `eda_result`；饱和布尔值、面积代理与变体 delta/ratio
+  是 `software_inference`；任务及可选 source hashes 是 `user_input`。本路径不产生 OA
+  readback；Spectre 环境、远端 evidence 路径和资源 inventory 仍是 `bridge_readback`。
+- 该层复用 Bridge SSH/Spectre runner、现有 remote timeout guard、worker resource
+  registry、cancel/watchdog 和 Windows Job Object，不增加 HSPICE 或 PowerShell wrapper，
+  也没有修改第三方 Bridge。远端 evidence root 有意保留，后续由资源 inventory 审计。
+
+首个只读 live smoke 的两份 AC 各有 241 点并包围 bandwidth，执行后远端
+Spectre/si/Maestro 进程回到零。级联/共源的 gain/BW/GBW 比为
+`1.538/0.489/0.753`，既有 OA→`si` 为 `1.404/0.534/0.750`；方向一致，但绝对值误差
+最高超过 20%。下一道有效 Gate 不是扩大随机候选数，而是把理论生成的少量结构候选
+自动编译到同一 preview contract，并只将可能改变 objective 的胜出者升级到 OA。同样，
+任何最终选中的拓扑仍要进入 OA 同源或人工 ADE 验证。完整证据见
+[`validation/2026-07-27-standalone-netlist-preview-live.md`](validation/2026-07-27-standalone-netlist-preview-live.md)。
+
 ## 跨电路 Gate：通用微调事务
 
 状态：instance/net/reconnect 子集已在共源和“电流镜负载 + 对称源退化”两个新 cellview 完成真实 OA/`si`/Spectre forward 与 exact inverse；NMOS `nch_lvt_mac -> nch_mac -> nch_lvt_mac` 的 master/CDF、`si` model、DC/AC 和恢复态也已 live。post-save 自动 recovery 的失败分支仍只有本地故障注入。

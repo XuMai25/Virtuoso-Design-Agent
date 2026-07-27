@@ -108,6 +108,23 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "multi-finger/multiplicity and optional PVT remain pending"
         ),
     ),
+    CircuitKind.NETLIST_PREVIEW: CircuitCapability(
+        circuit=CircuitKind.NETLIST_PREVIEW,
+        stage="Lightweight topology screening",
+        executable=True,
+        operations=(Operation.SIMULATION_RUN,),
+        parameters=(),
+        explicit_instance_parameters=False,
+        evidence_gate=(
+            "validated structured circuit graph rendered directly to standalone "
+            "foundry-model Spectre DC/AC decks; no OA, si, or Maestro access. Raw "
+            "Spectre results are eda_result, while cross-variant comparison is "
+            "software_inference. One nominal TSMC N28 common-source/cascode A/B is "
+            "live with complete DC OP, 241-point AC, per-file SHA-256 manifests, and "
+            "zero residual Spectre/si/Maestro processes; absolute values differ from "
+            "OA-to-si, so selected topologies still require same-source or ADE validation"
+        ),
+    ),
     CircuitKind.EXISTING_SCHEMATIC: CircuitCapability(
         circuit=CircuitKind.EXISTING_SCHEMATIC,
         stage="Bridge-preserving manual OA surface",

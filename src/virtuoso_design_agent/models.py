@@ -17,6 +17,7 @@ from pydantic import (
     model_validator,
 )
 
+from .netlist_preview import NetlistPreviewSpec
 from .topology_delta import TopologyDeltaExecutionSpec
 
 # The default is the currently verified foundry-CMOS environment. Packaging,
@@ -47,6 +48,7 @@ class Operation(str, Enum):
 
 class CircuitKind(str, Enum):
     MOS_DEVICE = "mos_device"
+    NETLIST_PREVIEW = "netlist_preview"
     EXISTING_SCHEMATIC = "existing_schematic"
     INVERTER = "inverter"
     COMMON_SOURCE = "common_source"
@@ -1886,6 +1888,7 @@ class TaskSpec(StrictModel):
     schematic_transform: SchematicTransformSpec | None = None
     topology_delta: TopologyDeltaExecutionSpec | None = None
     device_characterization: DeviceCharacterizationSpec | None = None
+    netlist_preview: NetlistPreviewSpec | None = None
     operating_conditions: list[OperatingCondition] = Field(
         default_factory=list,
         max_length=5,
@@ -1953,6 +1956,7 @@ class TaskSpec(StrictModel):
                 or self.ade_setup is not None
                 or self.schematic_transform is not None
                 or self.topology_delta is not None
+                or self.netlist_preview is not None
                 or self.operating_conditions
                 or self.parameters
                 or self.instance_parameter_updates
@@ -1971,8 +1975,55 @@ class TaskSpec(StrictModel):
             if self.safety.allow_remote_write or self.safety.replace_existing:
                 raise ValueError("device.characterize cannot request remote OA writes")
             return self
+        if self.circuit is CircuitKind.NETLIST_PREVIEW:
+            if self.operation is not Operation.SIMULATION_RUN:
+                raise ValueError(
+                    "netlist_preview supports only operation='simulation.run'"
+                )
+            if self.target is not None:
+                raise ValueError("netlist_preview does not accept an OA target")
+            if self.netlist_preview is None:
+                raise ValueError("netlist_preview requires netlist_preview settings")
+            if self.analysis not in {AnalysisKind.DC, AnalysisKind.AC}:
+                raise ValueError("netlist_preview requires explicit dc or ac analysis")
+            if self.analysis is AnalysisKind.AC and self.ac_sweep is None:
+                raise ValueError("netlist_preview AC analysis requires ac_sweep")
+            if self.analysis is AnalysisKind.DC and self.ac_sweep is not None:
+                raise ValueError("netlist_preview DC analysis does not accept ac_sweep")
+            if (
+                self.linearity_sweep is not None
+                or self.noise_sweep is not None
+                or self.ade_capture is not None
+                or self.ade_prepare is not None
+                or self.ade_run is not None
+                or self.ade_variables is not None
+                or self.ade_corners is not None
+                or self.ade_setup is not None
+                or self.schematic_transform is not None
+                or self.topology_delta is not None
+                or self.device_characterization is not None
+                or self.operating_conditions
+                or self.parameters
+                or self.instance_parameter_updates
+                or self.parameter_space
+                or self.candidate_set is not None
+                or self.theory_seed is not None
+                or self.instance_parameter_space
+                or self.create_if_missing
+            ):
+                raise ValueError(
+                    "netlist_preview accepts only its structured circuit, dc/ac "
+                    "settings, constraints/objective, PDK, limits, and safety"
+                )
+            if self.safety.allow_remote_write or self.safety.replace_existing:
+                raise ValueError("netlist_preview cannot request remote OA writes")
+            return self
         if self.circuit is CircuitKind.MOS_DEVICE:
             raise ValueError("mos_device supports only operation='device.characterize'")
+        if self.netlist_preview is not None:
+            raise ValueError(
+                "netlist_preview settings require circuit='netlist_preview'"
+            )
         if self.target is None:
             raise ValueError(f"{self.operation.value} requires an OA target")
         if self.device_characterization is not None:

@@ -24,6 +24,9 @@ _PROCESS_TREE_GRACE_SECONDS = 3.0
 _WORKER_COOPERATIVE_CLEANUP_SECONDS = 30.0
 
 _WORKER_ACTIONS = {
+    CircuitKind.NETLIST_PREVIEW: {
+        "simulate": "simulate_netlist_preview",
+    },
     CircuitKind.EXISTING_SCHEMATIC: {
         "inspect": "inspect_existing_schematic",
         "transform": "transform_existing_schematic_topology_delta",
@@ -365,6 +368,8 @@ class SubprocessBridgeAdapter:
             payload["device_characterization"] = (
                 task.device_characterization.model_dump(mode="json")
             )
+        if task.netlist_preview is not None:
+            payload["netlist_preview"] = task.netlist_preview.model_dump(mode="json")
         if task.operation not in {
             Operation.DEVICE_CHARACTERIZE,
             Operation.ADE_PREPARE,
@@ -435,6 +440,15 @@ class SubprocessBridgeAdapter:
         profile = load_pdk_profile(pdk_profile)
         data = self._request(
             "probe", {"profile": profile.model_dump(mode="json")}, timeout=30
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
+
+    def probe_simulator(self, pdk_profile: str) -> AdapterResult:
+        profile = load_pdk_profile(pdk_profile)
+        data = self._request(
+            "probe_spectre_environment",
+            {"profile": profile.model_dump(mode="json")},
+            timeout=30,
         )
         return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
 

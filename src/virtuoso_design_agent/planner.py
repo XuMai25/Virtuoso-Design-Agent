@@ -75,6 +75,55 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 SideEffect.LOCAL_WRITE,
             ),
         ]
+    if task.circuit is CircuitKind.NETLIST_PREVIEW:
+        preview = task.netlist_preview
+        if preview is None:  # TaskSpec validation owns the user-facing error.
+            raise ValueError("netlist preview settings are missing")
+        analysis = task.resolved_analysis().value.upper()
+        return [
+            _step(
+                "01-probe",
+                "bridge.spectre.probe",
+                "只读核对 SSH、Spectre 与声明的 foundry PDK；不启动 Virtuoso 或访问 OA",
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "02-render",
+                "netlist.preview.render",
+                (
+                    f"从受校验的结构化电路图确定性生成 {len(preview.variants)} 个"
+                    f"同条件 standalone Spectre {analysis} deck；不接受任意网表文本"
+                ),
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "03-simulate",
+                "simulation.preview.run",
+                (
+                    "在唯一远端 scratch 中运行各拓扑，保留 deck、原始 PSF、日志、"
+                    "大小与 SHA-256 清单；不创建或修改 OA cellview"
+                ),
+                SideEffect.REMOTE_COMPUTE,
+            ),
+            _step(
+                "04-compare",
+                "simulation.preview.compare",
+                (
+                    "核对共享激励、偏置、负载和器件工作区，比较 DC/AC 指标；"
+                    "跨拓扑差值只记为 software_inference"
+                ),
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "05-persist",
+                "evidence.persist",
+                (
+                    "保存 Spectre 原始量=eda_result、A/B 派生比较="
+                    "software_inference，并明确该结果不是 OA 同源闭环"
+                ),
+                SideEffect.LOCAL_WRITE,
+            ),
+        ]
     common_source = task.circuit is CircuitKind.COMMON_SOURCE
     differential_pair = task.circuit is CircuitKind.DIFFERENTIAL_PAIR
     analysis = task.resolved_analysis()

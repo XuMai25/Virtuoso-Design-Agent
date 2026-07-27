@@ -19,6 +19,16 @@
 
 L5A 不允许自行发明无限搜索范围、修改 PDK、覆盖未知 cell、把 demo 模型当 EDA 结果，或在缺少证据时宣布 closure。
 
+为降低新拓扑早期评估成本，L5A 现增加可选 `netlist_preview` 层：理论/KCL/gm-Id 先给出
+少量具体候选，再由受校验结构直接生成 standalone foundry Spectre DC/AC deck。该层不
+启动 Virtuoso、`si` 或 Maestro，不创建/修改 OA，只把 raw simulator 结果记为
+`eda_result`、A/B 差值记为 `software_inference`。它只负责淘汰明显差的结构；最终候选
+仍须进入 OA→`si`→Spectre 或 ADE。契约、planner、worker mock、空波形和无 OA executor
+路径已本地通过；2026-07-27 nics4304 live smoke 又闭合两份 241 点 AC、DC OP、逐文件
+hash manifest 和进程归零。级联/共源的 gain/BW/GBW A/B 方向与既有 OA→`si` 一致，
+但绝对数值误差最高超过 20%，所以状态只升级为 standalone directional preview live，
+不能用该层宣称 schematic-driven 性能或设计闭环。
+
 PDK 路线默认按晶圆厂 CMOS 工艺推进：当前以 TSMC N28 LVT profile 为缺省；同工艺的 `nch_mac/pch_mac` 通过继承式 `nics4304_tsmc28_svt` 显式选择。NMOS 共源的 LVT/SVT OA/`si`/Spectre round-trip 已 live，PMOS 和其他拓扑仍需独立 Gate。后续优先通过独立 profile 接入 TSMC/SMIC 的实际晶体管 PDK。profile 继承只复用静态工艺配置，不复用性能证据。TSV、hybrid-bonding 等封装/3D PDK 不进入普通电路设计的默认路径；若未来需要，将作为显式选择和独立 Gate，而不是当前 profile 的替代品。
 
 当前实现状态：`OA schematic -> si -> Spectre -> metrics`、供电能量积分、失败注入和候选级 checkpoint/resume 已通过本地测试。2026-07-19 live 结果覆盖 OA/`si` 参数一致性、非空 timing/current 波形、收紧规格、不可行 + 预算耗尽恢复，以及一个经历 3 次 tunnel 中断后仍完成 9/9 候选、最佳参数写回和独立 OA 回读的恢复任务。反相器 L5A 的同源有限闭环与显式恢复 Gate 已通过；Bridge 本地隔离补丁又通过强制断链只读 smoke，闭合 Windows stale state 与调用边界自动重建。运行中传输的随机 reset/timeout 仍是跨 Gate 的底层可靠性债务。
@@ -171,6 +181,7 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> 通用 topology-delta 契约（add/remove/reconnect/master/CDF/pin/placement 与 post-save exact recovery 均已在新 cellview live；仍是受控 contract，不是任意 OA editor）
   -> 共源→共栅原位微调（新 cellview 已完成同一 9 点 DC→AC、对应网表 9/9 匹配、checkpoint、exact inverse 和基线身份检查；完整 quality A/B 不再默认，未覆盖 residual 只在可能改变 objective 时补）
   -> OP 导数驱动的通用小信号预筛（既有共源/共栅真实 run 本地重放：增益误差 0.158%/0.646%；未来 gmb+dQi/dVj+cjd/cjs 保存面已实现、本地测试通过、live capture 待做）
+  -> 结构化 standalone Spectre 轻量 A/B（共源/共栅级联已完成无 OA/si/Maestro 的 TSMC N28 live preview、完整 manifest 和进程归零；方向与 OA→si 一致，绝对值不作同源复现）
   -> active-load + 对称源极退化组合拓扑（新 cellview forward/readback/七实例 si/DC/AC/CMRR/noise/transient/ICMR/PSRR/inverse/恢复态 DC 均已 live；质量闭环未过）
   -> L5B 单模块闭环
   -> layout/DRC/LVS/PEX Gate

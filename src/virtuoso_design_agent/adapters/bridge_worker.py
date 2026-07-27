@@ -31,6 +31,11 @@ from virtuoso_design_agent.characterization import (
     enumerate_mos_characterization_points,
 )
 from virtuoso_design_agent.models import DeviceCharacterizationSpec
+from virtuoso_design_agent.netlist_preview import (
+    NetlistPreviewSpec,
+    NetlistPreviewVariant,
+    render_spectre_preview_deck,
+)
 from virtuoso_design_agent.metrics import (
     aggregate_common_source_linearity_metrics,
     aggregate_differential_pair_linearity_metrics,
@@ -6168,6 +6173,55 @@ def probe(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _parse_spectre_environment_probe(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    tool_paths = [
+        line
+        for line in lines
+        if re.fullmatch(r"/[A-Za-z0-9_./-]+/spectre", line)
+    ]
+    if len(tool_paths) != 1:
+        raise RuntimeError("standalone Spectre probe did not return one tool path")
+    return tool_paths[0]
+
+
+def probe_spectre_environment(payload: dict[str, Any]) -> dict[str, Any]:
+    """Probe the standalone simulator without starting Virtuoso or touching OA."""
+
+    import virtuoso_bridge
+    from virtuoso_bridge.transport.tunnel import SSHClient
+
+    profile = payload["profile"]
+    cadence_cshrc = str(profile.get("cadence_cshrc", ""))
+    if re.fullmatch(r"/[A-Za-z0-9_./-]+", cadence_cshrc) is None:
+        raise RuntimeError("invalid Cadence environment path in PDK profile")
+    if not SSHClient.is_running():
+        raise RuntimeError("no default virtuoso-bridge connection is running")
+    ssh_client = _register_worker_resource(SSHClient.from_env(keep_remote_files=True))
+    runner = ssh_client.ssh_runner
+    runner._persistent_shell_enabled = False
+    command = f"source {cadence_cshrc}; which spectre"
+    result = runner.run_command(f"csh -fc {shlex.quote(command)}", timeout=25)
+    if int(getattr(result, "returncode", -1)) != 0:
+        detail = str(getattr(result, "stderr", "")).strip()
+        raise RuntimeError(
+            "standalone Spectre probe failed: " + (detail or "no stderr")
+        )
+    spectre_path = _parse_spectre_environment_probe(
+        str(getattr(result, "stdout", ""))
+    )
+    return {
+        "connected": True,
+        "bridge_version": virtuoso_bridge.__version__,
+        "profile": str(profile["name"]),
+        "spectre_path": spectre_path,
+        "spectre_version_source": "guarded_simulation_log",
+        "virtuoso_started": False,
+        "oa_access_performed": False,
+        "oa_write_performed": False,
+    }
+
+
 def create_inverter(payload: dict[str, Any]) -> dict[str, Any]:
     from virtuoso_bridge.virtuoso.schematic.ops import (
         schematic_create_inst_by_master_name as inst,
@@ -12182,7 +12236,7 @@ def _mos_characterization_points_from_result(
     return returned, root_evidence
 
 
-def _mos_characterization_manifest(work_dir: Path) -> tuple[list[dict[str, Any]], str]:
+def _spectre_artifact_manifest(work_dir: Path) -> tuple[list[dict[str, Any]], str]:
     entries: list[dict[str, Any]] = []
     for path in sorted(item for item in work_dir.rglob("*") if item.is_file()):
         relative = path.relative_to(work_dir).as_posix()
@@ -12194,7 +12248,7 @@ def _mos_characterization_manifest(work_dir: Path) -> tuple[list[dict[str, Any]]
             }
         )
     if not entries:
-        raise RuntimeError("MOS characterization produced no simulator artifacts")
+        raise RuntimeError("Spectre run produced no simulator artifacts")
     canonical = json.dumps(
         entries,
         sort_keys=True,
@@ -12504,7 +12558,7 @@ def characterize_mos_devices(payload: dict[str, Any]) -> dict[str, Any]:
             profile,
             points,
         )
-        manifest, manifest_sha256 = _mos_characterization_manifest(work_dir)
+        manifest, manifest_sha256 = _spectre_artifact_manifest(work_dir)
         tool_version = str(result.tool_version or "").strip()
         if not tool_version:
             tool_version = _spectre_version_from_log(work_dir)
@@ -12559,6 +12613,477 @@ def characterize_mos_devices(payload: dict[str, Any]) -> dict[str, Any]:
                 "oa_write_performed": False,
             },
         }
+
+
+def _preview_node_names(
+    spec: NetlistPreviewSpec,
+    variant: NetlistPreviewVariant,
+) -> set[str]:
+    nodes: set[str] = set()
+    for source in [*spec.voltage_sources, *variant.voltage_sources]:
+        nodes.update((source.positive, source.negative))
+    for resistor in [*spec.resistors, *variant.resistors]:
+        nodes.update((resistor.positive, resistor.negative))
+    for capacitor in [*spec.capacitors, *variant.capacitors]:
+        nodes.update((capacitor.positive, capacitor.negative))
+    for mosfet in variant.mosfets:
+        nodes.update((mosfet.drain, mosfet.gate, mosfet.source, mosfet.bulk))
+    return nodes
+
+
+def _preview_dc_metrics(
+    spec: NetlistPreviewSpec,
+    variant: NetlistPreviewVariant,
+    data: dict[str, Any],
+) -> tuple[dict[str, float], dict[str, Any]]:
+    nodes = sorted(_preview_node_names(spec, variant))
+    node_values = {
+        node: 0.0 if node == "0" else _scalar(data, f"dc_{node}")
+        for node in nodes
+    }
+    input_source = next(
+        source for source in spec.voltage_sources if source.name == spec.input_source
+    )
+    input_dc_v = (
+        node_values[input_source.positive] - node_values[input_source.negative]
+    )
+    output_dc_v = (
+        node_values[variant.output_positive]
+        - node_values[variant.output_negative]
+    )
+    all_sources = [*spec.voltage_sources, *variant.voltage_sources]
+    source_values: dict[str, dict[str, float]] = {}
+    for source in all_sources:
+        actual_voltage = node_values[source.positive] - node_values[source.negative]
+        if not math.isclose(
+            actual_voltage,
+            source.dc_v,
+            rel_tol=1e-7,
+            abs_tol=1e-8,
+        ):
+            raise RuntimeError(
+                f"preview source {source.name} DC voltage mismatch: "
+                f"declared={source.dc_v}, actual={actual_voltage}"
+            )
+        source_values[source.name] = {
+            "voltage_v": actual_voltage,
+            "positive_terminal_current_a": _scalar(data, f"dc_{source.name}:p"),
+        }
+
+    mos_values: dict[str, dict[str, float | str]] = {}
+    margins: list[float] = []
+    intrinsic_gains: list[float] = []
+    metrics: dict[str, float] = {
+        "input_dc_v": input_dc_v,
+        "output_dc_v": output_dc_v,
+    }
+    for mosfet in variant.mosfets:
+        ids_a = _operating_point_scalar(data, mosfet.name, "ids", "id")
+        vgs_v = _operating_point_scalar(data, mosfet.name, "vgs")
+        vds_v = _operating_point_scalar(data, mosfet.name, "vds")
+        vbs_v = _operating_point_scalar(data, mosfet.name, "vbs")
+        vdsat_v = _operating_point_scalar(data, mosfet.name, "vdsat")
+        gm_s = _operating_point_scalar(data, mosfet.name, "gm")
+        gds_s = _operating_point_scalar(data, mosfet.name, "gds")
+        gmb_s = _operating_point_scalar(data, mosfet.name, "gmb", "gmbs")
+        margin_v = abs(vds_v) - abs(vdsat_v)
+        intrinsic_gain = abs(gm_s) / max(abs(gds_s), 1e-30)
+        prefix = mosfet.name
+        device_metrics = {
+            f"{prefix}.drain_current_ua": abs(ids_a) * 1e6,
+            f"{prefix}.vgs_v": vgs_v,
+            f"{prefix}.vds_v": vds_v,
+            f"{prefix}.vbs_v": vbs_v,
+            f"{prefix}.vdsat_v": vdsat_v,
+            f"{prefix}.saturation_margin_v": margin_v,
+            f"{prefix}.gm_us": abs(gm_s) * 1e6,
+            f"{prefix}.gds_us": abs(gds_s) * 1e6,
+            f"{prefix}.gmb_us": abs(gmb_s) * 1e6,
+            f"{prefix}.intrinsic_gain_v_per_v": intrinsic_gain,
+        }
+        metrics.update(device_metrics)
+        margins.append(margin_v)
+        intrinsic_gains.append(intrinsic_gain)
+        mos_values[mosfet.name] = {
+            "polarity": mosfet.polarity,
+            "ids_a": ids_a,
+            "vgs_v": vgs_v,
+            "vds_v": vds_v,
+            "vbs_v": vbs_v,
+            "vdsat_v": vdsat_v,
+            "gm_s": gm_s,
+            "gds_s": gds_s,
+            "gmb_s": gmb_s,
+            "saturation_margin_v": margin_v,
+        }
+
+    supply_power_w = 0.0
+    supply_current_a = 0.0
+    for source_name in spec.supply_sources:
+        values = source_values[source_name]
+        supply_power_w += -values["voltage_v"] * values[
+            "positive_terminal_current_a"
+        ]
+        supply_current_a += -values["positive_terminal_current_a"]
+    metrics.update(
+        {
+            "minimum_saturation_margin_v": min(margins),
+            "all_mos_saturation_region": float(
+                all(
+                    abs(float(values["ids_a"])) > 0.0
+                    and float(values["saturation_margin_v"]) >= 0.0
+                    for values in mos_values.values()
+                )
+            ),
+            "minimum_intrinsic_gain_v_per_v": min(intrinsic_gains),
+            "supply_current_ua": supply_current_a * 1e6,
+            "dc_supply_power_uw": supply_power_w * 1e6,
+            "gate_area_proxy_um2": sum(
+                mosfet.width_um
+                * mosfet.length_um
+                * mosfet.fingers
+                * mosfet.multiplicity
+                for mosfet in variant.mosfets
+            ),
+        }
+    )
+    if any(not math.isfinite(value) for value in metrics.values()):
+        raise RuntimeError(f"preview variant {variant.id} produced non-finite DC metrics")
+    return metrics, {
+        "node_values_v": node_values,
+        "source_values": source_values,
+        "mos_operating_points": mos_values,
+        "region_rule": "saturation when |VDS| >= |VDSAT| and |IDS| > 0",
+        "source_voltage_consistency": "matched",
+    }
+
+
+def _preview_ac_metrics(
+    spec: NetlistPreviewSpec,
+    variant: NetlistPreviewVariant,
+    data: dict[str, Any],
+    ac_sweep: dict[str, Any],
+) -> tuple[dict[str, float], dict[str, Any]]:
+    frequency_hz = _signal(data, "ac_freq")
+
+    def complex_node(node: str) -> list[complex]:
+        if node == "0":
+            return [0j] * len(frequency_hz)
+        return _complex_signal(data, f"ac_{node}")
+
+    input_source = next(
+        source for source in spec.voltage_sources if source.name == spec.input_source
+    )
+    input_v = [
+        positive - negative
+        for positive, negative in zip(
+            complex_node(input_source.positive),
+            complex_node(input_source.negative),
+            strict=True,
+        )
+    ]
+    output_v = [
+        positive - negative
+        for positive, negative in zip(
+            complex_node(variant.output_positive),
+            complex_node(variant.output_negative),
+            strict=True,
+        )
+    ]
+    metrics, diagnostics = extract_common_source_ac_metrics(
+        frequency_hz,
+        input_v,
+        output_v,
+        reference_points=int(ac_sweep.get("reference_points", 5)),
+        max_reference_variation_db=float(
+            ac_sweep.get("max_reference_variation_db", 0.5)
+        ),
+    )
+    diagnostics.update(
+        {
+            "input_nodes": [input_source.positive, input_source.negative],
+            "output_nodes": [variant.output_positive, variant.output_negative],
+            "transfer": "declared differential output / shared input source voltage",
+            "frequency_hz": [float(value) for value in frequency_hz],
+        }
+    )
+    return metrics, diagnostics
+
+
+def _preview_comparisons(
+    spec: NetlistPreviewSpec,
+    metrics_by_variant: dict[str, dict[str, float]],
+) -> tuple[dict[str, float], dict[str, str], dict[str, Any]]:
+    baseline_id = spec.variants[0].id
+    baseline = metrics_by_variant[baseline_id]
+    flat_metrics: dict[str, float] = {}
+    flat_sources: dict[str, str] = {}
+    comparisons: dict[str, Any] = {}
+
+    def metric_name(*parts: str) -> str:
+        return "__".join(part.replace(".", "__") for part in parts)
+
+    for variant in spec.variants:
+        for name, value in metrics_by_variant[variant.id].items():
+            flattened = metric_name(variant.id, name)
+            flat_metrics[flattened] = value
+            flat_sources[flattened] = (
+                "software_inference"
+                if name in {"all_mos_saturation_region", "gate_area_proxy_um2"}
+                else "eda_result"
+            )
+        if variant.id == baseline_id:
+            continue
+        rows: dict[str, Any] = {}
+        for name in sorted(set(baseline) & set(metrics_by_variant[variant.id])):
+            baseline_value = baseline[name]
+            candidate_value = metrics_by_variant[variant.id][name]
+            delta = candidate_value - baseline_value
+            delta_name = metric_name(
+                variant.id,
+                "delta_vs",
+                baseline_id,
+                name,
+            )
+            flat_metrics[delta_name] = delta
+            flat_sources[delta_name] = "software_inference"
+            row: dict[str, float] = {
+                "baseline": baseline_value,
+                "candidate": candidate_value,
+                "delta": delta,
+            }
+            if abs(baseline_value) > 1e-30:
+                ratio = candidate_value / baseline_value
+                ratio_name = metric_name(
+                    variant.id,
+                    "ratio_vs",
+                    baseline_id,
+                    name,
+                )
+                flat_metrics[ratio_name] = ratio
+                flat_sources[ratio_name] = "software_inference"
+                row["ratio"] = ratio
+            rows[name] = row
+        comparisons[variant.id] = rows
+    return flat_metrics, flat_sources, {
+        "source": "software_inference",
+        "baseline_variant": baseline_id,
+        "comparisons": comparisons,
+    }
+
+
+def simulate_netlist_preview(payload: dict[str, Any]) -> dict[str, Any]:
+    """Run a validated standalone Spectre topology bundle without OA or si."""
+
+    from virtuoso_bridge.spectre.runner import SpectreSimulator
+    from virtuoso_bridge.transport.tunnel import SSHClient
+
+    profile = payload["profile"]
+    spec = NetlistPreviewSpec.model_validate(payload.get("netlist_preview"))
+    analysis = str(payload.get("analysis", ""))
+    if analysis not in {"dc", "ac"}:
+        raise RuntimeError("netlist preview supports only dc or ac analysis")
+    ac_sweep = payload.get("ac_sweep")
+    if analysis == "ac" and not isinstance(ac_sweep, dict):
+        raise RuntimeError("netlist preview AC simulation requires ac_sweep")
+    timeout = int(payload.get("timeout_seconds", 600))
+    run_root = str(profile["remote_run_root"]).rstrip("/")
+    if not run_root.startswith("/data/xum/"):
+        raise RuntimeError("netlist preview remote root must stay under /data/xum")
+    task_slug = re.sub(
+        r"[^A-Za-z0-9_.-]",
+        "_",
+        str(payload.get("task_id", "task")),
+    )[:48]
+    remote_run_root = (
+        f"{run_root}/vda_netlist_preview_{task_slug}_{uuid.uuid4().hex[:12]}"
+    )
+    if not SSHClient.is_running():
+        raise RuntimeError("no default virtuoso-bridge connection is running")
+    ssh_client = _register_worker_resource(SSHClient.from_env(keep_remote_files=True))
+    runner = ssh_client.ssh_runner
+    runner._persistent_shell_enabled = False
+    remote_root_q = shlex.quote(remote_run_root)
+    _ssh_command_result(
+        runner,
+        f"test ! -e {remote_root_q}",
+        "netlist preview non-overwrite preflight",
+    )
+
+    variant_results: dict[str, Any] = {}
+    metrics_by_variant: dict[str, dict[str, float]] = {}
+    tool_versions: set[str] = set()
+    warnings: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="vda_netlist_preview_") as temp_dir:
+        work_root = Path(temp_dir)
+        for variant in spec.variants:
+            work_dir = work_root / variant.id
+            work_dir.mkdir()
+            remote_variant_root = f"{remote_run_root}/{variant.id}"
+            deck_path = work_dir / f"preview_{variant.id}.scs"
+            deck = render_spectre_preview_deck(
+                spec,
+                variant.id,
+                profile,
+                analysis=analysis,
+                ac_sweep=ac_sweep if isinstance(ac_sweep, dict) else None,
+            )
+            deck_path.write_text(deck, encoding="utf-8", newline="\n")
+            spectre_cmd, process_lifecycle = _install_remote_spectre_guard(
+                ssh_client,
+                work_dir,
+                remote_variant_root,
+                timeout=timeout,
+            )
+            simulator = _create_spectre_simulator(
+                SpectreSimulator,
+                ssh_client,
+                spectre_cmd=spectre_cmd,
+                timeout=timeout,
+                work_dir=work_dir,
+                keep_remote_files=True,
+                remote_run_dir=remote_variant_root,
+            )
+            result = simulator.run_simulation(deck_path, {})
+            if not result.ok:
+                detail = _spectre_failure_detail(result, work_dir)
+                raise RuntimeError(
+                    f"Spectre preview variant {variant.id} failed; retained remote "
+                    f"root {remote_variant_root}: {detail}"
+                )
+            tool_version = str(result.tool_version or "").strip()
+            if not tool_version:
+                tool_version = _spectre_version_from_log(work_dir)
+            tool_versions.add(tool_version)
+            warnings.extend(
+                f"{variant.id}: {warning}" for warning in result.warnings[:20]
+            )
+            dc_data, dc_files = _common_source_dc_data_from_result(result)
+            metrics, operating_point = _preview_dc_metrics(
+                spec,
+                variant,
+                dc_data,
+            )
+            analysis_issues: list[str] = []
+            analysis_warnings: list[str] = []
+            ac_diagnostics: dict[str, Any] | None = None
+            analysis_complete = True
+            if analysis == "ac":
+                assert isinstance(ac_sweep, dict)
+                ac_metrics, ac_diagnostics = _preview_ac_metrics(
+                    spec,
+                    variant,
+                    result.data,
+                    ac_sweep,
+                )
+                ac_diagnostics["raw_files"] = _spectre_ac_file_evidence_from_result(
+                    result
+                )
+                metrics.update(ac_metrics)
+                analysis_issues.extend(
+                    str(value) for value in ac_diagnostics.get("issues", [])
+                )
+                analysis_warnings.extend(
+                    str(value) for value in ac_diagnostics.get("warnings", [])
+                )
+                analysis_complete = bool(
+                    ac_diagnostics.get("analysis_complete", False)
+                ) and not analysis_issues
+            manifest, manifest_sha256 = _spectre_artifact_manifest(work_dir)
+            remote_children = [
+                line.strip()
+                for line in _ssh_command_result(
+                    runner,
+                    f"find {shlex.quote(remote_variant_root)} -mindepth 1 "
+                    "-maxdepth 1 -type d -print",
+                    f"preview variant {variant.id} remote artifact discovery",
+                ).splitlines()
+                if line.strip()
+            ]
+            if len(remote_children) != 1:
+                raise RuntimeError(
+                    f"preview variant {variant.id} expected exactly one remote "
+                    f"simulator directory; found {remote_children}"
+                )
+            metrics_by_variant[variant.id] = metrics
+            variant_results[variant.id] = {
+                "analysis_complete": analysis_complete,
+                "analysis_issues": analysis_issues,
+                "analysis_warnings": analysis_warnings,
+                "metrics": metrics,
+                "operating_point": {
+                    "source": "eda_result",
+                    "raw_files": dc_files,
+                    **operating_point,
+                },
+                "ac_response": (
+                    {"source": "eda_result", **ac_diagnostics}
+                    if ac_diagnostics is not None
+                    else {"status": "not_requested"}
+                ),
+                "deck_sha256": hashlib.sha256(deck.encode("utf-8")).hexdigest(),
+                "artifact_manifest": manifest,
+                "manifest_sha256": manifest_sha256,
+                "remote_run_root": remote_variant_root,
+                "remote_simulation_dir": remote_children[0],
+                "process_lifecycle": process_lifecycle,
+            }
+
+    if len(tool_versions) != 1:
+        raise RuntimeError(
+            f"preview variants did not use one Spectre version: {sorted(tool_versions)}"
+        )
+    metrics, metric_sources, comparison = _preview_comparisons(
+        spec,
+        metrics_by_variant,
+    )
+    analysis_issues = [
+        f"{variant_id}: {issue}"
+        for variant_id, data in variant_results.items()
+        for issue in data["analysis_issues"]
+    ]
+    analysis_warnings = [
+        f"{variant_id}: {warning}"
+        for variant_id, data in variant_results.items()
+        for warning in data["analysis_warnings"]
+    ]
+    return {
+        "parameters": {},
+        "metrics": metrics,
+        "metric_sources": metric_sources,
+        "analysis_complete": all(
+            data["analysis_complete"] for data in variant_results.values()
+        ),
+        "analysis_issues": analysis_issues,
+        "analysis_warnings": analysis_warnings,
+        "tool_version": next(iter(tool_versions)),
+        "warnings": warnings,
+        "evidence": {
+            "source": "eda_result",
+            "preview_spec_sha256": spec.canonical_sha256(),
+            "preview_spec_source": "user_input",
+            "source_bindings": dict(spec.source_bindings),
+            "source_bindings_evidence_source": "user_input",
+            "analysis": analysis,
+            "analysis_source": str(payload.get("analysis_source", "user_input")),
+            "pdk_profile": str(profile["name"]),
+            "process_corner": str(profile["model_section"]),
+            "remote_run_root": remote_run_root,
+            "non_overwrite_preflight": "absent",
+            "variants": variant_results,
+            "comparison": comparison,
+            "netlist_source": "validated_structured_preview_spec",
+            "oa_access_performed": False,
+            "oa_write_performed": False,
+            "si_netlisting_performed": False,
+            "maestro_access_performed": False,
+            "remote_compute_performed": True,
+            "completion_scope": (
+                "preliminary topology screening only; OA-to-si-to-Spectre or ADE "
+                "validation remains required"
+            ),
+        },
+    }
 
 
 def _spectre_ac_file_evidence_from_result(result: Any) -> dict[str, Any]:
@@ -15867,7 +16392,9 @@ def simulate_differential_pair(
 _ACTIONS = {
     "audit_resources": audit_resources,
     "probe": probe,
+    "probe_spectre_environment": probe_spectre_environment,
     "characterize_mos_devices": characterize_mos_devices,
+    "simulate_netlist_preview": simulate_netlist_preview,
     "prepare_maestro": prepare_maestro,
     "capture_focused_maestro": capture_focused_maestro,
     "run_background_maestro": run_background_maestro,

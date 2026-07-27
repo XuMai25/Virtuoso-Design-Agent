@@ -3322,9 +3322,15 @@ class TaskExecutor:
             )
 
         try:
-            self._action(
-                "bridge.probe", lambda: self.adapter.probe(task.pdk_profile)
-            )
+            if task.circuit is CircuitKind.NETLIST_PREVIEW:
+                self._action(
+                    "bridge.spectre.probe",
+                    lambda: self.adapter.probe_simulator(task.pdk_profile),
+                )
+            else:
+                self._action(
+                    "bridge.probe", lambda: self.adapter.probe(task.pdk_profile)
+                )
             operation = task.operation
 
             if operation is Operation.DEVICE_CHARACTERIZE:
@@ -4576,10 +4582,11 @@ class TaskExecutor:
                     "Bridge readback until an ADE run supplies EDA results"
                 )
             elif operation is Operation.SIMULATION_RUN:
-                self._action(
-                    "schematic.inspect.before",
-                    lambda: self.adapter.inspect_schematic(task),
-                )
+                if task.circuit is not CircuitKind.NETLIST_PREVIEW:
+                    self._action(
+                        "schematic.inspect.before",
+                        lambda: self.adapter.inspect_schematic(task),
+                    )
                 candidates = self._run_candidates(task)
                 status = self._note_candidate_failures(candidates, status, notes)
                 if candidates:
@@ -4611,6 +4618,17 @@ class TaskExecutor:
                             notes.append(
                                 "simulation completed but one or more constraints failed"
                             )
+                if task.circuit is CircuitKind.NETLIST_PREVIEW:
+                    notes.append(
+                        "standalone Spectre preview used the declared structured "
+                        "netlist directly; no OA, si, Maestro, or schematic state was "
+                        "accessed"
+                    )
+                    notes.append(
+                        "raw simulator values are eda_result and A/B comparisons are "
+                        "software_inference; the selected topology still requires "
+                        "OA-to-si-to-Spectre or ADE validation before design closure"
+                    )
             else:
                 if operation is Operation.DESIGN_CLOSE_LOOP and task.create_if_missing:
                     self._action(
