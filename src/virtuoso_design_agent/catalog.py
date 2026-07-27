@@ -121,8 +121,10 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "Spectre results are eda_result, while cross-variant comparison is "
             "software_inference. One nominal TSMC N28 common-source/cascode A/B is "
             "live with complete DC OP, 241-point AC, per-file SHA-256 manifests, and "
-            "zero residual Spectre/si/Maestro processes; absolute values differ from "
-            "OA-to-si, so selected topologies still require same-source or ADE validation"
+            "zero residual Spectre/si/Maestro processes. A hash-bound nine-point "
+            "retrospective calibration retained the OA-to-si winner in a top-three "
+            "shortlist with Spearman rho 0.933; absolute values still differ from "
+            "OA-to-si, so selected topologies require same-source or ADE validation"
         ),
     ),
     CircuitKind.EXISTING_SCHEMATIC: CircuitCapability(

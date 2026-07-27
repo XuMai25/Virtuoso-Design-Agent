@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "id": "common-source-cascode-preview-selection-20260727",
+  "assessment_mode": "retrospective_calibration",
+  "expected_preview_task_id": "common-source-cascode-candidate-preview",
+  "expected_preview_task_sha256": "4492b955673fb387f62d00aefab4d3980e6574d6c11cde0d55f38807f031864a",
+  "expected_preview_run_sha256": "90cdffc52acd339a135c3339e3ef445d71817c7538b042270b59f01117fef17e",
+  "expected_reference_task_id": "common-source-cascode-ac-seeded",
+  "expected_reference_run_sha256": "11aed37b22f1028fc43e43835a6069280b4048ddf4bba32fe3b0617bfb83e060",
+  "expected_analysis": "ac",
+  "expected_pdk_profile": "nics4304_tsmc28",
+  "expected_candidate_generator": "vda.cascode-seed",
+  "expected_candidate_source_id": "common-source-cascode-op-seed-20260726-live",
+  "candidate_source_sha256": "cac79804395d001f4cd2fcdfa0acc4498f5bd10c099888476df6546b7f7e71c4",
+  "reference_candidate_source_binding": "cascode_seed_result_sha256",
+  "constraints": [
+    {
+      "metric": "all_mos_saturation_region",
+      "relation": ">=",
+      "value": 1.0,
+      "expected_evidence_source": "software_inference"
+    },
+    {
+      "metric": "low_frequency_gain_v_per_v",
+      "relation": ">=",
+      "value": 2.0,
+      "expected_evidence_source": "eda_result"
+    },
+    {
+      "metric": "bandwidth_3db_hz",
+      "relation": ">=",
+      "value": 1000000.0,
+      "expected_evidence_source": "eda_result"
+    }
+  ],
+  "objective": {
+    "preview_metric": "gain_bandwidth_product_hz",
+    "reference_metric": "gain_bandwidth_product_hz",
+    "goal": "maximize"
+  },
+  "comparison_metrics": [
+    {
+      "preview_metric": "low_frequency_gain_v_per_v",
+      "reference_metric": "low_frequency_gain_v_per_v"
+    },
+    {
+      "preview_metric": "bandwidth_3db_hz",
+      "reference_metric": "bandwidth_3db_hz"
+    },
+    {
+      "preview_metric": "gain_bandwidth_product_hz",
+      "reference_metric": "gain_bandwidth_product_hz"
+    },
+    {
+      "preview_metric": "dc_supply_power_uw",
+      "reference_metric": "dc_supply_power_uw"
+    }
+  ],
+  "shortlist_size": 3,
+  "minimum_artifact_count_per_variant": 8,
+  "minimum_ac_sample_count": 241,
+  "minimum_feasibility_agreement": 1.0,
+  "minimum_reference_feasible_recall": 1.0,
+  "minimum_spearman_rank_correlation": 0.7,
+  "require_reference_winner_in_shortlist": true,
+  "require_preview_winner_match": false,
+  "evidence_source": "user_input"
+}

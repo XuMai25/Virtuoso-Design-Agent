@@ -2,8 +2,8 @@
 
 ## 结论
 
-状态为 **local candidate-to-structured-preview compilation verified; remote candidate
-execution pending**。
+状态为 **local candidate-to-structured-preview compilation verified; follow-up remote
+candidate execution and reference ranking audit completed**。
 
 本 Gate 把现有原子候选域与轻量 standalone Spectre 预评估接起来，但没有连接 Bridge、
 没有运行远端 Spectre、没有访问或写入 OA。它证明的是任务生成、来源绑定和拒绝边界，
@@ -63,8 +63,9 @@ planner，包含 10 个 variant：一个未改变的 `common_source`，随后是
 - task template：`95122e3289d4549db2d97d8366f31399f7f26dc9a86e3f6a9e9ef4b8fcea017b`
 
 最终计划 token 为 `37cbd9002824f337`。计划披露 10 份 standalone Spectre AC deck 和
-remote compute；任务没有 OA target，`allow_remote_write=false`。本 Gate 未使用该 token
-执行远端计算。
+remote compute；任务没有 OA target，`allow_remote_write=false`。本地编译 Gate 本身未
+使用该 token；随后用户单独批准的远端 Gate 已原样使用该 task/token 完成 10/10 执行，
+详见 [`2026-07-27-preview-candidate-selection-live.md`](2026-07-27-preview-candidate-selection-live.md)。
 
 ## 测试
 
@@ -82,10 +83,11 @@ ID 等拒绝路径。
 
 ## 尚未验证
 
-- 这 10 个编译后 variant 尚未在远端运行；没有新的 `eda_result`。
+- 这 10 个编译后 variant 已在 follow-up 远端 Gate 运行；本记录仍只陈述编译器本地证据，
+  新 `eda_result`、排序和资源审计以独立 live 记录为准。
 - 当前 compiler 不做拓扑综合，也不从任意网表反推结构；新拓扑仍需提供受校验 graph
   template。
 - preview 的绝对指标与 OA→`si` 已知可有超过 20% 的差异，只能作早期筛选。
-- 本 Gate 没有定义跨 candidate 的自动最终选优。下一道远端 Gate 应先核对 10 个 candidate
-  的完整执行、身份/网表绑定和逐点可行性，再将 preview 排序与既有 OA→`si` 九点结果
-  对照；最终胜出结构仍必须进入 OA 同源或人工 ADE 验证。
+- 本 Gate 当时没有定义跨 candidate 的自动最终选优；follow-up 已新增 hash-bound
+  `preview-select`，可做粗约束、top-k 和 OA 参考排序审计。它仍只输出 shortlist，不把
+  preview winner 当作最终设计；胜出结构仍必须进入 OA 同源或人工 ADE 验证。

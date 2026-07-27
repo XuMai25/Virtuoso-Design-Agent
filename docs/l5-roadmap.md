@@ -35,9 +35,14 @@ ID 和顺序把候选 semantic 参数映射到一个 typed graph placeholder。�
 漂移、参数遗漏、固定值漂移、raw CDF 更新、重复目标和含糊的 placeholder objective，
 并把 source/policy/template hash 与 `variant -> candidate ID` 写进输出。既有 9 点真实
 cascode seed 已确定性编译成 1 个固定共源基线 + 9 个共栅候选并通过 plan；本 Gate 没有
-连接 Bridge、运行远端计算或写 OA。下一道远端 Gate 应验证这 10 份 preview 的执行与
-候选身份绑定，并把排序同既有 OA→`si` 九点结果对照；它需要单独披露远端路径和确认，
-不能用本地编译通过代替。
+连接 Bridge、运行远端计算或写 OA。获单独批准后，下一道 Gate 已完成 10/10 份真实
+Spectre preview、逐 deck 重渲染与 manifest/候选身份审计，并用新增 `vda preview-select`
+对照既有 OA→`si` 九点离散域。preview top-3=`009/007/003`，参考 top-3=`009/003/007`，
+Spearman ρ=`0.9333`，两侧 winner 都是 `009`；gain/BW/GBW/power 最大误差分别为
+`4.39%/11.04%/10.13%/19.45%`。因此该同拓扑预筛可把后续 OA 真值计算由 9 点缩到 3 点，
+但 policy 明确标为 `retrospective_calibration`：下一未见拓扑仍需 prospective 验证，不能
+把本次排序或误差门槛直接外推。全过程无 OA target/write，执行后 Spectre/si/Maestro
+均归零，Bridge tunnel 已恢复为停止状态。
 
 PDK 路线默认按晶圆厂 CMOS 工艺推进：当前以 TSMC N28 LVT profile 为缺省；同工艺的 `nch_mac/pch_mac` 通过继承式 `nics4304_tsmc28_svt` 显式选择。NMOS 共源的 LVT/SVT OA/`si`/Spectre round-trip 已 live，PMOS 和其他拓扑仍需独立 Gate。后续优先通过独立 profile 接入 TSMC/SMIC 的实际晶体管 PDK。profile 继承只复用静态工艺配置，不复用性能证据。TSV、hybrid-bonding 等封装/3D PDK 不进入普通电路设计的默认路径；若未来需要，将作为显式选择和独立 Gate，而不是当前 profile 的替代品。
 

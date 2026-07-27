@@ -46,6 +46,10 @@ from .op_relinearization import (
 )
 from .planner import build_plan
 from .preview_compile import build_preview_task_from_candidates
+from .preview_selection import (
+    PreviewSelectionPolicy,
+    validate_preview_selection,
+)
 from .resource_audit import audit_local_resources, load_retention_pins
 from .safety import SafetyViolation
 from .small_signal import SmallSignalNetworkRequest, analyze_small_signal_network
@@ -231,6 +235,24 @@ def _cmd_preview_task_from_candidates(args: argparse.Namespace) -> int:
     args.output.write_text(payload + "\n", encoding="utf-8")
     print(payload)
     return 0
+
+
+def _cmd_preview_select(args: argparse.Namespace) -> int:
+    policy = PreviewSelectionPolicy.model_validate_json(
+        args.policy.read_text(encoding="utf-8")
+    )
+    result = validate_preview_selection(
+        policy,
+        args.preview_task,
+        args.preview_run,
+        args.reference_run,
+    )
+    payload = result.model_dump_json(indent=2)
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(payload + "\n", encoding="utf-8")
+    print(payload)
+    return 0 if result.status is RunStatus.SUCCEEDED else 1
 
 
 def _cmd_theory_request_from_validation(args: argparse.Namespace) -> int:
@@ -665,6 +687,20 @@ def build_parser() -> argparse.ArgumentParser:
     preview_candidate_task.add_argument("task_template", type=Path)
     preview_candidate_task.add_argument("--output", type=Path, required=True)
     preview_candidate_task.set_defaults(handler=_cmd_preview_task_from_candidates)
+
+    preview_select = subparsers.add_parser(
+        "preview-select",
+        help=(
+            "audit a hash-bound Spectre preview, shortlist candidates, and "
+            "compare an exhausted real OA/si reference run"
+        ),
+    )
+    preview_select.add_argument("policy", type=Path)
+    preview_select.add_argument("preview_task", type=Path)
+    preview_select.add_argument("preview_run", type=Path)
+    preview_select.add_argument("reference_run", type=Path)
+    preview_select.add_argument("--output", type=Path)
+    preview_select.set_defaults(handler=_cmd_preview_select)
 
     theory_request = subparsers.add_parser(
         "theory-request-from-validation",

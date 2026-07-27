@@ -290,11 +290,19 @@ OA Gate 之间的通用初筛面；绝对值与 OA→`si` 不等同。
 Spectre/si/Maestro 进程回到零。级联/共源的 gain/BW/GBW 比为
 `1.538/0.489/0.753`，既有 OA→`si` 为 `1.404/0.534/0.750`；方向一致，但绝对值误差
 最高超过 20%。既有 9 点 cascode seed 现已本地编译为 1 个固定共源基线 + 9 个共栅
-candidate variant；下一道远端 Gate 是执行这 10 个网表并把候选身份、可行性和排序同
-既有 OA→`si` 九点结果对照，而不是扩大随机候选数。只有可能改变 objective 的胜出结构
-才值得升级到 OA，且任何最终选中的拓扑仍要进入 OA 同源或人工 ADE 验证。完整证据见
+candidate variant，并已在获批的只读远端 Gate 中完成 10/10。新增 `preview-select` 把
+task/run/reference SHA、typed graph 重渲染 deck、每份 8 项 manifest、241 点 AC、bounded
+process、候选来源和 OA→`si` 穷尽域一起核对；证据漂移硬拒绝，完整证据但筛选效用不足
+返回 `partial`。本次 preview top-3=`009/007/003`，OA→`si` top-3=`009/003/007`，
+Spearman ρ=`0.9333` 且 winner 都是 `009`，证明在这个已知拓扑内可把 9 个 OA 候选压到
+3 个复核。gain/BW/GBW/power 最大误差仍为 `4.39%/11.04%/10.13%/19.45%`；严格把
+preview 的 20 mV 饱和余量当真值还会错误淘汰 OA winner，因此当前粗约束只使用饱和区、
+gain 和 bandwidth。该 policy 是事后校准，下一拓扑不得直接外推。只有可能改变 objective
+的胜出结构才值得升级到 OA，且任何最终选中的拓扑仍要进入 OA 同源或人工 ADE 验证。
+完整证据见
 [`validation/2026-07-27-standalone-netlist-preview-live.md`](validation/2026-07-27-standalone-netlist-preview-live.md)和
-[`validation/2026-07-27-preview-candidate-compiler-local.md`](validation/2026-07-27-preview-candidate-compiler-local.md)。
+[`validation/2026-07-27-preview-candidate-compiler-local.md`](validation/2026-07-27-preview-candidate-compiler-local.md)，九点执行与选择证据见
+[`validation/2026-07-27-preview-candidate-selection-live.md`](validation/2026-07-27-preview-candidate-selection-live.md)。
 
 ## 跨电路 Gate：通用微调事务
 

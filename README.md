@@ -36,7 +36,7 @@ Gate 8 已把 Gate 7D 的真实器件表和 validation hash 编译成六个不�
 - 单独规划或执行：`device.characterize`、`schematic.create`、`schematic.inspect`、`schematic.transform`、`parameters.apply`、`ade.prepare`、`ade.capture`、`ade.corners.apply`、`ade.variables.apply`、`ade.setup.apply`、`ade.run`、`simulation.run`、`design.tune`、`design.close_loop`。`device.characterize` 只有远端 scratch/compute，不接受 OA target；当前 `schematic.transform` 开放共源级源极退化的受控 add/remove、反相器 core→ADE source/load testbench、差分对 core→`MNTAIL/BIAS`、真实尾管差分对的对称源极退化 add/remove，以及无源退化真实尾管差分对的 `RD0/RD1 ↔ MP0/MP1` 电流镜负载可逆变换。预声明通用 delta 还可把既有共源级原位增量变成共栅级，不需要重建整个 cellview；该变体的 OA pin/placement、`si`、DC/AC 和 inverse 已有 live 证据。
 - 每次专用 `schematic.transform` 通过原有模板语义断言后，还会把完整结构回读规范化为通用 topology snapshot，推导只含实例增删、端子重连、master 替换、net/pin 增删的 allowlisted delta，计算前后 SHA-256，并证明自动生成的 inverse patch 精确恢复原结构。参数不混入拓扑指纹，继续由独立 CDF/semantic 回读负责。`existing_schematic` 已真实执行 instance add/remove、terminal reconnect、net add/remove，以及 instance-scoped `replace_master + CDF`：NMOS LVT/SVT round-trip 的 OA master、233 项 CDF、`si` model/W/L、271 点 Spectre AC 和恢复态均已同源验证。逻辑 pin 现与实际 pin-symbol master/坐标/方向绑定，完整实例、pin、label、wire 几何进入独立 placement SHA；`add_pin/remove_pin` 删除完整 terminal/pin figure 层级。保存后审计失败时，worker 只在新鲜回读精确等于预期 topology 时自动 inverse，并已通过真实 PDK callback 故障 Gate；状态未知或存在额外结构漂移时仍拒绝二次写。`vda topology-compile` 可从 operation 文件一并绑定 `master_parameter_migrations`。这仍是受控 contract writer，不是任意远端 OA editor。
 - 用确定性 demo adapter 离线验证闭环、规格判定和参数选择；结果明确标为 `software_inference`。
-- 用 `circuit: netlist_preview` 做不经过 OA/`si`/Maestro 的轻量拓扑预评估。任务只接受受校验的 MOS/R/C/独立电压源结构、共享激励/供电/负载和 DC 或 AC 设置；worker 直接生成 standalone foundry-model Spectre deck，提取每个变体的 DC 工作点、功耗、工作区、gain、−3 dB bandwidth、GBW 和 unity，并给出同条件 A/B 差值。`vda preview-task-from-candidates` 现可把既有原子 `candidate_set` 或 `theory_seed` 按显式候选顺序和 typed field mapping 编译进一个结构占位 variant；未映射参数、固定值漂移、来源/PDK 不匹配、原始 CDF patch 和重复目标都会在 plan 前拒绝，不做隐式排名或截断。原始 Spectre 量是 `eda_result`，跨变体比较及候选到 variant 的绑定是 `software_inference`。2026-07-27 首个 nics4304 live smoke 得到共栅/共源 gain、BW、GBW 比分别为 `1.538/0.489/0.753`，与既有 OA→`si` 的 `1.404/0.534/0.750` 方向一致；但单结构绝对值误差最高超过 20%，所以该路径只用于理论筛选后的快速方向性核对，不创建 cellview，也不替代最终 OA→`si`→Spectre/ADE 同源 Gate。
+- 用 `circuit: netlist_preview` 做不经过 OA/`si`/Maestro 的轻量拓扑预评估。任务只接受受校验的 MOS/R/C/独立电压源结构、共享激励/供电/负载和 DC 或 AC 设置；worker 直接生成 standalone foundry-model Spectre deck，提取每个变体的 DC 工作点、功耗、工作区、gain、−3 dB bandwidth、GBW 和 unity，并给出同条件 A/B 差值。`vda preview-task-from-candidates` 现可把既有原子 `candidate_set` 或 `theory_seed` 按显式候选顺序和 typed field mapping 编译进一个结构占位 variant；未映射参数、固定值漂移、来源/PDK 不匹配、原始 CDF patch 和重复目标都会在 plan 前拒绝，不做隐式排名或截断。`vda preview-select` 再把 policy、编译任务、preview run 和已穷尽的 OA→`si` 参考 run 全部按 SHA-256 绑定，逐 variant 重渲染 deck、核对 manifest/非空 AC/进程 guard/候选身份和证据来源，然后按显式粗约束与 objective 生成 top-k；证据损坏会硬拒绝，排序或 winner-retention 不够只返回 `partial`。原始 Spectre 量是 `eda_result`，跨变体比较、候选映射和筛选判定是 `software_inference`。2026-07-27 九点 live 校准得到 preview top-3=`009/007/003`、OA→`si` top-3=`009/003/007`、Spearman ρ=`0.9333`，两边最优均为 `009`，因此当前同拓扑可把九个 OA 候选压到三个再复核；但 gain/BW/GBW/power 的最大绝对误差仍为 `4.39%/11.04%/10.13%/19.45%`，而且这是已知候选域上的事后校准，所以不创建 cellview、不替代最终 OA→`si`→Spectre/ADE，也不宣称跨拓扑泛化。
 - 用独立本地命令 `vda theory` 对 Gate 6 电流镜负载差分对做理论先导尺寸估算。它不接收一份任意手列的 W 候选，而是遍历声明且有来源绑定的有限 gm/Id 表域，对每个输入管/PMOS 负载/尾管工作点组合用 KCL、小信号和一阶极点方程反解满足 BW/GBW 的最小支路电流与三组 W，再检查增益、余量、功耗、面积和宽度边界。输出包括约束裕量、主导电流下界、寄生渐近上限和局部对数敏感性；只称为 `best_in_declared_discrete_characterization_domain`，`continuous_optimum_claim` 与 `global_optimum_claim` 永远为 false。`vda theory-calibrate` 又能从绑定的真实 Bridge run records 拟合并留一验证 topology-local 增益修正和等效输出电容模型；首个 TSMC N28 六点 Gate 的 gain/BW/GBW 最大留一误差为 `0.083%/0.373%/0.457%`，新鲜只读同点复跑误差为 `0.069%/0.320%/0.390%`。Gate 7B/7C/7D 已分别把 nominal 共源、源极退化共源和五管差分对的 OA/`si` 图及实际 DC 偏置绑定到独立表；任何不同器件签名、几何或 PVT 的推荐仍不能直接写 OA。
 - 用 `vda theory-request-from-validation` 从 passed held-out validation 和 exact characterization run 集派生真实 PDK theory request；用 `vda theory-seed-task` 将理论结果编译为带 hash、量化规则和最优性边界的原子候选；再由正常 `design.tune` executor 用 `eda_result` 判规格和选优。`vda theory-seed-validate` 分开报告 shortlist 可行比例与逐点预测误差，防止“候选里有好点”被包装成“理论数值已准确”。Gate 8 已验证这条交接和中断恢复，但预测精度仍为 partial。
 - 共栅级微调使用更小的 `vda cascode-seed` 分析器：它从 hash-bound 的真实共源 DC OP 估计当前器件阈值/过驱动，按声明的下管饱和余量、共栅管宽比和偏置 offset 生成有限原子 `(Wcas,Lcas,VCAS)` tuple；同一 tuple 集随后原样编译进 DC 和 AC 两个普通任务。首个 live Gate 的 DC/AC 9 点顺序和对应 `si` 网表 9/9 匹配，最终选择仍来自 Spectre。seed 是 `software_inference`，只负责缩小候选域，不会宣称连续或全局最优。
@@ -112,6 +112,22 @@ compile policy 会核对 candidate generator/source ID、可选 PDK、显式 can
 三份文件 hash 以及 `variant -> candidate ID` 都进入任务。编译本身不连接 Bridge，也不
 运行仿真；示例 policy 绑定的是已保留的 `...-live` seed，换用新 seed 时必须显式更新该
 source ID，不能自动接受来源漂移。
+
+preview 运行后可用独立 validator 生成 top-k，并与一个已穷尽的 OA→`si` 参考域校准：
+
+```powershell
+.\.venv\Scripts\vda.exe preview-select `
+  examples\theory\common-source-cascode-preview-selection-policy.json `
+  artifacts\theory\common-source-cascode-preview-task-20260727.json `
+  artifacts\runs\common-source-cascode-candidate-preview\run-20260727T-candidate-preview-live.json `
+  artifacts\runs\common-source-cascode-ac-seeded\run-20260726T-live-real-network.json `
+  --output artifacts\theory\common-source-cascode-preview-selection-20260727.json
+```
+
+该命令只读输入文件并写本地结果，不重跑 EDA。示例 policy 是已知九点域上的
+`retrospective_calibration`；用于新拓扑时应预先固定 policy 并标成
+`prospective_validation`。完整九点结果见
+[selection live Gate](docs/validation/2026-07-27-preview-candidate-selection-live.md)。
 
 共栅级微调先对变换前的共源 OA 做一次只读 DC，再把该 real-Bridge run 的
 SHA-256 写入 policy（模板中的全零 hash 只是故意不可执行的占位符）。以下命令完全
@@ -519,6 +535,7 @@ direct `si`/Spectre 路径还会在每个唯一 `/data/xum/.../vda_<task>_<nonce
 - [2026-07-27 standalone Spectre 轻量拓扑预评估本地 Gate](docs/validation/2026-07-27-standalone-netlist-preview-local.md)
 - [2026-07-27 standalone Spectre 轻量拓扑预评估 live Gate](docs/validation/2026-07-27-standalone-netlist-preview-live.md)
 - [2026-07-27 候选域到 netlist preview 的确定性编译本地 Gate](docs/validation/2026-07-27-preview-candidate-compiler-local.md)
+- [2026-07-27 standalone preview 九点预筛与 OA 参考校准 live Gate](docs/validation/2026-07-27-preview-candidate-selection-live.md)
 - [2026-07-19 共源放大器 Gate 2A DC smoke](docs/validation/2026-07-19-common-source-gate2a-dc-smoke.md)
 - [2026-07-19 显式实例参数能力验证](docs/validation/2026-07-19-explicit-instance-parameters.md)
 - [2026-07-20 源极退化原位变更实现验证](docs/validation/2026-07-20-source-degeneration-in-place.md)

@@ -187,16 +187,33 @@ bindings。一个 semantic 参数可以映射到多个不同器件字段，但�
 标为 `eda_result`。因此 Agent 可以为新拓扑提供一个受校验结构模板和少量候选，而不必
 复制 deck 或 OA 操作；最终胜出结构仍要通过 OA→`si` 或人工 ADE Gate。
 
+`vda preview-select` 是独立的本地后处理 Gate，不修改 task、run record、OA 或远端产物。
+policy 必须绑定编译任务、preview run、参考 OA→`si` run、PDK、candidate generator/source
+和候选源文件 SHA-256，并声明粗约束、objective、top-k 及最低排序/可行性门。validator
+重新从 typed graph 和当前 PDK profile 渲染每份 deck，要求其 SHA 同 run 和 manifest 中
+唯一 `.scs` 项一致；还逐项复核 manifest 聚合 hash、非空 AC sample、bounded process、
+`/data/xum` 路径、无 OA probe、variant→candidate ID、参考域穷尽和参考 winner。hash、
+身份、波形或证据来源漂移属于证据损坏并硬拒绝；完整证据下的低相关性、漏掉真值 winner
+或空 shortlist 属于筛选器失效，结果保留为 `partial`。排序和误差比较是
+`software_inference`，两侧 simulator 标量仍分别是 `eda_result`。结果只称
+`best_in_declared_discrete_domain`，连续和全局最优声明固定为 false。
+
 推荐顺序是：理论/KCL/gm-Id 先缩小结构和参数域，`netlist_preview` 对少量具体候选做
 nonlinear PDK DC/AC 证伪，只有可能胜出的结构才创建/微调 OA 并走 `si` 或 ADE。当前
 共源/共栅级联同条件示例已完成 nics4304 live smoke：两份 241 点 AC、DC OP、逐文件
 SHA-256 manifest 和执行后零 Spectre/si/Maestro 进程均通过。preview 的级联/共源
 gain/BW/GBW 比为 `1.538/0.489/0.753`，既有 OA→`si` 对照为
 `1.404/0.534/0.750`，主要方向一致；但单结构绝对值误差最高超过 20%，因此只证明方向性
-筛选价值，不替代已验证的 OA→`si` 结果。HSPICE 没有加入默认链路：现有 Spectre runner
-的调用复杂度相同，并且与最终 foundry-model 真源一致。完整证据见
+筛选价值，不替代已验证的 OA→`si` 结果。随后同一 9 点 cascode 域全部经过 standalone
+preview：top-3 为 `009/007/003`，参考 OA→`si` top-3 为 `009/003/007`，Spearman
+ρ=`0.9333`，两边 winner 均为 `009`；gain/BW/GBW/power 最大误差为
+`4.39%/11.04%/10.13%/19.45%`。top-3 政策把 OA 复核成本从 9 点降到 3 点，但该政策是在
+已知同域结果上事后校准，下一拓扑必须作为 prospective Gate 重新验证，不能沿用这些误差
+或门槛。HSPICE 没有加入默认链路：现有 Spectre runner 的调用复杂度相同，并且与最终
+foundry-model 真源一致。完整证据见
 [`validation/2026-07-27-standalone-netlist-preview-live.md`](validation/2026-07-27-standalone-netlist-preview-live.md)。候选编译器的本地证据见
-[`validation/2026-07-27-preview-candidate-compiler-local.md`](validation/2026-07-27-preview-candidate-compiler-local.md)。
+[`validation/2026-07-27-preview-candidate-compiler-local.md`](validation/2026-07-27-preview-candidate-compiler-local.md)，九点执行和筛选校准见
+[`validation/2026-07-27-preview-candidate-selection-live.md`](validation/2026-07-27-preview-candidate-selection-live.md)。
 
 ## 理论先导尺寸分析
 

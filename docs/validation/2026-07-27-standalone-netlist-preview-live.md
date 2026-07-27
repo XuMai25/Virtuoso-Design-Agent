@@ -162,6 +162,8 @@ OA 对照误差是 `software_inference`；任务条件、source bindings 与本�
 - 本 Gate 只证明当前 TSMC N28 `top_tt`、两种结构、一个偏置/负载点的轻量 preview。
 - 没有 OA schematic、`si` netlist 或 ADE setup，因此没有同源闭环，也没有 OA 写回授权。
 - 绝对数值与 OA→`si` 存在可见差异；preview 的正式用途是少量候选的快速方向性筛选。
-- 下一个有价值的实现 Gate 是让理论/结构候选自动编译到同一 preview contract，并只把
-  方向稳定或可能改变 objective 的少数候选升级到 OA。若需要更高定量一致性，应显式绑定
-  exact device parameter signature，而不是扩大随机 sweep 或加入 HSPICE 平行链路。
+- 后续已让理论/结构候选自动编译到同一 preview contract，并用 10 份真实 Spectre 结果
+  对照既有 OA→`si` 九点离散域；hash-bound `preview-select` 能把本拓扑 9 点压到 top-3，
+  详见 [`2026-07-27-preview-candidate-selection-live.md`](2026-07-27-preview-candidate-selection-live.md)。
+  若需要更高定量一致性，仍应显式绑定 exact device parameter signature，而不是扩大随机
+  sweep 或加入 HSPICE 平行链路。
