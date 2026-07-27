@@ -91,6 +91,7 @@ class OperatingPointRelinearizationPolicy(_FiniteStrictModel):
     constraints: list[MetricConstraint] = Field(min_length=1, max_length=32)
     objective: Objective
     maximum_candidates: int = Field(default=6, ge=2, le=32)
+    include_measured_anchor: bool = True
     evidence_source: Literal[EvidenceSource.USER_INPUT] = EvidenceSource.USER_INPUT
 
     @model_validator(mode="after")
@@ -685,15 +686,15 @@ def relinearize_operating_point(
     if validation_passed and not feasible_proposals:
         notes.append("validated local model produced no predicted-feasible proposal")
     elif validation_passed:
-        anchor_proposal = next(
-            item for item in proposals if item.previously_evaluated
-        )
-        selected = [anchor_proposal]
-        selected.extend(
+        anchor_proposal = next(item for item in proposals if item.previously_evaluated)
+        selected = [
             item
             for item in proposals
-            if item is not anchor_proposal
-        )
+            if policy.include_measured_anchor or item is not anchor_proposal
+        ]
+        if policy.include_measured_anchor:
+            selected.remove(anchor_proposal)
+            selected.insert(0, anchor_proposal)
         selected = selected[: policy.maximum_candidates]
         policy_sha256 = _canonical_sha256(policy.model_dump(mode="json"))
         candidate_set = AtomicCandidateSet(
@@ -716,8 +717,14 @@ def relinearize_operating_point(
             ],
         )
         notes.append(
-            "candidate set starts with the measured anchor, followed by locally "
-            "ranked proposals; final ranking still belongs to EDA"
+            (
+                "candidate set starts with the measured anchor, followed by locally "
+                "ranked proposals; final ranking still belongs to EDA"
+                if policy.include_measured_anchor
+                else "candidate set excludes every previously measured point and "
+                "contains locally ranked prospective proposals only; final ranking "
+                "still belongs to EDA"
+            )
         )
 
     policy_sha256 = _canonical_sha256(policy.model_dump(mode="json"))

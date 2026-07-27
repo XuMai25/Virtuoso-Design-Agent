@@ -30,6 +30,8 @@ Gate 8 已把 Gate 7D 的真实器件表和 validation hash 编译成六个不�
 
 同日又在新 `vda_cs_cascode_gate_001` 上闭合共源→共栅原位微调。通用 delta 只增加 `MNCAS/NCAS/VCAS/VCAS pin` 并重连 `MN0.D`；真实 pin/placement 指纹、post-save 故障自动 inverse、部分恢复后的端子重建、OA CDF `iPar("simM")` 严格解析都经过独立回读。由普通共源真实 OP 生成的同一组 9 个 `(Wcas,Lcas,VCAS)` tuple 先跑 DC、再逐点跑 AC，对应网表 9/9 匹配且两轮都 9/9 可行。AC 的声明离散域最佳点为 `0.75 µm/0.03 µm/0.545 V`，gain `6.4412 V/V`、BW `3.6127 GHz`、GBW `23.2705 GHz`；exact inverse 后普通共源 netlist hash、17 个 DC 指标及两次 28 项 AC/DC 指标完全一致。当前状态是 **recoverable common-source-to-cascode bounded same-source DC/AC selection live verified at nominal top_tt**，仍不是连续最优或完整质量闭环。详见[共栅与恢复 live Gate](docs/validation/2026-07-26-common-source-cascode-and-topology-recovery-live.md)。
 
+2026-07-28 又在未参与旧 preview 校准的差分对八点域完成首个 prospective shortlist Gate。`vda preview-shortlist` 在读取任何新 OA 真值前固定 policy、完整 reference task hash 和 top-3=`op-local-001/002/003`；`vda preview-shortlist-audit` 只接受冻结之后开始、同任务 token 且完整穷尽的 OA→`si` reference run。八点 preview 与真实功耗排序 1–8 完全一致，Spearman ρ、可行性 agreement 和真值可行点 recall 均为 `1.0`，真实 winner `op-local-001` 被保留并最终写回 OA。中途 candidate 6 下载超时/SSH reset 被记为 `system_event`，独立 OA 回读后从 checkpoint 继续到 8/8。该 Gate 证明的是 **prospectively frozen standalone preview ranking and winner retention for one nominal TSMC N28 differential-pair local domain**；BW/GBW/power 最大绝对误差仍为 `24.10%/27.71%/30.35%`，所以 preview 仍只负责筛选，不能替代 OA 真值。详见[prospective live Gate](docs/validation/2026-07-28-differential-pair-preview-prospective-live.md)。
+
 ## 当前能做什么
 
 - 将任务编译为带副作用标记的稳定执行计划。
@@ -37,6 +39,7 @@ Gate 8 已把 Gate 7D 的真实器件表和 validation hash 编译成六个不�
 - 每次专用 `schematic.transform` 通过原有模板语义断言后，还会把完整结构回读规范化为通用 topology snapshot，推导只含实例增删、端子重连、master 替换、net/pin 增删的 allowlisted delta，计算前后 SHA-256，并证明自动生成的 inverse patch 精确恢复原结构。参数不混入拓扑指纹，继续由独立 CDF/semantic 回读负责。`existing_schematic` 已真实执行 instance add/remove、terminal reconnect、net add/remove，以及 instance-scoped `replace_master + CDF`：NMOS LVT/SVT round-trip 的 OA master、233 项 CDF、`si` model/W/L、271 点 Spectre AC 和恢复态均已同源验证。逻辑 pin 现与实际 pin-symbol master/坐标/方向绑定，完整实例、pin、label、wire 几何进入独立 placement SHA；`add_pin/remove_pin` 删除完整 terminal/pin figure 层级。保存后审计失败时，worker 只在新鲜回读精确等于预期 topology 时自动 inverse，并已通过真实 PDK callback 故障 Gate；状态未知或存在额外结构漂移时仍拒绝二次写。`vda topology-compile` 可从 operation 文件一并绑定 `master_parameter_migrations`。这仍是受控 contract writer，不是任意远端 OA editor。
 - 用确定性 demo adapter 离线验证闭环、规格判定和参数选择；结果明确标为 `software_inference`。
 - 用 `circuit: netlist_preview` 做不经过 OA/`si`/Maestro 的轻量拓扑预评估。任务只接受受校验的 MOS/R/C/独立电压源结构、共享激励/供电/负载和 DC 或 AC 设置；worker 直接生成 standalone foundry-model Spectre deck，提取每个变体的 DC 工作点、功耗、工作区、gain、−3 dB bandwidth、GBW 和 unity，并给出同条件 A/B 差值。`vda preview-task-from-candidates` 现可把既有原子 `candidate_set` 或 `theory_seed` 按显式候选顺序和 typed field mapping 编译进一个结构占位 variant；未映射参数、固定值漂移、来源/PDK 不匹配、原始 CDF patch 和重复目标都会在 plan 前拒绝，不做隐式排名或截断。`vda preview-select` 再把 policy、编译任务、preview run 和已穷尽的 OA→`si` 参考 run 全部按 SHA-256 绑定，逐 variant 重渲染 deck、核对 manifest/非空 AC/进程 guard/候选身份和证据来源，然后按显式粗约束与 objective 生成 top-k；证据损坏会硬拒绝，排序或 winner-retention 不够只返回 `partial`。原始 Spectre 量是 `eda_result`，跨变体比较、候选映射和筛选判定是 `software_inference`。2026-07-27 九点 live 校准得到 preview top-3=`009/007/003`、OA→`si` top-3=`009/003/007`、Spearman ρ=`0.9333`，两边最优均为 `009`，因此当前同拓扑可把九个 OA 候选压到三个再复核；但 gain/BW/GBW/power 的最大绝对误差仍为 `4.39%/11.04%/10.13%/19.45%`，而且这是已知候选域上的事后校准，所以不创建 cellview、不替代最终 OA→`si`→Spectre/ADE，也不宣称跨拓扑泛化。
+- 对未见候选域使用两阶段 prospective 契约：`vda preview-shortlist` 只读 preview task/run 和预先写好的完整 OA reference task，在没有 reference run 的情况下冻结 policy hash、reference task hash、时间戳和 top-k；该冻结结果可立即由 `vda oa-task-from-preview-shortlist` 编译成普通 OA 任务，但仍需重新 plan 和单独授权。完整真值域运行结束后，`vda preview-shortlist-audit` 才核对冻结内容、执行先后、reference task/token、完整域、winner retention、可行性和排序。冻结后改 shortlist、换 reference task、使用冻结前已开始的真值 run 或未穷尽域都会拒绝。2026-07-28 的差分对八点 live Gate 得到 ρ=`1.0` 并保留真实 winner；绝对值仍有最高 `30.35%` 系统偏差，因此能力边界是 prospective 排名/预筛，不是数值替代或跨 PVT/任意拓扑保证。
 - 用独立本地命令 `vda theory` 对 Gate 6 电流镜负载差分对做理论先导尺寸估算。它不接收一份任意手列的 W 候选，而是遍历声明且有来源绑定的有限 gm/Id 表域，对每个输入管/PMOS 负载/尾管工作点组合用 KCL、小信号和一阶极点方程反解满足 BW/GBW 的最小支路电流与三组 W，再检查增益、余量、功耗、面积和宽度边界。输出包括约束裕量、主导电流下界、寄生渐近上限和局部对数敏感性；只称为 `best_in_declared_discrete_characterization_domain`，`continuous_optimum_claim` 与 `global_optimum_claim` 永远为 false。`vda theory-calibrate` 又能从绑定的真实 Bridge run records 拟合并留一验证 topology-local 增益修正和等效输出电容模型；首个 TSMC N28 六点 Gate 的 gain/BW/GBW 最大留一误差为 `0.083%/0.373%/0.457%`，新鲜只读同点复跑误差为 `0.069%/0.320%/0.390%`。Gate 7B/7C/7D 已分别把 nominal 共源、源极退化共源和五管差分对的 OA/`si` 图及实际 DC 偏置绑定到独立表；任何不同器件签名、几何或 PVT 的推荐仍不能直接写 OA。
 - 用 `vda theory-request-from-validation` 从 passed held-out validation 和 exact characterization run 集派生真实 PDK theory request；用 `vda theory-seed-task` 将理论结果编译为带 hash、量化规则和最优性边界的原子候选；再由正常 `design.tune` executor 用 `eda_result` 判规格和选优。`vda theory-seed-validate` 分开报告 shortlist 可行比例与逐点预测误差，防止“候选里有好点”被包装成“理论数值已准确”。Gate 8 已验证这条交接和中断恢复，但预测精度仍为 partial。
 - 共栅级微调使用更小的 `vda cascode-seed` 分析器：它从 hash-bound 的真实共源 DC OP 估计当前器件阈值/过驱动，按声明的下管饱和余量、共栅管宽比和偏置 offset 生成有限原子 `(Wcas,Lcas,VCAS)` tuple；同一 tuple 集随后原样编译进 DC 和 AC 两个普通任务。首个 live Gate 的 DC/AC 9 点顺序和对应 `si` 网表 9/9 匹配，最终选择仍来自 Spectre。seed 是 `software_inference`，只负责缩小候选域，不会宣称连续或全局最优。
@@ -147,7 +150,36 @@ preview 运行后可用独立 validator 生成 top-k，并与一个已穷尽的 
 `prospective_validation`。完整九点结果见
 [selection live Gate](docs/validation/2026-07-27-preview-candidate-selection-live.md)。
 
-筛选 Gate 通过后，可把 top-k 按原排名确定性编译回普通 OA `candidate_set` 任务：
+未见候选域不能先读取 OA reference run 再生成 shortlist。两阶段命令先冻结名单，之后
+才允许用完整真值域审计：
+
+```powershell
+.\.venv\Scripts\vda.exe preview-shortlist `
+  examples\theory\differential-pair-preview-prospective-policy.json `
+  artifacts\theory\differential-pair-preview-prospective-task.json `
+  artifacts\runs\differential-pair-preview-prospective\preview-live-20260728.json `
+  artifacts\relinearization\differential-pair-preview-prospective-oa-task.json `
+  --output artifacts\theory\differential-pair-preview-prospective-shortlist-20260728.json
+
+.\.venv\Scripts\vda.exe preview-shortlist-audit `
+  examples\theory\differential-pair-preview-prospective-policy.json `
+  artifacts\theory\differential-pair-preview-prospective-shortlist-20260728.json `
+  artifacts\theory\differential-pair-preview-prospective-task.json `
+  artifacts\runs\differential-pair-preview-prospective\preview-live-20260728.json `
+  artifacts\relinearization\differential-pair-preview-prospective-oa-task.json `
+  artifacts\runs\differential-pair-preview-prospective-oa-reference\reference-live-20260728-resume1.json `
+  --output artifacts\theory\differential-pair-preview-prospective-audit-20260728.json
+```
+
+第一条命令要求 policy 已绑定未来完整 OA task 的 SHA-256，但参数中不存在 reference run，
+所以无法在看见真值后修改 top-k。第二条命令要求 reference run 的 `started_at` 晚于
+`frozen_at`，并且 task hash、plan token、候选域和执行完成度都匹配。两条命令都只读
+证据并写本地 JSON，不连接 Bridge、不写 OA；真正 preview 和 OA reference 的执行仍分别
+需要各自 plan token 与授权。差分对实测见
+[prospective live Gate](docs/validation/2026-07-28-differential-pair-preview-prospective-live.md)。
+
+筛选 Gate 通过后，可把 retrospective selection 或已冻结的 prospective shortlist 按原
+排名确定性编译回普通 OA `candidate_set` 任务：
 
 ```powershell
 .\.venv\Scripts\vda.exe oa-task-from-preview-shortlist `
@@ -575,6 +607,7 @@ direct `si`/Spectre 路径还会在每个唯一 `/data/xum/.../vda_<task>_<nonce
 - [2026-07-27 候选域到 netlist preview 的确定性编译本地 Gate](docs/validation/2026-07-27-preview-candidate-compiler-local.md)
 - [2026-07-27 standalone preview 九点预筛与 OA 参考校准 live Gate](docs/validation/2026-07-27-preview-candidate-selection-live.md)
 - [2026-07-27 preview shortlist 到 OA 同源复核与耗时 live Gate](docs/validation/2026-07-27-preview-shortlist-oa-handoff-live.md)
+- [2026-07-28 差分对未见候选域 prospective preview shortlist live Gate](docs/validation/2026-07-28-differential-pair-preview-prospective-live.md)
 - [2026-07-19 共源放大器 Gate 2A DC smoke](docs/validation/2026-07-19-common-source-gate2a-dc-smoke.md)
 - [2026-07-19 显式实例参数能力验证](docs/validation/2026-07-19-explicit-instance-parameters.md)
 - [2026-07-20 源极退化原位变更实现验证](docs/validation/2026-07-20-source-degeneration-in-place.md)

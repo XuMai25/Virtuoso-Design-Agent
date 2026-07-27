@@ -348,6 +348,36 @@ def test_heldout_validated_local_model_emits_hash_bound_atomic_task(
         build_task_from_relinearization(result_path, incomplete_path)
 
 
+def test_relinearization_can_emit_prospective_candidates_without_measured_anchor(
+    tmp_path: Path,
+) -> None:
+    source_run = _write_source_run(tmp_path)
+    policy = _policy(source_run).model_copy(
+        update={"include_measured_anchor": False}
+    )
+
+    result = relinearize_operating_point(policy, source_run)
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert result.candidate_set is not None
+    assert len(result.candidate_set.candidates) == policy.maximum_candidates
+    anchor_parameters = {"device_width_um": 1.0, "bias_v": 0.30}
+    assert all(
+        candidate.parameters != anchor_parameters
+        for candidate in result.candidate_set.candidates
+    )
+    selected_signatures = {
+        tuple(sorted(candidate.parameters.items()))
+        for candidate in result.candidate_set.candidates
+    }
+    assert all(
+        not proposal.previously_evaluated
+        for proposal in result.proposals
+        if tuple(sorted(proposal.parameters.items())) in selected_signatures
+    )
+    assert any("excludes every previously measured point" in note for note in result.notes)
+
+
 def test_holdout_failure_is_partial_and_cannot_compile_a_task(tmp_path: Path) -> None:
     source_run = _write_source_run(tmp_path, holdout_gain_offset=10.0)
     result = relinearize_operating_point(_policy(source_run), source_run)

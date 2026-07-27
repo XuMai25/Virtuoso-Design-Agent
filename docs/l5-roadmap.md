@@ -57,6 +57,27 @@ OA 写入前就拒绝此类拓扑漂移；拓扑修复仍是独立显式 operati
 该 Gate 仍是 retrospective known-domain replay，下一未见拓扑的 shortlist utility 必须
 prospectively 预注册并验证。
 
+2026-07-28 已完成这项 prospective Gate。新增 `vda preview-shortlist` 在接口层不接受
+reference run，只用预注册 policy、standalone preview 和未来完整 OA task 冻结 top-3、
+`frozen_at` 及全部 hash；`vda preview-shortlist-audit` 再要求真值 run 晚于冻结、task/token/
+完整候选域一致。差分对八个新 tuple 与历史建模点零重合，preview 后先冻结
+`op-local-001/002/003`，随后才在既有 `vda_diffpair_active_gate6_001` 完成 8/8
+OA→`si`→Spectre DC/差模 AC/共模 AC。preview 与真值的功耗排名 1–8 完全一致，ρ、可行性
+agreement、真值可行点 recall 均为 `1.0`，真实 winner 001 被保留并写回。候选 6 的下载
+timeout/SSH reset 由 checkpoint 和独立 OA 回读恢复；最终 Spectre/si/Maestro 进程归零。
+状态升级为 **prospectively frozen standalone preview ranking and winner retention verified for
+one nominal TSMC N28 differential-pair local domain**。gain/BW/GBW/power 最大误差仍为
+`3.05%/24.10%/27.71%/30.35%`，不能把 preview 数值用于最终 closure。冻结 top-3 已编译
+为正常 OA task，但本轮没有重复执行；约 `354.176 s` 的两级时间是从完整 run 的前三点
+动作重建的估算，不是独立三点实测。
+
+下一步不再为这个已知八点域追加随机点。更有产品价值的 Gate 是把“理论/局部模型生成候选
+→ standalone preview → 冻结 shortlist → 获授权后只跑 shortlist OA → 最终质量复核”收敛
+成一个可中断、每阶段仍可单独调用的编排流程，并在 active-load + source-degeneration 这类
+已有 topology-delta、但 preview 尚未校准的结构上默认只跑 shortlist。完整域只作为周期性
+审计或 near-boundary 复核；当粗约束靠近绝对误差带时，应使用显式 guard band 或升级到 OA，
+不能靠放宽误差门维持筛选结论。PVT 继续可选，不默认附加。
+
 PDK 路线默认按晶圆厂 CMOS 工艺推进：当前以 TSMC N28 LVT profile 为缺省；同工艺的 `nch_mac/pch_mac` 通过继承式 `nics4304_tsmc28_svt` 显式选择。NMOS 共源的 LVT/SVT OA/`si`/Spectre round-trip 已 live，PMOS 和其他拓扑仍需独立 Gate。后续优先通过独立 profile 接入 TSMC/SMIC 的实际晶体管 PDK。profile 继承只复用静态工艺配置，不复用性能证据。TSV、hybrid-bonding 等封装/3D PDK 不进入普通电路设计的默认路径；若未来需要，将作为显式选择和独立 Gate，而不是当前 profile 的替代品。
 
 当前实现状态：`OA schematic -> si -> Spectre -> metrics`、供电能量积分、失败注入和候选级 checkpoint/resume 已通过本地测试。2026-07-19 live 结果覆盖 OA/`si` 参数一致性、非空 timing/current 波形、收紧规格、不可行 + 预算耗尽恢复，以及一个经历 3 次 tunnel 中断后仍完成 9/9 候选、最佳参数写回和独立 OA 回读的恢复任务。反相器 L5A 的同源有限闭环与显式恢复 Gate 已通过；Bridge 本地隔离补丁又通过强制断链只读 smoke，闭合 Windows stale state 与调用边界自动重建。运行中传输的随机 reset/timeout 仍是跨 Gate 的底层可靠性债务。
@@ -212,7 +233,7 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> 共源→共栅原位微调（新 cellview 已完成同一 9 点 DC→AC、对应网表 9/9 匹配、checkpoint、exact inverse 和基线身份检查；完整 quality A/B 不再默认，未覆盖 residual 只在可能改变 objective 时补）
   -> OP 导数驱动的通用小信号预筛（既有共源/共栅真实 run 本地重放：增益误差 0.158%/0.646%；未来 gmb+dQi/dVj+cjd/cjs 保存面已实现、本地测试通过、live capture 待做）
   -> 结构化 standalone Spectre 轻量 A/B（共源/共栅级联已完成无 OA/si/Maestro 的 TSMC N28 live preview、完整 manifest 和进程归零；方向与 OA→si 一致，绝对值不作同源复现）
-  -> preview shortlist → 普通 OA 同源复核（已知九点域的 top-3 编译、拓扑前置检查、3/3 OA/si/AC、winner 保留与耗时压缩已 live；新拓扑 prospective utility 待独立证明）
+  -> preview shortlist → 普通 OA 同源复核（已知九点域 3/3 live；未见差分对八点域已先冻结 top-3、后跑完整真值并以 ρ=1.0 保留 winner；下一步把 prospective 两级流程用于新结构的 shortlist-only 正常设计）
   -> active-load + 对称源极退化组合拓扑（新 cellview forward/readback/七实例 si/DC/AC/CMRR/noise/transient/ICMR/PSRR/inverse/恢复态 DC 均已 live；质量闭环未过）
   -> L5B 单模块闭环
   -> layout/DRC/LVS/PEX Gate

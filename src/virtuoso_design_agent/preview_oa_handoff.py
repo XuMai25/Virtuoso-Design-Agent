@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from .models import CircuitKind, Operation, RunStatus, TaskSpec
-from .preview_selection import PreviewSelectionResult
+from .preview_selection import PreviewSelectionResult, PreviewShortlistResult
 
 
 _TUNING_OPERATIONS = {Operation.DESIGN_TUNE, Operation.DESIGN_CLOSE_LOOP}
@@ -66,18 +68,31 @@ def build_oa_task_from_preview_shortlist(
     same-source netlisting, EDA metrics, checkpointing, and final selection.
     """
 
-    selection = PreviewSelectionResult.model_validate_json(
-        selection_path.read_text(encoding="utf-8")
-    )
+    selection_text = selection_path.read_text(encoding="utf-8")
+    try:
+        selection: PreviewSelectionResult | PreviewShortlistResult = (
+            PreviewSelectionResult.model_validate_json(selection_text)
+        )
+    except ValidationError:
+        selection = PreviewShortlistResult.model_validate_json(selection_text)
     template = TaskSpec.model_validate_json(
         candidate_task_path.read_text(encoding="utf-8")
     )
 
-    if (
-        selection.status is not RunStatus.SUCCEEDED
-        or not selection.selection_utility_gate_passed
-    ):
-        raise ValueError("preview selection utility Gate did not pass")
+    if isinstance(selection, PreviewSelectionResult):
+        if (
+            selection.status is not RunStatus.SUCCEEDED
+            or not selection.selection_utility_gate_passed
+        ):
+            raise ValueError("preview selection utility Gate did not pass")
+        result_binding_name = "preview_selection_result_sha256"
+    else:
+        if (
+            selection.status is not RunStatus.SUCCEEDED
+            or not selection.shortlist_generation_gate_passed
+        ):
+            raise ValueError("prospective preview shortlist Gate did not pass")
+        result_binding_name = "prospective_preview_shortlist_sha256"
     shortlist_ids = list(selection.shortlist_candidate_ids)
     if not shortlist_ids:
         raise ValueError("preview selection produced an empty shortlist")
@@ -154,7 +169,7 @@ def build_oa_task_from_preview_shortlist(
     )
     _merge_binding(
         bindings,
-        "preview_selection_result_sha256",
+        result_binding_name,
         _file_sha256(selection_path),
     )
     _merge_binding(

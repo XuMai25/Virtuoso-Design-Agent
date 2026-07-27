@@ -125,9 +125,12 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "retrospective calibration retained the OA-to-si winner in a top-three "
             "shortlist with Spearman rho 0.933; the shortlist compiler and normal "
             "OA-to-si replay retained the same winner while reducing three-point OA "
-            "wall time by 71.667% versus the full nine-point run. Absolute preview "
-            "values still differ from OA-to-si, and unseen topologies still require "
-            "prospective same-source or ADE validation"
+            "wall time by 71.667% versus the full nine-point run. A reference-free "
+            "freeze plus later audit then prospectively retained the true winner for "
+            "one unseen eight-point differential-pair local domain with Spearman rho "
+            "1.0 and checkpoint recovery. Absolute preview values still differ from "
+            "OA-to-si by as much as 30.35%; other topologies and PVT still require "
+            "their own prospective same-source or ADE validation"
         ),
     ),
     CircuitKind.EXISTING_SCHEMATIC: CircuitCapability(

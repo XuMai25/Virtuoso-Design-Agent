@@ -173,6 +173,61 @@ def _candidate_task_payload() -> dict:
     }
 
 
+def _frozen_shortlist_payload() -> dict:
+    selection = _selection_payload()
+    return {
+        "schema_version": 1,
+        "policy_id": selection["policy_id"],
+        "policy_sha256": selection["policy_sha256"],
+        "assessment_mode": "prospective_validation",
+        "preview_task_id": selection["preview_task_id"],
+        "preview_task_sha256": selection["preview_task_sha256"],
+        "preview_run_sha256": selection["preview_run_sha256"],
+        "expected_reference_task_id": selection["reference_task_id"],
+        "expected_reference_task_sha256": "5" * 64,
+        "frozen_at": "2026-07-27T00:00:00Z",
+        "plan_token": selection["plan_token"],
+        "status": "succeeded",
+        "pdk_profile": selection["pdk_profile"],
+        "analysis": selection["analysis"],
+        "candidate_generator": selection["candidate_generator"],
+        "candidate_source_id": selection["candidate_source_id"],
+        "candidate_source_sha256": selection["candidate_source_sha256"],
+        "declared_candidate_count": selection["declared_candidate_count"],
+        "evaluated_candidate_count": selection["evaluated_candidate_count"],
+        "shortlist_size": selection["shortlist_size"],
+        "shortlist_candidate_ids": selection["shortlist_candidate_ids"],
+        "shortlist_variant_ids": selection["shortlist_variant_ids"],
+        "preview_winner_candidate_id": selection["preview_winner_candidate_id"],
+        "artifact_integrity_gate_passed": True,
+        "shortlist_generation_gate_passed": True,
+        "selection_scope": "best_in_declared_discrete_domain",
+        "continuous_optimum_claim": False,
+        "global_optimum_claim": False,
+        "candidates": [
+            {
+                key: value
+                for key, value in candidate.items()
+                if key
+                in {
+                    "index",
+                    "preview_variant_id",
+                    "source_candidate_id",
+                    "preview_feasible",
+                    "preview_objective_value",
+                    "preview_rank",
+                    "constraints",
+                }
+            }
+            for candidate in selection["candidates"]
+        ],
+        "preview_measurement_evidence_source": "eda_result",
+        "shortlist_evidence_source": "software_inference",
+        "policy_evidence_source": "user_input",
+        "notes": [],
+    }
+
+
 def _write_inputs(tmp_path: Path) -> tuple[Path, Path]:
     selection = tmp_path / "selection.json"
     candidate_task = tmp_path / "candidate-task.json"
@@ -227,6 +282,33 @@ def test_preview_shortlist_compiles_to_exact_normal_oa_candidate_task(
             candidate_task.read_bytes()
         ).hexdigest(),
     }
+
+
+def test_frozen_prospective_shortlist_compiles_before_reference_truth(
+    tmp_path: Path,
+) -> None:
+    shortlist = tmp_path / "frozen-shortlist.json"
+    candidate_task = tmp_path / "candidate-task.json"
+    _write_json(shortlist, _frozen_shortlist_payload())
+    _write_json(candidate_task, _candidate_task_payload())
+
+    task = build_oa_task_from_preview_shortlist(
+        shortlist,
+        candidate_task,
+        task_id="prospective-shortlist-oa-task",
+    )
+
+    assert task.candidate_set is not None
+    assert [candidate.id for candidate in task.candidate_set.candidates] == [
+        "seed-c",
+        "seed-a",
+    ]
+    assert task.candidate_set.source.bindings[
+        "prospective_preview_shortlist_sha256"
+    ] == hashlib.sha256(shortlist.read_bytes()).hexdigest()
+    assert "preview_selection_result_sha256" not in (
+        task.candidate_set.source.bindings
+    )
 
 
 @pytest.mark.parametrize(

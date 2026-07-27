@@ -49,7 +49,10 @@ from .planner import build_plan
 from .preview_compile import build_preview_task_from_candidates
 from .preview_oa_handoff import build_oa_task_from_preview_shortlist
 from .preview_selection import (
+    ProspectivePreviewPolicy,
     PreviewSelectionPolicy,
+    audit_frozen_preview_shortlist,
+    freeze_preview_shortlist,
     validate_preview_selection,
 )
 from .resource_audit import audit_local_resources, load_retention_pins
@@ -270,6 +273,42 @@ def _cmd_preview_select(args: argparse.Namespace) -> int:
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(payload + "\n", encoding="utf-8")
+    print(payload)
+    return 0 if result.status is RunStatus.SUCCEEDED else 1
+
+
+def _cmd_preview_shortlist(args: argparse.Namespace) -> int:
+    policy = ProspectivePreviewPolicy.model_validate_json(
+        args.policy.read_text(encoding="utf-8")
+    )
+    result = freeze_preview_shortlist(
+        policy,
+        args.preview_task,
+        args.preview_run,
+        args.reference_task,
+    )
+    payload = result.model_dump_json(indent=2)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(payload + "\n", encoding="utf-8")
+    print(payload)
+    return 0 if result.status is RunStatus.SUCCEEDED else 1
+
+
+def _cmd_preview_shortlist_audit(args: argparse.Namespace) -> int:
+    policy = ProspectivePreviewPolicy.model_validate_json(
+        args.policy.read_text(encoding="utf-8")
+    )
+    result = audit_frozen_preview_shortlist(
+        policy,
+        args.shortlist,
+        args.preview_task,
+        args.preview_run,
+        args.reference_task,
+        args.reference_run,
+    )
+    payload = result.model_dump_json(indent=2)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(payload + "\n", encoding="utf-8")
     print(payload)
     return 0 if result.status is RunStatus.SUCCEEDED else 1
 
@@ -743,6 +782,36 @@ def build_parser() -> argparse.ArgumentParser:
     preview_select.add_argument("reference_run", type=Path)
     preview_select.add_argument("--output", type=Path)
     preview_select.set_defaults(handler=_cmd_preview_select)
+
+    preview_shortlist = subparsers.add_parser(
+        "preview-shortlist",
+        help=(
+            "freeze a prospective preview shortlist without reading an OA "
+            "reference run"
+        ),
+    )
+    preview_shortlist.add_argument("policy", type=Path)
+    preview_shortlist.add_argument("preview_task", type=Path)
+    preview_shortlist.add_argument("preview_run", type=Path)
+    preview_shortlist.add_argument("reference_task", type=Path)
+    preview_shortlist.add_argument("--output", type=Path, required=True)
+    preview_shortlist.set_defaults(handler=_cmd_preview_shortlist)
+
+    preview_shortlist_audit = subparsers.add_parser(
+        "preview-shortlist-audit",
+        help=(
+            "audit a frozen prospective shortlist against a later exhausted "
+            "OA/si reference run"
+        ),
+    )
+    preview_shortlist_audit.add_argument("policy", type=Path)
+    preview_shortlist_audit.add_argument("shortlist", type=Path)
+    preview_shortlist_audit.add_argument("preview_task", type=Path)
+    preview_shortlist_audit.add_argument("preview_run", type=Path)
+    preview_shortlist_audit.add_argument("reference_task", type=Path)
+    preview_shortlist_audit.add_argument("reference_run", type=Path)
+    preview_shortlist_audit.add_argument("--output", type=Path, required=True)
+    preview_shortlist_audit.set_defaults(handler=_cmd_preview_shortlist_audit)
 
     theory_request = subparsers.add_parser(
         "theory-request-from-validation",

@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from statistics import fmean
 from typing import Literal
@@ -79,8 +81,8 @@ class PreviewReferenceMetricRule(_FiniteStrictModel):
     ] = EvidenceSource.EDA_RESULT
 
 
-class PreviewSelectionPolicy(_FiniteStrictModel):
-    """Hash-bound policy for a cheap-preview-to-OA-reference comparison."""
+class PreviewDecisionPolicy(_FiniteStrictModel):
+    """Decision fields that must be fixed before preview or OA truth is seen."""
 
     schema_version: Literal[1] = 1
     id: StrictStr = Field(pattern=_ID_PATTERN)
@@ -90,9 +92,7 @@ class PreviewSelectionPolicy(_FiniteStrictModel):
     ]
     expected_preview_task_id: StrictStr = Field(min_length=1, max_length=128)
     expected_preview_task_sha256: str = Field(pattern=_HASH_PATTERN)
-    expected_preview_run_sha256: str = Field(pattern=_HASH_PATTERN)
     expected_reference_task_id: StrictStr = Field(min_length=1, max_length=128)
-    expected_reference_run_sha256: str = Field(pattern=_HASH_PATTERN)
     expected_analysis: Literal["dc", "ac"]
     expected_pdk_profile: StrictStr = Field(min_length=1, max_length=128)
     expected_candidate_generator: StrictStr = Field(pattern=_ID_PATTERN)
@@ -135,7 +135,7 @@ class PreviewSelectionPolicy(_FiniteStrictModel):
     evidence_source: Literal[EvidenceSource.USER_INPUT] = EvidenceSource.USER_INPUT
 
     @model_validator(mode="after")
-    def validate_metric_contract(self) -> "PreviewSelectionPolicy":
+    def validate_metric_contract(self) -> "PreviewDecisionPolicy":
         constraint_names = [item.metric for item in self.constraints]
         if len(constraint_names) != len(set(constraint_names)):
             raise ValueError("preview selection constraints must name unique metrics")
@@ -146,6 +146,20 @@ class PreviewSelectionPolicy(_FiniteStrictModel):
         if len(pairs) != len(set(pairs)):
             raise ValueError("preview/reference comparison metric pairs must be unique")
         return self
+
+
+class PreviewSelectionPolicy(PreviewDecisionPolicy):
+    """Run-hash-bound retrospective or already-frozen comparison policy."""
+
+    expected_preview_run_sha256: str = Field(pattern=_HASH_PATTERN)
+    expected_reference_run_sha256: str = Field(pattern=_HASH_PATTERN)
+
+
+class ProspectivePreviewPolicy(PreviewDecisionPolicy):
+    """Pre-registered policy that cannot contain either future run hash."""
+
+    assessment_mode: Literal["prospective_validation"] = "prospective_validation"
+    expected_reference_task_sha256: str = Field(pattern=_HASH_PATTERN)
 
 
 class PreviewConstraintEvaluation(_FiniteStrictModel):
@@ -183,6 +197,62 @@ class PreviewCandidateSelection(_FiniteStrictModel):
     comparisons: list[PreviewMetricComparison]
 
 
+class PreviewShortlistCandidate(_FiniteStrictModel):
+    index: int = Field(ge=1)
+    preview_variant_id: StrictStr
+    source_candidate_id: StrictStr
+    preview_feasible: bool
+    preview_objective_value: float
+    preview_rank: float = Field(ge=1.0)
+    constraints: list[PreviewConstraintEvaluation]
+
+
+class PreviewShortlistResult(_FiniteStrictModel):
+    """Reference-free shortlist frozen before the OA truth run exists."""
+
+    schema_version: Literal[1] = 1
+    policy_id: StrictStr
+    policy_sha256: str = Field(pattern=_HASH_PATTERN)
+    assessment_mode: Literal["prospective_validation"] = "prospective_validation"
+    preview_task_id: StrictStr
+    preview_task_sha256: str = Field(pattern=_HASH_PATTERN)
+    preview_run_sha256: str = Field(pattern=_HASH_PATTERN)
+    expected_reference_task_id: StrictStr
+    expected_reference_task_sha256: str = Field(pattern=_HASH_PATTERN)
+    frozen_at: datetime
+    plan_token: StrictStr
+    status: RunStatus
+    pdk_profile: StrictStr
+    analysis: Literal["dc", "ac"]
+    candidate_generator: StrictStr
+    candidate_source_id: StrictStr
+    candidate_source_sha256: str = Field(pattern=_HASH_PATTERN)
+    declared_candidate_count: int = Field(ge=1)
+    evaluated_candidate_count: int = Field(ge=1)
+    shortlist_size: int = Field(ge=0)
+    shortlist_candidate_ids: list[StrictStr]
+    shortlist_variant_ids: list[StrictStr]
+    preview_winner_candidate_id: StrictStr | None
+    artifact_integrity_gate_passed: Literal[True] = True
+    shortlist_generation_gate_passed: bool
+    selection_scope: Literal[
+        SelectionScope.BEST_IN_DECLARED_DISCRETE_DOMAIN
+    ] = SelectionScope.BEST_IN_DECLARED_DISCRETE_DOMAIN
+    continuous_optimum_claim: Literal[False] = False
+    global_optimum_claim: Literal[False] = False
+    candidates: list[PreviewShortlistCandidate]
+    preview_measurement_evidence_source: Literal[EvidenceSource.EDA_RESULT] = (
+        EvidenceSource.EDA_RESULT
+    )
+    shortlist_evidence_source: Literal[EvidenceSource.SOFTWARE_INFERENCE] = (
+        EvidenceSource.SOFTWARE_INFERENCE
+    )
+    policy_evidence_source: Literal[EvidenceSource.USER_INPUT] = (
+        EvidenceSource.USER_INPUT
+    )
+    notes: list[StrictStr] = Field(default_factory=list)
+
+
 class PreviewMetricErrorSummary(_FiniteStrictModel):
     preview_metric: StrictStr
     reference_metric: StrictStr
@@ -205,6 +275,18 @@ class PreviewSelectionResult(_FiniteStrictModel):
     preview_run_sha256: str = Field(pattern=_HASH_PATTERN)
     reference_task_id: StrictStr
     reference_run_sha256: str = Field(pattern=_HASH_PATTERN)
+    prospective_policy_sha256: str | None = Field(
+        default=None,
+        pattern=_HASH_PATTERN,
+    )
+    frozen_shortlist_sha256: str | None = Field(
+        default=None,
+        pattern=_HASH_PATTERN,
+    )
+    reference_task_sha256: str | None = Field(
+        default=None,
+        pattern=_HASH_PATTERN,
+    )
     plan_token: StrictStr
     status: RunStatus
     pdk_profile: StrictStr
@@ -477,40 +559,40 @@ def _selected_reference_candidate(run: RunRecord):
     return matches[0]
 
 
-def validate_preview_selection(
-    policy: PreviewSelectionPolicy,
+@dataclass(frozen=True)
+class _PreviewEvidence:
+    task_sha256: str
+    run_sha256: str
+    task: TaskSpec
+    run: RunRecord
+    metrics: dict[str, float]
+    metric_sources: dict[str, EvidenceSource]
+    candidate_variant_ids: list[str]
+    candidate_ids: list[str]
+
+
+def _validate_preview_evidence(
+    policy: PreviewDecisionPolicy,
     preview_task_path: Path,
     preview_run_path: Path,
-    reference_run_path: Path,
-) -> PreviewSelectionResult:
-    """Validate preview integrity, produce a shortlist, and compare OA truth."""
-
+    *,
+    expected_run_sha256: str | None,
+) -> _PreviewEvidence:
     task_sha256 = _file_sha256(preview_task_path)
-    preview_run_sha256 = _file_sha256(preview_run_path)
-    reference_run_sha256 = _file_sha256(reference_run_path)
+    run_sha256 = _file_sha256(preview_run_path)
     if task_sha256 != policy.expected_preview_task_sha256:
         raise ValueError("preview selection task SHA-256 mismatch")
-    if preview_run_sha256 != policy.expected_preview_run_sha256:
+    if expected_run_sha256 is not None and run_sha256 != expected_run_sha256:
         raise ValueError("preview selection run SHA-256 mismatch")
-    if reference_run_sha256 != policy.expected_reference_run_sha256:
-        raise ValueError("preview selection reference run SHA-256 mismatch")
 
     task = TaskSpec.model_validate_json(
         preview_task_path.read_text(encoding="utf-8")
     )
-    preview_run = RunRecord.model_validate_json(
+    run = RunRecord.model_validate_json(
         preview_run_path.read_text(encoding="utf-8")
     )
-    reference_run = RunRecord.model_validate_json(
-        reference_run_path.read_text(encoding="utf-8")
-    )
-    if (
-        task.id != policy.expected_preview_task_id
-        or preview_run.task_id != task.id
-    ):
+    if task.id != policy.expected_preview_task_id or run.task_id != task.id:
         raise ValueError("preview selection task identity mismatch")
-    if reference_run.task_id != policy.expected_reference_task_id:
-        raise ValueError("preview selection reference task identity mismatch")
     if (
         task.operation is not Operation.SIMULATION_RUN
         or task.circuit is not CircuitKind.NETLIST_PREVIEW
@@ -529,18 +611,13 @@ def validate_preview_selection(
     if task.pdk_profile != policy.expected_pdk_profile:
         raise ValueError("preview selection PDK profile mismatch")
     expected_token = build_plan(task).confirmation_token
-    if preview_run.plan_token != expected_token:
+    if run.plan_token != expected_token:
         raise ValueError("preview selection plan token mismatch")
-    if (
-        preview_run.status is not RunStatus.SUCCEEDED
-        or preview_run.adapter != "virtuoso-bridge-subprocess"
-    ):
+    if run.status is not RunStatus.SUCCEEDED or run.adapter != "virtuoso-bridge-subprocess":
         raise ValueError("preview selection requires a successful real Bridge run")
 
     probe_actions = [
-        action
-        for action in preview_run.actions
-        if action.action == "bridge.spectre.probe"
+        action for action in run.actions if action.action == "bridge.spectre.probe"
     ]
     if len(probe_actions) != 1:
         raise ValueError("preview run must contain one Spectre capability probe")
@@ -557,9 +634,7 @@ def validate_preview_selection(
         raise ValueError("preview Spectre probe does not prove the no-OA boundary")
 
     eda_actions = [
-        action
-        for action in preview_run.actions
-        if action.evidence_source is EvidenceSource.EDA_RESULT
+        action for action in run.actions if action.evidence_source is EvidenceSource.EDA_RESULT
     ]
     if (
         len(eda_actions) != 1
@@ -578,9 +653,9 @@ def validate_preview_selection(
         action.details.get("metric_sources"),
         "preview metric sources",
     )
-    if len(preview_run.candidates) != 1:
+    if len(run.candidates) != 1:
         raise ValueError("netlist preview run must have one aggregate candidate")
-    aggregate = preview_run.candidates[0]
+    aggregate = run.candidates[0]
     if (
         aggregate.evidence_source is not EvidenceSource.EDA_RESULT
         or not aggregate.analysis_complete
@@ -689,6 +764,297 @@ def validate_preview_selection(
             minimum_count=policy.minimum_artifact_count_per_variant,
             expected_deck_sha256=deck_sha256,
         )
+
+    return _PreviewEvidence(
+        task_sha256=task_sha256,
+        run_sha256=run_sha256,
+        task=task,
+        run=run,
+        metrics=metrics,
+        metric_sources=metric_sources,
+        candidate_variant_ids=candidate_variant_ids,
+        candidate_ids=candidate_ids,
+    )
+
+
+def _validate_reference_task(
+    policy: ProspectivePreviewPolicy,
+    reference_task_path: Path,
+    candidate_ids: list[str],
+) -> TaskSpec:
+    task_sha256 = _file_sha256(reference_task_path)
+    if task_sha256 != policy.expected_reference_task_sha256:
+        raise ValueError("prospective reference task SHA-256 mismatch")
+    task = TaskSpec.model_validate_json(
+        reference_task_path.read_text(encoding="utf-8")
+    )
+    if task.id != policy.expected_reference_task_id:
+        raise ValueError("prospective reference task identity mismatch")
+    if (
+        task.operation not in {Operation.DESIGN_TUNE, Operation.DESIGN_CLOSE_LOOP}
+        or task.circuit is CircuitKind.NETLIST_PREVIEW
+        or task.target is None
+        or task.candidate_set is None
+        or task.theory_seed is not None
+    ):
+        raise ValueError(
+            "prospective reference requires one concrete atomic OA tuning task"
+        )
+    if task.analysis is None or task.analysis.value != policy.expected_analysis:
+        raise ValueError("prospective reference task analysis mismatch")
+    if task.pdk_profile != policy.expected_pdk_profile:
+        raise ValueError("prospective reference task PDK mismatch")
+    if (
+        not task.safety.allow_remote_compute
+        or not task.safety.allow_remote_write
+        or task.safety.replace_existing
+    ):
+        raise ValueError("prospective reference task has an invalid safety boundary")
+    if task.objective is None or (
+        task.objective.metric != policy.objective.reference_metric
+        or task.objective.goal is not policy.objective.goal
+    ):
+        raise ValueError("prospective reference task objective mismatch")
+
+    source = task.candidate_set.source
+    if (
+        source.generator != policy.expected_candidate_generator
+        or source.id != policy.expected_candidate_source_id
+        or source.evidence_source is not EvidenceSource.SOFTWARE_INFERENCE
+    ):
+        raise ValueError("prospective reference candidate source identity mismatch")
+    if policy.reference_candidate_source_binding is not None and (
+        source.bindings.get(policy.reference_candidate_source_binding)
+        != policy.candidate_source_sha256
+    ):
+        raise ValueError("prospective reference candidate source SHA-256 mismatch")
+    reference_ids = [candidate.id for candidate in task.candidate_set.candidates]
+    if reference_ids != candidate_ids:
+        raise ValueError("prospective preview/reference candidate order mismatch")
+    if task.limits.max_iterations < len(candidate_ids):
+        raise ValueError("prospective reference budget does not exhaust its domain")
+    return task
+
+
+def freeze_preview_shortlist(
+    policy: ProspectivePreviewPolicy,
+    preview_task_path: Path,
+    preview_run_path: Path,
+    reference_task_path: Path,
+    *,
+    _frozen_at: datetime | None = None,
+) -> PreviewShortlistResult:
+    """Freeze a reference-free shortlist using only pre-registered decisions."""
+
+    preview = _validate_preview_evidence(
+        policy,
+        preview_task_path,
+        preview_run_path,
+        expected_run_sha256=None,
+    )
+    _validate_reference_task(policy, reference_task_path, preview.candidate_ids)
+
+    constraint_sets: list[list[PreviewConstraintEvaluation]] = []
+    feasible: list[bool] = []
+    objective_values: list[float] = []
+    for variant_id in preview.candidate_variant_ids:
+        evaluations: list[PreviewConstraintEvaluation] = []
+        for rule in policy.constraints:
+            actual = _metric(
+                preview.metrics,
+                preview.metric_sources,
+                variant_id,
+                rule.metric,
+                rule.expected_evidence_source,
+            )
+            evaluations.append(
+                PreviewConstraintEvaluation(
+                    metric=rule.metric,
+                    relation=rule.relation,
+                    expected=rule.value,
+                    actual=actual,
+                    tolerance=rule.tolerance,
+                    passed=_constraint_passed(rule, actual),
+                    evidence_source=rule.expected_evidence_source,
+                )
+            )
+        constraint_sets.append(evaluations)
+        feasible.append(all(item.passed for item in evaluations))
+        objective_values.append(
+            _metric(
+                preview.metrics,
+                preview.metric_sources,
+                variant_id,
+                policy.objective.preview_metric,
+                policy.objective.preview_evidence_source,
+            )
+        )
+
+    ranks = _average_ranks(objective_values, policy.objective.goal)
+    feasible_indices = [index for index, passed in enumerate(feasible) if passed]
+    feasible_indices.sort(
+        key=lambda index: (
+            -objective_values[index]
+            if policy.objective.goal is ObjectiveGoal.MAXIMIZE
+            else objective_values[index],
+            preview.candidate_ids[index],
+        )
+    )
+    shortlist_indices = feasible_indices[: policy.shortlist_size]
+    shortlist_ids = [preview.candidate_ids[index] for index in shortlist_indices]
+    shortlist_variants = [
+        preview.candidate_variant_ids[index] for index in shortlist_indices
+    ]
+    gate_passed = bool(shortlist_ids)
+    frozen_at = _frozen_at or datetime.now(UTC)
+    if frozen_at.tzinfo is None or frozen_at.utcoffset() is None:
+        raise ValueError("prospective shortlist frozen_at must be timezone-aware")
+    if preview.run.finished_at > frozen_at:
+        raise ValueError("prospective shortlist cannot predate the preview run")
+
+    return PreviewShortlistResult(
+        policy_id=policy.id,
+        policy_sha256=_canonical_sha256(policy.model_dump(mode="json")),
+        preview_task_id=preview.task.id,
+        preview_task_sha256=preview.task_sha256,
+        preview_run_sha256=preview.run_sha256,
+        expected_reference_task_id=policy.expected_reference_task_id,
+        expected_reference_task_sha256=policy.expected_reference_task_sha256,
+        frozen_at=frozen_at,
+        plan_token=preview.run.plan_token,
+        status=RunStatus.SUCCEEDED if gate_passed else RunStatus.PARTIAL,
+        pdk_profile=preview.task.pdk_profile,
+        analysis=policy.expected_analysis,
+        candidate_generator=policy.expected_candidate_generator,
+        candidate_source_id=policy.expected_candidate_source_id,
+        candidate_source_sha256=policy.candidate_source_sha256,
+        declared_candidate_count=len(preview.candidate_ids),
+        evaluated_candidate_count=len(preview.candidate_ids),
+        shortlist_size=len(shortlist_ids),
+        shortlist_candidate_ids=shortlist_ids,
+        shortlist_variant_ids=shortlist_variants,
+        preview_winner_candidate_id=shortlist_ids[0] if shortlist_ids else None,
+        shortlist_generation_gate_passed=gate_passed,
+        candidates=[
+            PreviewShortlistCandidate(
+                index=index + 1,
+                preview_variant_id=preview.candidate_variant_ids[index],
+                source_candidate_id=preview.candidate_ids[index],
+                preview_feasible=feasible[index],
+                preview_objective_value=objective_values[index],
+                preview_rank=ranks[index],
+                constraints=constraint_sets[index],
+            )
+            for index in range(len(preview.candidate_ids))
+        ],
+        notes=[
+            "shortlist was frozen without reading an OA reference run",
+            "standalone preview values are shortlist evidence only; final design "
+            "acceptance still requires OA/si or explicitly saved ADE evidence",
+        ],
+    )
+
+
+def audit_frozen_preview_shortlist(
+    policy: ProspectivePreviewPolicy,
+    shortlist_path: Path,
+    preview_task_path: Path,
+    preview_run_path: Path,
+    reference_task_path: Path,
+    reference_run_path: Path,
+) -> PreviewSelectionResult:
+    """Reveal OA truth only after a byte-hash-bound shortlist was frozen."""
+
+    frozen = PreviewShortlistResult.model_validate_json(
+        shortlist_path.read_text(encoding="utf-8")
+    )
+    recomputed = freeze_preview_shortlist(
+        policy,
+        preview_task_path,
+        preview_run_path,
+        reference_task_path,
+        _frozen_at=frozen.frozen_at,
+    )
+    if frozen != recomputed:
+        raise ValueError("frozen prospective shortlist content drifted")
+
+    reference_task = _validate_reference_task(
+        policy,
+        reference_task_path,
+        [candidate.source_candidate_id for candidate in frozen.candidates],
+    )
+    reference_run = RunRecord.model_validate_json(
+        reference_run_path.read_text(encoding="utf-8")
+    )
+    if reference_run.started_at <= frozen.frozen_at:
+        raise ValueError("OA reference run predates the frozen prospective shortlist")
+    if reference_run.task_id != reference_task.id or (
+        reference_run.plan_token != build_plan(reference_task).confirmation_token
+    ):
+        raise ValueError("OA reference run does not match the pre-registered task plan")
+
+    bound_payload = policy.model_dump(mode="json")
+    bound_payload.pop("expected_reference_task_sha256")
+    bound_payload["expected_preview_run_sha256"] = frozen.preview_run_sha256
+    bound_payload["expected_reference_run_sha256"] = _file_sha256(reference_run_path)
+    bound_policy = PreviewSelectionPolicy.model_validate(bound_payload)
+    result = validate_preview_selection(
+        bound_policy,
+        preview_task_path,
+        preview_run_path,
+        reference_run_path,
+    )
+    if (
+        result.shortlist_candidate_ids != frozen.shortlist_candidate_ids
+        or result.shortlist_variant_ids != frozen.shortlist_variant_ids
+        or result.preview_winner_candidate_id != frozen.preview_winner_candidate_id
+    ):
+        raise ValueError("OA audit recomputation changed the frozen shortlist")
+    return result.model_copy(
+        update={
+            "prospective_policy_sha256": frozen.policy_sha256,
+            "frozen_shortlist_sha256": _file_sha256(shortlist_path),
+            "reference_task_sha256": _file_sha256(reference_task_path),
+            "notes": [
+                *result.notes,
+                "prospective policy and shortlist were frozen before the OA "
+                "reference run started",
+            ],
+        }
+    )
+
+
+def validate_preview_selection(
+    policy: PreviewSelectionPolicy,
+    preview_task_path: Path,
+    preview_run_path: Path,
+    reference_run_path: Path,
+) -> PreviewSelectionResult:
+    """Validate preview integrity, produce a shortlist, and compare OA truth."""
+
+    preview = _validate_preview_evidence(
+        policy,
+        preview_task_path,
+        preview_run_path,
+        expected_run_sha256=policy.expected_preview_run_sha256,
+    )
+    reference_run_sha256 = _file_sha256(reference_run_path)
+    if reference_run_sha256 != policy.expected_reference_run_sha256:
+        raise ValueError("preview selection reference run SHA-256 mismatch")
+
+    reference_run = RunRecord.model_validate_json(
+        reference_run_path.read_text(encoding="utf-8")
+    )
+    if reference_run.task_id != policy.expected_reference_task_id:
+        raise ValueError("preview selection reference task identity mismatch")
+    task_sha256 = preview.task_sha256
+    preview_run_sha256 = preview.run_sha256
+    task = preview.task
+    preview_run = preview.run
+    metrics = preview.metrics
+    metric_sources = preview.metric_sources
+    candidate_variant_ids = preview.candidate_variant_ids
+    candidate_ids = preview.candidate_ids
 
     audit = reference_run.search_audit
     if (
@@ -1018,7 +1384,9 @@ def validate_preview_selection(
 
 
 __all__ = [
+    "ProspectivePreviewPolicy",
     "PreviewCandidateSelection",
+    "PreviewDecisionPolicy",
     "PreviewMetricComparison",
     "PreviewMetricConstraint",
     "PreviewMetricErrorSummary",
@@ -1026,5 +1394,9 @@ __all__ = [
     "PreviewSelectionObjective",
     "PreviewSelectionPolicy",
     "PreviewSelectionResult",
+    "PreviewShortlistCandidate",
+    "PreviewShortlistResult",
+    "audit_frozen_preview_shortlist",
+    "freeze_preview_shortlist",
     "validate_preview_selection",
 ]

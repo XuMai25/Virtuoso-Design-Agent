@@ -187,8 +187,9 @@ bindings。一个 semantic 参数可以映射到多个不同器件字段，但�
 标为 `eda_result`。因此 Agent 可以为新拓扑提供一个受校验结构模板和少量候选，而不必
 复制 deck 或 OA 操作；最终胜出结构仍要通过 OA→`si` 或人工 ADE Gate。
 
-`vda preview-select` 是独立的本地后处理 Gate，不修改 task、run record、OA 或远端产物。
-policy 必须绑定编译任务、preview run、参考 OA→`si` run、PDK、candidate generator/source
+`vda preview-select` 是 retrospective 校准用的独立本地后处理 Gate，不修改 task、run
+record、OA 或远端产物。policy 必须绑定编译任务、preview run、参考 OA→`si` run、PDK、
+candidate generator/source
 和候选源文件 SHA-256，并声明粗约束、objective、top-k 及最低排序/可行性门。validator
 重新从 typed graph 和当前 PDK profile 渲染每份 deck，要求其 SHA 同 run 和 manifest 中
 唯一 `.scs` 项一致；还逐项复核 manifest 聚合 hash、非空 AC sample、bounded process、
@@ -198,12 +199,30 @@ policy 必须绑定编译任务、preview run、参考 OA→`si` run、PDK、can
 `software_inference`，两侧 simulator 标量仍分别是 `eda_result`。结果只称
 `best_in_declared_discrete_domain`，连续和全局最优声明固定为 false。
 
-`vda oa-task-from-preview-shortlist` 只负责把已经通过上述 Gate 的 top-k 子集编译回普通
-`candidate_set` 任务，不增加第二套 OA 或仿真执行器。它要求 selection 与完整 OA task 的
+未见候选域使用严格分离的两阶段契约。`vda preview-shortlist` 接受
+`ProspectivePreviewPolicy`、preview task/run 和一份尚未执行的完整 OA reference task；
+接口故意不接受 reference run。policy 预先绑定未来 reference task 的 canonical SHA-256、
+粗约束、objective、top-k 和 utility 阈值。命令完成与 retrospective validator 相同的
+preview task/run、逐 deck、manifest、非空波形和 candidate identity 审计，然后保存
+`frozen_at`、policy/task/run hashes、reference task hash 和固定 shortlist。冻结文件属于
+`software_inference`，不会因为后来真值结果而改变。
+
+`vda preview-shortlist-audit` 才接受后来完成的 OA→`si` reference run。它先逐字段复核
+policy 与冻结 shortlist，要求 reference run 的 `started_at > frozen_at`，且 reference
+task ID/SHA、plan token、candidate generator/source/hash、完整候选顺序、PDK 和 analysis
+都与冻结时预注册内容一致；随后复用同一 reference evidence validator 检查域穷尽、真值
+winner、可行性、排序和逐指标误差。任何 shortlist 漂移、用旧真值 run 伪装 prospective、
+换任务或未穷尽域都会硬拒绝；证据完整但 utility 阈值失败仍返回 `partial`。这样把“先选
+名单”与“后看真值”变成机器可验证的时间与哈希边界，而不是文档约定。
+
+`vda oa-task-from-preview-shortlist` 只负责把已经通过 retrospective Gate 的 selection，或
+已经冻结但尚未读取真值的 prospective shortlist，编译回普通 `candidate_set` 任务，不
+增加第二套 OA 或仿真执行器。它要求 selection/shortlist 与完整 OA task 的
 PDK、analysis、candidate generator/source、源 hash、完整候选顺序和 variant identity
 一致，再逐字节绑定两份输入文件；target、constraints、objective、固定参数、安全策略和
 候选 tuple 原样保留，`max_iterations` 精确缩到 shortlist 大小。输出任务必须重新 plan，
-不会继承 preview 的 token 或授权。当前 common-source cascode 语义会推导或核对
+不会继承 preview 的 token 或授权；prospective 输出还保存 frozen shortlist SHA-256。
+当前 common-source cascode 语义会推导或核对
 `expected_target_topology_variant=cascode_common_source`；该通用任务前置条件也可显式用于
 其他 `simulation.run`/tuning 任务。executor 在 candidate stage 或 simulation 之前用
 `schematic.inspect` 的 `bridge_readback` 比较拓扑，不匹配时不尝试候选 OA 写入。拓扑
@@ -224,6 +243,15 @@ preview：top-3 为 `009/007/003`，参考 OA→`si` top-3 为 `009/003/007`，S
 `si` 网表 hash 和每点 40 项指标均与原九点参考对应项一致，真实 winner 仍为 009；3 点
 OA wall time 为 229.924 s，比原 9 点的 811.503 s 少 71.667%。preview 与 3 点 OA 合计
 301.553 s，仍少 62.840%。这只是已知同域的回放计时，不是新拓扑 prospective 证明。
+2026-07-28 的差分对八点 Gate 首次在不读取新 OA truth 的情况下冻结 top-3。八个 tuple
+均与用于建模的历史候选不重合；冻结后才运行完整 OA→`si`→Spectre 域。preview 与真值
+功耗排名 1–8 完全一致，Spearman ρ、可行性 agreement、真值可行点 recall 均为 `1.0`，
+真实 winner `op-local-001` 在 top-3 内。该结果把 prospective ranking/shortlisting 状态
+升级为 live，但 gain/BW/GBW/power 最大绝对误差仍为
+`3.05%/24.10%/27.71%/30.35%`，所以不升级为绝对预测或 design closure。冻结 top-3 已
+自动编译为正常 OA 任务但没有重复执行；根据同一完整 run 中前三点的 stage/simulation
+动作估算 preview+3 点约 `354.176 s`，不是独立三点实测。完整证据见
+[`validation/2026-07-28-differential-pair-preview-prospective-live.md`](validation/2026-07-28-differential-pair-preview-prospective-live.md)。
 HSPICE 没有加入默认链路：现有 Spectre runner 的调用复杂度相同，并且与最终
 foundry-model 真源一致。完整证据见
 [`validation/2026-07-27-standalone-netlist-preview-live.md`](validation/2026-07-27-standalone-netlist-preview-live.md)。候选编译器的本地证据见
