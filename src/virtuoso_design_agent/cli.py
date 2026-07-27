@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from .adapters import DeterministicDemoAdapter, SubprocessBridgeAdapter
 from .adapters.subprocess_bridge import BridgeWorkerError
+from .bridge_lifecycle import BridgeLifecycleError, run_bridge_lifecycle
 from .catalog import UnsupportedCapability, catalog_as_dicts
 from .cascode_seed import (
     CascodeSeedPolicy,
@@ -508,6 +509,16 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_bridge(args: argparse.Namespace) -> int:
+    return run_bridge_lifecycle(
+        args.bridge_action,
+        bridge_python=args.bridge_python,
+        profile=args.profile,
+        env_file=args.env_file,
+        verbose=args.verbose,
+    )
+
+
 def _cmd_resources(args: argparse.Namespace) -> int:
     pins = load_retention_pins(args.pin_manifest)
     local = audit_local_resources(
@@ -874,6 +885,36 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--pdk-profile", default=DEFAULT_PDK_PROFILE)
     doctor.set_defaults(handler=_cmd_doctor)
 
+    bridge = subparsers.add_parser(
+        "bridge",
+        help="start, inspect, or stop Bridge without a separate console window",
+    )
+    bridge_actions = bridge.add_subparsers(dest="bridge_action", required=True)
+    for action, help_text in (
+        ("start", "start the Bridge tunnel in a hidden child process"),
+        ("status", "show Bridge tunnel, daemon, and simulator status"),
+        ("stop", "stop the Bridge tunnel"),
+    ):
+        bridge_action = bridge_actions.add_parser(action, help=help_text)
+        bridge_action.add_argument("--bridge-python")
+        bridge_action.add_argument(
+            "-p",
+            "--profile",
+            help="Bridge connection profile (not a VDA PDK profile)",
+        )
+        bridge_action.add_argument(
+            "--env",
+            dest="env_file",
+            type=Path,
+            help="explicit Bridge .env path; file contents are never printed by VDA",
+        )
+        bridge_action.add_argument(
+            "--verbose",
+            action="store_true",
+            help="also echo Bridge command diagnostics in the current console",
+        )
+        bridge_action.set_defaults(handler=_cmd_bridge)
+
     resources = subparsers.add_parser(
         "resources",
         help="inventory retained evidence and transient VDA resources without deletion",
@@ -901,6 +942,7 @@ def main(argv: list[str] | None = None) -> int:
         SafetyViolation,
         UnsupportedCapability,
         BridgeWorkerError,
+        BridgeLifecycleError,
     ) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2

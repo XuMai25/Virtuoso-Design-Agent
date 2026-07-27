@@ -68,6 +68,24 @@ py -3.13 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
 
+需要显式启动真实 Bridge 时，使用 VDA 的生命周期入口，不再从外层
+PowerShell 直接运行 `virtuoso-bridge.exe start`：
+
+```powershell
+.\.venv\Scripts\vda.exe bridge start
+.\.venv\Scripts\vda.exe bridge status
+# 工作结束且确认没有其他任务复用 tunnel 时：
+.\.venv\Scripts\vda.exe bridge stop
+```
+
+Windows 子进程使用隐藏窗口和 Job Object；进度、Bridge warm 耗时、daemon/Spectre
+可用性和最终返回码只显示在当前终端。默认不回显原始 `[cmd]` SSH 诊断；排障时可加
+`--verbose`。`-p/--profile` 是 Bridge connection profile，不是 VDA PDK profile；也可用
+`--env <PATH>` 显式指定 Bridge 环境文件，但 VDA 不读取或打印其正文。这个入口只代理
+Bridge 的公开 CLI，不复制 SSH、daemon 或 state 逻辑。正常启动后共享 tunnel 按 Bridge
+语义继续存在；中断时只回收本次仍受控的启动进程树。`status` 会探测 daemon 并查询
+Spectre 版本，但不会访问 OA、运行设计仿真或形成 `eda_result`。
+
 先做完全本地、无 Bridge/OA 副作用的理论尺寸估算：
 
 ```powershell
