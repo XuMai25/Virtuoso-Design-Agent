@@ -2603,6 +2603,32 @@ def test_demo_close_loop_selects_and_applies_feasible_candidate() -> None:
     assert record.search_audit.global_optimum_claim is False
 
 
+def test_target_topology_precondition_blocks_candidate_writes() -> None:
+    data = _close_loop().model_dump(mode="json")
+    data["operation"] = "design.tune"
+    data["create_if_missing"] = False
+    data["expected_target_topology_variant"] = "cascode_common_source"
+    task = TaskSpec.model_validate(data)
+    adapter = DeterministicDemoAdapter()
+    adapter.create_schematic(task)
+    plan = build_plan(task)
+
+    record = TaskExecutor(adapter).execute(
+        task, plan, token=plan.confirmation_token
+    )
+
+    assert record.status is RunStatus.FAILED
+    assert [action.action for action in record.actions] == [
+        "bridge.probe",
+        "schematic.inspect.before",
+    ]
+    assert any(
+        "expected 'cascode_common_source', read back 'inverter'" in note
+        and "no candidate OA write was attempted" in note
+        for note in record.notes
+    )
+
+
 def test_simulation_record_uses_actual_schematic_parameters_when_omitted() -> None:
     task = TaskSpec.model_validate(
         {

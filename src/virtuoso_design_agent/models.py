@@ -1874,6 +1874,11 @@ class TaskSpec(StrictModel):
     operation: Operation
     circuit: CircuitKind
     target: DesignTarget | None = None
+    expected_target_topology_variant: StrictStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=96,
+    )
     pdk_profile: str = Field(default=DEFAULT_PDK_PROFILE, min_length=1)
     analysis: AnalysisKind | None = None
     ac_sweep: AcSweep | None = None
@@ -1957,6 +1962,7 @@ class TaskSpec(StrictModel):
                 or self.schematic_transform is not None
                 or self.topology_delta is not None
                 or self.netlist_preview is not None
+                or self.expected_target_topology_variant is not None
                 or self.operating_conditions
                 or self.parameters
                 or self.instance_parameter_updates
@@ -2002,6 +2008,7 @@ class TaskSpec(StrictModel):
                 or self.schematic_transform is not None
                 or self.topology_delta is not None
                 or self.device_characterization is not None
+                or self.expected_target_topology_variant is not None
                 or self.operating_conditions
                 or self.parameters
                 or self.instance_parameter_updates
@@ -2026,6 +2033,14 @@ class TaskSpec(StrictModel):
             )
         if self.target is None:
             raise ValueError(f"{self.operation.value} requires an OA target")
+        if (
+            self.expected_target_topology_variant is not None
+            and self.operation not in _SIMULATION_OPERATIONS
+        ):
+            raise ValueError(
+                "expected_target_topology_variant requires a simulation or "
+                "tuning operation"
+            )
         if self.device_characterization is not None:
             raise ValueError(
                 "device_characterization settings require operation='device.characterize'"

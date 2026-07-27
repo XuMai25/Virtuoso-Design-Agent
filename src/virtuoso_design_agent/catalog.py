@@ -123,8 +123,11 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "live with complete DC OP, 241-point AC, per-file SHA-256 manifests, and "
             "zero residual Spectre/si/Maestro processes. A hash-bound nine-point "
             "retrospective calibration retained the OA-to-si winner in a top-three "
-            "shortlist with Spearman rho 0.933; absolute values still differ from "
-            "OA-to-si, so selected topologies require same-source or ADE validation"
+            "shortlist with Spearman rho 0.933; the shortlist compiler and normal "
+            "OA-to-si replay retained the same winner while reducing three-point OA "
+            "wall time by 71.667% versus the full nine-point run. Absolute preview "
+            "values still differ from OA-to-si, and unseen topologies still require "
+            "prospective same-source or ADE validation"
         ),
     ),
     CircuitKind.EXISTING_SCHEMATIC: CircuitCapability(

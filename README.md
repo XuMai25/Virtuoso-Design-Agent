@@ -147,6 +147,26 @@ preview 运行后可用独立 validator 生成 top-k，并与一个已穷尽的 
 `prospective_validation`。完整九点结果见
 [selection live Gate](docs/validation/2026-07-27-preview-candidate-selection-live.md)。
 
+筛选 Gate 通过后，可把 top-k 按原排名确定性编译回普通 OA `candidate_set` 任务：
+
+```powershell
+.\.venv\Scripts\vda.exe oa-task-from-preview-shortlist `
+  artifacts\theory\common-source-cascode-preview-selection-20260727.json `
+  artifacts\theory\common-source-cascode-ac-task-20260726.json `
+  --id common-source-cascode-ac-preview-shortlist `
+  --output artifacts\theory\common-source-cascode-ac-preview-shortlist-task.json
+.\.venv\Scripts\vda.exe plan `
+  artifacts\theory\common-source-cascode-ac-preview-shortlist-task.json
+```
+
+编译器逐字节绑定 selection 和完整 OA task，保留 target、约束、objective、安全策略及
+候选 tuple，只把域缩成 shortlist 并把预算改为 shortlist 大小。输出仍需重新 plan，新的
+token 与远端授权不能从 preview 继承。若候选语义要求共栅级联，任务还会携带
+`expected_target_topology_variant=cascode_common_source`；executor 在任何候选写入或仿真
+前先做 OA 结构回读，拓扑不符即失败。已知九点域的 3 点 live handoff 保留了真实 winner
+009，3 点 OA 用时较原 9 点减少 71.667%；详见
+[OA shortlist handoff live Gate](docs/validation/2026-07-27-preview-shortlist-oa-handoff-live.md)。
+
 共栅级微调先对变换前的共源 OA 做一次只读 DC，再把该 real-Bridge run 的
 SHA-256 写入 policy（模板中的全零 hash 只是故意不可执行的占位符）。以下命令完全
 本地，只生成一个 theory result，并把同一组原子候选分别编译为 DC/AC 任务；它们不会
@@ -554,6 +574,7 @@ direct `si`/Spectre 路径还会在每个唯一 `/data/xum/.../vda_<task>_<nonce
 - [2026-07-27 standalone Spectre 轻量拓扑预评估 live Gate](docs/validation/2026-07-27-standalone-netlist-preview-live.md)
 - [2026-07-27 候选域到 netlist preview 的确定性编译本地 Gate](docs/validation/2026-07-27-preview-candidate-compiler-local.md)
 - [2026-07-27 standalone preview 九点预筛与 OA 参考校准 live Gate](docs/validation/2026-07-27-preview-candidate-selection-live.md)
+- [2026-07-27 preview shortlist 到 OA 同源复核与耗时 live Gate](docs/validation/2026-07-27-preview-shortlist-oa-handoff-live.md)
 - [2026-07-19 共源放大器 Gate 2A DC smoke](docs/validation/2026-07-19-common-source-gate2a-dc-smoke.md)
 - [2026-07-19 显式实例参数能力验证](docs/validation/2026-07-19-explicit-instance-parameters.md)
 - [2026-07-20 源极退化原位变更实现验证](docs/validation/2026-07-20-source-degeneration-in-place.md)

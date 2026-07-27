@@ -341,12 +341,24 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         "确认 Bridge、Virtuoso SKILL channel 与目标 profile 可用",
         SideEffect.READ_ONLY,
     )
+    inspect_description = "结构化回读实例、网络、pins 与参数"
+    if task.expected_target_topology_variant is not None:
+        inspect_description += (
+            "；候选写入或仿真前 topology_variant 必须等于 "
+            f"{task.expected_target_topology_variant}"
+        )
     inspect = _step(
         "inspect",
         "schematic.inspect",
-        "结构化回读实例、网络、pins 与参数",
+        inspect_description,
         SideEffect.READ_ONLY,
     )
+    final_inspect_description = "结构化回读实例、网络、pins 与参数"
+    if task.expected_target_topology_variant is not None:
+        final_inspect_description += (
+            "；最终 topology_variant 仍须等于 "
+            f"{task.expected_target_topology_variant}"
+        )
     persist = _step(
         "persist",
         "evidence.persist",
@@ -1049,7 +1061,12 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 finalize_description,
                 SideEffect.REMOTE_WRITE if candidate_oa_write else SideEffect.READ_ONLY,
             ),
-            inspect.model_copy(update={"id": "08-after"}),
+            inspect.model_copy(
+                update={
+                    "id": "08-after",
+                    "description": final_inspect_description,
+                }
+            ),
             persist.model_copy(
                 update={
                     "id": "09-persist",
@@ -1113,7 +1130,12 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             ),
             SideEffect.REMOTE_WRITE if candidate_oa_write else SideEffect.READ_ONLY,
         ),
-        inspect.model_copy(update={"id": "08-after"}),
+        inspect.model_copy(
+            update={
+                "id": "08-after",
+                "description": final_inspect_description,
+            }
+        ),
         persist.model_copy(
             update={
                 "id": "09-persist",

@@ -198,6 +198,17 @@ policy 必须绑定编译任务、preview run、参考 OA→`si` run、PDK、can
 `software_inference`，两侧 simulator 标量仍分别是 `eda_result`。结果只称
 `best_in_declared_discrete_domain`，连续和全局最优声明固定为 false。
 
+`vda oa-task-from-preview-shortlist` 只负责把已经通过上述 Gate 的 top-k 子集编译回普通
+`candidate_set` 任务，不增加第二套 OA 或仿真执行器。它要求 selection 与完整 OA task 的
+PDK、analysis、candidate generator/source、源 hash、完整候选顺序和 variant identity
+一致，再逐字节绑定两份输入文件；target、constraints、objective、固定参数、安全策略和
+候选 tuple 原样保留，`max_iterations` 精确缩到 shortlist 大小。输出任务必须重新 plan，
+不会继承 preview 的 token 或授权。当前 common-source cascode 语义会推导或核对
+`expected_target_topology_variant=cascode_common_source`；该通用任务前置条件也可显式用于
+其他 `simulation.run`/tuning 任务。executor 在 candidate stage 或 simulation 之前用
+`schematic.inspect` 的 `bridge_readback` 比较拓扑，不匹配时不尝试候选 OA 写入。拓扑
+修复仍须走独立、显式获授权的 topology-delta，不能由 handoff 静默完成。
+
 推荐顺序是：理论/KCL/gm-Id 先缩小结构和参数域，`netlist_preview` 对少量具体候选做
 nonlinear PDK DC/AC 证伪，只有可能胜出的结构才创建/微调 OA 并走 `si` 或 ADE。当前
 共源/共栅级联同条件示例已完成 nics4304 live smoke：两份 241 点 AC、DC OP、逐文件
@@ -209,11 +220,16 @@ preview：top-3 为 `009/007/003`，参考 OA→`si` top-3 为 `009/003/007`，S
 ρ=`0.9333`，两边 winner 均为 `009`；gain/BW/GBW/power 最大误差为
 `4.39%/11.04%/10.13%/19.45%`。top-3 政策把 OA 复核成本从 9 点降到 3 点，但该政策是在
 已知同域结果上事后校准，下一拓扑必须作为 prospective Gate 重新验证，不能沿用这些误差
-或门槛。HSPICE 没有加入默认链路：现有 Spectre runner 的调用复杂度相同，并且与最终
+或门槛。随后 top-3 已由正常 OA→`si`→Spectre 路径重放：009/007/003 的参数、三份
+`si` 网表 hash 和每点 40 项指标均与原九点参考对应项一致，真实 winner 仍为 009；3 点
+OA wall time 为 229.924 s，比原 9 点的 811.503 s 少 71.667%。preview 与 3 点 OA 合计
+301.553 s，仍少 62.840%。这只是已知同域的回放计时，不是新拓扑 prospective 证明。
+HSPICE 没有加入默认链路：现有 Spectre runner 的调用复杂度相同，并且与最终
 foundry-model 真源一致。完整证据见
 [`validation/2026-07-27-standalone-netlist-preview-live.md`](validation/2026-07-27-standalone-netlist-preview-live.md)。候选编译器的本地证据见
 [`validation/2026-07-27-preview-candidate-compiler-local.md`](validation/2026-07-27-preview-candidate-compiler-local.md)，九点执行和筛选校准见
-[`validation/2026-07-27-preview-candidate-selection-live.md`](validation/2026-07-27-preview-candidate-selection-live.md)。
+[`validation/2026-07-27-preview-candidate-selection-live.md`](validation/2026-07-27-preview-candidate-selection-live.md)，top-3 OA 交接与计时见
+[`validation/2026-07-27-preview-shortlist-oa-handoff-live.md`](validation/2026-07-27-preview-shortlist-oa-handoff-live.md)。
 
 ## 理论先导尺寸分析
 

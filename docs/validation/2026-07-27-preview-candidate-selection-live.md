@@ -162,7 +162,10 @@ SHA-256 f666d86ce21ba84de40c6ce11240020c2460d9981f655147a3519dd23a5b0145
 - task、policy、阈值和执行授权：`user_input`；
 - 初次 DNS failure：`system_event`。
 
-本 Gate 没有把 return code 0、文件存在或某个最大值单独称为设计完成。下一道有价值的
-自动化 Gate 是把 successful shortlist 确定性编译回普通 atomic OA 验证任务，再在第一份
-未参与本次校准的新拓扑上 prospectively 检查“top-k 保留真实 winner”。在此之前，当前
-结论只适用于这一个 TSMC N28 nominal 共源/共栅候选域。
+本 Gate 没有把 return code 0、文件存在或某个最大值单独称为设计完成。successful
+shortlist 确定性编译回普通 atomic OA 验证任务的增量 Gate 已于同日完成：已知域 top-3
+经 3/3 OA→`si`→Spectre 重放后仍保留 winner 009，并实测相对九点 OA 减少 71.667% wall
+time。该 follow-up 见
+[preview shortlist OA handoff live Gate](2026-07-27-preview-shortlist-oa-handoff-live.md)。
+第一份未参与本次校准的新拓扑仍必须 prospectively 检查“top-k 保留真实 winner”；在此
+之前，当前结论只适用于这一个 TSMC N28 nominal 共源/共栅候选域。

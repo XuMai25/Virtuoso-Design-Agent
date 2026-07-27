@@ -47,6 +47,7 @@ from .op_relinearization import (
 )
 from .planner import build_plan
 from .preview_compile import build_preview_task_from_candidates
+from .preview_oa_handoff import build_oa_task_from_preview_shortlist
 from .preview_selection import (
     PreviewSelectionPolicy,
     validate_preview_selection,
@@ -226,6 +227,23 @@ def _cmd_preview_task_from_candidates(args: argparse.Namespace) -> int:
         args.policy,
         args.candidate_source,
         args.task_template,
+    )
+    payload = task.model_dump_json(
+        indent=2,
+        exclude_none=True,
+        exclude_unset=True,
+    )
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(payload + "\n", encoding="utf-8")
+    print(payload)
+    return 0
+
+
+def _cmd_oa_task_from_preview_shortlist(args: argparse.Namespace) -> int:
+    task = build_oa_task_from_preview_shortlist(
+        args.selection,
+        args.candidate_task,
+        task_id=args.id,
     )
     payload = task.model_dump_json(
         indent=2,
@@ -698,6 +716,19 @@ def build_parser() -> argparse.ArgumentParser:
     preview_candidate_task.add_argument("task_template", type=Path)
     preview_candidate_task.add_argument("--output", type=Path, required=True)
     preview_candidate_task.set_defaults(handler=_cmd_preview_task_from_candidates)
+
+    preview_oa_task = subparsers.add_parser(
+        "oa-task-from-preview-shortlist",
+        help=(
+            "compile a passed hash-bound preview shortlist into a normal OA "
+            "candidate task"
+        ),
+    )
+    preview_oa_task.add_argument("selection", type=Path)
+    preview_oa_task.add_argument("candidate_task", type=Path)
+    preview_oa_task.add_argument("--id", required=True)
+    preview_oa_task.add_argument("--output", type=Path, required=True)
+    preview_oa_task.set_defaults(handler=_cmd_oa_task_from_preview_shortlist)
 
     preview_select = subparsers.add_parser(
         "preview-select",

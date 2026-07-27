@@ -44,6 +44,19 @@ Spearman ρ=`0.9333`，两侧 winner 都是 `009`；gain/BW/GBW/power 最大误�
 把本次排序或误差门槛直接外推。全过程无 OA target/write，执行后 Spectre/si/Maestro
 均归零，Bridge tunnel 已恢复为停止状态。
 
+同日继续闭合 preview shortlist 到正常 OA 同源验证的交接。新增
+`vda oa-task-from-preview-shortlist` 逐字节绑定 passed selection 与完整 OA candidate task，
+保留 target/规格/objective/safety，只按 preview 排名抽取 009/007/003，并要求重新 plan
+和独立授权。首次执行发现前一 round-trip Gate 已把目标还原为普通共源；失败发生在第一个
+candidate stage，未形成候选结果，恢复后 OA 仍为普通共源。复用既有获验证 forward
+topology-delta 后，3/3 OA→`si`→Spectre AC 完整通过，三点参数、网表 hash 和每点 40 项
+指标与原九点 run 对应项精确一致，winner 仍为 009，最终独立回读也保持该点。3 点 wall
+time=`229.924 s`，相对原 9 点 `811.503 s` 减少 `71.667%`；加上 preview 的
+`71.628 s` 后仍减少 `62.840%`。新增 `expected_target_topology_variant` 令以后在任何候选
+OA 写入前就拒绝此类拓扑漂移；拓扑修复仍是独立显式 operation，不由 handoff 静默执行。
+该 Gate 仍是 retrospective known-domain replay，下一未见拓扑的 shortlist utility 必须
+prospectively 预注册并验证。
+
 PDK 路线默认按晶圆厂 CMOS 工艺推进：当前以 TSMC N28 LVT profile 为缺省；同工艺的 `nch_mac/pch_mac` 通过继承式 `nics4304_tsmc28_svt` 显式选择。NMOS 共源的 LVT/SVT OA/`si`/Spectre round-trip 已 live，PMOS 和其他拓扑仍需独立 Gate。后续优先通过独立 profile 接入 TSMC/SMIC 的实际晶体管 PDK。profile 继承只复用静态工艺配置，不复用性能证据。TSV、hybrid-bonding 等封装/3D PDK 不进入普通电路设计的默认路径；若未来需要，将作为显式选择和独立 Gate，而不是当前 profile 的替代品。
 
 当前实现状态：`OA schematic -> si -> Spectre -> metrics`、供电能量积分、失败注入和候选级 checkpoint/resume 已通过本地测试。2026-07-19 live 结果覆盖 OA/`si` 参数一致性、非空 timing/current 波形、收紧规格、不可行 + 预算耗尽恢复，以及一个经历 3 次 tunnel 中断后仍完成 9/9 候选、最佳参数写回和独立 OA 回读的恢复任务。反相器 L5A 的同源有限闭环与显式恢复 Gate 已通过；Bridge 本地隔离补丁又通过强制断链只读 smoke，闭合 Windows stale state 与调用边界自动重建。运行中传输的随机 reset/timeout 仍是跨 Gate 的底层可靠性债务。
@@ -199,6 +212,7 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> 共源→共栅原位微调（新 cellview 已完成同一 9 点 DC→AC、对应网表 9/9 匹配、checkpoint、exact inverse 和基线身份检查；完整 quality A/B 不再默认，未覆盖 residual 只在可能改变 objective 时补）
   -> OP 导数驱动的通用小信号预筛（既有共源/共栅真实 run 本地重放：增益误差 0.158%/0.646%；未来 gmb+dQi/dVj+cjd/cjs 保存面已实现、本地测试通过、live capture 待做）
   -> 结构化 standalone Spectre 轻量 A/B（共源/共栅级联已完成无 OA/si/Maestro 的 TSMC N28 live preview、完整 manifest 和进程归零；方向与 OA→si 一致，绝对值不作同源复现）
+  -> preview shortlist → 普通 OA 同源复核（已知九点域的 top-3 编译、拓扑前置检查、3/3 OA/si/AC、winner 保留与耗时压缩已 live；新拓扑 prospective utility 待独立证明）
   -> active-load + 对称源极退化组合拓扑（新 cellview forward/readback/七实例 si/DC/AC/CMRR/noise/transient/ICMR/PSRR/inverse/恢复态 DC 均已 live；质量闭环未过）
   -> L5B 单模块闭环
   -> layout/DRC/LVS/PEX Gate

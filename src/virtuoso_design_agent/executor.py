@@ -627,6 +627,35 @@ class TaskExecutor:
         return {name: float(raw[name]) for name in names}
 
     @staticmethod
+    def _assert_expected_target_topology(
+        result: AdapterResult,
+        task: TaskSpec,
+        *,
+        before_candidate_write: bool = True,
+    ) -> None:
+        expected = task.expected_target_topology_variant
+        if expected is None:
+            return
+        actual = result.data.get("topology_variant")
+        if not isinstance(actual, str) or not actual:
+            raise RuntimeError(
+                "target topology precondition could not be verified: "
+                f"expected {expected!r}, but schematic inspection omitted "
+                "topology_variant"
+            )
+        if actual != expected:
+            consequence = (
+                "no candidate OA write was attempted"
+                if before_candidate_write
+                else "final topology readback does not match the task contract"
+            )
+            raise RuntimeError(
+                "target topology precondition mismatch: "
+                f"expected {expected!r}, read back {actual!r}; "
+                f"{consequence}"
+            )
+
+    @staticmethod
     def _instances_by_name(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
         raw = data.get("instances")
         if not isinstance(raw, list):
@@ -4583,10 +4612,11 @@ class TaskExecutor:
                 )
             elif operation is Operation.SIMULATION_RUN:
                 if task.circuit is not CircuitKind.NETLIST_PREVIEW:
-                    self._action(
+                    before = self._action(
                         "schematic.inspect.before",
                         lambda: self.adapter.inspect_schematic(task),
                     )
+                    self._assert_expected_target_topology(before, task)
                 candidates = self._run_candidates(task)
                 status = self._note_candidate_failures(candidates, status, notes)
                 if candidates:
@@ -4640,6 +4670,7 @@ class TaskExecutor:
                     else "schematic.inspect.before",
                     lambda: self.adapter.inspect_schematic(task),
                 )
+                self._assert_expected_target_topology(before, task)
                 current_parameters = self._semantic_parameters(before, task)
                 current_instance_parameters = self._targeted_instance_parameters(
                     before, task
@@ -4750,6 +4781,11 @@ class TaskExecutor:
                             lambda: self.adapter.inspect_schematic(task),
                         )
                         final_instance_parameters = {}
+                    self._assert_expected_target_topology(
+                        after,
+                        task,
+                        before_candidate_write=False,
+                    )
                     final_parameters = self._semantic_parameters(after, task)
                     if not self._same_parameters(
                         expected_oa_parameters, final_parameters
