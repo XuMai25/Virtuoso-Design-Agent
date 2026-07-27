@@ -13063,7 +13063,13 @@ def simulate_netlist_preview(payload: dict[str, Any]) -> dict[str, Any]:
             "preview_spec_sha256": spec.canonical_sha256(),
             "preview_spec_source": "user_input",
             "source_bindings": dict(spec.source_bindings),
-            "source_bindings_evidence_source": "user_input",
+            "source_bindings_evidence_source": (
+                spec.source_bindings_evidence_source
+            ),
+            "variant_source_ids": dict(spec.variant_source_ids),
+            "variant_source_ids_evidence_source": (
+                spec.variant_source_ids_evidence_source
+            ),
             "analysis": analysis,
             "analysis_source": str(payload.get("analysis_source", "user_input")),
             "pdk_profile": str(profile["name"]),

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "common-source-cascode-preview-compile-20260727",
+  "expected_candidate_generator": "vda.cascode-seed",
+  "expected_candidate_source_id": "common-source-cascode-op-seed-20260726-live",
+  "expected_pdk_profile": "nics4304_tsmc28",
+  "candidate_ids": [
+    "cascode-seed-001",
+    "cascode-seed-002",
+    "cascode-seed-003",
+    "cascode-seed-004",
+    "cascode-seed-005",
+    "cascode-seed-006",
+    "cascode-seed-007",
+    "cascode-seed-008",
+    "cascode-seed-009"
+  ],
+  "template_variant_id": "cascode_template",
+  "variant_id_prefix": "cascode_candidate",
+  "fixed_parameters": {},
+  "bindings": [
+    {
+      "parameter": "cascode_width_um",
+      "element_kind": "mosfet",
+      "element": "MNCAS",
+      "field": "width_um"
+    },
+    {
+      "parameter": "cascode_length_um",
+      "element_kind": "mosfet",
+      "element": "MNCAS",
+      "field": "length_um"
+    },
+    {
+      "parameter": "cascode_bias_v",
+      "element_kind": "voltage_source",
+      "element": "VCAS_SRC",
+      "field": "dc_v"
+    }
+  ]
+}

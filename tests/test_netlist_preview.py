@@ -509,6 +509,11 @@ def test_preview_worker_runs_both_decks_and_returns_eda_bound_ab(
         },
     )
 
+    preview_data = _preview_spec_data()
+    preview_data["variant_source_ids"] = {
+        "cascode_common_source": "cascode-seed-001"
+    }
+    preview_data["variant_source_ids_evidence_source"] = "software_inference"
     result = simulate_netlist_preview(
         {
             "task_id": "preview-worker",
@@ -522,7 +527,7 @@ def test_preview_worker_runs_both_decks_and_returns_eda_bound_ab(
                 "reference_points": 5,
                 "max_reference_variation_db": 0.5,
             },
-            "netlist_preview": _preview_spec_data(),
+            "netlist_preview": preview_data,
             "timeout_seconds": 60,
         }
     )
@@ -546,6 +551,13 @@ def test_preview_worker_runs_both_decks_and_returns_eda_bound_ab(
     assert result["evidence"]["oa_access_performed"] is False
     assert result["evidence"]["si_netlisting_performed"] is False
     assert result["evidence"]["comparison"]["source"] == "software_inference"
+    assert result["evidence"]["variant_source_ids"] == {
+        "cascode_common_source": "cascode-seed-001"
+    }
+    assert (
+        result["evidence"]["variant_source_ids_evidence_source"]
+        == "software_inference"
+    )
     assert all(
         item["process_lifecycle"]["bounded_remote_process"]
         for item in result["evidence"]["variants"].values()

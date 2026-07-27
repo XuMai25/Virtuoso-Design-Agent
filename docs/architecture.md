@@ -172,6 +172,21 @@ DC 会核对所有声明电压源的实际节点差，提取逐 MOS 的 Id/VGS/V
 记录 `oa_access=false`、`si_netlisting=false`、`maestro_access=false`，因此不能被包装成
 schematic-driven 或 design closure。
 
+`vda preview-task-from-candidates` 是该层之前的纯本地确定性编译器，不是第二个优化器。
+它直接消费既有 `AtomicCandidateSet` 或 `TheorySeedCandidateSet`，要求 policy 明列候选 ID
+及顺序、来源 generator/source ID、可选 PDK、结构占位 variant、固定参数和 typed field
+bindings。一个 semantic 参数可以映射到多个不同器件字段，但所有候选参数必须恰好被
+映射或声明为固定值；同一目标字段重复写、固定值跨候选漂移、未映射字段、raw CDF
+`instance_parameter_updates`、缺失器件或来源漂移都会拒绝。编译器不综合拓扑、不读取
+预测值决定排名，也不静默截断候选；当前结构化任务最多 16 个 variant。
+
+编译时只克隆 policy 指定的占位 variant，其他基线 variant 原位保留；引用占位 variant
+的 constraints 逐候选展开，引用它的单一 objective 因语义含糊而拒绝。输出绑定原候选
+文件、compile policy 和 task template 的 SHA-256，并保存 `variant_source_ids`。这些 hash
+计算和候选到 variant 的映射标为 `software_inference`；后续真正运行得到的 OP/AC 仍只
+标为 `eda_result`。因此 Agent 可以为新拓扑提供一个受校验结构模板和少量候选，而不必
+复制 deck 或 OA 操作；最终胜出结构仍要通过 OA→`si` 或人工 ADE Gate。
+
 推荐顺序是：理论/KCL/gm-Id 先缩小结构和参数域，`netlist_preview` 对少量具体候选做
 nonlinear PDK DC/AC 证伪，只有可能胜出的结构才创建/微调 OA 并走 `si` 或 ADE。当前
 共源/共栅级联同条件示例已完成 nics4304 live smoke：两份 241 点 AC、DC OP、逐文件
@@ -180,7 +195,8 @@ gain/BW/GBW 比为 `1.538/0.489/0.753`，既有 OA→`si` 对照为
 `1.404/0.534/0.750`，主要方向一致；但单结构绝对值误差最高超过 20%，因此只证明方向性
 筛选价值，不替代已验证的 OA→`si` 结果。HSPICE 没有加入默认链路：现有 Spectre runner
 的调用复杂度相同，并且与最终 foundry-model 真源一致。完整证据见
-[`validation/2026-07-27-standalone-netlist-preview-live.md`](validation/2026-07-27-standalone-netlist-preview-live.md)。
+[`validation/2026-07-27-standalone-netlist-preview-live.md`](validation/2026-07-27-standalone-netlist-preview-live.md)。候选编译器的本地证据见
+[`validation/2026-07-27-preview-candidate-compiler-local.md`](validation/2026-07-27-preview-candidate-compiler-local.md)。
 
 ## 理论先导尺寸分析
 

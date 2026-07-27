@@ -45,6 +45,7 @@ from .op_relinearization import (
     validate_relinearization_run,
 )
 from .planner import build_plan
+from .preview_compile import build_preview_task_from_candidates
 from .resource_audit import audit_local_resources, load_retention_pins
 from .safety import SafetyViolation
 from .small_signal import SmallSignalNetworkRequest, analyze_small_signal_network
@@ -204,6 +205,23 @@ def _cmd_cascode_seed(args: argparse.Namespace) -> int:
 
 def _cmd_candidate_task_from_cascode_seed(args: argparse.Namespace) -> int:
     task = build_task_from_cascode_seed(args.result, args.task_template)
+    payload = task.model_dump_json(
+        indent=2,
+        exclude_none=True,
+        exclude_unset=True,
+    )
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(payload + "\n", encoding="utf-8")
+    print(payload)
+    return 0
+
+
+def _cmd_preview_task_from_candidates(args: argparse.Namespace) -> int:
+    task = build_preview_task_from_candidates(
+        args.policy,
+        args.candidate_source,
+        args.task_template,
+    )
     payload = task.model_dump_json(
         indent=2,
         exclude_none=True,
@@ -634,6 +652,19 @@ def build_parser() -> argparse.ArgumentParser:
     cascode_seed_task.add_argument("task_template", type=Path)
     cascode_seed_task.add_argument("--output", type=Path, required=True)
     cascode_seed_task.set_defaults(handler=_cmd_candidate_task_from_cascode_seed)
+
+    preview_candidate_task = subparsers.add_parser(
+        "preview-task-from-candidates",
+        help=(
+            "compile an explicit atomic/theory candidate shortlist into typed "
+            "standalone Spectre preview variants"
+        ),
+    )
+    preview_candidate_task.add_argument("policy", type=Path)
+    preview_candidate_task.add_argument("candidate_source", type=Path)
+    preview_candidate_task.add_argument("task_template", type=Path)
+    preview_candidate_task.add_argument("--output", type=Path, required=True)
+    preview_candidate_task.set_defaults(handler=_cmd_preview_task_from_candidates)
 
     theory_request = subparsers.add_parser(
         "theory-request-from-validation",

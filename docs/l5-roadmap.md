@@ -29,6 +29,16 @@ hash manifest 和进程归零。级联/共源的 gain/BW/GBW A/B 方向与既有
 但绝对数值误差最高超过 20%，所以状态只升级为 standalone directional preview live，
 不能用该层宣称 schematic-driven 性能或设计闭环。
 
+2026-07-27 又补齐理论候选到该预评估层的本地交接：
+`vda preview-task-from-candidates` 复用现有 `candidate_set`/`theory_seed`，按 policy 显式列出的
+ID 和顺序把候选 semantic 参数映射到一个 typed graph placeholder。它拒绝来源/PDK
+漂移、参数遗漏、固定值漂移、raw CDF 更新、重复目标和含糊的 placeholder objective，
+并把 source/policy/template hash 与 `variant -> candidate ID` 写进输出。既有 9 点真实
+cascode seed 已确定性编译成 1 个固定共源基线 + 9 个共栅候选并通过 plan；本 Gate 没有
+连接 Bridge、运行远端计算或写 OA。下一道远端 Gate 应验证这 10 份 preview 的执行与
+候选身份绑定，并把排序同既有 OA→`si` 九点结果对照；它需要单独披露远端路径和确认，
+不能用本地编译通过代替。
+
 PDK 路线默认按晶圆厂 CMOS 工艺推进：当前以 TSMC N28 LVT profile 为缺省；同工艺的 `nch_mac/pch_mac` 通过继承式 `nics4304_tsmc28_svt` 显式选择。NMOS 共源的 LVT/SVT OA/`si`/Spectre round-trip 已 live，PMOS 和其他拓扑仍需独立 Gate。后续优先通过独立 profile 接入 TSMC/SMIC 的实际晶体管 PDK。profile 继承只复用静态工艺配置，不复用性能证据。TSV、hybrid-bonding 等封装/3D PDK 不进入普通电路设计的默认路径；若未来需要，将作为显式选择和独立 Gate，而不是当前 profile 的替代品。
 
 当前实现状态：`OA schematic -> si -> Spectre -> metrics`、供电能量积分、失败注入和候选级 checkpoint/resume 已通过本地测试。2026-07-19 live 结果覆盖 OA/`si` 参数一致性、非空 timing/current 波形、收紧规格、不可行 + 预算耗尽恢复，以及一个经历 3 次 tunnel 中断后仍完成 9/9 候选、最佳参数写回和独立 OA 回读的恢复任务。反相器 L5A 的同源有限闭环与显式恢复 Gate 已通过；Bridge 本地隔离补丁又通过强制断链只读 smoke，闭合 Windows stale state 与调用边界自动重建。运行中传输的随机 reset/timeout 仍是跨 Gate 的底层可靠性债务。

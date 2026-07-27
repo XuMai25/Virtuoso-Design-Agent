@@ -171,11 +171,21 @@ class NetlistPreviewSpec(_StrictModel):
     voltage_sources: list[PreviewVoltageSource] = Field(min_length=1, max_length=64)
     resistors: list[PreviewResistor] = Field(default_factory=list, max_length=512)
     capacitors: list[PreviewCapacitor] = Field(default_factory=list, max_length=512)
-    variants: list[NetlistPreviewVariant] = Field(min_length=1, max_length=8)
+    variants: list[NetlistPreviewVariant] = Field(min_length=1, max_length=16)
     source_bindings: dict[StrictStr, StrictStr] = Field(
         default_factory=dict,
         max_length=16,
     )
+    source_bindings_evidence_source: Literal[
+        "user_input", "software_inference"
+    ] = "user_input"
+    variant_source_ids: dict[StrictStr, StrictStr] = Field(
+        default_factory=dict,
+        max_length=16,
+    )
+    variant_source_ids_evidence_source: Literal[
+        "user_input", "software_inference"
+    ] = "user_input"
 
     @field_validator("source_bindings")
     @classmethod
@@ -185,10 +195,28 @@ class NetlistPreviewSpec(_StrictModel):
                 raise ValueError("preview source bindings require SHA-256 values")
         return dict(sorted(value.items()))
 
+    @field_validator("variant_source_ids")
+    @classmethod
+    def validate_variant_source_ids(
+        cls, value: dict[str, str]
+    ) -> dict[str, str]:
+        if any(not source_id for source_id in value.values()):
+            raise ValueError("preview variant source ids cannot be empty")
+        if len(value.values()) != len(set(value.values())):
+            raise ValueError("preview variant source ids must be unique")
+        return dict(sorted(value.items()))
+
     @model_validator(mode="after")
     def validate_preview(self) -> "NetlistPreviewSpec":
         _require_unique((variant.id for variant in self.variants), "variant")
         _require_unique(self.supply_sources, "supply source")
+        variant_ids = {variant.id for variant in self.variants}
+        unknown_source_ids = sorted(set(self.variant_source_ids) - variant_ids)
+        if unknown_source_ids:
+            raise ValueError(
+                "preview variant source ids name unknown variants: "
+                + ", ".join(unknown_source_ids)
+            )
 
         shared_names = [item.name for item in self.voltage_sources]
         shared_names.extend(item.name for item in self.resistors)

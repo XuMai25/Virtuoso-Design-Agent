@@ -279,14 +279,22 @@ OA Gate 之间的通用初筛面；绝对值与 OA→`si` 不等同。
 - 该层复用 Bridge SSH/Spectre runner、现有 remote timeout guard、worker resource
   registry、cancel/watchdog 和 Windows Job Object，不增加 HSPICE 或 PowerShell wrapper，
   也没有修改第三方 Bridge。远端 evidence root 有意保留，后续由资源 inventory 审计。
+- 新增的 `preview-task-from-candidates` 纯本地编译器直接复用 `candidate_set` 或
+  `theory_seed`。compile policy 显式列出候选 ID/顺序，并把每个 semantic 参数映射到
+  placeholder variant 的 MOS/电压源/R/C typed field；未映射参数、固定值漂移、raw CDF、
+  重复目标和 source/PDK 漂移全部拒绝，不根据 predicted metric 重新排序。source、policy、
+  template hash 和每个输出 variant 的原 candidate ID 随任务保存，派生绑定标为
+  `software_inference`。
 
 首个只读 live smoke 的两份 AC 各有 241 点并包围 bandwidth，执行后远端
 Spectre/si/Maestro 进程回到零。级联/共源的 gain/BW/GBW 比为
 `1.538/0.489/0.753`，既有 OA→`si` 为 `1.404/0.534/0.750`；方向一致，但绝对值误差
-最高超过 20%。下一道有效 Gate 不是扩大随机候选数，而是把理论生成的少量结构候选
-自动编译到同一 preview contract，并只将可能改变 objective 的胜出者升级到 OA。同样，
-任何最终选中的拓扑仍要进入 OA 同源或人工 ADE 验证。完整证据见
-[`validation/2026-07-27-standalone-netlist-preview-live.md`](validation/2026-07-27-standalone-netlist-preview-live.md)。
+最高超过 20%。既有 9 点 cascode seed 现已本地编译为 1 个固定共源基线 + 9 个共栅
+candidate variant；下一道远端 Gate 是执行这 10 个网表并把候选身份、可行性和排序同
+既有 OA→`si` 九点结果对照，而不是扩大随机候选数。只有可能改变 objective 的胜出结构
+才值得升级到 OA，且任何最终选中的拓扑仍要进入 OA 同源或人工 ADE 验证。完整证据见
+[`validation/2026-07-27-standalone-netlist-preview-live.md`](validation/2026-07-27-standalone-netlist-preview-live.md)和
+[`validation/2026-07-27-preview-candidate-compiler-local.md`](validation/2026-07-27-preview-candidate-compiler-local.md)。
 
 ## 跨电路 Gate：通用微调事务
 
