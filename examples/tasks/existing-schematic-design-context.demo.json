@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "id": "existing-schematic-design-context-demo",
+  "operation": "schematic.inspect",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_cs_ac_tradeoff_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "design_context": {
+    "schema_version": 1,
+    "id": "user-provided-single-ended-stage",
+    "topology_origin": "existing_oa",
+    "roles": [
+      {
+        "role": "signal.input",
+        "nets": [
+          "IN"
+        ]
+      },
+      {
+        "role": "signal.output",
+        "nets": [
+          "OUT"
+        ]
+      },
+      {
+        "role": "supply.positive",
+        "pins": [
+          "VDD"
+        ]
+      },
+      {
+        "role": "supply.negative",
+        "pins": [
+          "VSS"
+        ]
+      },
+      {
+        "role": "device.input",
+        "instances": [
+          "MN0"
+        ],
+        "evidence_source": "software_inference"
+      },
+      {
+        "role": "load.dc",
+        "instances": [
+          "RD0"
+        ],
+        "evidence_source": "software_inference"
+      }
+    ],
+    "instance_parameter_permissions": [
+      {
+        "instance": "MN0",
+        "parameters": [
+          "Wfg",
+          "fingers",
+          "l"
+        ],
+        "modes": [
+          "fixed",
+          "search"
+        ]
+      },
+      {
+        "instance": "RD0",
+        "parameters": [
+          "r"
+        ],
+        "modes": [
+          "fixed",
+          "search"
+        ]
+      }
+    ],
+    "frozen_pins": [
+      "IN",
+      "OUT",
+      "VDD",
+      "VSS"
+    ],
+    "topology_edits": {
+      "allowed_operations": [
+        "add_instance",
+        "add_net",
+        "reconnect_terminal",
+        "remove_instance",
+        "remove_net"
+      ],
+      "mutable_instances": [
+        "MN0",
+        "RS0"
+      ],
+      "mutable_nets": [
+        "NSRC"
+      ],
+      "max_operations_per_delta": 8
+    },
+    "required_analyses": [
+      "ac",
+      "dc"
+    ],
+    "optional_analyses": [
+      "noise",
+      "transient"
+    ],
+    "metrics": [
+      "all_mos_saturation_region",
+      "bandwidth_hz",
+      "dc_supply_power_uw",
+      "gbw_hz",
+      "low_frequency_gain_v_per_v"
+    ]
+  }
+}

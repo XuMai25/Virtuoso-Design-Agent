@@ -30,7 +30,17 @@ from virtuoso_design_agent.characterization import (
     MOS_CHARGE_DERIVATIVE_NAMES,
     enumerate_mos_characterization_points,
 )
-from virtuoso_design_agent.models import DeviceCharacterizationSpec
+from virtuoso_design_agent.design_context import DesignContext, audit_design_context
+from virtuoso_design_agent.generic_simulation import (
+    GenericOaSimulationSpec,
+    GenericVoltageExpression,
+    render_generic_oa_testbench,
+)
+from virtuoso_design_agent.models import (
+    AnalysisStageSpec,
+    DeviceCharacterizationSpec,
+    MetricConstraint,
+)
 from virtuoso_design_agent.netlist_preview import (
     NetlistPreviewSpec,
     NetlistPreviewVariant,
@@ -51,6 +61,7 @@ from virtuoso_design_agent.metrics import (
     extract_differential_pair_psrr_metrics,
     extract_inverter_metrics,
     extract_supply_metrics,
+    evaluate_constraints,
 )
 from virtuoso_design_agent.spectre_values import spectre_values_equal
 from virtuoso_design_agent.calculator_expressions import calculator_expressions_equal
@@ -11184,6 +11195,402 @@ def _parse_si_instance_parameters(
     return parameters, unparsed_parameter_tokens
 
 
+def _spectre_hierarchy_records(
+    text: str,
+) -> tuple[list[str], dict[str, dict[str, Any]]]:
+    top_records: list[str] = []
+    subcircuits: dict[str, dict[str, Any]] = {}
+    active_name: str | None = None
+    for record in _logical_netlist_records(text):
+        start = re.match(
+            r"^subckt\s+(\S+)\s*(?:\(([^)]*)\)|(.*))$",
+            record,
+            flags=re.IGNORECASE,
+        )
+        if start is not None:
+            if active_name is not None:
+                raise RuntimeError("nested si subcircuit definitions are unsupported")
+            name = start.group(1)
+            if name in subcircuits:
+                raise RuntimeError(f"si netlist repeats subcircuit {name!r}")
+            pin_text = start.group(2) if start.group(2) is not None else start.group(3)
+            pins = [
+                _normalized_net_name(value)
+                for value in str(pin_text or "").split()
+            ]
+            if not pins or len(pins) != len(set(pins)):
+                raise RuntimeError(
+                    f"si subcircuit {name!r} has invalid or duplicate terminals"
+                )
+            subcircuits[name] = {"pins": pins, "records": []}
+            active_name = name
+            continue
+        end = re.match(r"^ends(?:\s+(\S+))?$", record, flags=re.IGNORECASE)
+        if end is not None:
+            if active_name is None:
+                raise RuntimeError("si netlist contains ends outside a subcircuit")
+            if end.group(1) is not None and end.group(1) != active_name:
+                raise RuntimeError(
+                    f"si subcircuit end {end.group(1)!r} does not match "
+                    f"{active_name!r}"
+                )
+            active_name = None
+            continue
+        if active_name is None:
+            top_records.append(record)
+        else:
+            subcircuits[active_name]["records"].append(record)
+    if active_name is not None:
+        raise RuntimeError(f"si subcircuit {active_name!r} is missing ends")
+    return top_records, subcircuits
+
+
+def _parse_si_instance_records(
+    records: list[str],
+    *,
+    scope: str,
+) -> dict[str, dict[str, Any]]:
+    parsed_instances: dict[str, dict[str, Any]] = {}
+    for record in records:
+        match = re.match(r"^(\S+)\s*\(([^)]*)\)\s+(\S+)(?:\s+(.*))?$", record)
+        if match is None:
+            continue
+        name, nodes_text, model, parameter_text = match.groups()
+        if name in parsed_instances:
+            raise RuntimeError(f"si netlist repeats instance {scope}/{name}")
+        parameters, _ = _parse_si_instance_parameters(parameter_text or "", name)
+        parsed_instances[name] = {
+            "nodes": [
+                _normalized_net_name(value) for value in nodes_text.split()
+            ],
+            "model": model,
+            "parameters": {
+                key: value.strip('"') for key, value in sorted(parameters.items())
+            },
+        }
+    return parsed_instances
+
+
+def _verify_primitive_scope(
+    oa_instances: dict[str, dict[str, Any]],
+    parsed_instances: dict[str, dict[str, Any]],
+    *,
+    scope: str,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    omitted_ground_symbols = sorted(
+        name
+        for name, item in oa_instances.items()
+        if str(item.get("cell") or "").lower() in {"gnd", "vss"}
+    )
+    expected_names = set(oa_instances) - set(omitted_ground_symbols)
+    actual_names = set(parsed_instances)
+    if expected_names != actual_names:
+        raise RuntimeError(
+            f"si netlist/OA instance set mismatch in {scope}: "
+            f"missing={sorted(expected_names - actual_names)}, "
+            f"extra={sorted(actual_names - expected_names)}"
+        )
+    checks: list[dict[str, Any]] = []
+    for name in sorted(expected_names):
+        oa_instance = oa_instances[name]
+        contract = _ade_instance_contract(oa_instance)
+        if contract is None:
+            raise RuntimeError(
+                "generic OA hierarchy supports only primitive instances inside "
+                f"bound child schematics; unsupported {scope}/{name} "
+                f"({oa_instance.get('lib')}/{oa_instance.get('cell')})"
+            )
+        parsed = parsed_instances[name]
+        if parsed["model"] != contract["model"]:
+            raise RuntimeError(
+                f"si netlist model mismatch for {scope}/{name}: "
+                f"{parsed['model']!r} != {contract['model']!r}"
+            )
+        terminals = oa_instance.get("terms") or {}
+        expected_nodes = [
+            _normalized_net_name(terminals[terminal])
+            for terminal in contract["terminal_order"]
+        ]
+        if parsed["nodes"] != expected_nodes:
+            raise RuntimeError(
+                f"si netlist node mismatch for {scope}/{name}: "
+                f"{parsed['nodes']!r} != {expected_nodes!r}"
+            )
+        checks.append(
+            {
+                "instance": name,
+                "model": parsed["model"],
+                "nodes": parsed["nodes"],
+            }
+        )
+    return checks, omitted_ground_symbols
+
+
+def _parse_existing_schematic_netlist(
+    text: str,
+    schematic: dict[str, Any],
+    settings: GenericOaSimulationSpec,
+    hierarchy_schematics: dict[tuple[str, str], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Prove a primitive or explicitly bound one-level OA hierarchy matches si."""
+
+    top_records, subcircuits = _spectre_hierarchy_records(text)
+    parsed_instances = _parse_si_instance_records(top_records, scope="top")
+
+    oa_instances = {
+        str(item.get("name")): item for item in schematic.get("instances", [])
+    }
+    omitted_ground_symbols = sorted(
+        name
+        for name, item in oa_instances.items()
+        if str(item.get("cell") or "").lower() in {"gnd", "vss"}
+    )
+    expected_names = set(oa_instances) - set(omitted_ground_symbols)
+    actual_names = set(parsed_instances)
+    if expected_names != actual_names:
+        raise RuntimeError(
+            "si netlist/OA top-level instance set mismatch: "
+            f"missing={sorted(expected_names - actual_names)}, "
+            f"extra={sorted(actual_names - expected_names)}"
+        )
+    hierarchy_by_instance = {
+        binding.instance: binding for binding in settings.hierarchy_bindings
+    }
+    unknown_hierarchy_instances = sorted(
+        set(hierarchy_by_instance) - expected_names
+    )
+    if unknown_hierarchy_instances:
+        raise RuntimeError(
+            "generic hierarchy bindings reference missing top-level instances: "
+            + ", ".join(unknown_hierarchy_instances)
+        )
+
+    wrapper_names = {item.name for item in (*settings.sources, *settings.loads)}
+    collisions = sorted(wrapper_names & expected_names)
+    if collisions:
+        raise RuntimeError(
+            "generic testbench element names collide with OA instances: "
+            + ", ".join(collisions)
+        )
+
+    oa_nets = {
+        _normalized_net_name(name) for name in (schematic.get("nets") or {}).keys()
+    }
+    unknown_nodes = sorted(settings.referenced_nodes() - oa_nets - {"0"})
+    if unknown_nodes:
+        raise RuntimeError(
+            "generic testbench references nodes absent from OA schematic: "
+            + ", ".join(unknown_nodes)
+        )
+
+    topology_checks: list[dict[str, Any]] = []
+    hierarchy_checks: list[dict[str, Any]] = []
+    for name in sorted(expected_names):
+        oa_instance = oa_instances[name]
+        hierarchy_binding = hierarchy_by_instance.get(name)
+        if hierarchy_binding is not None:
+            if (
+                oa_instance.get("lib") != hierarchy_binding.library
+                or oa_instance.get("cell") != hierarchy_binding.cell
+            ):
+                raise RuntimeError(
+                    f"hierarchy binding master mismatch for {name}: OA="
+                    f"{oa_instance.get('lib')}/{oa_instance.get('cell')}, declared="
+                    f"{hierarchy_binding.library}/{hierarchy_binding.cell}"
+                )
+            parsed = parsed_instances[name]
+            if parsed["model"] != hierarchy_binding.subcircuit:
+                raise RuntimeError(
+                    f"si subcircuit call mismatch for {name}: "
+                    f"{parsed['model']!r} != {hierarchy_binding.subcircuit!r}"
+                )
+            terminals = oa_instance.get("terms") or {}
+            missing_terminals = sorted(
+                set(hierarchy_binding.terminal_order) - set(terminals)
+            )
+            if missing_terminals:
+                raise RuntimeError(
+                    f"hierarchy binding {name} references missing OA terminals: "
+                    + ", ".join(missing_terminals)
+                )
+            expected_nodes = [
+                _normalized_net_name(terminals[terminal])
+                for terminal in hierarchy_binding.terminal_order
+            ]
+            if parsed["nodes"] != expected_nodes:
+                raise RuntimeError(
+                    f"si subcircuit node mismatch for {name}: "
+                    f"{parsed['nodes']!r} != {expected_nodes!r}"
+                )
+            subcircuit = subcircuits.get(hierarchy_binding.subcircuit)
+            if subcircuit is None:
+                raise RuntimeError(
+                    f"si netlist is missing subcircuit definition "
+                    f"{hierarchy_binding.subcircuit!r} for {name}"
+                )
+            declared_pins = [
+                _normalized_net_name(value)
+                for value in hierarchy_binding.terminal_order
+            ]
+            if subcircuit["pins"] != declared_pins:
+                raise RuntimeError(
+                    f"si subcircuit terminal order mismatch for {name}: "
+                    f"{subcircuit['pins']!r} != {declared_pins!r}"
+                )
+            child_key = (hierarchy_binding.library, hierarchy_binding.cell)
+            child = (hierarchy_schematics or {}).get(child_key)
+            if child is None:
+                raise RuntimeError(
+                    f"hierarchy child schematic readback is missing for "
+                    f"{hierarchy_binding.library}/{hierarchy_binding.cell}"
+                )
+            child_pins = {
+                _normalized_net_name(value)
+                for value in (child.get("pins") or {}).keys()
+            }
+            if child_pins != set(declared_pins):
+                raise RuntimeError(
+                    f"hierarchy child OA pin set mismatch for {name}: "
+                    f"OA={sorted(child_pins)}, declared={sorted(declared_pins)}"
+                )
+            child_instances = {
+                str(item.get("name")): item
+                for item in child.get("instances", [])
+            }
+            child_parsed = _parse_si_instance_records(
+                subcircuit["records"],
+                scope=hierarchy_binding.subcircuit,
+            )
+            child_checks, child_grounds = _verify_primitive_scope(
+                child_instances,
+                child_parsed,
+                scope=hierarchy_binding.subcircuit,
+            )
+            child_summary = _existing_schematic_summary(child)
+            hierarchy_checks.append(
+                {
+                    "instance": name,
+                    "master": {
+                        "library": hierarchy_binding.library,
+                        "cell": hierarchy_binding.cell,
+                        "view": hierarchy_binding.view,
+                    },
+                    "subcircuit": hierarchy_binding.subcircuit,
+                    "terminal_order": list(hierarchy_binding.terminal_order),
+                    "nodes": parsed["nodes"],
+                    "child_topology_sha256": topology_fingerprint(
+                        snapshot_from_inspection(child_summary)
+                    ),
+                    "child_topology_source": "bridge_readback",
+                    "subcircuit_source": "eda_result",
+                    "consistency_source": "software_inference",
+                    "child_instances": child_checks,
+                    "child_omitted_ground_symbols": child_grounds,
+                }
+            )
+            topology_checks.append(
+                {
+                    "instance": name,
+                    "model": parsed["model"],
+                    "nodes": parsed["nodes"],
+                    "kind": "subcircuit",
+                }
+            )
+            continue
+        contract = _ade_instance_contract(oa_instance)
+        if contract is None:
+            raise RuntimeError(
+                "generic OA simulation has no primitive contract or explicit "
+                "hierarchy binding for "
+                f"{name} ({oa_instance.get('lib')}/{oa_instance.get('cell')})"
+            )
+        parsed = parsed_instances[name]
+        if parsed["model"] != contract["model"]:
+            raise RuntimeError(
+                f"si netlist model mismatch for {name}: "
+                f"{parsed['model']!r} != {contract['model']!r}"
+            )
+        terminals = oa_instance.get("terms") or {}
+        expected_nodes = [
+            _normalized_net_name(terminals[terminal])
+            for terminal in contract["terminal_order"]
+        ]
+        if parsed["nodes"] != expected_nodes:
+            raise RuntimeError(
+                f"si netlist node mismatch for {name}: "
+                f"{parsed['nodes']!r} != {expected_nodes!r}"
+            )
+        topology_checks.append(
+            {
+                "instance": name,
+                "model": parsed["model"],
+                "nodes": parsed["nodes"],
+            }
+        )
+
+    parameter_checks: list[dict[str, str]] = []
+    for binding in settings.netlist_parameter_bindings:
+        oa_instance = oa_instances.get(binding.instance)
+        if oa_instance is None or binding.instance not in parsed_instances:
+            raise RuntimeError(
+                "generic netlist parameter binding references missing instance "
+                f"{binding.instance!r}"
+            )
+        oa_parameters = oa_instance.get("params") or {}
+        netlist_parameters = parsed_instances[binding.instance]["parameters"]
+        if binding.oa_parameter not in oa_parameters:
+            raise RuntimeError(
+                "OA readback is missing bound parameter "
+                f"{binding.instance}.{binding.oa_parameter}"
+            )
+        if binding.netlist_parameter not in netlist_parameters:
+            raise RuntimeError(
+                "si netlist is missing bound parameter "
+                f"{binding.instance}.{binding.netlist_parameter}"
+            )
+        oa_value = str(oa_parameters[binding.oa_parameter])
+        netlist_value = str(netlist_parameters[binding.netlist_parameter])
+        if not spectre_values_equal(oa_value, netlist_value):
+            raise RuntimeError(
+                "OA/si parameter mismatch for "
+                f"{binding.instance}.{binding.oa_parameter}->"
+                f"{binding.netlist_parameter}: {oa_value!r} != {netlist_value!r}"
+            )
+        parameter_checks.append(
+            {
+                "instance": binding.instance,
+                "oa_parameter": binding.oa_parameter,
+                "netlist_parameter": binding.netlist_parameter,
+                "oa_value": oa_value,
+                "netlist_value": netlist_value,
+            }
+        )
+
+    missing_op_instances = sorted(
+        {item.instance for item in settings.operating_point_metrics}
+        - expected_names
+    )
+    if missing_op_instances:
+        raise RuntimeError(
+            "generic operating-point metrics reference missing instances: "
+            + ", ".join(missing_op_instances)
+        )
+    return {
+        "instances": topology_checks,
+        "omitted_ground_symbols": omitted_ground_symbols,
+        "topology_consistency": "matched",
+        "parameter_bindings": parameter_checks,
+        "parameter_consistency": "matched",
+        "flat_primitive_scope": not bool(hierarchy_checks),
+        "hierarchy_scope": (
+            "explicit_one_level_primitive_children"
+            if hierarchy_checks
+            else "flat_primitive"
+        ),
+        "hierarchy_bindings": hierarchy_checks,
+    }
+
+
 def _parse_common_source_netlist(
     text: str, profile: dict[str, Any]
 ) -> dict[str, Any]:
@@ -11808,6 +12215,7 @@ def _generate_oa_netlist(
     work_dir: Path,
     *,
     timeout: int,
+    schematic: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     library, cell = _target(payload)
     profile = payload["profile"]
@@ -11885,6 +12293,44 @@ def _generate_oa_netlist(
         parsed = _parse_common_source_netlist(netlist_text, profile)
     elif circuit == "differential_pair":
         parsed = _parse_differential_pair_netlist(netlist_text, profile)
+    elif circuit == "existing_schematic":
+        if schematic is None:
+            raise RuntimeError(
+                "generic OA netlist consistency requires the same schematic readback"
+            )
+        raw_settings = payload.get("generic_simulation")
+        if not isinstance(raw_settings, dict):
+            raise RuntimeError("generic OA netlisting requires generic_simulation")
+        settings = GenericOaSimulationSpec.model_validate(raw_settings)
+        hierarchy_schematics: dict[tuple[str, str], dict[str, Any]] = {}
+        target_library, target_cell = _target(payload)
+        for binding in settings.hierarchy_bindings:
+            child_key = (binding.library, binding.cell)
+            if child_key == (target_library, target_cell):
+                raise RuntimeError(
+                    "generic hierarchy binding cannot recursively target the top cell"
+                )
+            if child_key in hierarchy_schematics:
+                continue
+            child = _try_read_schematic(client, *child_key)
+            if child is None:
+                raise RuntimeError(
+                    "generic hierarchy child schematic does not exist: "
+                    f"{binding.library}/{binding.cell}/schematic"
+                )
+            hierarchy_schematics[child_key] = child
+        try:
+            parsed = _parse_existing_schematic_netlist(
+                netlist_text,
+                schematic,
+                settings,
+                hierarchy_schematics,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"{exc}; si netlist retained at {remote_netlist} "
+                f"(sha256={hashlib.sha256(netlist_text.encode('utf-8')).hexdigest()})"
+            ) from exc
     else:
         raise RuntimeError(f"unsupported OA netlist circuit: {circuit}")
     return {
@@ -14532,6 +14978,730 @@ save MN1:ids MN1:vgs MN1:vds MN1:vdsat MN1:gm MN1:gds
 '''
 
 
+def _generic_dc_voltage(
+    data: dict[str, Any], expression: GenericVoltageExpression
+) -> float:
+    def node_value(node: str) -> float:
+        return 0.0 if node == "0" else _scalar(data, f"dc_{node}")
+
+    return node_value(expression.positive_node) - node_value(
+        expression.negative_node
+    )
+
+
+def _generic_ac_voltage(
+    data: dict[str, Any],
+    expression: GenericVoltageExpression,
+    *,
+    sample_count: int,
+) -> list[complex]:
+    def node_values(node: str) -> list[complex]:
+        if node == "0":
+            return [0j] * sample_count
+        values = _complex_signal(data, f"ac_{node}")
+        if len(values) != sample_count:
+            raise RuntimeError(
+                f"Spectre complex signal ac_{node} length {len(values)} does not "
+                f"match frequency length {sample_count}"
+            )
+        return values
+
+    positive = node_values(expression.positive_node)
+    negative = node_values(expression.negative_node)
+    return [left - right for left, right in zip(positive, negative, strict=True)]
+
+
+def _generic_transient_voltage(
+    data: dict[str, Any], expression: GenericVoltageExpression
+) -> list[float]:
+    def node_values(node: str, sample_count: int | None = None) -> list[float]:
+        if node == "0":
+            if sample_count is None:
+                raise RuntimeError(
+                    "ground-only transient expression has no sample-count reference"
+                )
+            return [0.0] * sample_count
+        return _signal(data, node)
+
+    positive = node_values(expression.positive_node)
+    negative = node_values(expression.negative_node, len(positive))
+    if len(negative) != len(positive):
+        raise RuntimeError(
+            "generic transient voltage expression signals have different lengths"
+        )
+    return [left - right for left, right in zip(positive, negative, strict=True)]
+
+
+def _generic_linearity_metrics_from_result(
+    metadata: dict[str, Any],
+    settings: GenericOaSimulationSpec,
+    linearity_sweep: dict[str, Any],
+) -> tuple[dict[str, float], dict[str, Any]]:
+    if settings.transfer is None or settings.dynamic_analysis is None:
+        raise RuntimeError(
+            "generic transient extraction requires transfer and dynamic_analysis"
+        )
+    raw_points = metadata.get("sweep_points")
+    if not isinstance(raw_points, dict) or not raw_points:
+        raise RuntimeError("generic Spectre linearity sweep returned no transient points")
+    amplitudes = [float(value) for value in linearity_sweep["amplitudes_v"]]
+    if len(raw_points) != len(amplitudes):
+        raise RuntimeError(
+            "generic Spectre linearity point count does not match declared amplitudes"
+        )
+    source_by_name = {source.name: source for source in settings.sources}
+    power_source = source_by_name[settings.dynamic_analysis.power_source]
+    supply_voltage_v = abs(float(power_source.dc_value))
+    point_metrics: list[dict[str, float]] = []
+    point_diagnostics: list[dict[str, Any]] = []
+    for index, amplitude in enumerate(amplitudes, start=1):
+        raw_point = raw_points.get(index, raw_points.get(str(index)))
+        if not isinstance(raw_point, dict):
+            raise RuntimeError(
+                f"generic Spectre linearity sweep is missing point {index}"
+            )
+        input_voltage = _generic_transient_voltage(
+            raw_point, settings.transfer.input
+        )
+        output_voltage = _generic_transient_voltage(
+            raw_point, settings.transfer.output
+        )
+        metrics, diagnostics = extract_common_source_linearity_point_metrics(
+            _signal(raw_point, "time"),
+            input_voltage,
+            output_voltage,
+            _signal(raw_point, f"{power_source.name}:p"),
+            vdd_v=supply_voltage_v,
+            frequency_hz=float(linearity_sweep["frequency_hz"]),
+            settling_cycles=int(linearity_sweep.get("settling_cycles", 4)),
+            measurement_cycles=int(linearity_sweep.get("measurement_cycles", 8)),
+            max_harmonic=int(linearity_sweep.get("max_harmonic", 5)),
+        )
+        tolerance = max(amplitude * 5e-3, 1e-8)
+        if abs(metrics["input_fundamental_v_peak"] - amplitude) > tolerance:
+            raise RuntimeError(
+                "generic Spectre input fundamental does not match the declared "
+                f"amplitude at point {index}"
+            )
+        point_metrics.append(metrics)
+        point_diagnostics.append(
+            {
+                "index": index,
+                "declared_input_amplitude_v_peak": amplitude,
+                "input_expression": settings.transfer.input.model_dump(mode="json"),
+                "output_expression": settings.transfer.output.model_dump(mode="json"),
+                "power_source": power_source.name,
+                "metrics": metrics,
+                **diagnostics,
+            }
+        )
+    metrics, diagnostics = aggregate_common_source_linearity_metrics(
+        amplitudes,
+        point_metrics,
+        compression_db=float(linearity_sweep.get("compression_db", 1.0)),
+    )
+    diagnostics.update(
+        {
+            "point_details": point_diagnostics,
+            "sweep_point_count": len(point_metrics),
+            "sweep_engine": "Spectre nested parameter sweep",
+            "supply_voltage_v": supply_voltage_v,
+        }
+    )
+    return metrics, diagnostics
+
+
+def simulate_existing_schematic(
+    payload: dict[str, Any], *, _bundle_cache: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Run a typed wrapper around one user-provided OA schematic."""
+
+    from virtuoso_bridge.spectre.runner import SpectreSimulator
+
+    profile = payload["profile"]
+    timeout = int(payload.get("timeout_seconds", 600))
+    analysis = str(payload.get("analysis", ""))
+    raw_conditions = payload.get("operating_conditions")
+    if raw_conditions is not None and payload.get("operating_condition") is None:
+        return _simulate_existing_schematic_operating_conditions(
+            payload,
+            _bundle_cache=_bundle_cache,
+        )
+    raw_settings = payload.get("generic_simulation")
+    raw_context = payload.get("design_context")
+    if not isinstance(raw_settings, dict) or not isinstance(raw_context, dict):
+        raise RuntimeError(
+            "generic existing-schematic simulation requires design_context and "
+            "generic_simulation"
+        )
+    settings = GenericOaSimulationSpec.model_validate(raw_settings)
+    operating_condition = payload.get("operating_condition")
+    if operating_condition is not None and not isinstance(
+        operating_condition, dict
+    ):
+        raise RuntimeError("generic operating condition is not structured")
+    effective_vdd: float | None = None
+    if isinstance(operating_condition, dict):
+        source_name = settings.operating_condition_supply_source
+        if source_name is None:
+            raise RuntimeError(
+                "generic PVT simulation requires an operating-condition supply source"
+            )
+        sources = []
+        for source in settings.sources:
+            if source.name != source_name:
+                sources.append(source)
+                continue
+            effective_vdd = float(
+                operating_condition.get("vdd_v")
+                if operating_condition.get("vdd_v") is not None
+                else source.dc_value
+            )
+            sources.append(source.model_copy(update={"dc_value": effective_vdd}))
+        if effective_vdd is None:
+            raise RuntimeError(
+                "generic operating-condition supply source disappeared from settings"
+            )
+        settings = settings.model_copy(
+            update={
+                "sources": sources,
+                "temperature_c": float(operating_condition["temperature_c"]),
+            }
+        )
+    settings.validate_analysis(analysis)
+    context = DesignContext.model_validate(raw_context)
+    ac_sweep = payload.get("ac_sweep")
+    linearity_sweep = payload.get("linearity_sweep")
+    noise_sweep = payload.get("noise_sweep")
+    if analysis == "ac" and not isinstance(ac_sweep, dict):
+        raise RuntimeError("generic existing-schematic AC requires ac_sweep")
+    if analysis == "transient" and not isinstance(linearity_sweep, dict):
+        raise RuntimeError(
+            "generic existing-schematic transient requires linearity_sweep"
+        )
+    if analysis == "noise" and not isinstance(noise_sweep, dict):
+        raise RuntimeError("generic existing-schematic noise requires noise_sweep")
+    expected_sweep = {
+        "ac": ac_sweep,
+        "transient": linearity_sweep,
+        "noise": noise_sweep,
+    }
+    if any(
+        value is not None and name != analysis
+        for name, value in expected_sweep.items()
+    ):
+        raise RuntimeError(
+            "generic existing-schematic analysis rejects unrelated sweep settings"
+        )
+
+    binding_sha256 = hashlib.sha256(
+        json.dumps(
+            {
+                "target": payload.get("target"),
+                "profile": profile,
+                "design_context": raw_context,
+                "generic_simulation": raw_settings,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if _bundle_cache is not None and "client" in _bundle_cache:
+        if _bundle_cache.get("binding_sha256") != binding_sha256:
+            raise RuntimeError(
+                "shared-netlist stage changed target, profile, context, or testbench"
+            )
+        client = _bundle_cache["client"]
+        schematic = _bundle_cache["schematic"]
+        context_audit = _bundle_cache["context_audit"]
+    else:
+        client = _client()
+        library, cell = _target(payload)
+        schematic = _read_schematic(client, library, cell)
+        pin_geometry, placement = _schematic_geometry_bundle(
+            client, library, cell
+        )
+        context_audit = audit_design_context(
+            _existing_schematic_summary(
+                schematic,
+                pin_geometry=pin_geometry,
+                placement=placement,
+            ),
+            context,
+        )
+        if _bundle_cache is not None:
+            _bundle_cache.update(
+                {
+                    "binding_sha256": binding_sha256,
+                    "client": client,
+                    "schematic": schematic,
+                    "context_audit": context_audit,
+                    "schematic_readback_count": 1,
+                }
+            )
+    with tempfile.TemporaryDirectory(prefix="vda_existing_schematic_") as temp_dir:
+        work_dir = Path(temp_dir)
+        if _bundle_cache is not None and "netlist_evidence" in _bundle_cache:
+            netlist_evidence = _bundle_cache["netlist_evidence"]
+        else:
+            netlist_evidence = _generate_oa_netlist(
+                client,
+                payload,
+                work_dir,
+                timeout=timeout,
+                schematic=schematic,
+            )
+            if _bundle_cache is not None:
+                _bundle_cache["netlist_evidence"] = netlist_evidence
+                _bundle_cache["netlist_generation_count"] = 1
+        model_configuration, _ = _common_source_model_configuration(
+            profile,
+            operating_condition if isinstance(operating_condition, dict) else None,
+        )
+        deck = render_generic_oa_testbench(
+            settings,
+            analysis=analysis,
+            remote_netlist_path=netlist_evidence["remote_netlist_path"],
+            model_configuration=model_configuration,
+            ac_sweep=ac_sweep if isinstance(ac_sweep, dict) else None,
+            linearity_sweep=(
+                linearity_sweep if isinstance(linearity_sweep, dict) else None
+            ),
+            noise_sweep=noise_sweep if isinstance(noise_sweep, dict) else None,
+        )
+        condition_slug = _operating_condition_slug(
+            operating_condition if isinstance(operating_condition, dict) else None
+        )
+        wrapper_name = (
+            f"input_from_oa_{analysis}"
+            + (f"_{condition_slug}" if condition_slug is not None else "")
+            + ".scs"
+            if _bundle_cache is not None
+            else "input_from_oa.scs"
+        )
+        local_wrapper = work_dir / wrapper_name
+        local_wrapper.write_text(deck, encoding="utf-8")
+        remote_wrapper = f"{netlist_evidence['remote_run_dir']}/{wrapper_name}"
+        _upload_file(
+            client,
+            local_wrapper,
+            remote_wrapper,
+            timeout=min(timeout, 60),
+        )
+        spectre_cmd, process_lifecycle = _install_remote_spectre_guard(
+            client,
+            work_dir,
+            netlist_evidence["remote_run_dir"],
+            timeout=timeout,
+        )
+        simulator = _create_spectre_simulator(
+            SpectreSimulator,
+            client,
+            spectre_cmd=spectre_cmd,
+            timeout=timeout,
+            work_dir=work_dir,
+            keep_remote_files=False,
+            remote_run_dir=netlist_evidence["remote_run_dir"],
+        )
+        result = simulator.run_simulation(local_wrapper, {})
+        if not result.ok:
+            detail = _spectre_failure_detail(result, work_dir)
+            raise RuntimeError(f"Spectre simulation failed: {detail}")
+        tool_version = str(result.tool_version or "").strip()
+        if not tool_version:
+            tool_version = _spectre_version_from_log(work_dir)
+
+        dc_data, dc_raw_files = _common_source_dc_data_from_result(result)
+        metrics: dict[str, float] = {}
+        for item in settings.dc_voltage_metrics:
+            metrics[item.metric] = _generic_dc_voltage(dc_data, item.expression)
+        for item in settings.dc_current_metrics:
+            metrics[item.metric] = _scalar(dc_data, f"dc_{item.source}:p")
+        for item in settings.operating_point_metrics:
+            metrics[item.metric] = _operating_point_scalar(
+                dc_data,
+                item.instance,
+                item.quantity,
+            )
+        if any(not math.isfinite(value) for value in metrics.values()):
+            raise RuntimeError("generic DC/OP metrics contain a non-finite value")
+
+        analysis_complete = True
+        analysis_issues: list[str] = []
+        analysis_warnings: list[str] = []
+        ac_diagnostics: dict[str, Any] | None = None
+        linearity_diagnostics: dict[str, Any] | None = None
+        noise_diagnostics: dict[str, Any] | None = None
+        if analysis == "ac":
+            assert settings.transfer is not None
+            assert isinstance(ac_sweep, dict)
+            frequency_hz = _signal(result.data, "ac_freq")
+            input_voltage = _generic_ac_voltage(
+                result.data,
+                settings.transfer.input,
+                sample_count=len(frequency_hz),
+            )
+            output_voltage = _generic_ac_voltage(
+                result.data,
+                settings.transfer.output,
+                sample_count=len(frequency_hz),
+            )
+            ac_metrics, ac_diagnostics = extract_common_source_ac_metrics(
+                frequency_hz,
+                input_voltage,
+                output_voltage,
+                reference_points=int(ac_sweep.get("reference_points", 5)),
+                max_reference_variation_db=float(
+                    ac_sweep.get("max_reference_variation_db", 0.5)
+                ),
+            )
+            ac_diagnostics["frequency_hz"] = frequency_hz
+            ac_diagnostics["input_expression"] = (
+                settings.transfer.input.model_dump(mode="json")
+            )
+            ac_diagnostics["output_expression"] = (
+                settings.transfer.output.model_dump(mode="json")
+            )
+            ac_diagnostics["raw_files"] = _spectre_ac_file_evidence_from_result(
+                result
+            )
+            metrics.update(ac_metrics)
+            analysis_issues.extend(
+                str(value) for value in ac_diagnostics.get("issues", [])
+            )
+            analysis_warnings.extend(
+                str(value) for value in ac_diagnostics.get("warnings", [])
+            )
+            analysis_complete = bool(
+                ac_diagnostics.get("analysis_complete", False)
+            ) and not analysis_issues
+        elif analysis == "transient":
+            assert isinstance(linearity_sweep, dict)
+            metrics_update, linearity_diagnostics = (
+                _generic_linearity_metrics_from_result(
+                    getattr(result, "metadata", {}),
+                    settings,
+                    linearity_sweep,
+                )
+            )
+            metrics.update(metrics_update)
+            analysis_issues.extend(
+                str(value)
+                for value in linearity_diagnostics.get("issues", [])
+            )
+            analysis_warnings.extend(
+                str(value)
+                for value in linearity_diagnostics.get("warnings", [])
+            )
+            analysis_complete = bool(
+                linearity_diagnostics.get("analysis_complete", False)
+            ) and not analysis_issues
+        elif analysis == "noise":
+            assert isinstance(noise_sweep, dict)
+            metrics_update, noise_diagnostics = (
+                _common_source_noise_metrics_from_result(result, noise_sweep)
+            )
+            metrics.update(metrics_update)
+            analysis_issues.extend(
+                str(value) for value in noise_diagnostics.get("issues", [])
+            )
+            analysis_warnings.extend(
+                str(value) for value in noise_diagnostics.get("warnings", [])
+            )
+            analysis_complete = bool(
+                noise_diagnostics.get("analysis_complete", False)
+            ) and not analysis_issues
+
+        manifest, manifest_sha256 = _spectre_artifact_manifest(work_dir)
+        return {
+            "parameters": (
+                {"vdd_v": effective_vdd}
+                if effective_vdd is not None
+                else {}
+            ),
+            "metrics": metrics,
+            "metric_sources": {name: "eda_result" for name in metrics},
+            "analysis_complete": analysis_complete,
+            "analysis_issues": analysis_issues,
+            "analysis_warnings": analysis_warnings,
+            "scalar_count": len(result.data),
+            "tool_version": tool_version,
+            "warnings": result.warnings[:20],
+            "evidence": {
+                "side_effects": {
+                    "oa_access_performed": True,
+                    "oa_write_performed": False,
+                    "remote_compute_performed": True,
+                },
+                "process_lifecycle": process_lifecycle,
+                "design_context_binding": {
+                    "source": "software_inference",
+                    **context_audit.model_dump(mode="json"),
+                },
+                "schematic_readback": {
+                    "source": "bridge_readback",
+                    "target": payload["target"],
+                    "topology_sha256": context_audit.topology_sha256,
+                },
+                "netlist": {
+                    "source": "eda_result",
+                    "generator": "Cadence si -batch",
+                    "remote_path": netlist_evidence["remote_netlist_path"],
+                    "sha256": netlist_evidence["netlist_sha256"],
+                    "si_log_tail": netlist_evidence["si_log_tail"],
+                    **netlist_evidence["parsed"],
+                    "consistency_source": "software_inference",
+                },
+                "testbench": {
+                    "contract_source": "user_input",
+                    "rendering_source": "software_inference",
+                    "remote_path": remote_wrapper,
+                    "sha256": hashlib.sha256(deck.encode("utf-8")).hexdigest(),
+                    "analysis": analysis,
+                    "settings": settings.model_dump(mode="json"),
+                    "operating_condition": operating_condition,
+                    "operating_condition_source": (
+                        "user_input"
+                        if isinstance(operating_condition, dict)
+                        else None
+                    ),
+                    "ac_sweep": ac_sweep,
+                    "linearity_sweep": linearity_sweep,
+                    "noise_sweep": noise_sweep,
+                    "model_resolution_source": "pdk_profile",
+                    "model_configuration": _common_source_model_manifest(
+                        profile,
+                        operating_condition
+                        if isinstance(operating_condition, dict)
+                        else None,
+                    ),
+                },
+                "simulation": {
+                    "source": "eda_result",
+                    "tool_version": tool_version,
+                    "dc_raw_files": dc_raw_files,
+                    "ac_response": (
+                        {
+                            "source": "eda_result",
+                            "extraction_source": "software_inference",
+                            **ac_diagnostics,
+                        }
+                        if ac_diagnostics is not None
+                        else {"status": "not_requested"}
+                    ),
+                    "linearity": (
+                        {
+                            "source": "eda_result",
+                            "extraction_source": "software_inference",
+                            **linearity_diagnostics,
+                        }
+                        if linearity_diagnostics is not None
+                        else {"status": "not_requested"}
+                    ),
+                    "noise": (
+                        {
+                            "source": "eda_result",
+                            "extraction_source": "software_inference",
+                            **noise_diagnostics,
+                        }
+                        if noise_diagnostics is not None
+                        else {"status": "not_requested"}
+                    ),
+                    "artifact_manifest_complete": True,
+                    "artifact_manifest": manifest,
+                    "artifact_manifest_sha256": manifest_sha256,
+                },
+            },
+        }
+
+
+def simulate_existing_schematic_stages(payload: dict[str, Any]) -> dict[str, Any]:
+    """Run an ordered gate sequence in one worker using one verified si netlist."""
+
+    raw_stages = payload.get("analysis_stages")
+    raw_constraints = payload.get("constraints")
+    if not isinstance(raw_stages, list) or not raw_stages:
+        raise RuntimeError(
+            "shared-netlist existing-schematic simulation requires analysis_stages"
+        )
+    if not isinstance(raw_constraints, list):
+        raise RuntimeError(
+            "shared-netlist existing-schematic simulation requires constraints"
+        )
+    stages = [AnalysisStageSpec.model_validate(item) for item in raw_stages]
+    constraints = [
+        MetricConstraint.model_validate(item) for item in raw_constraints
+    ]
+    constraints_by_metric: dict[str, list[MetricConstraint]] = {}
+    for constraint in constraints:
+        constraints_by_metric.setdefault(constraint.metric, []).append(constraint)
+
+    cache: dict[str, Any] = {}
+    stage_results: list[dict[str, Any]] = []
+    terminated_after_stage: str | None = None
+    shared_schematic: dict[str, Any] | None = None
+    shared_netlist: dict[str, Any] | None = None
+    for position, stage in enumerate(stages, start=1):
+        member_payload = dict(payload)
+        member_payload["analysis"] = stage.analysis.value
+        member_payload["analysis_source"] = "user_input"
+        member_payload["analysis_stages"] = []
+        for sweep_name, owner in (
+            ("ac_sweep", "ac"),
+            ("linearity_sweep", "transient"),
+            ("noise_sweep", "noise"),
+        ):
+            if stage.analysis.value != owner:
+                member_payload.pop(sweep_name, None)
+                member_payload.pop(f"{sweep_name}_user_fields", None)
+        result = simulate_existing_schematic(
+            member_payload,
+            _bundle_cache=cache,
+        )
+        evidence = result.get("evidence")
+        if not isinstance(evidence, dict):
+            raise RuntimeError(
+                f"shared-netlist stage {stage.id!r} lacks structured evidence"
+            )
+        schematic_evidence = evidence.get("schematic_readback")
+        netlist_evidence = evidence.get("netlist")
+        if not isinstance(schematic_evidence, dict) or not isinstance(
+            netlist_evidence, dict
+        ):
+            raise RuntimeError(
+                f"shared-netlist stage {stage.id!r} lacks OA/si binding evidence"
+            )
+        if shared_schematic is None:
+            shared_schematic = schematic_evidence
+            shared_netlist = netlist_evidence
+        elif (
+            schematic_evidence != shared_schematic
+            or netlist_evidence != shared_netlist
+        ):
+            raise RuntimeError(
+                f"shared-netlist OA/si evidence changed during stage {stage.id!r}"
+            )
+
+        missing_constraints = [
+            name
+            for name in stage.constraint_metrics
+            if name not in constraints_by_metric
+        ]
+        if missing_constraints:
+            raise RuntimeError(
+                f"shared-netlist stage {stage.id!r} references undeclared constraints: "
+                + ", ".join(missing_constraints)
+            )
+        stage_constraints = [
+            constraint
+            for name in stage.constraint_metrics
+            for constraint in constraints_by_metric[name]
+        ]
+        raw_condition_results = result.get("operating_condition_results")
+        if raw_condition_results is not None:
+            if not isinstance(raw_condition_results, list) or not raw_condition_results:
+                raise RuntimeError(
+                    f"shared-netlist stage {stage.id!r} returned no PVT cases"
+                )
+            condition_gate_rows = []
+            for raw_condition_result in raw_condition_results:
+                if not isinstance(raw_condition_result, dict) or not isinstance(
+                    raw_condition_result.get("result"), dict
+                ):
+                    raise RuntimeError(
+                        f"shared-netlist stage {stage.id!r} returned an invalid PVT case"
+                    )
+                condition_metrics = {
+                    str(name): float(value)
+                    for name, value in raw_condition_result["result"].get(
+                        "metrics", {}
+                    ).items()
+                }
+                condition_gate_rows.append(
+                    evaluate_constraints(condition_metrics, stage_constraints)
+                )
+            gate_evaluations = [
+                max(
+                    (row[index] for row in condition_gate_rows),
+                    key=lambda item: (
+                        item.normalized_violation,
+                        float("-inf") if item.actual is None else abs(item.actual),
+                    ),
+                )
+                for index in range(len(stage_constraints))
+            ]
+            every_condition_gate_passed = all(
+                item.passed
+                for row in condition_gate_rows
+                for item in row
+            )
+        else:
+            metrics = {
+                str(name): float(value)
+                for name, value in result.get("metrics", {}).items()
+            }
+            gate_evaluations = evaluate_constraints(metrics, stage_constraints)
+            every_condition_gate_passed = all(
+                item.passed for item in gate_evaluations
+            )
+        missing_metrics = [
+            item.metric for item in gate_evaluations if item.actual is None
+        ]
+        if missing_metrics:
+            result = dict(result)
+            result["analysis_complete"] = False
+            result["analysis_issues"] = [
+                *[str(value) for value in result.get("analysis_issues", [])],
+                "analysis omitted stage constraint metrics: "
+                + ", ".join(missing_metrics),
+            ]
+        stage_results.append(
+            {
+                "stage_id": stage.id,
+                "analysis": stage.analysis.value,
+                "result": result,
+                "gate_evaluations": [
+                    item.model_dump(mode="json") for item in gate_evaluations
+                ],
+                "gate_evidence_source": "software_inference",
+            }
+        )
+        if not bool(result.get("analysis_complete", True)):
+            break
+        if (
+            stage.stop_on_failure
+            and not every_condition_gate_passed
+            and position < len(stages)
+        ):
+            terminated_after_stage = stage.id
+            break
+
+    assert shared_schematic is not None
+    assert shared_netlist is not None
+    if cache.get("netlist_generation_count") != 1:
+        raise RuntimeError(
+            "shared-netlist execution did not generate exactly one netlist"
+        )
+    return {
+        "stage_results": stage_results,
+        "terminated_after_stage": terminated_after_stage,
+        "shared_netlist": {
+            "source": "software_inference",
+            "remote_path": shared_netlist.get("remote_path"),
+            "sha256": shared_netlist.get("sha256"),
+            "netlist_generation_count": cache["netlist_generation_count"],
+            "schematic_readback_count": cache.get("schematic_readback_count"),
+            "executed_stages": [item["stage_id"] for item in stage_results],
+            "reuse_contract": "one_worker_one_oa_readback_one_si_netlist",
+        },
+        "evidence": {
+            "schematic_readback": shared_schematic,
+            "netlist": shared_netlist,
+            "stage_gate_source": "software_inference",
+        },
+    }
+
+
 def simulate_inverter(payload: dict[str, Any]) -> dict[str, Any]:
     from virtuoso_bridge.spectre.runner import SpectreSimulator
 
@@ -14754,6 +15924,24 @@ def _operating_condition_slug(condition: dict[str, Any] | None) -> str | None:
     return slug[:96]
 
 
+def _payload_default_supply_vdd(payload: dict[str, Any]) -> float | None:
+    semantic_vdd = payload.get("parameters", {}).get("vdd_v")
+    if semantic_vdd is not None:
+        return float(semantic_vdd)
+    raw_settings = payload.get("generic_simulation")
+    if not isinstance(raw_settings, dict):
+        return None
+    source_name = raw_settings.get("operating_condition_supply_source")
+    raw_sources = raw_settings.get("sources")
+    if not isinstance(source_name, str) or not isinstance(raw_sources, list):
+        return None
+    for source in raw_sources:
+        if isinstance(source, dict) and source.get("name") == source_name:
+            value = source.get("dc_value")
+            return float(value) if value is not None else None
+    return None
+
+
 def _merge_common_source_operating_condition_results(
     payload: dict[str, Any],
     rows: list[tuple[dict[str, Any], dict[str, Any]]],
@@ -14793,7 +15981,7 @@ def _merge_common_source_operating_condition_results(
                 common_parameters.pop(parameter)
         effective_vdd = condition.get("vdd_v")
         if effective_vdd is None:
-            effective_vdd = payload.get("parameters", {}).get("vdd_v")
+            effective_vdd = _payload_default_supply_vdd(payload)
         if effective_vdd is None or not math.isclose(
             parameters.get("vdd_v", float("nan")),
             float(effective_vdd),
@@ -14848,6 +16036,35 @@ def _merge_common_source_operating_condition_results(
             },
         },
     }
+
+
+def _simulate_existing_schematic_operating_conditions(
+    payload: dict[str, Any],
+    *,
+    _bundle_cache: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    raw_conditions = payload.get("operating_conditions")
+    if not isinstance(raw_conditions, list) or not raw_conditions:
+        raise RuntimeError("operating_conditions must contain at least one case")
+    cache = _bundle_cache if _bundle_cache is not None else {}
+    rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for raw_condition in raw_conditions:
+        if not isinstance(raw_condition, dict):
+            raise RuntimeError("operating condition is not structured")
+        condition = dict(raw_condition)
+        condition_payload = dict(payload)
+        condition_payload.pop("operating_conditions", None)
+        condition_payload["operating_condition"] = condition
+        rows.append(
+            (
+                condition,
+                simulate_existing_schematic(
+                    condition_payload,
+                    _bundle_cache=cache,
+                ),
+            )
+        )
+    return _merge_common_source_operating_condition_results(payload, rows)
 
 
 def _simulate_common_source_operating_conditions(
@@ -16412,6 +17629,8 @@ _ACTIONS = {
         transform_existing_schematic_topology_delta
     ),
     "apply_existing_schematic_parameters": apply_existing_schematic_parameters,
+    "simulate_existing_schematic": simulate_existing_schematic,
+    "simulate_existing_schematic_stages": simulate_existing_schematic_stages,
     "create_inverter": create_inverter,
     "inspect_inverter": inspect_inverter,
     "transform_inverter_testbench": transform_inverter_testbench,

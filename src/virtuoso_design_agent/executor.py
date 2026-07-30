@@ -17,9 +17,13 @@ from .adapters.base import AdapterInterrupted, AdapterResult, DesignAdapter
 from .calculator_expressions import calculator_expressions_equal
 from .catalog import task_requests_oa_parameter_write
 from .characterization import normalize_mos_characterization
+from .design_context import audit_design_context
 from .metrics import evaluate_constraints
 from .models import (
     ActionRecord,
+    AnalysisStageExecution,
+    AnalysisStageEvaluation,
+    AnalysisStageSpec,
     CandidateEvaluation,
     CircuitKind,
     EvidenceSource,
@@ -41,6 +45,8 @@ from .safety import authorize_execution
 from .spectre_values import spectre_scalar, spectre_values_equal
 from .topology_delta import (
     audit_derived_topology_delta,
+    snapshot_from_inspection,
+    topology_fingerprint,
     validate_topology_execution_readback,
 )
 
@@ -128,6 +134,26 @@ class TaskExecutor:
             )
         )
         return result
+
+    def _bind_design_context(
+        self,
+        task: TaskSpec,
+        inspection: AdapterResult,
+        *,
+        action_name: str = "design.context.bind",
+    ) -> AdapterResult | None:
+        if task.design_context is None:
+            return None
+        return self._action(
+            action_name,
+            lambda: AdapterResult(
+                data=audit_design_context(
+                    inspection.data,
+                    task.design_context,
+                ).model_dump(mode="json"),
+                evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+            ),
+        )
 
     @staticmethod
     def _candidates(task: TaskSpec) -> list[dict[str, float]]:
@@ -259,6 +285,8 @@ class TaskExecutor:
         theory_seed_candidate_id: str | None = None,
         theory_seed_source_candidate_id: str | None = None,
         theory_seed_predicted_metrics: dict[str, float] | None = None,
+        topology_variant_id: str | None = None,
+        topology_sha256: str | None = None,
     ) -> CandidateEvaluation:
         raw_conditions = simulation.data.get("operating_condition_results")
         if raw_conditions is not None:
@@ -280,6 +308,8 @@ class TaskExecutor:
                 theory_seed_candidate_id=theory_seed_candidate_id,
                 theory_seed_source_candidate_id=theory_seed_source_candidate_id,
                 theory_seed_predicted_metrics=theory_seed_predicted_metrics,
+                topology_variant_id=topology_variant_id,
+                topology_sha256=topology_sha256,
             )
         metrics = {
             str(name): float(value)
@@ -310,6 +340,8 @@ class TaskExecutor:
         }
         return CandidateEvaluation(
             index=index,
+            topology_variant_id=topology_variant_id,
+            topology_sha256=topology_sha256,
             parameters=evaluated_parameters,
             instance_parameters=instance_parameters or {},
             oa_parameters=oa_parameters or {},
@@ -345,6 +377,619 @@ class TaskExecutor:
         )
 
     @staticmethod
+    def _constraints_for_analysis_stage(
+        task: TaskSpec, stage: AnalysisStageSpec
+    ) -> list[Any]:
+        metrics = set(stage.constraint_metrics)
+        return [
+            constraint
+            for constraint in task.constraints
+            if constraint.metric in metrics
+        ]
+
+    @staticmethod
+    def _worst_constraint_evaluation(
+        constraint: Any,
+        rows: list[Any],
+    ) -> Any:
+        if constraint.relation is Relation.LESS_OR_EQUAL:
+            return max(
+                rows,
+                key=lambda item: (
+                    item.normalized_violation,
+                    -math.inf if item.actual is None else item.actual,
+                ),
+            )
+        if constraint.relation is Relation.GREATER_OR_EQUAL:
+            return max(
+                rows,
+                key=lambda item: (
+                    item.normalized_violation,
+                    math.inf if item.actual is None else -item.actual,
+                ),
+            )
+        return max(
+            rows,
+            key=lambda item: (
+                item.normalized_violation,
+                math.inf
+                if item.actual is None
+                else abs(item.actual - constraint.value),
+            ),
+        )
+
+    @classmethod
+    def _evaluate_analysis_stage(
+        cls,
+        task: TaskSpec,
+        stage: AnalysisStageSpec,
+        simulation: AdapterResult,
+    ) -> AnalysisStageEvaluation:
+        raw_conditions = simulation.data.get("operating_condition_results")
+        if raw_conditions is not None:
+            return cls._evaluate_operating_condition_analysis_stage(
+                task,
+                stage,
+                simulation,
+                raw_conditions,
+            )
+        metrics = {
+            str(name): float(value)
+            for name, value in simulation.data.get("metrics", {}).items()
+        }
+        constraints = evaluate_constraints(
+            metrics,
+            cls._constraints_for_analysis_stage(task, stage),
+        )
+        analysis_complete = bool(simulation.data.get("analysis_complete", True))
+        analysis_issues = [
+            str(value) for value in simulation.data.get("analysis_issues", [])
+        ]
+        analysis_warnings = [
+            str(value) for value in simulation.data.get("analysis_warnings", [])
+        ]
+        if not analysis_complete and not analysis_issues:
+            analysis_issues = ["analysis did not produce its required core metrics"]
+        missing_constraint_metrics = [
+            item.metric for item in constraints if item.actual is None
+        ]
+        if missing_constraint_metrics:
+            analysis_complete = False
+            analysis_issues.append(
+                "analysis omitted stage constraint metrics: "
+                + ", ".join(missing_constraint_metrics)
+            )
+        raw_sources = simulation.data.get("metric_sources", {})
+        metric_sources = {
+            name: EvidenceSource(raw_sources.get(name, simulation.evidence_source))
+            for name in metrics
+        }
+        return AnalysisStageEvaluation(
+            stage_id=stage.id,
+            analysis=stage.analysis,
+            metrics=metrics,
+            constraints=constraints,
+            passed=analysis_complete and all(item.passed for item in constraints),
+            evidence_source=simulation.evidence_source,
+            metric_sources=metric_sources,
+            analysis_complete=analysis_complete,
+            analysis_issues=analysis_issues,
+            analysis_warnings=analysis_warnings,
+        )
+
+    @staticmethod
+    def _default_operating_condition_vdd(task: TaskSpec) -> float:
+        if "vdd_v" in task.parameters:
+            return float(task.parameters["vdd_v"])
+        settings = task.generic_simulation
+        if settings is None or settings.operating_condition_supply_source is None:
+            raise RuntimeError(
+                "operating-condition evaluation has no declared supply source"
+            )
+        source = next(
+            (
+                item
+                for item in settings.sources
+                if item.name == settings.operating_condition_supply_source
+            ),
+            None,
+        )
+        if source is None:
+            raise RuntimeError(
+                "operating-condition supply source disappeared from the testbench"
+            )
+        return float(source.dc_value)
+
+    @classmethod
+    def _evaluate_operating_condition_analysis_stage(
+        cls,
+        task: TaskSpec,
+        stage: AnalysisStageSpec,
+        simulation: AdapterResult,
+        raw_conditions: Any,
+    ) -> AnalysisStageEvaluation:
+        if not isinstance(raw_conditions, list) or not raw_conditions:
+            raise RuntimeError("analysis stage returned no operating conditions")
+        expected = [
+            condition.model_dump(mode="json")
+            for condition in task.operating_conditions
+        ]
+        if len(raw_conditions) != len(expected):
+            raise RuntimeError(
+                "analysis stage did not return every declared operating condition"
+            )
+        stage_constraints = cls._constraints_for_analysis_stage(task, stage)
+        evaluations: list[OperatingConditionEvaluation] = []
+        for position, (raw, expected_condition) in enumerate(
+            zip(raw_conditions, expected, strict=True), start=1
+        ):
+            if not isinstance(raw, dict) or not isinstance(raw.get("result"), dict):
+                raise RuntimeError(
+                    f"analysis-stage operating condition {position} is not structured"
+                )
+            if raw.get("condition") != expected_condition:
+                raise RuntimeError(
+                    "analysis-stage operating-condition identity/order mismatch"
+                )
+            result = raw["result"]
+            metrics = {
+                str(name): float(value)
+                for name, value in result.get("metrics", {}).items()
+            }
+            constraints = evaluate_constraints(metrics, stage_constraints)
+            analysis_complete = bool(result.get("analysis_complete", True))
+            issues = [str(value) for value in result.get("analysis_issues", [])]
+            missing = [item.metric for item in constraints if item.actual is None]
+            if missing:
+                analysis_complete = False
+                issues.append(
+                    "analysis omitted stage constraint metrics: "
+                    + ", ".join(missing)
+                )
+            if not analysis_complete and not issues:
+                issues = ["analysis did not produce its required core metrics"]
+            warnings = [
+                str(value) for value in result.get("analysis_warnings", [])
+            ]
+            raw_sources = result.get("metric_sources", {})
+            metric_sources = {
+                name: EvidenceSource(
+                    raw_sources.get(name, simulation.evidence_source)
+                )
+                for name in metrics
+            }
+            effective_vdd = (
+                float(expected_condition["vdd_v"])
+                if expected_condition["vdd_v"] is not None
+                else cls._default_operating_condition_vdd(task)
+            )
+            returned_parameters = {
+                str(name): float(value)
+                for name, value in result.get("parameters", {}).items()
+            }
+            if not math.isclose(
+                returned_parameters.get("vdd_v", float("nan")),
+                effective_vdd,
+                rel_tol=1e-9,
+                abs_tol=1e-12,
+            ):
+                raise RuntimeError(
+                    f"operating condition {expected_condition['name']} did not "
+                    "confirm its effective supply voltage"
+                )
+            evaluations.append(
+                OperatingConditionEvaluation(
+                    name=str(expected_condition["name"]),
+                    process_corner=str(expected_condition["process_corner"]),
+                    temperature_c=float(expected_condition["temperature_c"]),
+                    vdd_v=effective_vdd,
+                    parameters=returned_parameters,
+                    metrics=metrics,
+                    constraints=constraints,
+                    feasible=(
+                        analysis_complete and all(item.passed for item in constraints)
+                    ),
+                    total_violation=(
+                        sum(item.normalized_violation for item in constraints)
+                        + (1_000_000.0 if not analysis_complete else 0.0)
+                    ),
+                    evidence_source=simulation.evidence_source,
+                    metric_sources=metric_sources,
+                    analysis_complete=analysis_complete,
+                    analysis_issues=issues,
+                    analysis_warnings=warnings,
+                )
+            )
+
+        aggregate_constraints = []
+        aggregate_metrics: dict[str, float] = {}
+        for constraint_index, constraint in enumerate(stage_constraints):
+            rows = [item.constraints[constraint_index] for item in evaluations]
+            worst = cls._worst_constraint_evaluation(constraint, rows)
+            aggregate_constraints.append(worst)
+            if worst.actual is not None:
+                aggregate_metrics[constraint.metric] = float(worst.actual)
+        return AnalysisStageEvaluation(
+            stage_id=stage.id,
+            analysis=stage.analysis,
+            metrics=aggregate_metrics,
+            constraints=aggregate_constraints,
+            passed=all(item.feasible for item in evaluations),
+            evidence_source=simulation.evidence_source,
+            metric_sources={
+                name: EvidenceSource.SOFTWARE_INFERENCE
+                for name in aggregate_metrics
+            },
+            analysis_complete=all(item.analysis_complete for item in evaluations),
+            analysis_issues=[
+                f"{item.name}: {issue}"
+                for item in evaluations
+                for issue in item.analysis_issues
+            ],
+            analysis_warnings=[
+                f"{item.name}: {warning}"
+                for item in evaluations
+                for warning in item.analysis_warnings
+            ],
+            operating_conditions=evaluations,
+        )
+
+    @classmethod
+    def _merge_analysis_stage_candidate(
+        cls,
+        task: TaskSpec,
+        index: int,
+        candidate: _CandidateInput,
+        stages: list[AnalysisStageEvaluation],
+        *,
+        oa_parameters: dict[str, float] | None = None,
+        topology_variant_id: str | None = None,
+        topology_sha256: str | None = None,
+        terminated_after_stage: str | None = None,
+    ) -> CandidateEvaluation:
+        if any(stage.operating_conditions for stage in stages):
+            if not stages or not all(stage.operating_conditions for stage in stages):
+                raise RuntimeError(
+                    "analysis-stage PVT evidence is incomplete across stages"
+                )
+            return cls._merge_operating_condition_analysis_stage_candidate(
+                task,
+                index,
+                candidate,
+                stages,
+                oa_parameters=oa_parameters,
+                topology_variant_id=topology_variant_id,
+                topology_sha256=topology_sha256,
+                terminated_after_stage=terminated_after_stage,
+            )
+        metrics: dict[str, float] = {}
+        metric_sources: dict[str, EvidenceSource] = {}
+        for stage in stages:
+            for name, value in stage.metrics.items():
+                if name in metrics and not math.isclose(
+                    metrics[name],
+                    value,
+                    rel_tol=1e-5,
+                    abs_tol=1e-12,
+                ):
+                    raise RuntimeError(
+                        "analysis stages returned inconsistent repeated metric "
+                        f"{name}: {metrics[name]:.12g} versus {value:.12g}"
+                    )
+                metrics.setdefault(name, value)
+                metric_sources.setdefault(name, stage.metric_sources[name])
+
+        constraints = evaluate_constraints(metrics, task.constraints)
+        if terminated_after_stage is not None:
+            constraints = [
+                evaluation.model_copy(
+                    update={
+                        "reason": (
+                            "not evaluated after earlier analysis-stage gate rejection"
+                            if evaluation.actual is None
+                            else evaluation.reason
+                        )
+                    }
+                )
+                for evaluation in constraints
+            ]
+        completed_all_stages = len(stages) == len(task.analysis_stages)
+        decision_complete = completed_all_stages or terminated_after_stage is not None
+        stage_analyses_complete = all(stage.analysis_complete for stage in stages)
+        objective_value = (
+            metrics.get(task.objective.metric) if task.objective is not None else None
+        )
+        objective_missing = (
+            completed_all_stages
+            and task.objective is not None
+            and objective_value is None
+        )
+        analysis_complete = (
+            decision_complete and stage_analyses_complete and not objective_missing
+        )
+        analysis_issues = [
+            f"{stage.stage_id}: {issue}"
+            for stage in stages
+            for issue in stage.analysis_issues
+        ]
+        if not decision_complete:
+            analysis_issues.append("candidate did not complete every required analysis stage")
+        if objective_missing:
+            analysis_issues.append(
+                f"candidate omitted objective metric {task.objective.metric!r}"
+            )
+        analysis_warnings = [
+            f"{stage.stage_id}: {warning}"
+            for stage in stages
+            for warning in stage.analysis_warnings
+        ]
+        return CandidateEvaluation(
+            index=index,
+            topology_variant_id=topology_variant_id,
+            topology_sha256=topology_sha256,
+            parameters=dict(candidate.parameters),
+            instance_parameters={
+                instance: dict(parameters)
+                for instance, parameters in candidate.instance_parameters.items()
+            },
+            oa_parameters=oa_parameters or {},
+            metrics=metrics,
+            constraints=constraints,
+            feasible=(
+                completed_all_stages
+                and analysis_complete
+                and all(item.passed for item in constraints)
+                and not objective_missing
+            ),
+            total_violation=(
+                sum(item.normalized_violation for item in constraints)
+                + (1_000_000.0 if objective_missing else 0.0)
+                + (1_000_000.0 if not analysis_complete else 0.0)
+            ),
+            objective_value=objective_value,
+            evidence_source=(
+                stages[-1].evidence_source
+                if stages
+                else EvidenceSource.SYSTEM_EVENT
+            ),
+            metric_sources=metric_sources,
+            analysis_complete=analysis_complete,
+            analysis_issues=analysis_issues,
+            analysis_warnings=analysis_warnings,
+            atomic_candidate_id=candidate.atomic_candidate_id,
+            atomic_candidate_predicted_metrics=(
+                candidate.atomic_candidate_predicted_metrics
+            ),
+            atomic_candidate_evidence_source=(
+                candidate.atomic_candidate_evidence_source
+            ),
+            theory_seed_candidate_id=candidate.theory_seed_candidate_id,
+            theory_seed_source_candidate_id=(
+                candidate.theory_seed_source_candidate_id
+            ),
+            theory_seed_predicted_metrics=(
+                candidate.theory_seed_predicted_metrics
+            ),
+            theory_seed_evidence_source=(
+                EvidenceSource.SOFTWARE_INFERENCE
+                if candidate.theory_seed_candidate_id is not None
+                else None
+            ),
+            analysis_stages=stages,
+            terminated_after_stage=terminated_after_stage,
+        )
+
+    @classmethod
+    def _merge_operating_condition_analysis_stage_candidate(
+        cls,
+        task: TaskSpec,
+        index: int,
+        candidate: _CandidateInput,
+        stages: list[AnalysisStageEvaluation],
+        *,
+        oa_parameters: dict[str, float] | None,
+        topology_variant_id: str | None,
+        topology_sha256: str | None,
+        terminated_after_stage: str | None,
+    ) -> CandidateEvaluation:
+        expected = [
+            condition.model_dump(mode="json")
+            for condition in task.operating_conditions
+        ]
+        for stage in stages:
+            identities = [
+                {
+                    "name": item.name,
+                    "process_corner": item.process_corner,
+                    "temperature_c": item.temperature_c,
+                    "vdd_v": (
+                        next(
+                            condition.vdd_v
+                            for condition in task.operating_conditions
+                            if condition.name == item.name
+                        )
+                    ),
+                }
+                for item in stage.operating_conditions
+            ]
+            if identities != expected:
+                raise RuntimeError(
+                    "analysis stages returned inconsistent operating-condition identities"
+                )
+
+        completed_all_stages = len(stages) == len(task.analysis_stages)
+        decision_complete = completed_all_stages or terminated_after_stage is not None
+        condition_evaluations: list[OperatingConditionEvaluation] = []
+        for condition_index, condition in enumerate(task.operating_conditions):
+            rows = [stage.operating_conditions[condition_index] for stage in stages]
+            metrics: dict[str, float] = {}
+            metric_sources: dict[str, EvidenceSource] = {}
+            for row in rows:
+                for name, value in row.metrics.items():
+                    if name in metrics and not math.isclose(
+                        metrics[name], value, rel_tol=1e-5, abs_tol=1e-12
+                    ):
+                        raise RuntimeError(
+                            "PVT analysis stages returned inconsistent repeated metric "
+                            f"{condition.name}.{name}"
+                        )
+                    metrics.setdefault(name, value)
+                    metric_sources.setdefault(name, row.metric_sources[name])
+            constraints = evaluate_constraints(metrics, task.constraints)
+            if terminated_after_stage is not None:
+                constraints = [
+                    item.model_copy(
+                        update={
+                            "reason": (
+                                "not evaluated after earlier analysis-stage gate rejection"
+                                if item.actual is None
+                                else item.reason
+                            )
+                        }
+                    )
+                    for item in constraints
+                ]
+            objective_value = (
+                metrics.get(task.objective.metric)
+                if task.objective is not None
+                else None
+            )
+            objective_missing = (
+                completed_all_stages
+                and task.objective is not None
+                and objective_value is None
+            )
+            analysis_complete = (
+                decision_complete
+                and all(row.analysis_complete for row in rows)
+                and not objective_missing
+            )
+            condition_evaluations.append(
+                OperatingConditionEvaluation(
+                    name=condition.name,
+                    process_corner=condition.process_corner,
+                    temperature_c=condition.temperature_c,
+                    vdd_v=rows[0].vdd_v,
+                    parameters=dict(rows[0].parameters),
+                    metrics=metrics,
+                    constraints=constraints,
+                    feasible=(
+                        completed_all_stages
+                        and analysis_complete
+                        and all(item.passed for item in constraints)
+                        and not objective_missing
+                    ),
+                    total_violation=(
+                        sum(item.normalized_violation for item in constraints)
+                        + (1_000_000.0 if objective_missing else 0.0)
+                        + (1_000_000.0 if not analysis_complete else 0.0)
+                    ),
+                    objective_value=objective_value,
+                    evidence_source=rows[-1].evidence_source,
+                    metric_sources=metric_sources,
+                    analysis_complete=analysis_complete,
+                    analysis_issues=[
+                        f"{stage.stage_id}: {issue}"
+                        for stage, row in zip(stages, rows, strict=True)
+                        for issue in row.analysis_issues
+                    ],
+                    analysis_warnings=[
+                        f"{stage.stage_id}: {warning}"
+                        for stage, row in zip(stages, rows, strict=True)
+                        for warning in row.analysis_warnings
+                    ],
+                )
+            )
+
+        aggregate_metrics: dict[str, float] = {}
+        aggregate_constraints = []
+        for constraint_index, constraint in enumerate(task.constraints):
+            worst = cls._worst_constraint_evaluation(
+                constraint,
+                [
+                    item.constraints[constraint_index]
+                    for item in condition_evaluations
+                ],
+            )
+            aggregate_constraints.append(worst)
+            if worst.actual is not None:
+                aggregate_metrics[constraint.metric] = float(worst.actual)
+        objective_value: float | None = None
+        if task.objective is not None:
+            values = [item.objective_value for item in condition_evaluations]
+            if all(value is not None for value in values):
+                numeric_values = [float(value) for value in values if value is not None]
+                objective_value = (
+                    max(numeric_values)
+                    if task.objective.goal is ObjectiveGoal.MINIMIZE
+                    else min(numeric_values)
+                )
+                aggregate_metrics[task.objective.metric] = objective_value
+        objective_missing = task.objective is not None and objective_value is None
+        analysis_complete = all(
+            item.analysis_complete for item in condition_evaluations
+        )
+        return CandidateEvaluation(
+            index=index,
+            topology_variant_id=topology_variant_id,
+            topology_sha256=topology_sha256,
+            parameters=dict(candidate.parameters),
+            instance_parameters={
+                instance: dict(parameters)
+                for instance, parameters in candidate.instance_parameters.items()
+            },
+            oa_parameters=oa_parameters or {},
+            metrics=aggregate_metrics,
+            constraints=aggregate_constraints,
+            feasible=(
+                completed_all_stages
+                and analysis_complete
+                and all(item.feasible for item in condition_evaluations)
+                and not objective_missing
+            ),
+            total_violation=sum(
+                item.total_violation for item in condition_evaluations
+            ),
+            objective_value=objective_value,
+            evidence_source=stages[-1].evidence_source,
+            metric_sources={
+                name: EvidenceSource.SOFTWARE_INFERENCE
+                for name in aggregate_metrics
+            },
+            analysis_complete=analysis_complete,
+            analysis_issues=[
+                f"{item.name}: {issue}"
+                for item in condition_evaluations
+                for issue in item.analysis_issues
+            ],
+            analysis_warnings=[
+                f"{item.name}: {warning}"
+                for item in condition_evaluations
+                for warning in item.analysis_warnings
+            ],
+            operating_conditions=condition_evaluations,
+            atomic_candidate_id=candidate.atomic_candidate_id,
+            atomic_candidate_predicted_metrics=(
+                candidate.atomic_candidate_predicted_metrics
+            ),
+            atomic_candidate_evidence_source=(
+                candidate.atomic_candidate_evidence_source
+            ),
+            theory_seed_candidate_id=candidate.theory_seed_candidate_id,
+            theory_seed_source_candidate_id=(
+                candidate.theory_seed_source_candidate_id
+            ),
+            theory_seed_predicted_metrics=candidate.theory_seed_predicted_metrics,
+            theory_seed_evidence_source=(
+                EvidenceSource.SOFTWARE_INFERENCE
+                if candidate.theory_seed_candidate_id is not None
+                else None
+            ),
+            analysis_stages=stages,
+            terminated_after_stage=terminated_after_stage,
+        )
+
+    @staticmethod
     def _evaluate_operating_condition_candidate(
         task: TaskSpec,
         index: int,
@@ -360,6 +1005,8 @@ class TaskExecutor:
         theory_seed_candidate_id: str | None = None,
         theory_seed_source_candidate_id: str | None = None,
         theory_seed_predicted_metrics: dict[str, float] | None = None,
+        topology_variant_id: str | None = None,
+        topology_sha256: str | None = None,
     ) -> CandidateEvaluation:
         if not isinstance(raw_conditions, list) or not raw_conditions:
             raise RuntimeError("operating-condition simulation returned no cases")
@@ -424,7 +1071,7 @@ class TaskExecutor:
             effective_vdd = (
                 expected_condition["vdd_v"]
                 if expected_condition["vdd_v"] is not None
-                else parameters["vdd_v"]
+                else TaskExecutor._default_operating_condition_vdd(task)
             )
             for name, value in parameters.items():
                 expected_value = effective_vdd if name == "vdd_v" else value
@@ -548,6 +1195,8 @@ class TaskExecutor:
         )
         return CandidateEvaluation(
             index=index,
+            topology_variant_id=topology_variant_id,
+            topology_sha256=topology_sha256,
             parameters=evaluated_parameters,
             instance_parameters=instance_parameters or {},
             oa_parameters=oa_parameters or {},
@@ -595,6 +1244,11 @@ class TaskExecutor:
     def _semantic_parameters(
         result: AdapterResult, task: TaskSpec
     ) -> dict[str, float]:
+        if task.circuit is CircuitKind.EXISTING_SCHEMATIC:
+            # Generic existing schematics intentionally expose only exact raw
+            # instance fields.  They do not invent topology-specific semantic
+            # aliases, and the Bridge summary therefore has no semantic map.
+            return {}
         raw = result.data.get("semantic_parameters")
         required = _OA_SEMANTIC_PARAMETERS[task.circuit]
         if not isinstance(raw, dict) or any(name not in raw for name in required):
@@ -2790,6 +3444,7 @@ class TaskExecutor:
         expected_indexes = list(range(1, checkpoint.next_candidate_index))
         if [candidate.index for candidate in checkpoint.candidates] != expected_indexes:
             raise ValueError("checkpoint candidates are not a completed search prefix")
+        cls._validate_checkpoint_analysis_stage_state(checkpoint, task)
         for candidate in checkpoint.candidates:
             declared_candidate = declared[candidate.index - 1]
             declared_parameters = declared_candidate.parameters
@@ -2830,6 +3485,62 @@ class TaskExecutor:
                     f"checkpoint candidate {candidate.index} atomic provenance "
                     "does not match task"
                 )
+
+    @staticmethod
+    def _validate_checkpoint_analysis_stage_state(
+        checkpoint: ExecutionCheckpoint,
+        task: TaskSpec,
+    ) -> None:
+        if not task.analysis_stages:
+            if (
+                checkpoint.active_candidate_index is not None
+                or checkpoint.next_analysis_stage_index != 1
+                or checkpoint.active_candidate_stages
+            ):
+                raise ValueError(
+                    "checkpoint contains analysis-stage state for a non-staged task"
+                )
+            return
+        if checkpoint.active_candidate_index is None:
+            if (
+                checkpoint.next_analysis_stage_index != 1
+                or checkpoint.active_candidate_stages
+            ):
+                raise ValueError(
+                    "checkpoint active analysis-stage state lacks a candidate identity"
+                )
+            return
+        if (
+            task.analysis_stage_execution
+            is AnalysisStageExecution.SHARED_NETLIST
+            and (
+                checkpoint.next_analysis_stage_index != 1
+                or checkpoint.active_candidate_stages
+            )
+        ):
+            raise ValueError(
+                "shared-netlist checkpoint cannot contain partial stage results"
+            )
+        if checkpoint.active_candidate_index != checkpoint.next_candidate_index:
+            raise ValueError(
+                "checkpoint active candidate must equal next_candidate_index"
+            )
+        if checkpoint.next_analysis_stage_index > len(task.analysis_stages) + 1:
+            raise ValueError("checkpoint next analysis stage is outside the task")
+        completed_count = checkpoint.next_analysis_stage_index - 1
+        if len(checkpoint.active_candidate_stages) != completed_count:
+            raise ValueError(
+                "checkpoint active analysis-stage count is inconsistent"
+            )
+        expected = task.analysis_stages[:completed_count]
+        if [item.stage_id for item in checkpoint.active_candidate_stages] != [
+            item.id for item in expected
+        ] or [item.analysis for item in checkpoint.active_candidate_stages] != [
+            item.analysis for item in expected
+        ]:
+            raise ValueError(
+                "checkpoint active analysis stages do not match the task prefix"
+            )
 
     @classmethod
     def _validate_resume_oa_state(
@@ -2911,6 +3622,364 @@ class TaskExecutor:
         )
         return semantic_size * instance_size
 
+    @classmethod
+    def _analysis_stage_task(
+        cls,
+        task: TaskSpec,
+        stage: AnalysisStageSpec,
+        instance_parameters: dict[str, dict[str, str]],
+    ) -> TaskSpec:
+        candidate_task = cls._candidate_task(task, instance_parameters)
+        return candidate_task.model_copy(
+            update={
+                "analysis": stage.analysis,
+                "analysis_stages": [],
+                "ac_sweep": (
+                    task.ac_sweep if stage.analysis.value == "ac" else None
+                ),
+                "linearity_sweep": (
+                    task.linearity_sweep
+                    if stage.analysis.value == "transient"
+                    else None
+                ),
+                "noise_sweep": (
+                    task.noise_sweep if stage.analysis.value == "noise" else None
+                ),
+                "constraints": cls._constraints_for_analysis_stage(task, stage),
+                "objective": None,
+            }
+        )
+
+    def _run_staged_candidates(
+        self,
+        task: TaskSpec,
+        *,
+        stage_parameters: bool,
+        evaluations: list[CandidateEvaluation],
+        start_index: int,
+        index_offset: int,
+        topology_variant_id: str | None,
+        topology_sha256: str | None,
+        progress: Callable[
+            [
+                str,
+                int,
+                _CandidateInput,
+                list[CandidateEvaluation],
+                _AppliedCandidateState | None,
+            ],
+            None,
+        ]
+        | None,
+        stage_progress: Callable[
+            [
+                int,
+                _CandidateInput,
+                list[AnalysisStageEvaluation],
+                int,
+            ],
+            None,
+        ]
+        | None,
+        resume_candidate_index: int | None,
+        resume_stages: list[AnalysisStageEvaluation] | None,
+    ) -> list[CandidateEvaluation]:
+        shared_netlist = (
+            task.analysis_stage_execution is AnalysisStageExecution.SHARED_NETLIST
+        )
+        if shared_netlist and (resume_stages or []):
+            raise ValueError(
+                "shared-netlist staged execution resumes only at candidate boundaries"
+            )
+        for local_index, candidate in enumerate(self._candidate_inputs(task), start=1):
+            index = index_offset + local_index
+            if index < start_index:
+                continue
+            completed_stages = (
+                list(resume_stages or [])
+                if resume_candidate_index == index
+                else []
+            )
+            expected_prefix = task.analysis_stages[: len(completed_stages)]
+            if [item.stage_id for item in completed_stages] != [
+                item.id for item in expected_prefix
+            ] or [item.analysis for item in completed_stages] != [
+                item.analysis for item in expected_prefix
+            ]:
+                raise ValueError(
+                    "checkpoint active analysis stages do not match the task prefix"
+                )
+            resumed_termination = next(
+                (
+                    spec.id
+                    for position, (spec, evaluation) in enumerate(
+                        zip(expected_prefix, completed_stages, strict=True),
+                        start=1,
+                    )
+                    if spec.stop_on_failure
+                    and not evaluation.passed
+                    and evaluation.analysis_complete
+                    and position < len(task.analysis_stages)
+                ),
+                None,
+            )
+            resumed_incomplete = any(
+                not evaluation.analysis_complete for evaluation in completed_stages
+            )
+            if progress is not None:
+                progress("started", index, candidate, evaluations, None)
+            stage_completed = not stage_parameters
+            applied_state: _AppliedCandidateState | None = None
+            candidate_task = self._candidate_task(
+                task, candidate.instance_parameters
+            )
+            try:
+                if stage_parameters:
+                    staged = self._action(
+                        f"parameters.stage.{index}",
+                        lambda candidate=candidate, candidate_task=candidate_task: self.adapter.apply_parameters(
+                            candidate_task, candidate.parameters
+                        ),
+                    )
+                    applied_state = _AppliedCandidateState(
+                        oa_parameters=self._applied_semantic_parameters(
+                            staged, candidate_task
+                        ),
+                        oa_instance_parameters=(
+                            self._applied_instance_parameter_state(
+                                staged, candidate_task
+                            )
+                        ),
+                    )
+                    stage_completed = True
+                    if progress is not None:
+                        progress(
+                            "staged", index, candidate, evaluations, applied_state
+                        )
+
+                terminated_after_stage: str | None = resumed_termination
+                pending_stages = (
+                    []
+                    if resumed_termination is not None or resumed_incomplete
+                    else task.analysis_stages[len(completed_stages) :]
+                )
+                if shared_netlist and pending_stages:
+                    batch_method = getattr(
+                        self.adapter, "simulate_analysis_stages", None
+                    )
+                    if not callable(batch_method):
+                        raise RuntimeError(
+                            "adapter does not implement shared-netlist staged simulation"
+                        )
+                    batch_result = self._action(
+                        f"simulation.candidate.{index}.stages.shared-netlist",
+                        lambda candidate=candidate, candidate_task=candidate_task: (
+                            batch_method(candidate_task, candidate.parameters)
+                        ),
+                    )
+                    (
+                        completed_stages,
+                        terminated_after_stage,
+                    ) = self._evaluate_shared_analysis_stage_batch(
+                        task,
+                        batch_result,
+                    )
+                else:
+                    for stage_index, stage in enumerate(
+                        pending_stages, start=len(completed_stages) + 1
+                    ):
+                        analysis_task = self._analysis_stage_task(
+                            task,
+                            stage,
+                            candidate.instance_parameters,
+                        )
+                        result = self._action(
+                            (
+                                f"simulation.candidate.{index}.stage.{stage_index}."
+                                f"{stage.id}"
+                            ),
+                            lambda candidate=candidate, analysis_task=analysis_task: self.adapter.simulate(
+                                analysis_task, candidate.parameters
+                            ),
+                        )
+                        stage_evaluation = self._evaluate_analysis_stage(
+                            task, stage, result
+                        )
+                        completed_stages.append(stage_evaluation)
+                        if stage_progress is not None:
+                            stage_progress(
+                                index,
+                                candidate,
+                                completed_stages,
+                                stage_index + 1,
+                            )
+                        if not stage_evaluation.analysis_complete:
+                            break
+                        if (
+                            stage.stop_on_failure
+                            and not stage_evaluation.passed
+                            and stage_index < len(task.analysis_stages)
+                        ):
+                            terminated_after_stage = stage.id
+                            break
+            except AdapterInterrupted:
+                if progress is not None:
+                    progress("interrupted", index, candidate, evaluations, None)
+                raise
+            except Exception as exc:
+                if stage_parameters and not stage_completed:
+                    raise
+                failed = self._merge_analysis_stage_candidate(
+                    task,
+                    index,
+                    candidate,
+                    completed_stages,
+                    oa_parameters=(
+                        applied_state.oa_parameters
+                        if applied_state is not None
+                        else {}
+                    ),
+                    topology_variant_id=topology_variant_id,
+                    topology_sha256=topology_sha256,
+                ).model_copy(
+                    update={
+                        "feasible": False,
+                        "analysis_complete": False,
+                        "analysis_issues": [
+                            *(
+                                f"{item.stage_id}: {issue}"
+                                for item in completed_stages
+                                for issue in item.analysis_issues
+                            ),
+                            f"{type(exc).__name__}: {exc}",
+                        ],
+                        "evidence_source": EvidenceSource.SYSTEM_EVENT,
+                    }
+                )
+                evaluations.append(failed)
+                if progress is not None:
+                    progress("completed", index, candidate, evaluations, None)
+                continue
+
+            evaluations.append(
+                self._merge_analysis_stage_candidate(
+                    task,
+                    index,
+                    candidate,
+                    completed_stages,
+                    oa_parameters=(
+                        applied_state.oa_parameters
+                        if applied_state is not None
+                        else {}
+                    ),
+                    topology_variant_id=topology_variant_id,
+                    topology_sha256=topology_sha256,
+                    terminated_after_stage=terminated_after_stage,
+                )
+            )
+            if progress is not None:
+                progress("completed", index, candidate, evaluations, None)
+        return evaluations
+
+    @classmethod
+    def _evaluate_shared_analysis_stage_batch(
+        cls,
+        task: TaskSpec,
+        batch: AdapterResult,
+    ) -> tuple[list[AnalysisStageEvaluation], str | None]:
+        raw_results = batch.data.get("stage_results")
+        if not isinstance(raw_results, list) or not raw_results:
+            raise RuntimeError(
+                "shared-netlist staged simulation returned no stage results"
+            )
+        if len(raw_results) > len(task.analysis_stages):
+            raise RuntimeError(
+                "shared-netlist staged simulation returned too many stages"
+            )
+
+        evaluations: list[AnalysisStageEvaluation] = []
+        netlists: list[dict[str, Any]] = []
+        for index, raw in enumerate(raw_results):
+            if not isinstance(raw, dict) or not isinstance(raw.get("result"), dict):
+                raise RuntimeError(
+                    "shared-netlist staged simulation returned an invalid stage result"
+                )
+            expected = task.analysis_stages[index]
+            if (
+                raw.get("stage_id") != expected.id
+                or raw.get("analysis") != expected.analysis.value
+            ):
+                raise RuntimeError(
+                    "shared-netlist stage identity/order does not match the task"
+                )
+            nested = raw["result"]
+            evidence = nested.get("evidence")
+            netlist = evidence.get("netlist") if isinstance(evidence, dict) else None
+            if not isinstance(netlist, dict):
+                raise RuntimeError(
+                    f"shared-netlist stage {expected.id!r} lacks netlist evidence"
+                )
+            netlists.append(netlist)
+            evaluations.append(
+                cls._evaluate_analysis_stage(
+                    task,
+                    expected,
+                    AdapterResult(
+                        data=nested,
+                        evidence_source=batch.evidence_source,
+                    ),
+                )
+            )
+
+        if any(netlist != netlists[0] for netlist in netlists[1:]):
+            raise RuntimeError(
+                "shared-netlist stages did not bind to identical netlist evidence"
+            )
+        reuse = batch.data.get("shared_netlist")
+        if not isinstance(reuse, dict):
+            raise RuntimeError("shared-netlist reuse evidence is missing")
+        if reuse.get("netlist_generation_count") != 1:
+            raise RuntimeError("shared-netlist batch did not prove one si generation")
+        if (
+            reuse.get("remote_path") != netlists[0].get("remote_path")
+            or reuse.get("sha256") != netlists[0].get("sha256")
+        ):
+            raise RuntimeError(
+                "shared-netlist reuse summary does not match stage evidence"
+            )
+
+        expected_termination: str | None = None
+        for position, (stage, evaluation) in enumerate(
+            zip(task.analysis_stages, evaluations, strict=False),
+            start=1,
+        ):
+            if not evaluation.analysis_complete:
+                break
+            if (
+                stage.stop_on_failure
+                and not evaluation.passed
+                and position < len(task.analysis_stages)
+            ):
+                expected_termination = stage.id
+                break
+        prefix_is_complete = len(evaluations) == len(task.analysis_stages)
+        prefix_ended_incomplete = not evaluations[-1].analysis_complete
+        if (
+            not prefix_is_complete
+            and expected_termination is None
+            and not prefix_ended_incomplete
+        ):
+            raise RuntimeError(
+                "shared-netlist batch omitted a required later analysis stage"
+            )
+        reported_termination = batch.data.get("terminated_after_stage")
+        if reported_termination != expected_termination:
+            raise RuntimeError(
+                "shared-netlist early-termination result disagrees with independent "
+                "executor constraint evaluation"
+            )
+        return evaluations, expected_termination
+
     def _run_candidates(
         self,
         task: TaskSpec,
@@ -2918,6 +3987,9 @@ class TaskExecutor:
         stage_parameters: bool = False,
         evaluations: list[CandidateEvaluation] | None = None,
         start_index: int = 1,
+        index_offset: int = 0,
+        topology_variant_id: str | None = None,
+        topology_sha256: str | None = None,
         progress: Callable[
             [
                 str,
@@ -2929,9 +4001,38 @@ class TaskExecutor:
             None,
         ]
         | None = None,
+        stage_progress: Callable[
+            [
+                int,
+                _CandidateInput,
+                list[AnalysisStageEvaluation],
+                int,
+            ],
+            None,
+        ]
+        | None = None,
+        resume_candidate_index: int | None = None,
+        resume_stages: list[AnalysisStageEvaluation] | None = None,
     ) -> list[CandidateEvaluation]:
         evaluations = evaluations if evaluations is not None else []
-        for index, candidate in enumerate(self._candidate_inputs(task), start=1):
+        if task.analysis_stages:
+            return self._run_staged_candidates(
+                task,
+                stage_parameters=stage_parameters,
+                evaluations=evaluations,
+                start_index=start_index,
+                index_offset=index_offset,
+                topology_variant_id=topology_variant_id,
+                topology_sha256=topology_sha256,
+                progress=progress,
+                stage_progress=stage_progress,
+                resume_candidate_index=resume_candidate_index,
+                resume_stages=resume_stages,
+            )
+        for local_index, candidate in enumerate(
+            self._candidate_inputs(task), start=1
+        ):
+            index = index_offset + local_index
             if index < start_index:
                 continue
             if progress is not None:
@@ -2985,6 +4086,8 @@ class TaskExecutor:
                 evaluations.append(
                     CandidateEvaluation(
                         index=index,
+                        topology_variant_id=topology_variant_id,
+                        topology_sha256=topology_sha256,
                         parameters=candidate.parameters,
                         instance_parameters=candidate.instance_parameters,
                         oa_parameters=(
@@ -3050,6 +4153,8 @@ class TaskExecutor:
                     theory_seed_predicted_metrics=(
                         candidate.theory_seed_predicted_metrics
                     ),
+                    topology_variant_id=topology_variant_id,
+                    topology_sha256=topology_sha256,
                 )
             )
             if progress is not None:
@@ -3107,8 +4212,15 @@ class TaskExecutor:
         candidates: list[CandidateEvaluation],
         *,
         has_recommendation: bool,
+        declared_candidate_count: int | None = None,
+        topology_variant_count: int = 1,
+        recommendation_withheld_after_winner_verification: bool = False,
     ) -> SearchAudit:
-        declared = cls._candidate_space_size(task)
+        declared = (
+            cls._candidate_space_size(task)
+            if declared_candidate_count is None
+            else declared_candidate_count
+        )
         attempted = len(candidates)
         completed = sum(
             candidate.analysis_complete
@@ -3116,7 +4228,16 @@ class TaskExecutor:
             for candidate in candidates
         )
         domain_exhausted = attempted == declared and completed == declared
-        if has_recommendation and domain_exhausted:
+        if recommendation_withheld_after_winner_verification:
+            scope = SelectionScope.NO_RECOMMENDATION_FROM_EVALUATED_POINTS
+            statement = (
+                "The nominal candidate domain was evaluated and produced a "
+                "provisional winner, but that point failed or did not complete "
+                "the separately declared winner-only verification Gate. No robust "
+                "recommendation is made, and unverified nominal runners-up were not "
+                "silently promoted."
+            )
+        elif has_recommendation and domain_exhausted:
             scope = SelectionScope.BEST_IN_DECLARED_DISCRETE_DOMAIN
             statement = (
                 "The recommendation is the highest-ranked feasible candidate "
@@ -3148,6 +4269,7 @@ class TaskExecutor:
             declared_candidate_count=declared,
             attempted_candidate_count=attempted,
             completed_candidate_count=completed,
+            topology_variant_count=topology_variant_count,
             domain_exhausted=domain_exhausted,
             selection_scope=scope,
             statement=statement,
@@ -3157,6 +4279,1306 @@ class TaskExecutor:
             theory_seed_source=(
                 task.theory_seed.source if task.theory_seed is not None else None
             ),
+        )
+
+    @staticmethod
+    def _merge_instance_parameter_updates(
+        *collections: list[InstanceParameterUpdate],
+    ) -> list[InstanceParameterUpdate]:
+        merged: dict[str, dict[str, str]] = {}
+        for collection in collections:
+            for update in collection:
+                merged.setdefault(update.instance, {}).update(update.parameters)
+        return [
+            InstanceParameterUpdate(instance=instance, parameters=parameters)
+            for instance, parameters in sorted(merged.items())
+        ]
+
+    @classmethod
+    def _winner_verification_task(
+        cls,
+        task: TaskSpec,
+        variant_task: TaskSpec,
+        selected: CandidateEvaluation,
+    ) -> TaskSpec:
+        verification = task.winner_verification
+        if verification is None:
+            raise ValueError("winner verification settings are missing")
+        candidate_task = cls._candidate_task(
+            variant_task,
+            selected.instance_parameters,
+        )
+        return candidate_task.model_copy(
+            update={
+                "analysis": None,
+                "analysis_stages": list(verification.analysis_stages),
+                "analysis_stage_execution": AnalysisStageExecution.SHARED_NETLIST,
+                "ac_sweep": verification.ac_sweep,
+                "linearity_sweep": verification.linearity_sweep,
+                "noise_sweep": verification.noise_sweep,
+                "constraints": list(verification.constraints),
+                "objective": None,
+                "operating_conditions": list(
+                    verification.operating_conditions
+                ),
+                "parameter_space": {},
+                "instance_parameter_space": [],
+                "candidate_set": None,
+                "theory_seed": None,
+                "topology_refinement": None,
+                "winner_verification": None,
+            }
+        )
+
+    def _run_winner_verification(
+        self,
+        task: TaskSpec,
+        variant_task: TaskSpec,
+        selected: CandidateEvaluation,
+    ) -> CandidateEvaluation:
+        verification_task = self._winner_verification_task(
+            task,
+            variant_task,
+            selected,
+        )
+        batch = self._action(
+            f"simulation.winner.{selected.index}.stages.shared-netlist",
+            lambda: self.adapter.simulate_analysis_stages(
+                verification_task,
+                selected.parameters,
+            ),
+        )
+        stages, terminated_after_stage = self._evaluate_shared_analysis_stage_batch(
+            verification_task,
+            batch,
+        )
+        candidate = _CandidateInput(
+            parameters=dict(selected.parameters),
+            instance_parameters={
+                instance: dict(parameters)
+                for instance, parameters in selected.instance_parameters.items()
+            },
+            atomic_candidate_id=selected.atomic_candidate_id,
+            atomic_candidate_predicted_metrics=dict(
+                selected.atomic_candidate_predicted_metrics
+            ),
+            atomic_candidate_evidence_source=(
+                selected.atomic_candidate_evidence_source
+            ),
+            theory_seed_candidate_id=selected.theory_seed_candidate_id,
+            theory_seed_source_candidate_id=(
+                selected.theory_seed_source_candidate_id
+            ),
+            theory_seed_predicted_metrics=dict(
+                selected.theory_seed_predicted_metrics
+            ),
+        )
+        return self._merge_analysis_stage_candidate(
+            verification_task,
+            selected.index,
+            candidate,
+            stages,
+            oa_parameters=selected.oa_parameters,
+            topology_variant_id=selected.topology_variant_id,
+            topology_sha256=selected.topology_sha256,
+            terminated_after_stage=terminated_after_stage,
+        )
+
+    @classmethod
+    def _topology_refinement_variant_tasks(
+        cls, task: TaskSpec
+    ) -> tuple[TaskSpec, list[tuple[Any, TaskSpec]]]:
+        refinement = task.topology_refinement
+        if refinement is None:
+            raise ValueError("topology refinement settings are missing")
+        baseline = task.model_copy(update={"topology_refinement": None})
+        alternatives = []
+        for alternative in refinement.resolved_alternatives():
+            alternative_task = baseline.model_copy(
+                update={
+                    "design_context": alternative.design_context,
+                    "generic_simulation": alternative.generic_simulation,
+                    "instance_parameter_updates": cls._merge_instance_parameter_updates(
+                        list(task.instance_parameter_updates),
+                        list(alternative.instance_parameter_updates),
+                    ),
+                }
+            )
+            alternatives.append((alternative, alternative_task))
+        return baseline, alternatives
+
+    @classmethod
+    def _topology_refinement_declared_candidates(
+        cls, task: TaskSpec
+    ) -> list[tuple[str, str, _CandidateInput]]:
+        refinement = task.topology_refinement
+        if refinement is None:
+            raise ValueError("topology refinement settings are missing")
+        baseline, alternatives = cls._topology_refinement_variant_tasks(task)
+        baseline_sha256 = alternatives[
+            0
+        ][0].topology_delta.contract.expected_before_sha256
+        declared = [
+            (
+                refinement.baseline_id,
+                baseline_sha256,
+                candidate,
+            )
+            for candidate in cls._candidate_inputs(baseline)
+        ]
+        for alternative, alternative_task in alternatives:
+            declared.extend(
+                (
+                    alternative.id,
+                    alternative.topology_delta.contract.expected_after_sha256,
+                    candidate,
+                )
+                for candidate in cls._candidate_inputs(alternative_task)
+            )
+        return declared
+
+    @classmethod
+    def _validate_topology_refinement_checkpoint(
+        cls,
+        checkpoint: ExecutionCheckpoint,
+        task: TaskSpec,
+        plan: ExecutionPlan,
+        adapter_name: str,
+    ) -> None:
+        if checkpoint.complete:
+            raise ValueError("checkpoint is already complete")
+        if checkpoint.task_id != task.id:
+            raise ValueError("checkpoint task_id does not match the requested task")
+        if checkpoint.plan_token != plan.confirmation_token:
+            raise ValueError("checkpoint plan token does not match the current task plan")
+        if checkpoint.adapter != adapter_name:
+            raise ValueError("checkpoint adapter does not match the selected adapter")
+
+        refinement = task.topology_refinement
+        if refinement is None:
+            raise ValueError("topology refinement settings are missing")
+        alternatives = refinement.resolved_alternatives()
+        baseline_sha256 = alternatives[
+            0
+        ].topology_delta.contract.expected_before_sha256
+        variants = {refinement.baseline_id: baseline_sha256}
+        variants.update(
+            {
+                alternative.id: alternative.topology_delta.contract.expected_after_sha256
+                for alternative in alternatives
+            }
+        )
+        if checkpoint.initial_topology_sha256 != baseline_sha256:
+            raise ValueError("checkpoint topology baseline does not match the task")
+        if (
+            checkpoint.expected_topology_variant_id not in variants
+            or variants[checkpoint.expected_topology_variant_id]
+            != checkpoint.expected_topology_sha256
+        ):
+            raise ValueError("checkpoint expected topology state is inconsistent")
+        if (
+            checkpoint.pending_topology_sha256 is not None
+            and checkpoint.pending_topology_sha256 not in set(variants.values())
+        ):
+            raise ValueError("checkpoint pending topology is outside the task")
+
+        declared = cls._topology_refinement_declared_candidates(task)
+        if checkpoint.next_candidate_index > len(declared) + 1:
+            raise ValueError("checkpoint next candidate is outside the task search space")
+        expected_indexes = list(range(1, checkpoint.next_candidate_index))
+        if [candidate.index for candidate in checkpoint.candidates] != expected_indexes:
+            raise ValueError("checkpoint candidates are not a completed search prefix")
+        cls._validate_checkpoint_analysis_stage_state(checkpoint, task)
+        for candidate in checkpoint.candidates:
+            variant_id, topology_sha256, declared_candidate = declared[
+                candidate.index - 1
+            ]
+            if (
+                candidate.topology_variant_id != variant_id
+                or candidate.topology_sha256 != topology_sha256
+            ):
+                raise ValueError(
+                    f"checkpoint candidate {candidate.index} topology identity "
+                    "does not match task"
+                )
+            if candidate.parameters != declared_candidate.parameters:
+                raise ValueError(
+                    f"checkpoint candidate {candidate.index} parameters do not "
+                    "match task"
+                )
+            if candidate.instance_parameters != declared_candidate.instance_parameters:
+                raise ValueError(
+                    f"checkpoint candidate {candidate.index} instance parameters "
+                    "do not match task"
+                )
+            if (
+                candidate.atomic_candidate_id
+                != declared_candidate.atomic_candidate_id
+                or candidate.atomic_candidate_predicted_metrics
+                != declared_candidate.atomic_candidate_predicted_metrics
+                or candidate.atomic_candidate_evidence_source
+                != declared_candidate.atomic_candidate_evidence_source
+            ):
+                raise ValueError(
+                    f"checkpoint candidate {candidate.index} provenance does not "
+                    "match task"
+                )
+
+    @classmethod
+    def _validate_topology_refinement_resume_parameters(
+        cls,
+        checkpoint: ExecutionCheckpoint,
+        variant_task: TaskSpec,
+        actual: dict[str, dict[str, str]],
+    ) -> None:
+        targets = cls._instance_parameter_targets(variant_task)
+
+        def selected(
+            state: dict[str, dict[str, str]] | None,
+        ) -> dict[str, dict[str, str]] | None:
+            if state is None:
+                return None
+            result: dict[str, dict[str, str]] = {}
+            for instance, names in targets.items():
+                parameters = state.get(instance)
+                if parameters is None or not names <= parameters.keys():
+                    return None
+                result[instance] = {
+                    name: parameters[name] for name in sorted(names)
+                }
+            return result
+
+        allowed: list[dict[str, dict[str, str]]] = []
+        for state in (
+            checkpoint.initial_instance_parameters,
+            checkpoint.expected_oa_instance_parameters,
+            checkpoint.pending_oa_instance_parameters,
+        ):
+            filtered = selected(state)
+            if filtered is not None:
+                allowed.append(filtered)
+        allowed.extend(
+            candidate.instance_parameters
+            for candidate in cls._candidate_inputs(variant_task)
+        )
+        if actual not in allowed:
+            raise RuntimeError(
+                "current OA instance parameters do not match the checkpoint "
+                "baseline, a declared candidate, or a confirmed/pending write; "
+                "refusing automatic topology-loop resume"
+            )
+
+    def _execute_topology_refinement(
+        self,
+        task: TaskSpec,
+        plan: ExecutionPlan,
+        *,
+        checkpoint_path: Path | None,
+        resume_checkpoint: ExecutionCheckpoint | None,
+    ) -> RunRecord:
+        refinement = task.topology_refinement
+        if refinement is None:
+            raise ValueError("topology refinement settings are missing")
+        baseline_task, alternative_variants = self._topology_refinement_variant_tasks(
+            task
+        )
+        alternatives = [alternative for alternative, _ in alternative_variants]
+        baseline_sha256 = alternatives[
+            0
+        ].topology_delta.contract.expected_before_sha256
+        alternative_by_id = {
+            alternative.id: (alternative, alternative_task)
+            for alternative, alternative_task in alternative_variants
+        }
+        alternative_by_sha256 = {
+            alternative.topology_delta.contract.expected_after_sha256: (
+                alternative,
+                alternative_task,
+            )
+            for alternative, alternative_task in alternative_variants
+        }
+        parameter_candidate_count = self._candidate_space_size(task)
+        declared_candidate_count = (1 + len(alternatives)) * parameter_candidate_count
+
+        if resume_checkpoint is not None:
+            if checkpoint_path is None:
+                raise ValueError("resuming requires a checkpoint output path")
+            self._validate_topology_refinement_checkpoint(
+                resume_checkpoint,
+                task,
+                plan,
+                self.adapter.name,
+            )
+
+        self.actions = (
+            list(resume_checkpoint.actions) if resume_checkpoint is not None else []
+        )
+        started = (
+            resume_checkpoint.started_at
+            if resume_checkpoint is not None
+            else datetime.now(UTC)
+        )
+        notes = (
+            list(resume_checkpoint.notes) if resume_checkpoint is not None else []
+        )
+        candidates = (
+            list(resume_checkpoint.candidates)
+            if resume_checkpoint is not None
+            else []
+        )
+        initial_parameters = (
+            dict(resume_checkpoint.initial_parameters)
+            if resume_checkpoint is not None
+            else {}
+        )
+        initial_instance_parameters = (
+            {
+                instance: dict(parameters)
+                for instance, parameters in resume_checkpoint.initial_instance_parameters.items()
+            }
+            if resume_checkpoint is not None
+            else {}
+        )
+        expected_oa_parameters = (
+            dict(resume_checkpoint.expected_oa_parameters)
+            if resume_checkpoint is not None
+            else {}
+        )
+        expected_oa_instance_parameters = (
+            {
+                instance: dict(parameters)
+                for instance, parameters in resume_checkpoint.expected_oa_instance_parameters.items()
+            }
+            if resume_checkpoint is not None
+            else {}
+        )
+        pending_oa_parameters = (
+            dict(resume_checkpoint.pending_oa_parameters)
+            if resume_checkpoint is not None
+            and resume_checkpoint.pending_oa_parameters is not None
+            else None
+        )
+        pending_oa_instance_parameters = (
+            {
+                instance: dict(parameters)
+                for instance, parameters in resume_checkpoint.pending_oa_instance_parameters.items()
+            }
+            if resume_checkpoint is not None
+            and resume_checkpoint.pending_oa_instance_parameters is not None
+            else None
+        )
+        expected_topology_sha256 = (
+            resume_checkpoint.expected_topology_sha256
+            if resume_checkpoint is not None
+            else baseline_sha256
+        )
+        pending_topology_sha256 = (
+            resume_checkpoint.pending_topology_sha256
+            if resume_checkpoint is not None
+            else None
+        )
+        expected_topology_variant_id = (
+            resume_checkpoint.expected_topology_variant_id
+            if resume_checkpoint is not None
+            else refinement.baseline_id
+        )
+        next_candidate_index = (
+            resume_checkpoint.next_candidate_index
+            if resume_checkpoint is not None
+            else 1
+        )
+        active_candidate_index = (
+            resume_checkpoint.active_candidate_index
+            if resume_checkpoint is not None
+            else None
+        )
+        next_analysis_stage_index = (
+            resume_checkpoint.next_analysis_stage_index
+            if resume_checkpoint is not None
+            else 1
+        )
+        active_candidate_stages = (
+            list(resume_checkpoint.active_candidate_stages)
+            if resume_checkpoint is not None
+            else []
+        )
+        selected_parameters: dict[str, float] | None = None
+        selected_instance_parameters: dict[str, dict[str, str]] | None = None
+        selected_metrics: dict[str, float] | None = None
+        selected_topology_variant_id: str | None = None
+        selected_topology_sha256: str | None = None
+        winner_verification: CandidateEvaluation | None = None
+        winner_verification_rejected = False
+        status = RunStatus.SUCCEEDED
+
+        alternative_fixed_parameters = {
+            alternative.id: {
+                update.instance: dict(update.parameters)
+                for update in alternative.instance_parameter_updates
+            }
+            for alternative in alternatives
+        }
+
+        def merged_state(
+            left: dict[str, dict[str, str]],
+            right: dict[str, dict[str, str]],
+        ) -> dict[str, dict[str, str]]:
+            result = {
+                instance: dict(parameters)
+                for instance, parameters in left.items()
+            }
+            for instance, parameters in right.items():
+                result.setdefault(instance, {}).update(parameters)
+            return result
+
+        def checkpoint_state(*, complete: bool = False) -> ExecutionCheckpoint:
+            return ExecutionCheckpoint(
+                    task_id=task.id,
+                    plan_token=plan.confirmation_token,
+                    adapter=self.adapter.name,
+                    started_at=started,
+                    initial_parameters=initial_parameters,
+                    expected_oa_parameters=expected_oa_parameters,
+                    pending_oa_parameters=pending_oa_parameters,
+                    initial_instance_parameters=initial_instance_parameters,
+                    expected_oa_instance_parameters=(
+                        expected_oa_instance_parameters
+                    ),
+                    pending_oa_instance_parameters=(
+                        pending_oa_instance_parameters
+                    ),
+                    initial_topology_sha256=baseline_sha256,
+                    expected_topology_sha256=expected_topology_sha256,
+                    pending_topology_sha256=pending_topology_sha256,
+                    expected_topology_variant_id=(
+                        expected_topology_variant_id
+                    ),
+                    next_candidate_index=next_candidate_index,
+                    active_candidate_index=active_candidate_index,
+                    next_analysis_stage_index=next_analysis_stage_index,
+                    active_candidate_stages=active_candidate_stages,
+                    actions=self.actions,
+                    candidates=candidates,
+                    notes=notes,
+                    complete=complete,
+                )
+
+        def persist_checkpoint(*, complete: bool = False) -> None:
+            if checkpoint_path is None or not initial_instance_parameters:
+                return
+            save_execution_checkpoint(
+                checkpoint_state(complete=complete),
+                checkpoint_path,
+            )
+
+        def inspection_sha256(result: AdapterResult) -> str:
+            return topology_fingerprint(snapshot_from_inspection(result.data))
+
+        def assert_topology(
+            result: AdapterResult,
+            expected: str,
+            label: str,
+        ) -> None:
+            actual = inspection_sha256(result)
+            if actual != expected:
+                raise RuntimeError(
+                    f"{label} topology fingerprint mismatch: expected={expected}, "
+                    f"actual={actual}"
+                )
+
+        def apply_state(
+            action: str,
+            variant_task: TaskSpec,
+            instance_parameters: dict[str, dict[str, str]],
+        ) -> _AppliedCandidateState:
+            nonlocal expected_oa_parameters
+            nonlocal expected_oa_instance_parameters
+            nonlocal pending_oa_parameters
+            nonlocal pending_oa_instance_parameters
+            pending_oa_parameters = {}
+            pending_oa_instance_parameters = {
+                instance: dict(parameters)
+                for instance, parameters in instance_parameters.items()
+            }
+            persist_checkpoint()
+            candidate_task = self._candidate_task(
+                variant_task,
+                instance_parameters,
+            )
+            result = self._action(
+                action,
+                lambda: self.adapter.apply_parameters(candidate_task, {}),
+            )
+            expected_oa_parameters = self._applied_semantic_parameters(
+                result,
+                candidate_task,
+            )
+            expected_oa_instance_parameters = (
+                self._applied_instance_parameter_state(result, candidate_task)
+            )
+            pending_oa_parameters = None
+            pending_oa_instance_parameters = None
+            persist_checkpoint()
+            return _AppliedCandidateState(
+                oa_parameters=expected_oa_parameters,
+                oa_instance_parameters=expected_oa_instance_parameters,
+            )
+
+        def transform_task(
+            alternative: Any,
+            alternative_task: TaskSpec,
+            direction: str,
+        ) -> TaskSpec:
+            context = (
+                baseline_task.design_context
+                if direction == "forward"
+                else alternative_task.design_context
+            )
+            return task.model_copy(
+                update={
+                    "operation": Operation.SCHEMATIC_TRANSFORM,
+                    "analysis": None,
+                    "analysis_stages": [],
+                    "ac_sweep": None,
+                    "linearity_sweep": None,
+                    "noise_sweep": None,
+                    "generic_simulation": None,
+                    "topology_refinement": None,
+                    "winner_verification": None,
+                    "topology_delta": alternative.topology_delta.model_copy(
+                        update={"direction": direction}
+                    ),
+                    "design_context": context,
+                    "parameters": {},
+                    "instance_parameter_updates": [],
+                    "instance_parameter_space": [],
+                    "candidate_set": None,
+                    "theory_seed": None,
+                    "constraints": [],
+                    "objective": None,
+                    "create_if_missing": False,
+                }
+            )
+
+        def apply_topology(
+            alternative: Any,
+            alternative_task: TaskSpec,
+            direction: str,
+            *,
+            recovery: bool = False,
+        ) -> None:
+            nonlocal expected_oa_instance_parameters
+            nonlocal expected_topology_sha256
+            nonlocal pending_topology_sha256
+            nonlocal expected_topology_variant_id
+            if direction == "forward":
+                input_task = baseline_task
+                output_task = alternative_task
+                input_sha256 = baseline_sha256
+                output_sha256 = (
+                    alternative.topology_delta.contract.expected_after_sha256
+                )
+                output_variant_id = alternative.id
+            else:
+                input_task = alternative_task
+                output_task = baseline_task
+                input_sha256 = (
+                    alternative.topology_delta.contract.expected_after_sha256
+                )
+                output_sha256 = baseline_sha256
+                output_variant_id = refinement.baseline_id
+            suffix = ".recovery" if recovery else ""
+            variant_suffix = (
+                "" if len(alternative_variants) == 1 else f".{alternative.id}"
+            )
+            before = self._action(
+                f"schematic.inspect.topology-{direction}{variant_suffix}.before{suffix}",
+                lambda: self.adapter.inspect_schematic(input_task),
+            )
+            assert_topology(before, input_sha256, f"{direction} input")
+            self._bind_design_context(
+                input_task,
+                before,
+                action_name=(
+                    f"design.context.bind.{direction}{variant_suffix}.before{suffix}"
+                ),
+            )
+            pending_topology_sha256 = output_sha256
+            persist_checkpoint()
+            directed_task = transform_task(
+                alternative,
+                alternative_task,
+                direction,
+            )
+            transformed = self._action(
+                f"schematic.transform.topology-delta.{direction}{variant_suffix}{suffix}",
+                lambda: self.adapter.transform_schematic(directed_task),
+            )
+            after = self._action(
+                f"schematic.inspect.topology-{direction}{variant_suffix}.after{suffix}",
+                lambda: self.adapter.inspect_schematic(output_task),
+            )
+            assert_topology(after, output_sha256, f"{direction} output")
+            audit = validate_topology_execution_readback(
+                before.data,
+                after.data,
+                directed_task.topology_delta,
+            )
+            self._action(
+                f"schematic.transform.topology-delta.{direction}{variant_suffix}.audit{suffix}",
+                lambda: AdapterResult(
+                    data={
+                        "transform_readback": transformed.data,
+                        "contract_audit": audit.model_dump(mode="json"),
+                    },
+                    evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+                ),
+            )
+            self._bind_design_context(
+                output_task,
+                after,
+                action_name=(
+                    f"design.context.bind.{direction}{variant_suffix}.after{suffix}"
+                ),
+            )
+            expected_topology_sha256 = output_sha256
+            expected_topology_variant_id = output_variant_id
+            pending_topology_sha256 = None
+            expected_oa_instance_parameters = self._targeted_instance_parameters(
+                after,
+                output_task,
+            )
+            persist_checkpoint()
+
+        def progress_for_variant(
+            _variant_task: TaskSpec,
+        ) -> Callable[
+            [
+                str,
+                int,
+                _CandidateInput,
+                list[CandidateEvaluation],
+                _AppliedCandidateState | None,
+            ],
+            None,
+        ]:
+            def progress(
+                event: str,
+                index: int,
+                candidate: _CandidateInput,
+                _evaluations: list[CandidateEvaluation],
+                readback: _AppliedCandidateState | None,
+            ) -> None:
+                nonlocal expected_oa_parameters
+                nonlocal expected_oa_instance_parameters
+                nonlocal next_candidate_index
+                nonlocal pending_oa_parameters
+                nonlocal pending_oa_instance_parameters
+                nonlocal active_candidate_index
+                nonlocal next_analysis_stage_index
+                nonlocal active_candidate_stages
+                if event == "started":
+                    if task.analysis_stages:
+                        if active_candidate_index not in {None, index}:
+                            raise RuntimeError(
+                                "checkpoint active topology candidate changed before completion"
+                            )
+                        active_candidate_index = index
+                    pending_oa_parameters = {}
+                    pending_oa_instance_parameters = {
+                        instance: dict(parameters)
+                        for instance, parameters in candidate.instance_parameters.items()
+                    }
+                elif event == "staged":
+                    if readback is None:
+                        raise RuntimeError(
+                            "candidate stage did not return OA readback"
+                        )
+                    expected_oa_parameters = readback.oa_parameters
+                    expected_oa_instance_parameters = (
+                        readback.oa_instance_parameters
+                    )
+                    pending_oa_parameters = None
+                    pending_oa_instance_parameters = None
+                elif event == "completed":
+                    next_candidate_index = index + 1
+                    active_candidate_index = None
+                    next_analysis_stage_index = 1
+                    active_candidate_stages = []
+                    pending_oa_parameters = None
+                    pending_oa_instance_parameters = None
+                persist_checkpoint()
+
+            return progress
+
+        def analysis_stage_progress_for_variant(
+            index: int,
+            _candidate: _CandidateInput,
+            stages: list[AnalysisStageEvaluation],
+            next_stage_index: int,
+        ) -> None:
+            nonlocal active_candidate_index
+            nonlocal active_candidate_stages
+            nonlocal next_analysis_stage_index
+            active_candidate_index = index
+            active_candidate_stages = list(stages)
+            next_analysis_stage_index = next_stage_index
+            persist_checkpoint()
+
+        def verify_final(
+            variant_task: TaskSpec,
+            expected_sha256: str,
+        ) -> None:
+            if expected_oa_instance_parameters:
+                result = self._action(
+                    "schematic.inspect.final",
+                    lambda: self.adapter.verify_parameters(
+                        variant_task,
+                        expected_oa_instance_parameters,
+                    ),
+                )
+                confirmed = self._confirmed_instance_parameters(
+                    result.data,
+                    "confirmed_instance_parameters",
+                )
+                if confirmed != expected_oa_instance_parameters:
+                    raise RuntimeError(
+                        "final OA readback does not match the confirmed instance "
+                        "parameter write"
+                    )
+            else:
+                result = self._action(
+                    "schematic.inspect.final",
+                    lambda: self.adapter.inspect_schematic(variant_task),
+                )
+            assert_topology(result, expected_sha256, "final")
+            self._bind_design_context(
+                variant_task,
+                result,
+                action_name="design.context.bind.final",
+            )
+
+        def recover_initial_baseline() -> None:
+            nonlocal expected_oa_parameters
+            nonlocal expected_oa_instance_parameters
+            nonlocal expected_topology_sha256
+            nonlocal pending_topology_sha256
+            nonlocal expected_topology_variant_id
+            current = self._action(
+                "schematic.inspect.recovery",
+                lambda: self.adapter.inspect_schematic(baseline_task),
+            )
+            current_sha256 = inspection_sha256(current)
+            if current_sha256 in alternative_by_sha256:
+                recovery_alternative, recovery_task = alternative_by_sha256[
+                    current_sha256
+                ]
+                action_variant = (
+                    ""
+                    if len(alternative_variants) == 1
+                    else f".{recovery_alternative.id}"
+                )
+                self._bind_design_context(
+                    recovery_task,
+                    current,
+                    action_name=(
+                        "design.context.bind.recovery.alternative"
+                        + action_variant
+                    ),
+                )
+                actual = self._targeted_instance_parameters(
+                    current,
+                    recovery_task,
+                )
+                self._validate_topology_refinement_resume_parameters(
+                    checkpoint_state(),
+                    recovery_task,
+                    actual,
+                )
+                apply_state(
+                    "parameters.restore.recovery.alternative" + action_variant,
+                    recovery_task,
+                    merged_state(
+                        initial_instance_parameters,
+                        alternative_fixed_parameters[recovery_alternative.id],
+                    ),
+                )
+                apply_topology(
+                    recovery_alternative,
+                    recovery_task,
+                    "inverse",
+                    recovery=True,
+                )
+            elif current_sha256 == baseline_sha256:
+                self._bind_design_context(
+                    baseline_task,
+                    current,
+                    action_name="design.context.bind.recovery.baseline",
+                )
+                actual = self._targeted_instance_parameters(
+                    current,
+                    baseline_task,
+                )
+                self._validate_topology_refinement_resume_parameters(
+                    checkpoint_state(),
+                    baseline_task,
+                    actual,
+                )
+                if actual != initial_instance_parameters:
+                    apply_state(
+                        "parameters.restore.recovery.baseline",
+                        baseline_task,
+                        initial_instance_parameters,
+                    )
+            else:
+                raise RuntimeError(
+                    "current topology is neither the declared baseline nor complete "
+                    "alternative; refusing automatic recovery from an unknown or "
+                    "partial topology fingerprint"
+                )
+            expected_oa_parameters = {}
+            expected_oa_instance_parameters = {
+                instance: dict(parameters)
+                for instance, parameters in initial_instance_parameters.items()
+            }
+            expected_topology_sha256 = baseline_sha256
+            expected_topology_variant_id = refinement.baseline_id
+            pending_topology_sha256 = None
+            verify_final(baseline_task, baseline_sha256)
+            persist_checkpoint()
+
+        try:
+            self._action(
+                "bridge.probe",
+                lambda: self.adapter.probe(task.pdk_profile),
+            )
+            current = self._action(
+                "schematic.inspect.resume"
+                if resume_checkpoint is not None
+                else "schematic.inspect.before",
+                lambda: self.adapter.inspect_schematic(baseline_task),
+            )
+            current_sha256 = inspection_sha256(current)
+
+            if resume_checkpoint is None:
+                assert_topology(current, baseline_sha256, "initial baseline")
+                self._bind_design_context(baseline_task, current)
+                initial_parameters = self._semantic_parameters(
+                    current,
+                    baseline_task,
+                )
+                initial_instance_parameters = self._targeted_instance_parameters(
+                    current,
+                    baseline_task,
+                )
+                expected_oa_parameters = dict(initial_parameters)
+                expected_oa_instance_parameters = {
+                    instance: dict(parameters)
+                    for instance, parameters in initial_instance_parameters.items()
+                }
+                expected_topology_sha256 = baseline_sha256
+                expected_topology_variant_id = refinement.baseline_id
+                persist_checkpoint()
+            else:
+                if current_sha256 in alternative_by_sha256:
+                    resume_alternative, resume_task = alternative_by_sha256[
+                        current_sha256
+                    ]
+                    action_variant = (
+                        ""
+                        if len(alternative_variants) == 1
+                        else f".{resume_alternative.id}"
+                    )
+                    self._bind_design_context(
+                        resume_task,
+                        current,
+                        action_name=(
+                            "design.context.bind.resume.alternative"
+                            + action_variant
+                        ),
+                    )
+                    actual = self._targeted_instance_parameters(
+                        current,
+                        resume_task,
+                    )
+                    self._validate_topology_refinement_resume_parameters(
+                        resume_checkpoint,
+                        resume_task,
+                        actual,
+                    )
+                    apply_state(
+                        "parameters.restore.resume.alternative" + action_variant,
+                        resume_task,
+                        merged_state(
+                            initial_instance_parameters,
+                            alternative_fixed_parameters[resume_alternative.id],
+                        ),
+                    )
+                    apply_topology(
+                        resume_alternative,
+                        resume_task,
+                        "inverse",
+                        recovery=True,
+                    )
+                elif current_sha256 == baseline_sha256:
+                    self._bind_design_context(
+                        baseline_task,
+                        current,
+                        action_name="design.context.bind.resume.baseline",
+                    )
+                    actual = self._targeted_instance_parameters(
+                        current,
+                        baseline_task,
+                    )
+                    self._validate_topology_refinement_resume_parameters(
+                        resume_checkpoint,
+                        baseline_task,
+                        actual,
+                    )
+                    if actual != initial_instance_parameters:
+                        apply_state(
+                            "parameters.restore.resume.baseline",
+                            baseline_task,
+                            initial_instance_parameters,
+                        )
+                else:
+                    raise RuntimeError(
+                        "resume topology is neither the declared baseline nor complete "
+                        "alternative; refusing automatic write"
+                    )
+                expected_oa_parameters = {}
+                expected_oa_instance_parameters = {
+                    instance: dict(parameters)
+                    for instance, parameters in initial_instance_parameters.items()
+                }
+                expected_topology_sha256 = baseline_sha256
+                expected_topology_variant_id = refinement.baseline_id
+                pending_topology_sha256 = None
+                notes.append(
+                    "resumed the flattened topology-parameter search at index "
+                    f"{next_candidate_index} after exact readback and baseline "
+                    "normalization"
+                )
+                persist_checkpoint()
+
+            if next_candidate_index <= parameter_candidate_count:
+                candidates = self._run_candidates(
+                    baseline_task,
+                    stage_parameters=True,
+                    evaluations=candidates,
+                    start_index=next_candidate_index,
+                    topology_variant_id=refinement.baseline_id,
+                    topology_sha256=baseline_sha256,
+                    progress=progress_for_variant(baseline_task),
+                    stage_progress=analysis_stage_progress_for_variant,
+                    resume_candidate_index=active_candidate_index,
+                    resume_stages=active_candidate_stages,
+                )
+
+            current_alternative: Any | None = None
+            current_alternative_task: TaskSpec | None = None
+            for alternative_position, (
+                alternative,
+                alternative_task,
+            ) in enumerate(alternative_variants, start=1):
+                block_start = alternative_position * parameter_candidate_count + 1
+                block_end = (alternative_position + 1) * parameter_candidate_count
+                if next_candidate_index > block_end:
+                    continue
+                action_variant = (
+                    ""
+                    if len(alternative_variants) == 1
+                    else f".{alternative.id}"
+                )
+                apply_state(
+                    "parameters.restore.before-topology" + action_variant,
+                    baseline_task,
+                    initial_instance_parameters,
+                )
+                apply_topology(alternative, alternative_task, "forward")
+                current_alternative = alternative
+                current_alternative_task = alternative_task
+                candidates = self._run_candidates(
+                    alternative_task,
+                    stage_parameters=True,
+                    evaluations=candidates,
+                    start_index=max(next_candidate_index, block_start),
+                    index_offset=alternative_position * parameter_candidate_count,
+                    topology_variant_id=alternative.id,
+                    topology_sha256=(
+                        alternative.topology_delta.contract.expected_after_sha256
+                    ),
+                    progress=progress_for_variant(alternative_task),
+                    stage_progress=analysis_stage_progress_for_variant,
+                    resume_candidate_index=active_candidate_index,
+                    resume_stages=active_candidate_stages,
+                )
+                if alternative_position < len(alternative_variants):
+                    apply_state(
+                        "parameters.restore.alternative-before-inverse"
+                        + action_variant,
+                        alternative_task,
+                        merged_state(
+                            initial_instance_parameters,
+                            alternative_fixed_parameters[alternative.id],
+                        ),
+                    )
+                    apply_topology(alternative, alternative_task, "inverse")
+                    current_alternative = None
+                    current_alternative_task = None
+
+            status = self._note_candidate_failures(candidates, status, notes)
+            complete_domain = (
+                len(candidates) == declared_candidate_count
+                and all(
+                    candidate.analysis_complete
+                    and candidate.evidence_source is not EvidenceSource.SYSTEM_EVENT
+                    for candidate in candidates
+                )
+            )
+            feasible = (
+                [candidate for candidate in candidates if candidate.feasible]
+                if complete_domain
+                else []
+            )
+            if not complete_domain:
+                status = RunStatus.PARTIAL
+                notes.append(
+                    "topology-parameter selection was withheld because all variants "
+                    "did not complete the full declared domain"
+                )
+            elif not feasible:
+                status = RunStatus.PARTIAL
+                notes.append(
+                    "no candidate in any declared topology met every constraint"
+                )
+
+            if feasible:
+                selected = min(feasible, key=lambda item: self._rank(task, item))
+                selected_parameters = dict(selected.parameters)
+                selected_instance_parameters = {
+                    instance: dict(parameters)
+                    for instance, parameters in selected.instance_parameters.items()
+                }
+                selected_metrics = dict(selected.metrics)
+                selected_topology_variant_id = selected.topology_variant_id
+                selected_topology_sha256 = selected.topology_sha256
+                if selected.topology_variant_id == refinement.baseline_id:
+                    selected_variant_task = baseline_task
+                    if (
+                        current_alternative is not None
+                        and current_alternative_task is not None
+                    ):
+                        action_variant = (
+                            ""
+                            if len(alternative_variants) == 1
+                            else f".{current_alternative.id}"
+                        )
+                        apply_state(
+                            "parameters.restore.alternative-before-inverse"
+                            + action_variant,
+                            current_alternative_task,
+                            merged_state(
+                                initial_instance_parameters,
+                                alternative_fixed_parameters[
+                                    current_alternative.id
+                                ],
+                            ),
+                        )
+                        apply_topology(
+                            current_alternative,
+                            current_alternative_task,
+                            "inverse",
+                        )
+                        current_alternative = None
+                        current_alternative_task = None
+                    apply_state(
+                        "parameters.apply.best.baseline",
+                        baseline_task,
+                        selected.instance_parameters,
+                    )
+                    verify_final(baseline_task, baseline_sha256)
+                else:
+                    selected_alternative, selected_variant_task = alternative_by_id[
+                        str(selected.topology_variant_id)
+                    ]
+                    if (
+                        current_alternative is None
+                        or current_alternative.id != selected_alternative.id
+                    ):
+                        if (
+                            current_alternative is not None
+                            and current_alternative_task is not None
+                        ):
+                            current_variant = (
+                                ""
+                                if len(alternative_variants) == 1
+                                else f".{current_alternative.id}"
+                            )
+                            apply_state(
+                                "parameters.restore.alternative-before-inverse"
+                                + current_variant,
+                                current_alternative_task,
+                                merged_state(
+                                    initial_instance_parameters,
+                                    alternative_fixed_parameters[
+                                        current_alternative.id
+                                    ],
+                                ),
+                            )
+                            apply_topology(
+                                current_alternative,
+                                current_alternative_task,
+                                "inverse",
+                            )
+                        apply_state(
+                            "parameters.restore.before-selected-topology",
+                            baseline_task,
+                            initial_instance_parameters,
+                        )
+                        apply_topology(
+                            selected_alternative,
+                            selected_variant_task,
+                            "forward",
+                        )
+                        current_alternative = selected_alternative
+                        current_alternative_task = selected_variant_task
+                    selected_variant = (
+                        ""
+                        if len(alternative_variants) == 1
+                        else f".{selected_alternative.id}"
+                    )
+                    apply_state(
+                        "parameters.apply.best.alternative" + selected_variant,
+                        selected_variant_task,
+                        selected.instance_parameters,
+                    )
+                    verify_final(
+                        selected_variant_task,
+                        selected_alternative.topology_delta.contract.expected_after_sha256,
+                    )
+                if task.winner_verification is not None:
+                    winner_verification = self._run_winner_verification(
+                        task,
+                        selected_variant_task,
+                        selected,
+                    )
+                    if winner_verification.feasible:
+                        notes.append(
+                            "the nominal topology/parameter winner passed every "
+                            "declared winner-only analysis and PVT condition"
+                        )
+                    else:
+                        winner_verification_rejected = True
+                        status = RunStatus.PARTIAL
+                        recover_initial_baseline()
+                        selected_parameters = None
+                        selected_instance_parameters = None
+                        selected_metrics = None
+                        selected_topology_variant_id = None
+                        selected_topology_sha256 = None
+                        notes.append(
+                            "the nominal topology/parameter winner failed or did not "
+                            "complete winner-only verification; the exact initial "
+                            "baseline was restored and no unverified runner-up was "
+                            "silently promoted"
+                        )
+                notes.append(
+                    "nominal selection was limited to the fully evaluated "
+                    f"{1 + len(alternatives)}-topology discrete domain; no continuous "
+                    "or global optimum "
+                    "is claimed"
+                )
+            else:
+                if (
+                    current_alternative is not None
+                    and current_alternative_task is not None
+                ):
+                    action_variant = (
+                        ""
+                        if len(alternative_variants) == 1
+                        else f".{current_alternative.id}"
+                    )
+                    apply_state(
+                        "parameters.restore.alternative-before-inverse"
+                        + action_variant,
+                        current_alternative_task,
+                        merged_state(
+                            initial_instance_parameters,
+                            alternative_fixed_parameters[current_alternative.id],
+                        ),
+                    )
+                    apply_topology(
+                        current_alternative,
+                        current_alternative_task,
+                        "inverse",
+                    )
+                apply_state(
+                    "parameters.restore.initial-baseline",
+                    baseline_task,
+                    initial_instance_parameters,
+                )
+                verify_final(baseline_task, baseline_sha256)
+                notes.append(
+                    "no topology or parameter candidate was committed; the exact "
+                    "initial baseline topology and target parameters were restored"
+                )
+            persist_checkpoint(complete=True)
+        except BaseException as exc:
+            status = RunStatus.FAILED
+            selected_parameters = None
+            selected_instance_parameters = None
+            selected_metrics = None
+            selected_topology_variant_id = None
+            selected_topology_sha256 = None
+            notes.append(f"{type(exc).__name__}: {exc}")
+            persist_checkpoint()
+            try:
+                if initial_instance_parameters:
+                    recover_initial_baseline()
+                    notes.append(
+                        "the interrupted topology-parameter loop restored and "
+                        "independently verified the exact initial baseline"
+                    )
+                    persist_checkpoint()
+            except Exception as recovery_exc:
+                notes.append(
+                    "automatic topology-loop recovery failed; OA state remains "
+                    "unverified and requires a fresh readback before resume: "
+                    f"{type(recovery_exc).__name__}: {recovery_exc}"
+                )
+                persist_checkpoint()
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+
+        finished = datetime.now(UTC)
+        search_audit = self._search_audit(
+            task,
+            candidates,
+            has_recommendation=selected_topology_variant_id is not None,
+            declared_candidate_count=declared_candidate_count,
+            topology_variant_count=1 + len(alternatives),
+            recommendation_withheld_after_winner_verification=(
+                winner_verification_rejected
+            ),
+        )
+        return RunRecord(
+            task_id=task.id,
+            plan_token=plan.confirmation_token,
+            adapter=self.adapter.name,
+            status=status,
+            started_at=started,
+            finished_at=finished,
+            actions=self.actions,
+            candidates=candidates,
+            selected_parameters=selected_parameters,
+            selected_instance_parameters=selected_instance_parameters,
+            selected_metrics=selected_metrics,
+            selected_topology_variant_id=selected_topology_variant_id,
+            selected_topology_sha256=selected_topology_sha256,
+            winner_verification=winner_verification,
+            search_audit=search_audit,
+            notes=notes,
         )
 
     def execute(
@@ -3169,6 +5591,13 @@ class TaskExecutor:
         resume_checkpoint: ExecutionCheckpoint | None = None,
     ) -> RunRecord:
         authorize_execution(task, plan, token)
+        if task.topology_refinement is not None:
+            return self._execute_topology_refinement(
+                task,
+                plan,
+                checkpoint_path=checkpoint_path,
+                resume_checkpoint=resume_checkpoint,
+            )
         tuning = task.operation in {Operation.DESIGN_TUNE, Operation.DESIGN_CLOSE_LOOP}
         candidate_oa_write = tuning and task_requests_oa_parameter_write(task)
         if resume_checkpoint is not None:
@@ -3198,6 +5627,8 @@ class TaskExecutor:
         selected_parameters: dict[str, float] | None = None
         selected_instance_parameters: dict[str, dict[str, str]] | None = None
         selected_metrics: dict[str, float] | None = None
+        winner_verification: CandidateEvaluation | None = None
+        winner_verification_rejected = False
         initial_parameters = (
             dict(resume_checkpoint.initial_parameters)
             if resume_checkpoint is not None
@@ -3245,6 +5676,22 @@ class TaskExecutor:
             else 1
         )
 
+        active_candidate_index = (
+            resume_checkpoint.active_candidate_index
+            if resume_checkpoint is not None
+            else None
+        )
+        next_analysis_stage_index = (
+            resume_checkpoint.next_analysis_stage_index
+            if resume_checkpoint is not None
+            else 1
+        )
+        active_candidate_stages = (
+            list(resume_checkpoint.active_candidate_stages)
+            if resume_checkpoint is not None
+            else []
+        )
+
         def persist_checkpoint(*, complete: bool = False) -> None:
             if (
                 checkpoint_path is None
@@ -3269,6 +5716,9 @@ class TaskExecutor:
                         pending_oa_instance_parameters
                     ),
                     next_candidate_index=next_candidate_index,
+                    active_candidate_index=active_candidate_index,
+                    next_analysis_stage_index=next_analysis_stage_index,
+                    active_candidate_stages=active_candidate_stages,
                     actions=self.actions,
                     candidates=candidates,
                     notes=notes,
@@ -3295,7 +5745,16 @@ class TaskExecutor:
             nonlocal next_candidate_index
             nonlocal pending_oa_parameters
             nonlocal pending_oa_instance_parameters
+            nonlocal active_candidate_index
+            nonlocal next_analysis_stage_index
+            nonlocal active_candidate_stages
             if event == "started":
+                if task.analysis_stages:
+                    if active_candidate_index not in {None, index}:
+                        raise RuntimeError(
+                            "checkpoint active candidate changed before completion"
+                        )
+                    active_candidate_index = index
                 pending_oa_parameters = (
                     semantic_candidate(candidate.parameters)
                     if candidate_oa_write
@@ -3315,8 +5774,25 @@ class TaskExecutor:
                 pending_oa_instance_parameters = None
             elif event == "completed":
                 next_candidate_index = index + 1
+                active_candidate_index = None
+                next_analysis_stage_index = 1
+                active_candidate_stages = []
                 pending_oa_parameters = None
                 pending_oa_instance_parameters = None
+            persist_checkpoint()
+
+        def analysis_stage_progress(
+            index: int,
+            _candidate: _CandidateInput,
+            stages: list[AnalysisStageEvaluation],
+            next_stage_index: int,
+        ) -> None:
+            nonlocal active_candidate_index
+            nonlocal active_candidate_stages
+            nonlocal next_analysis_stage_index
+            active_candidate_index = index
+            active_candidate_stages = list(stages)
+            next_analysis_stage_index = next_stage_index
             persist_checkpoint()
 
         def apply_with_checkpoint(
@@ -3406,14 +5882,16 @@ class TaskExecutor:
                     "schematic.inspect", lambda: self.adapter.inspect_schematic(task)
                 )
             elif operation is Operation.SCHEMATIC_INSPECT:
-                self._action(
+                inspected = self._action(
                     "schematic.inspect", lambda: self.adapter.inspect_schematic(task)
                 )
+                self._bind_design_context(task, inspected)
             elif operation is Operation.SCHEMATIC_TRANSFORM:
                 before = self._action(
                     "schematic.inspect.before",
                     lambda: self.adapter.inspect_schematic(task),
                 )
+                self._bind_design_context(task, before)
                 resolved_transform = task.resolved_schematic_transform_action()
                 transform_action = "schematic.transform.inverter-testbench"
                 if task.circuit is CircuitKind.EXISTING_SCHEMATIC:
@@ -3604,10 +6082,11 @@ class TaskExecutor:
                     )
                 selected_parameters = dict(task.parameters)
             elif operation is Operation.PARAMETERS_APPLY:
-                self._action(
+                before = self._action(
                     "schematic.inspect.before",
                     lambda: self.adapter.inspect_schematic(task),
                 )
+                self._bind_design_context(task, before)
                 applied = self._action(
                     "parameters.apply",
                     lambda: self.adapter.apply_parameters(task, task.parameters),
@@ -4616,6 +7095,7 @@ class TaskExecutor:
                         "schematic.inspect.before",
                         lambda: self.adapter.inspect_schematic(task),
                     )
+                    self._bind_design_context(task, before)
                     self._assert_expected_target_topology(before, task)
                 candidates = self._run_candidates(task)
                 status = self._note_candidate_failures(candidates, status, notes)
@@ -4670,6 +7150,7 @@ class TaskExecutor:
                     else "schematic.inspect.before",
                     lambda: self.adapter.inspect_schematic(task),
                 )
+                self._bind_design_context(task, before)
                 self._assert_expected_target_topology(before, task)
                 current_parameters = self._semantic_parameters(before, task)
                 current_instance_parameters = self._targeted_instance_parameters(
@@ -4706,6 +7187,9 @@ class TaskExecutor:
                         evaluations=candidates,
                         start_index=next_candidate_index,
                         progress=candidate_progress,
+                        stage_progress=analysis_stage_progress,
+                        resume_candidate_index=active_candidate_index,
+                        resume_stages=active_candidate_stages,
                     )
                     status = self._note_candidate_failures(candidates, status, notes)
                     status = self._note_budget_exhaustion(task, status, notes)
@@ -4762,6 +7246,47 @@ class TaskExecutor:
                                 "selected the best testbench condition without changing "
                                 "OA parameters"
                             )
+                        if task.winner_verification is not None:
+                            if not candidate_oa_write:
+                                raise RuntimeError(
+                                    "winner verification cannot run without a staged OA "
+                                    "candidate"
+                                )
+                            try:
+                                winner_verification = self._run_winner_verification(
+                                    task,
+                                    task,
+                                    selected,
+                                )
+                            except BaseException:
+                                selected_parameters = None
+                                selected_instance_parameters = None
+                                selected_metrics = None
+                                raise
+                            if winner_verification.feasible:
+                                notes.append(
+                                    "the nominal provisional winner passed every "
+                                    "declared winner-only analysis and PVT condition; "
+                                    "only that candidate incurred the expensive Gate"
+                                )
+                            else:
+                                winner_verification_rejected = True
+                                status = RunStatus.PARTIAL
+                                apply_with_checkpoint(
+                                    "parameters.restore.winner-verification",
+                                    initial_parameters,
+                                    initial_instance_parameters,
+                                )
+                                selected_parameters = None
+                                selected_instance_parameters = None
+                                selected_metrics = None
+                                notes.append(
+                                    "the nominal provisional winner failed or did not "
+                                    "complete winner-only verification; VDA restored the "
+                                    "exact initial OA parameters and withheld a robust "
+                                    "recommendation. Other nominal candidates were not "
+                                    "silently promoted without the same Gate"
+                                )
                         parameters_finalized = True
                     if expected_oa_instance_parameters:
                         after = self._action(
@@ -4831,6 +7356,9 @@ class TaskExecutor:
                 task,
                 candidates,
                 has_recommendation=selected_parameters is not None,
+                recommendation_withheld_after_winner_verification=(
+                    winner_verification_rejected
+                ),
             )
             if task.operation in {Operation.DESIGN_TUNE, Operation.DESIGN_CLOSE_LOOP}
             else None
@@ -4847,6 +7375,7 @@ class TaskExecutor:
             selected_parameters=selected_parameters,
             selected_instance_parameters=selected_instance_parameters,
             selected_metrics=selected_metrics,
+            winner_verification=winner_verification,
             search_audit=search_audit,
             notes=notes,
         )

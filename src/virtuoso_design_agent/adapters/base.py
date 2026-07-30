@@ -146,3 +146,7 @@ class DesignAdapter(Protocol):
     def simulate(
         self, task: TaskSpec, parameters: dict[str, float]
     ) -> AdapterResult: ...
+
+    def simulate_analysis_stages(
+        self, task: TaskSpec, parameters: dict[str, float]
+    ) -> AdapterResult: ...

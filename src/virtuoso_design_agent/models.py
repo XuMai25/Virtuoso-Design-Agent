@@ -17,6 +17,8 @@ from pydantic import (
     model_validator,
 )
 
+from .design_context import DesignContext, validate_topology_delta_scope
+from .generic_simulation import GenericOaSimulationSpec
 from .netlist_preview import NetlistPreviewSpec
 from .topology_delta import TopologyDeltaExecutionSpec
 
@@ -81,6 +83,11 @@ class AnalysisKind(str, Enum):
     NOISE = "noise"
     PSRR = "psrr"
     QUALITY = "quality"
+
+
+class AnalysisStageExecution(str, Enum):
+    ISOLATED = "isolated"
+    SHARED_NETLIST = "shared_netlist"
 
 
 class AdeBackend(str, Enum):
@@ -451,6 +458,46 @@ class Objective(StrictModel):
     goal: ObjectiveGoal = ObjectiveGoal.MINIMIZE
 
 
+class AnalysisStageSpec(StrictModel):
+    """One ordered analysis gate inside a candidate evaluation."""
+
+    id: StrictStr = Field(
+        min_length=1,
+        max_length=96,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
+    analysis: AnalysisKind
+    constraint_metrics: list[StrictStr] = Field(
+        default_factory=list,
+        max_length=64,
+    )
+    stop_on_failure: bool = True
+
+    @field_validator("constraint_metrics")
+    @classmethod
+    def validate_constraint_metrics(
+        cls, value: list[StrictStr]
+    ) -> list[StrictStr]:
+        if any(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", item) is None for item in value):
+            raise ValueError("analysis-stage constraint metrics must be identifiers")
+        if len(value) != len(set(value)):
+            raise ValueError("analysis-stage constraint metrics contain duplicates")
+        return value
+
+    @model_validator(mode="after")
+    def validate_supported_analysis(self) -> "AnalysisStageSpec":
+        if self.analysis not in {
+            AnalysisKind.DC,
+            AnalysisKind.AC,
+            AnalysisKind.TRANSIENT,
+            AnalysisKind.NOISE,
+        }:
+            raise ValueError(
+                "analysis stages support only dc, ac, transient, or noise"
+            )
+        return self
+
+
 class OperatingCondition(StrictModel):
     """One explicit process/voltage/temperature verification condition."""
 
@@ -471,6 +518,135 @@ class OperatingCondition(StrictModel):
 class ExecutionLimits(StrictModel):
     max_iterations: int = Field(default=12, ge=1, le=64)
     timeout_seconds: int = Field(default=600, ge=10, le=7200)
+
+
+class ExistingSchematicTopologyAlternativeSpec(StrictModel):
+    """One baseline-anchored, exact, reversible local topology alternative."""
+
+    id: StrictStr = Field(
+        min_length=1,
+        max_length=96,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
+    topology_delta: TopologyDeltaExecutionSpec
+    design_context: DesignContext
+    generic_simulation: GenericOaSimulationSpec
+    instance_parameter_updates: list[InstanceParameterUpdate] = Field(
+        default_factory=list,
+        max_length=32,
+    )
+
+    @model_validator(mode="after")
+    def validate_alternative(self) -> "ExistingSchematicTopologyAlternativeSpec":
+        if self.topology_delta.direction != "forward":
+            raise ValueError("topology alternative requires a forward topology_delta")
+        contract = self.topology_delta.contract
+        if not contract.operations or not contract.inverse_operations:
+            raise ValueError(
+                "topology alternative requires nonempty forward and inverse operations"
+            )
+        if contract.expected_before_sha256 == contract.expected_after_sha256:
+            raise ValueError("topology alternative requires a real topology change")
+        instances = [update.instance for update in self.instance_parameter_updates]
+        if len(instances) != len(set(instances)):
+            raise ValueError(
+                "topology alternative instance_parameter_updates cannot repeat an instance"
+            )
+        return self
+
+
+class ExistingSchematicTopologyRefinementSpec(StrictModel):
+    """One baseline plus bounded independent reversible topology alternatives."""
+
+    baseline_id: StrictStr = Field(
+        default="baseline",
+        min_length=1,
+        max_length=96,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
+    alternatives: list[ExistingSchematicTopologyAlternativeSpec] = Field(
+        default_factory=list,
+        max_length=7,
+    )
+    alternative_id: StrictStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=96,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
+    topology_delta: TopologyDeltaExecutionSpec | None = None
+    alternative_design_context: DesignContext | None = None
+    alternative_generic_simulation: GenericOaSimulationSpec | None = None
+    alternative_instance_parameter_updates: list[InstanceParameterUpdate] = Field(
+        default_factory=list,
+        max_length=32,
+    )
+
+    @model_validator(mode="after")
+    def validate_refinement(self) -> "ExistingSchematicTopologyRefinementSpec":
+        legacy_values = (
+            self.alternative_id,
+            self.topology_delta,
+            self.alternative_design_context,
+            self.alternative_generic_simulation,
+        )
+        if self.alternatives and any(value is not None for value in legacy_values):
+            raise ValueError(
+                "topology refinement must use either alternatives or the legacy "
+                "single-alternative fields, not both"
+            )
+        if self.alternatives and self.alternative_instance_parameter_updates:
+            raise ValueError(
+                "topology refinement alternatives own their instance parameter updates"
+            )
+        if not self.alternatives and not all(
+            value is not None for value in legacy_values
+        ):
+            raise ValueError(
+                "topology refinement requires at least one complete alternative"
+            )
+        alternatives = self.resolved_alternatives()
+        ids = [alternative.id for alternative in alternatives]
+        if self.baseline_id in ids or len(ids) != len(set(ids)):
+            raise ValueError("topology refinement variant ids must be unique")
+        baseline_hashes = {
+            alternative.topology_delta.contract.expected_before_sha256
+            for alternative in alternatives
+        }
+        if len(baseline_hashes) != 1:
+            raise ValueError(
+                "all topology alternatives must be anchored to one baseline fingerprint"
+            )
+        output_hashes = [
+            alternative.topology_delta.contract.expected_after_sha256
+            for alternative in alternatives
+        ]
+        if len(output_hashes) != len(set(output_hashes)):
+            raise ValueError(
+                "topology alternatives must have distinct output fingerprints"
+            )
+        return self
+
+    def resolved_alternatives(
+        self,
+    ) -> tuple[ExistingSchematicTopologyAlternativeSpec, ...]:
+        if self.alternatives:
+            return tuple(self.alternatives)
+        assert self.alternative_id is not None
+        assert self.topology_delta is not None
+        assert self.alternative_design_context is not None
+        assert self.alternative_generic_simulation is not None
+        return (
+            ExistingSchematicTopologyAlternativeSpec(
+                id=self.alternative_id,
+                topology_delta=self.topology_delta,
+                design_context=self.alternative_design_context,
+                generic_simulation=self.alternative_generic_simulation,
+                instance_parameter_updates=(
+                    self.alternative_instance_parameter_updates
+                ),
+            ),
+        )
 
 
 class AcSweep(StrictModel):
@@ -547,6 +723,88 @@ class NoiseSweep(StrictModel):
             raise ValueError("noise sweep frequencies must be finite")
         if self.stop_hz <= self.start_hz:
             raise ValueError("noise sweep stop_hz must be greater than start_hz")
+        return self
+
+
+class ExistingSchematicWinnerVerificationSpec(StrictModel):
+    """Optional expensive checks run only after nominal candidate selection."""
+
+    analysis_stages: list[AnalysisStageSpec] = Field(min_length=1, max_length=4)
+    constraints: list[MetricConstraint] = Field(min_length=1, max_length=128)
+    operating_conditions: list[OperatingCondition] = Field(
+        default_factory=list,
+        max_length=5,
+    )
+    ac_sweep: AcSweep | None = None
+    linearity_sweep: LinearitySweep | None = None
+    noise_sweep: NoiseSweep | None = None
+
+    @model_validator(mode="after")
+    def validate_verification(self) -> "ExistingSchematicWinnerVerificationSpec":
+        stage_ids = [stage.id for stage in self.analysis_stages]
+        if len(stage_ids) != len(set(stage_ids)):
+            raise ValueError("winner-verification analysis stage ids must be unique")
+        stage_analyses = [stage.analysis for stage in self.analysis_stages]
+        if len(stage_analyses) != len(set(stage_analyses)):
+            raise ValueError(
+                "winner-verification analysis stages cannot repeat an analysis"
+            )
+        declared_metrics = {constraint.metric for constraint in self.constraints}
+        assigned_metrics = [
+            metric
+            for stage in self.analysis_stages
+            for metric in stage.constraint_metrics
+        ]
+        duplicate_assignments = sorted(
+            {
+                metric
+                for metric in assigned_metrics
+                if assigned_metrics.count(metric) > 1
+            }
+        )
+        if duplicate_assignments:
+            raise ValueError(
+                "winner-verification constraints are assigned more than once: "
+                + ", ".join(duplicate_assignments)
+            )
+        if set(assigned_metrics) != declared_metrics:
+            missing = sorted(declared_metrics - set(assigned_metrics))
+            unknown = sorted(set(assigned_metrics) - declared_metrics)
+            details = []
+            if missing:
+                details.append("unassigned=" + ", ".join(missing))
+            if unknown:
+                details.append("undeclared=" + ", ".join(unknown))
+            raise ValueError(
+                "winner-verification stage constraint mapping is incomplete: "
+                + "; ".join(details)
+            )
+        for stage in self.analysis_stages[:-1]:
+            if not stage.constraint_metrics:
+                raise ValueError(
+                    "every non-final winner-verification stage requires a constraint gate"
+                )
+        requested = set(stage_analyses)
+        required_settings = {
+            AnalysisKind.AC: ("ac_sweep", self.ac_sweep),
+            AnalysisKind.TRANSIENT: ("linearity_sweep", self.linearity_sweep),
+            AnalysisKind.NOISE: ("noise_sweep", self.noise_sweep),
+        }
+        for analysis, (name, value) in required_settings.items():
+            if (analysis in requested) != (value is not None):
+                if analysis in requested:
+                    raise ValueError(
+                        f"winner-verification {analysis.value} analysis requires {name}"
+                    )
+                raise ValueError(
+                    f"winner-verification {name} requires a matching "
+                    f"{analysis.value} analysis stage"
+                )
+        names = [condition.name for condition in self.operating_conditions]
+        if len(names) != len(set(names)):
+            raise ValueError(
+                "winner-verification operating conditions require unique names"
+            )
         return self
 
 
@@ -1881,6 +2139,13 @@ class TaskSpec(StrictModel):
     )
     pdk_profile: str = Field(default=DEFAULT_PDK_PROFILE, min_length=1)
     analysis: AnalysisKind | None = None
+    analysis_stages: list[AnalysisStageSpec] = Field(
+        default_factory=list,
+        max_length=4,
+    )
+    analysis_stage_execution: AnalysisStageExecution = (
+        AnalysisStageExecution.ISOLATED
+    )
     ac_sweep: AcSweep | None = None
     linearity_sweep: LinearitySweep | None = None
     noise_sweep: NoiseSweep | None = None
@@ -1892,8 +2157,12 @@ class TaskSpec(StrictModel):
     ade_setup: AdeSetupApplySpec | None = None
     schematic_transform: SchematicTransformSpec | None = None
     topology_delta: TopologyDeltaExecutionSpec | None = None
+    topology_refinement: ExistingSchematicTopologyRefinementSpec | None = None
+    winner_verification: ExistingSchematicWinnerVerificationSpec | None = None
     device_characterization: DeviceCharacterizationSpec | None = None
     netlist_preview: NetlistPreviewSpec | None = None
+    design_context: DesignContext | None = None
+    generic_simulation: GenericOaSimulationSpec | None = None
     operating_conditions: list[OperatingCondition] = Field(
         default_factory=list,
         max_length=5,
@@ -1939,6 +2208,18 @@ class TaskSpec(StrictModel):
 
     @model_validator(mode="after")
     def validate_operation_inputs(self) -> "TaskSpec":
+        if self.analysis_stages and self.circuit is not CircuitKind.EXISTING_SCHEMATIC:
+            raise ValueError(
+                "analysis_stages currently require circuit='existing_schematic'"
+            )
+        if (
+            not self.analysis_stages
+            and self.analysis_stage_execution
+            is not AnalysisStageExecution.ISOLATED
+        ):
+            raise ValueError(
+                "analysis_stage_execution='shared_netlist' requires analysis_stages"
+            )
         if self.operation is Operation.DEVICE_CHARACTERIZE:
             if self.circuit is not CircuitKind.MOS_DEVICE:
                 raise ValueError("device.characterize requires circuit='mos_device'")
@@ -1950,6 +2231,7 @@ class TaskSpec(StrictModel):
                 )
             if (
                 self.analysis is not None
+                or self.analysis_stages
                 or self.ac_sweep is not None
                 or self.linearity_sweep is not None
                 or self.noise_sweep is not None
@@ -1961,6 +2243,10 @@ class TaskSpec(StrictModel):
                 or self.ade_setup is not None
                 or self.schematic_transform is not None
                 or self.topology_delta is not None
+                or self.topology_refinement is not None
+                or self.winner_verification is not None
+                or self.design_context is not None
+                or self.generic_simulation is not None
                 or self.netlist_preview is not None
                 or self.expected_target_topology_variant is not None
                 or self.operating_conditions
@@ -1992,6 +2278,8 @@ class TaskSpec(StrictModel):
                 raise ValueError("netlist_preview requires netlist_preview settings")
             if self.analysis not in {AnalysisKind.DC, AnalysisKind.AC}:
                 raise ValueError("netlist_preview requires explicit dc or ac analysis")
+            if self.analysis_stages:
+                raise ValueError("netlist_preview does not support analysis_stages")
             if self.analysis is AnalysisKind.AC and self.ac_sweep is None:
                 raise ValueError("netlist_preview AC analysis requires ac_sweep")
             if self.analysis is AnalysisKind.DC and self.ac_sweep is not None:
@@ -2007,6 +2295,10 @@ class TaskSpec(StrictModel):
                 or self.ade_setup is not None
                 or self.schematic_transform is not None
                 or self.topology_delta is not None
+                or self.topology_refinement is not None
+                or self.winner_verification is not None
+                or self.design_context is not None
+                or self.generic_simulation is not None
                 or self.device_characterization is not None
                 or self.expected_target_topology_variant is not None
                 or self.operating_conditions
@@ -2044,6 +2336,485 @@ class TaskSpec(StrictModel):
         if self.device_characterization is not None:
             raise ValueError(
                 "device_characterization settings require operation='device.characterize'"
+            )
+        generic_existing_simulation = (
+            self.circuit is CircuitKind.EXISTING_SCHEMATIC
+            and self.operation
+            in {
+                Operation.SIMULATION_RUN,
+                Operation.DESIGN_TUNE,
+                Operation.DESIGN_CLOSE_LOOP,
+            }
+        )
+        if generic_existing_simulation:
+            if self.generic_simulation is None:
+                raise ValueError(
+                    "existing_schematic simulation/tuning requires "
+                    "generic_simulation"
+                )
+            if self.design_context is None:
+                raise ValueError(
+                    "existing_schematic simulation/tuning requires "
+                    "design_context"
+                )
+            if self.analysis_stages:
+                if self.analysis is not None:
+                    raise ValueError(
+                        "existing_schematic staged analysis cannot also declare analysis"
+                    )
+                stage_ids = [stage.id for stage in self.analysis_stages]
+                if len(stage_ids) != len(set(stage_ids)):
+                    raise ValueError("analysis stage ids must be unique")
+                stage_analyses = [stage.analysis for stage in self.analysis_stages]
+                if len(stage_analyses) != len(set(stage_analyses)):
+                    raise ValueError(
+                        "existing_schematic analysis stages cannot repeat an analysis"
+                    )
+                declared_constraint_metrics = {
+                    constraint.metric for constraint in self.constraints
+                }
+                assigned_constraint_metrics = [
+                    metric
+                    for stage in self.analysis_stages
+                    for metric in stage.constraint_metrics
+                ]
+                duplicate_assignments = sorted(
+                    {
+                        metric
+                        for metric in assigned_constraint_metrics
+                        if assigned_constraint_metrics.count(metric) > 1
+                    }
+                )
+                if duplicate_assignments:
+                    raise ValueError(
+                        "analysis-stage constraints are assigned more than once: "
+                        + ", ".join(duplicate_assignments)
+                    )
+                unknown_assignments = sorted(
+                    set(assigned_constraint_metrics) - declared_constraint_metrics
+                )
+                if unknown_assignments:
+                    raise ValueError(
+                        "analysis stages reference undeclared constraint metrics: "
+                        + ", ".join(unknown_assignments)
+                    )
+                unassigned_constraints = sorted(
+                    declared_constraint_metrics - set(assigned_constraint_metrics)
+                )
+                if unassigned_constraints:
+                    raise ValueError(
+                        "every existing-schematic constraint must belong to one "
+                        "analysis stage: " + ", ".join(unassigned_constraints)
+                    )
+                for index, stage in enumerate(self.analysis_stages):
+                    self.generic_simulation.validate_analysis(stage.analysis.value)
+                    available = self.generic_simulation.metric_names_for_analysis(
+                        stage.analysis.value
+                    )
+                    unavailable = sorted(set(stage.constraint_metrics) - available)
+                    if unavailable:
+                        raise ValueError(
+                            f"analysis stage {stage.id!r} cannot produce constraint "
+                            "metrics: " + ", ".join(unavailable)
+                        )
+                    if index < len(self.analysis_stages) - 1 and not stage.constraint_metrics:
+                        raise ValueError(
+                            "every non-final analysis stage requires a constraint gate"
+                        )
+                if (
+                    self.objective is not None
+                    and not any(
+                        self.objective.metric
+                        in self.generic_simulation.metric_names_for_analysis(
+                            stage.analysis.value
+                        )
+                        for stage in self.analysis_stages
+                    )
+                ):
+                    raise ValueError(
+                        "no analysis stage can produce the declared objective metric"
+                    )
+            else:
+                if self.analysis not in {
+                    AnalysisKind.DC,
+                    AnalysisKind.AC,
+                    AnalysisKind.TRANSIENT,
+                    AnalysisKind.NOISE,
+                }:
+                    raise ValueError(
+                        "existing_schematic simulation/tuning requires explicit "
+                        "dc, ac, transient, or noise analysis, or analysis_stages"
+                    )
+                self.generic_simulation.validate_analysis(self.analysis.value)
+            if self.target.view != "schematic":
+                raise ValueError(
+                    "existing_schematic simulation/tuning requires "
+                    "target.view='schematic'"
+                )
+            if self.parameters:
+                raise ValueError(
+                    "generic existing-schematic simulation takes testbench values from "
+                    "generic_simulation, not semantic parameters"
+                )
+            if self.parameter_space or self.theory_seed is not None:
+                raise ValueError(
+                    "generic existing-schematic tuning searches raw instance "
+                    "parameters, not circuit-specific semantic parameters"
+                )
+            if (
+                self.candidate_set is not None
+                and self.candidate_set.candidates[0].parameters
+            ):
+                raise ValueError(
+                    "generic existing-schematic candidate_set entries may contain "
+                    "only instance_parameter_updates"
+                )
+            if self.create_if_missing:
+                raise ValueError(
+                    "existing_schematic simulation/tuning requires an "
+                    "existing schematic"
+                )
+            if self.safety.replace_existing:
+                raise ValueError(
+                    "existing_schematic simulation/tuning never replaces "
+                    "the target"
+                )
+            permitted_fields = {
+                (permission.instance, parameter)
+                for permission in self.design_context.instance_parameter_permissions
+                for parameter in permission.parameters
+            }
+            bound_fields = {
+                (binding.instance, binding.oa_parameter)
+                for binding in self.generic_simulation.netlist_parameter_bindings
+            }
+            unpermitted_bindings = sorted(bound_fields - permitted_fields)
+            if unpermitted_bindings:
+                raise ValueError(
+                    "generic simulation netlist bindings are outside design_context "
+                    "parameter permissions: "
+                    + ", ".join(
+                        f"{instance}.{parameter}"
+                        for instance, parameter in unpermitted_bindings
+                    )
+                )
+            if self.operation in {
+                Operation.DESIGN_TUNE,
+                Operation.DESIGN_CLOSE_LOOP,
+            }:
+                changed_fields = {
+                    (update.instance, parameter)
+                    for update in self.instance_parameter_updates
+                    for parameter in update.parameters
+                }
+                changed_fields.update(
+                    (sweep.instance, sweep.parameter)
+                    for sweep in self.instance_parameter_space
+                )
+                if self.candidate_set is not None:
+                    changed_fields.update(
+                        (update.instance, parameter)
+                        for update in self.candidate_set.candidates[
+                            0
+                        ].instance_parameter_updates
+                        for parameter in update.parameters
+                    )
+                unbound_fields = sorted(changed_fields - bound_fields)
+                if unbound_fields:
+                    raise ValueError(
+                        "generic existing-schematic tuning fields require explicit "
+                        "OA-to-si netlist parameter bindings: "
+                        + ", ".join(
+                            f"{instance}.{parameter}"
+                            for instance, parameter in unbound_fields
+                        )
+                    )
+        elif self.generic_simulation is not None:
+            raise ValueError(
+                "generic_simulation requires existing_schematic simulation.run or "
+                "a tuning operation"
+            )
+        if self.winner_verification is not None:
+            if (
+                self.circuit is not CircuitKind.EXISTING_SCHEMATIC
+                or self.operation not in _TUNING_OPERATIONS
+            ):
+                raise ValueError(
+                    "winner_verification requires existing_schematic design.tune "
+                    "or design.close_loop"
+                )
+            has_candidate_write = bool(
+                self.instance_parameter_updates
+                or self.instance_parameter_space
+                or (
+                    self.candidate_set is not None
+                    and self.candidate_set.candidates[0].instance_parameter_updates
+                )
+            )
+            if not has_candidate_write:
+                raise ValueError(
+                    "winner_verification requires an OA parameter candidate; it is "
+                    "not a testbench-only selection mode"
+                )
+            assert self.generic_simulation is not None
+            verification = self.winner_verification
+            for stage in verification.analysis_stages:
+                self.generic_simulation.validate_analysis(stage.analysis.value)
+                unavailable = sorted(
+                    set(stage.constraint_metrics)
+                    - self.generic_simulation.metric_names_for_analysis(
+                        stage.analysis.value
+                    )
+                )
+                if unavailable:
+                    raise ValueError(
+                        f"winner-verification stage {stage.id!r} cannot produce "
+                        "constraint metrics: " + ", ".join(unavailable)
+                    )
+            if verification.operating_conditions:
+                if (
+                    self.generic_simulation.operating_condition_supply_source
+                    is None
+                ):
+                    raise ValueError(
+                        "winner-verification PVT requires generic_simulation."
+                        "operating_condition_supply_source"
+                    )
+        if self.topology_refinement is not None:
+            if (
+                self.circuit is not CircuitKind.EXISTING_SCHEMATIC
+                or self.operation is not Operation.DESIGN_CLOSE_LOOP
+            ):
+                raise ValueError(
+                    "topology_refinement requires existing_schematic "
+                    "design.close_loop"
+                )
+            if self.topology_delta is not None or self.schematic_transform is not None:
+                raise ValueError(
+                    "topology_refinement owns its topology_delta and cannot be "
+                    "combined with a top-level transform"
+                )
+            if self.objective is None:
+                raise ValueError(
+                    "existing-schematic topology close-loop requires an objective"
+                )
+            refinement = self.topology_refinement
+            alternatives = refinement.resolved_alternatives()
+            baseline_sha256 = alternatives[
+                0
+            ].topology_delta.contract.expected_before_sha256
+            if self.design_context is None or self.generic_simulation is None:
+                raise ValueError(
+                    "topology refinement requires baseline design_context and "
+                    "generic_simulation"
+                )
+            if (
+                self.design_context.expected_topology_sha256
+                != baseline_sha256
+            ):
+                raise ValueError(
+                    "baseline design_context topology fingerprint must equal the "
+                    "input of every topology alternative"
+                )
+            fixed_instance = {
+                (update.instance, parameter)
+                for update in self.instance_parameter_updates
+                for parameter in update.parameters
+            }
+            searched_instance = {
+                (sweep.instance, sweep.parameter)
+                for sweep in self.instance_parameter_space
+            }
+            if self.candidate_set is not None:
+                searched_instance.update(
+                    (update.instance, parameter)
+                    for update in self.candidate_set.candidates[
+                        0
+                    ].instance_parameter_updates
+                    for parameter in update.parameters
+                )
+            metric_names = {constraint.metric for constraint in self.constraints}
+            metric_names.add(self.objective.metric)
+            context_ids = {self.design_context.id}
+            for alternative in alternatives:
+                contract = alternative.topology_delta.contract
+                alternative_context = alternative.design_context
+                alternative_simulation = alternative.generic_simulation
+                if (
+                    alternative_context.expected_topology_sha256
+                    != contract.expected_after_sha256
+                ):
+                    raise ValueError(
+                        f"alternative {alternative.id!r} design_context topology "
+                        "fingerprint must equal its topology_delta output"
+                    )
+                if alternative_context.id in context_ids:
+                    raise ValueError(
+                        "baseline and alternative design_context ids must be unique"
+                    )
+                context_ids.add(alternative_context.id)
+                for requested_analysis in self.resolved_analyses():
+                    alternative_simulation.validate_analysis(
+                        requested_analysis.value
+                    )
+                for stage in self.analysis_stages:
+                    unavailable = sorted(
+                        set(stage.constraint_metrics)
+                        - alternative_simulation.metric_names_for_analysis(
+                            stage.analysis.value
+                        )
+                    )
+                    if unavailable:
+                        raise ValueError(
+                            f"alternative {alternative.id!r} analysis stage "
+                            f"{stage.id!r} cannot produce constraint metrics: "
+                            + ", ".join(unavailable)
+                        )
+                if self.winner_verification is not None:
+                    for stage in self.winner_verification.analysis_stages:
+                        alternative_simulation.validate_analysis(
+                            stage.analysis.value
+                        )
+                        unavailable = sorted(
+                            set(stage.constraint_metrics)
+                            - alternative_simulation.metric_names_for_analysis(
+                                stage.analysis.value
+                            )
+                        )
+                        if unavailable:
+                            raise ValueError(
+                                f"alternative {alternative.id!r} winner-verification "
+                                f"stage {stage.id!r} cannot produce constraint metrics: "
+                                + ", ".join(unavailable)
+                            )
+                    if (
+                        self.winner_verification.operating_conditions
+                        and alternative_simulation.operating_condition_supply_source
+                        is None
+                    ):
+                        raise ValueError(
+                            f"alternative {alternative.id!r} winner-verification PVT "
+                            "requires an operating_condition_supply_source"
+                        )
+                if self.analysis_stages and not any(
+                    self.objective.metric
+                    in alternative_simulation.metric_names_for_analysis(
+                        stage.analysis.value
+                    )
+                    for stage in self.analysis_stages
+                ):
+                    raise ValueError(
+                        f"no alternative {alternative.id!r} analysis stage can "
+                        "produce the declared objective metric"
+                    )
+
+                alternative_fixed = {
+                    (update.instance, parameter)
+                    for update in alternative.instance_parameter_updates
+                    for parameter in update.parameters
+                }
+                overlap = sorted(
+                    alternative_fixed & (fixed_instance | searched_instance)
+                )
+                if overlap:
+                    raise ValueError(
+                        f"alternative {alternative.id!r} only parameters overlap "
+                        "baseline/common fields: "
+                        + ", ".join(
+                            f"{instance}.{parameter}"
+                            for instance, parameter in overlap
+                        )
+                    )
+                added_instances = {
+                    operation.instance.name
+                    for operation in contract.operations
+                    if operation.operation == "add_instance"
+                }
+                invalid_alternative_instances = sorted(
+                    {instance for instance, _ in alternative_fixed}
+                    - added_instances
+                )
+                if invalid_alternative_instances:
+                    raise ValueError(
+                        f"alternative {alternative.id!r} only parameters require "
+                        "instances added by the topology_delta: "
+                        + ", ".join(invalid_alternative_instances)
+                    )
+                alternative_context.validate_parameter_scope(
+                    fixed_semantic=set(),
+                    searched_semantic=set(),
+                    fixed_instance=fixed_instance | alternative_fixed,
+                    searched_instance=searched_instance,
+                )
+                alternative_context.validate_analysis_scope(
+                    [analysis.value for analysis in self.resolved_analyses()],
+                    metric_names,
+                )
+                validate_topology_delta_scope(
+                    self.design_context,
+                    alternative.topology_delta,
+                )
+                validate_topology_delta_scope(
+                    alternative_context,
+                    alternative.topology_delta.model_copy(
+                        update={"direction": "inverse"}
+                    ),
+                )
+                alternative_permitted_fields = {
+                    (permission.instance, parameter)
+                    for permission in alternative_context.instance_parameter_permissions
+                    for parameter in permission.parameters
+                }
+                alternative_bound_fields = {
+                    (binding.instance, binding.oa_parameter)
+                    for binding in alternative_simulation.netlist_parameter_bindings
+                }
+                unpermitted_alternative_bindings = sorted(
+                    alternative_bound_fields - alternative_permitted_fields
+                )
+                if unpermitted_alternative_bindings:
+                    raise ValueError(
+                        f"alternative {alternative.id!r} generic simulation bindings "
+                        "are outside its design_context permissions: "
+                        + ", ".join(
+                            f"{instance}.{parameter}"
+                            for instance, parameter in unpermitted_alternative_bindings
+                        )
+                    )
+                unbound_alternative_fields = sorted(
+                    (fixed_instance | searched_instance | alternative_fixed)
+                    - alternative_bound_fields
+                )
+                if unbound_alternative_fields:
+                    raise ValueError(
+                        f"alternative {alternative.id!r} topology parameter fields "
+                        "require explicit OA-to-si netlist bindings: "
+                        + ", ".join(
+                            f"{instance}.{parameter}"
+                            for instance, parameter in unbound_alternative_fields
+                        )
+                    )
+
+            if self.candidate_set is not None:
+                parameter_candidate_count = len(self.candidate_set.candidates)
+            else:
+                parameter_candidate_count = math.prod(
+                    len(sweep.values) for sweep in self.instance_parameter_space
+                )
+            required_iterations = (1 + len(alternatives)) * parameter_candidate_count
+            if self.limits.max_iterations < required_iterations:
+                raise ValueError(
+                    "topology close-loop max_iterations must cover the complete "
+                    "topology-parameter domain: "
+                    f"required={required_iterations}, configured="
+                    f"{self.limits.max_iterations}"
+                )
+        elif (
+            self.circuit is CircuitKind.EXISTING_SCHEMATIC
+            and self.operation is Operation.DESIGN_CLOSE_LOOP
+        ):
+            raise ValueError(
+                "existing_schematic design.close_loop requires topology_refinement"
             )
         if self.operating_conditions:
             if self.operation not in _SIMULATION_OPERATIONS:
@@ -2099,6 +2870,7 @@ class TaskSpec(StrictModel):
                 )
         analysis_settings = (
             self.analysis is not None
+            or bool(self.analysis_stages)
             or self.ac_sweep is not None
             or self.linearity_sweep is not None
             or self.noise_sweep is not None
@@ -2241,6 +3013,32 @@ class TaskSpec(StrictModel):
                         raise ValueError(
                             "differential_pair tuning requires explicit testbench "
                             "parameters for resumable evidence: " + ", ".join(missing)
+                        )
+            elif self.circuit is CircuitKind.EXISTING_SCHEMATIC:
+                if not generic_existing_simulation:
+                    raise ValueError(
+                        "analysis settings for existing_schematic require "
+                        "simulation.run or a tuning operation"
+                    )
+                requested_analyses = set(self.resolved_analyses())
+                required_settings = {
+                    AnalysisKind.AC: ("ac_sweep", self.ac_sweep),
+                    AnalysisKind.TRANSIENT: (
+                        "linearity_sweep",
+                        self.linearity_sweep,
+                    ),
+                    AnalysisKind.NOISE: ("noise_sweep", self.noise_sweep),
+                }
+                for requested, (name, value) in required_settings.items():
+                    if (requested in requested_analyses) != (value is not None):
+                        if requested in requested_analyses:
+                            raise ValueError(
+                                f"existing-schematic {requested.value} analysis "
+                                f"requires {name}"
+                            )
+                        raise ValueError(
+                            f"existing-schematic {name} requires a matching "
+                            f"{requested.value} analysis stage"
                         )
             elif analysis_settings:
                 raise ValueError(
@@ -2724,18 +3522,103 @@ class TaskSpec(StrictModel):
                 )
             if not self.constraints:
                 raise ValueError(f"{self.operation.value} requires constraints")
-        if self.operation is Operation.SIMULATION_RUN and not self.parameters:
+        if (
+            self.operation is Operation.SIMULATION_RUN
+            and not self.parameters
+            and not generic_existing_simulation
+        ):
             raise ValueError("simulation.run requires parameters")
+        if self.design_context is not None:
+            context_operations = {
+                Operation.SCHEMATIC_INSPECT,
+                Operation.SCHEMATIC_TRANSFORM,
+                Operation.PARAMETERS_APPLY,
+                Operation.SIMULATION_RUN,
+                Operation.DESIGN_TUNE,
+                Operation.DESIGN_CLOSE_LOOP,
+            }
+            if self.operation not in context_operations:
+                raise ValueError(
+                    "design_context supports inspect, transform, parameter, simulation, "
+                    "or tuning operations"
+                )
+            if (
+                self.operation is Operation.DESIGN_CLOSE_LOOP
+                and self.create_if_missing
+            ):
+                raise ValueError(
+                    "design_context close-loop requires an existing schematic; "
+                    "create_if_missing must remain false"
+                )
+            if (
+                self.operation is Operation.SCHEMATIC_TRANSFORM
+                and self.topology_delta is None
+            ):
+                raise ValueError(
+                    "design_context schematic.transform requires an explicit "
+                    "topology_delta so every local edit is scope-checked"
+                )
+
+            fixed_semantic = set(self.parameters)
+            searched_semantic = set(self.parameter_space)
+            if self.candidate_set is not None:
+                searched_semantic.update(
+                    self.candidate_set.candidates[0].parameters
+                )
+            if self.theory_seed is not None:
+                searched_semantic.update(self.theory_seed.candidates[0].parameters)
+            fixed_instance = {
+                (update.instance, parameter)
+                for update in self.instance_parameter_updates
+                for parameter in update.parameters
+            }
+            searched_instance = {
+                (sweep.instance, sweep.parameter)
+                for sweep in self.instance_parameter_space
+            }
+            if self.candidate_set is not None:
+                searched_instance.update(
+                    {
+                        (update.instance, parameter)
+                        for update in self.candidate_set.candidates[
+                            0
+                        ].instance_parameter_updates
+                        for parameter in update.parameters
+                    }
+                )
+            self.design_context.validate_parameter_scope(
+                fixed_semantic=fixed_semantic,
+                searched_semantic=searched_semantic,
+                fixed_instance=fixed_instance,
+                searched_instance=searched_instance,
+            )
+            if self.operation in _SIMULATION_OPERATIONS:
+                metric_names = {constraint.metric for constraint in self.constraints}
+                if self.objective is not None:
+                    metric_names.add(self.objective.metric)
+                self.design_context.validate_analysis_scope(
+                    [analysis.value for analysis in self.resolved_analyses()],
+                    metric_names,
+                )
+            if self.topology_delta is not None:
+                validate_topology_delta_scope(
+                    self.design_context,
+                    self.topology_delta,
+                )
         return self
 
     def resolved_analysis(self) -> AnalysisKind:
         if self.analysis is not None:
             return self.analysis
+        if self.analysis_stages:
+            return self.analysis_stages[-1].analysis
         if self.circuit is CircuitKind.INVERTER:
             return AnalysisKind.TRANSIENT
         return AnalysisKind.DC
 
     def resolved_analyses(self) -> tuple[AnalysisKind, ...]:
+        if self.analysis_stages:
+            return tuple(stage.analysis for stage in self.analysis_stages)
         analysis = self.resolved_analysis()
         if analysis is AnalysisKind.QUALITY:
             return (
@@ -2799,8 +3682,33 @@ class ConstraintEvaluation(StrictModel):
     reason: str | None = None
 
 
+class AnalysisStageEvaluation(StrictModel):
+    stage_id: str = Field(
+        min_length=1,
+        max_length=96,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
+    analysis: AnalysisKind
+    metrics: dict[str, float]
+    constraints: list[ConstraintEvaluation]
+    passed: bool
+    evidence_source: EvidenceSource
+    metric_sources: dict[str, EvidenceSource] = Field(default_factory=dict)
+    analysis_complete: bool = True
+    analysis_issues: list[str] = Field(default_factory=list)
+    analysis_warnings: list[str] = Field(default_factory=list)
+    operating_conditions: list["OperatingConditionEvaluation"] = Field(
+        default_factory=list
+    )
+
+
 class CandidateEvaluation(StrictModel):
     index: int
+    topology_variant_id: str | None = None
+    topology_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     parameters: dict[str, float]
     instance_parameters: dict[str, dict[str, str]] = Field(default_factory=dict)
     oa_parameters: dict[str, float] = Field(default_factory=dict)
@@ -2826,6 +3734,8 @@ class CandidateEvaluation(StrictModel):
     theory_seed_source_candidate_id: str | None = None
     theory_seed_predicted_metrics: dict[str, float] = Field(default_factory=dict)
     theory_seed_evidence_source: EvidenceSource | None = None
+    analysis_stages: list[AnalysisStageEvaluation] = Field(default_factory=list)
+    terminated_after_stage: str | None = None
 
 
 class OperatingConditionEvaluation(StrictModel):
@@ -2861,6 +3771,7 @@ class SearchAudit(StrictModel):
     declared_candidate_count: int = Field(ge=1)
     attempted_candidate_count: int = Field(ge=0)
     completed_candidate_count: int = Field(ge=0)
+    topology_variant_count: int = Field(default=1, ge=1, le=8)
     domain_exhausted: bool
     selection_scope: SelectionScope
     continuous_optimum_claim: Literal[False] = False
@@ -2883,6 +3794,12 @@ class RunRecord(StrictModel):
     selected_parameters: dict[str, float] | None = None
     selected_instance_parameters: dict[str, dict[str, str]] | None = None
     selected_metrics: dict[str, float] | None = None
+    selected_topology_variant_id: str | None = None
+    selected_topology_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    winner_verification: CandidateEvaluation | None = None
     search_audit: SearchAudit | None = None
     notes: list[str] = Field(default_factory=list)
 
@@ -2903,7 +3820,25 @@ class ExecutionCheckpoint(StrictModel):
         default_factory=dict
     )
     pending_oa_instance_parameters: dict[str, dict[str, str]] | None = None
+    initial_topology_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    expected_topology_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    pending_topology_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    expected_topology_variant_id: str | None = None
     next_candidate_index: int = Field(ge=1)
+    active_candidate_index: int | None = Field(default=None, ge=1)
+    next_analysis_stage_index: int = Field(default=1, ge=1)
+    active_candidate_stages: list[AnalysisStageEvaluation] = Field(
+        default_factory=list
+    )
     actions: list[ActionRecord] = Field(default_factory=list)
     candidates: list[CandidateEvaluation] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)

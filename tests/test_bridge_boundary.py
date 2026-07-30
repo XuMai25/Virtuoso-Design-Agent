@@ -8312,12 +8312,25 @@ def test_subprocess_boundary_parses_only_structured_marker(tmp_path, monkeypatch
         def __init__(self, process):
             self.process = process
             self.closed = False
+            self.terminated = False
             jobs.append(self)
+
+        def terminate(self):
+            self.terminated = True
 
         def close(self):
             self.closed = True
 
-    monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: FakeProcess())
+    class FakeProcessWithWait(FakeProcess):
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout):
+            return self.returncode
+
+    monkeypatch.setattr(
+        "subprocess.Popen", lambda *args, **kwargs: FakeProcessWithWait()
+    )
     monkeypatch.setattr(
         "virtuoso_design_agent.adapters.subprocess_bridge._WindowsProcessJob",
         FakeJob,
@@ -8325,7 +8338,9 @@ def test_subprocess_boundary_parses_only_structured_marker(tmp_path, monkeypatch
     result = SubprocessBridgeAdapter(bridge_python).probe("nics4304_tsmc28")
     assert result.data == {"connected": True}
     assert result.evidence_source.value == "bridge_readback"
-    assert len(jobs) == 1 and jobs[0].closed is True
+    assert len(jobs) == 1
+    assert jobs[0].terminated is True
+    assert jobs[0].closed is True
 
 
 def test_subprocess_payload_preserves_ac_sweep_and_user_input_fields() -> None:
@@ -8502,9 +8517,18 @@ def test_subprocess_boundary_rejects_unstructured_output(tmp_path, monkeypatch) 
         def communicate(self, request, *, timeout):
             return "traceback", "failure"
 
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout):
+            return self.returncode
+
     class FakeJob:
         def __init__(self, process):
             self.process = process
+
+        def terminate(self):
+            pass
 
         def close(self):
             pass

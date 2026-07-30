@@ -1,0 +1,546 @@
+{
+  "schema_version": 1,
+  "id": "existing-schematic-multi-alternative-close-loop-live",
+  "operation": "design.close_loop",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_l5b_multi_alt_gate_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis_stage_execution": "shared_netlist",
+  "analysis_stages": [
+    {
+      "id": "bias",
+      "analysis": "dc",
+      "constraint_metrics": ["output_dc_v"]
+    },
+    {
+      "id": "small-signal",
+      "analysis": "ac",
+      "constraint_metrics": [
+        "low_frequency_gain_v_per_v",
+        "bandwidth_3db_hz"
+      ]
+    }
+  ],
+  "ac_sweep": {
+    "start_hz": 1000.0,
+    "stop_hz": 1000000000000.0,
+    "points_per_decade": 30,
+    "reference_points": 5,
+    "max_reference_variation_db": 0.5
+  },
+  "design_context": {
+    "schema_version": 1,
+    "id": "multi-alternative-common-source-baseline-live",
+    "topology_origin": "existing_oa",
+    "expected_topology_sha256": "a0bb019a7c81a0d4422e90dca0b5ade814d265cd41544ef245104cb3c7856a41",
+    "roles": [
+      {"role": "signal.input", "nets": ["IN"]},
+      {"role": "signal.output", "nets": ["OUT"]},
+      {"role": "supply.positive", "nets": ["VDD"]},
+      {"role": "supply.return", "nets": ["VSS"]},
+      {"role": "device.gain", "instances": ["MN0"]},
+      {"role": "load.resistive", "instances": ["RD0"]},
+      {
+        "role": "device.input_gate",
+        "terminals": [
+          {"instance": "MN0", "terminal": "G", "net": "IN"}
+        ]
+      }
+    ],
+    "instance_parameter_permissions": [
+      {
+        "instance": "MN0",
+        "parameters": ["Wfg", "l", "nf", "simM"],
+        "modes": ["fixed", "search"]
+      },
+      {
+        "instance": "RD0",
+        "parameters": ["r"],
+        "modes": ["fixed", "search"]
+      }
+    ],
+    "frozen_pins": ["IN", "OUT", "VDD", "VSS"],
+    "topology_edits": {
+      "allowed_operations": [
+        "add_net",
+        "reconnect_terminal",
+        "add_instance",
+        "add_pin"
+      ],
+      "mutable_instances": ["MN0", "RS0", "MNCAS"],
+      "mutable_nets": ["NSRC", "NCAS", "VCAS"],
+      "mutable_pins": ["VCAS"],
+      "max_operations_per_delta": 12
+    },
+    "required_analyses": ["dc", "ac"],
+    "metrics": [
+      "output_dc_v",
+      "supply_current_a",
+      "mn0_ids_a",
+      "mn0_vgs_v",
+      "mn0_vds_v",
+      "mn0_vdsat_v",
+      "mn0_gm_s",
+      "mn0_gds_s",
+      "low_frequency_gain_v_per_v",
+      "low_frequency_gain_db",
+      "bandwidth_3db_hz",
+      "gain_bandwidth_product_hz",
+      "unity_gain_frequency_hz"
+    ]
+  },
+  "generic_simulation": {
+    "schema_version": 1,
+    "sources": [
+      {
+        "name": "VDD_SRC",
+        "kind": "voltage",
+        "positive_node": "VDD",
+        "negative_node": "0",
+        "dc_value": 0.9
+      },
+      {
+        "name": "VSS_SRC",
+        "kind": "voltage",
+        "positive_node": "VSS",
+        "negative_node": "0",
+        "dc_value": 0.0
+      },
+      {
+        "name": "VIN_SRC",
+        "kind": "voltage",
+        "positive_node": "IN",
+        "negative_node": "0",
+        "dc_value": 0.35,
+        "ac_magnitude": 1.0,
+        "ac_phase_deg": 0.0
+      }
+    ],
+    "loads": [
+      {
+        "name": "CL0",
+        "kind": "capacitor",
+        "positive_node": "OUT",
+        "negative_node": "0",
+        "value": 2e-15
+      }
+    ],
+    "dc_voltage_metrics": [
+      {
+        "metric": "output_dc_v",
+        "expression": {"positive_node": "OUT", "negative_node": "0"}
+      }
+    ],
+    "dc_current_metrics": [
+      {"metric": "supply_current_a", "source": "VDD_SRC"}
+    ],
+    "operating_point_metrics": [
+      {"metric": "mn0_ids_a", "instance": "MN0", "quantity": "ids"},
+      {"metric": "mn0_vgs_v", "instance": "MN0", "quantity": "vgs"},
+      {"metric": "mn0_vds_v", "instance": "MN0", "quantity": "vds"},
+      {"metric": "mn0_vdsat_v", "instance": "MN0", "quantity": "vdsat"},
+      {"metric": "mn0_gm_s", "instance": "MN0", "quantity": "gm"},
+      {"metric": "mn0_gds_s", "instance": "MN0", "quantity": "gds"}
+    ],
+    "transfer": {
+      "input": {"positive_node": "IN", "negative_node": "0"},
+      "output": {"positive_node": "OUT", "negative_node": "0"}
+    },
+    "netlist_parameter_bindings": [
+      {"instance": "MN0", "oa_parameter": "Wfg", "netlist_parameter": "w"},
+      {"instance": "MN0", "oa_parameter": "l", "netlist_parameter": "l"},
+      {"instance": "MN0", "oa_parameter": "nf", "netlist_parameter": "nf"},
+      {"instance": "MN0", "oa_parameter": "simM", "netlist_parameter": "multi"},
+      {"instance": "RD0", "oa_parameter": "r", "netlist_parameter": "r"}
+    ]
+  },
+  "candidate_set": {
+    "source": {
+      "generator": "user_declared",
+      "id": "multi-alternative-two-point-gate",
+      "evidence_source": "user_input"
+    },
+    "candidates": [
+      {
+        "id": "compact-load",
+        "instance_parameter_updates": [
+          {"instance": "MN0", "parameters": {"Wfg": "1u"}},
+          {"instance": "RD0", "parameters": {"r": "5K"}}
+        ]
+      },
+      {
+        "id": "gain-load",
+        "instance_parameter_updates": [
+          {"instance": "MN0", "parameters": {"Wfg": "1.1u"}},
+          {"instance": "RD0", "parameters": {"r": "18.5K"}}
+        ]
+      }
+    ]
+  },
+  "topology_refinement": {
+    "baseline_id": "common-source",
+    "alternatives": [
+      {
+        "id": "source-degenerated",
+        "topology_delta": {
+          "direction": "forward",
+          "contract": {
+            "schema_version": 1,
+            "id": "existing-close-loop-source-degeneration-v1",
+            "expected_before_sha256": "a0bb019a7c81a0d4422e90dca0b5ade814d265cd41544ef245104cb3c7856a41",
+            "expected_after_sha256": "f441b938846c366b89b28da1c6866db11afaf816d522479b293ba5d62187c9c6",
+            "operations": [
+              {
+                "operation": "add_net",
+                "net": {
+                  "name": "NSRC",
+                  "attributes": {"isGlobal": false, "numBits": 1, "sigType": "signal"}
+                }
+              },
+              {
+                "operation": "reconnect_terminal",
+                "instance": "MN0",
+                "terminal": "S",
+                "expected_net": "VSS",
+                "net": "NSRC"
+              },
+              {
+                "operation": "add_instance",
+                "instance": {
+                  "name": "RS0",
+                  "master": {"library": "analogLib", "cell": "res", "view": "symbol"},
+                  "terminals": {"MINUS": "VSS", "PLUS": "NSRC"},
+                  "attributes": {"numInst": 1, "orient": "R0", "xy": [0.0, -1.3]}
+                }
+              }
+            ],
+            "inverse_operations": [
+              {
+                "operation": "remove_instance",
+                "expected": {
+                  "name": "RS0",
+                  "master": {"library": "analogLib", "cell": "res", "view": "symbol"},
+                  "terminals": {"MINUS": "VSS", "PLUS": "NSRC"},
+                  "attributes": {"numInst": 1, "orient": "R0", "xy": [0.0, -1.3]}
+                }
+              },
+              {
+                "operation": "reconnect_terminal",
+                "instance": "MN0",
+                "terminal": "S",
+                "expected_net": "NSRC",
+                "net": "VSS"
+              },
+              {
+                "operation": "remove_net",
+                "expected": {
+                  "name": "NSRC",
+                  "attributes": {"isGlobal": false, "numBits": 1, "sigType": "signal"}
+                }
+              }
+            ],
+            "master_parameter_migrations": []
+          }
+        },
+        "design_context": {
+          "schema_version": 1,
+          "id": "multi-alternative-source-degenerated-live",
+          "topology_origin": "existing_oa",
+          "expected_topology_sha256": "f441b938846c366b89b28da1c6866db11afaf816d522479b293ba5d62187c9c6",
+          "roles": [
+            {"role": "signal.input", "nets": ["IN"]},
+            {"role": "signal.output", "nets": ["OUT"]},
+            {"role": "supply.positive", "nets": ["VDD"]},
+            {"role": "supply.return", "nets": ["VSS"]},
+            {"role": "device.gain", "instances": ["MN0"]},
+            {"role": "load.resistive", "instances": ["RD0"]},
+            {"role": "device.source-degeneration", "instances": ["RS0"]}
+          ],
+          "instance_parameter_permissions": [
+            {
+              "instance": "MN0",
+              "parameters": ["Wfg", "l", "nf", "simM"],
+              "modes": ["fixed", "search"]
+            },
+            {
+              "instance": "RD0",
+              "parameters": ["r"],
+              "modes": ["fixed", "search"]
+            },
+            {
+              "instance": "RS0",
+              "parameters": ["r"],
+              "modes": ["fixed"]
+            }
+          ],
+          "frozen_pins": ["IN", "OUT", "VDD", "VSS"],
+          "topology_edits": {
+            "allowed_operations": ["remove_instance", "reconnect_terminal", "remove_net"],
+            "mutable_instances": ["MN0", "RS0"],
+            "mutable_nets": ["NSRC"],
+            "max_operations_per_delta": 8
+          },
+          "required_analyses": ["dc", "ac"],
+          "metrics": [
+            "output_dc_v",
+            "supply_current_a",
+            "mn0_ids_a",
+            "mn0_vgs_v",
+            "mn0_vds_v",
+            "mn0_vdsat_v",
+            "mn0_gm_s",
+            "mn0_gds_s",
+            "low_frequency_gain_v_per_v",
+            "low_frequency_gain_db",
+            "bandwidth_3db_hz",
+            "gain_bandwidth_product_hz",
+            "unity_gain_frequency_hz"
+          ]
+        },
+        "generic_simulation": {
+          "schema_version": 1,
+          "sources": [
+            {"name": "VDD_SRC", "kind": "voltage", "positive_node": "VDD", "negative_node": "0", "dc_value": 0.9},
+            {"name": "VSS_SRC", "kind": "voltage", "positive_node": "VSS", "negative_node": "0", "dc_value": 0.0},
+            {"name": "VIN_SRC", "kind": "voltage", "positive_node": "IN", "negative_node": "0", "dc_value": 0.35, "ac_magnitude": 1.0, "ac_phase_deg": 0.0}
+          ],
+          "loads": [
+            {"name": "CL0", "kind": "capacitor", "positive_node": "OUT", "negative_node": "0", "value": 2e-15}
+          ],
+          "dc_voltage_metrics": [
+            {"metric": "output_dc_v", "expression": {"positive_node": "OUT", "negative_node": "0"}}
+          ],
+          "dc_current_metrics": [
+            {"metric": "supply_current_a", "source": "VDD_SRC"}
+          ],
+          "operating_point_metrics": [
+            {"metric": "mn0_ids_a", "instance": "MN0", "quantity": "ids"},
+            {"metric": "mn0_vgs_v", "instance": "MN0", "quantity": "vgs"},
+            {"metric": "mn0_vds_v", "instance": "MN0", "quantity": "vds"},
+            {"metric": "mn0_vdsat_v", "instance": "MN0", "quantity": "vdsat"},
+            {"metric": "mn0_gm_s", "instance": "MN0", "quantity": "gm"},
+            {"metric": "mn0_gds_s", "instance": "MN0", "quantity": "gds"}
+          ],
+          "transfer": {
+            "input": {"positive_node": "IN", "negative_node": "0"},
+            "output": {"positive_node": "OUT", "negative_node": "0"}
+          },
+          "netlist_parameter_bindings": [
+            {"instance": "MN0", "oa_parameter": "Wfg", "netlist_parameter": "w"},
+            {"instance": "MN0", "oa_parameter": "l", "netlist_parameter": "l"},
+            {"instance": "MN0", "oa_parameter": "nf", "netlist_parameter": "nf"},
+            {"instance": "MN0", "oa_parameter": "simM", "netlist_parameter": "multi"},
+            {"instance": "RD0", "oa_parameter": "r", "netlist_parameter": "r"},
+            {"instance": "RS0", "oa_parameter": "r", "netlist_parameter": "r"}
+          ]
+        },
+        "instance_parameter_updates": [
+          {"instance": "RS0", "parameters": {"r": "750"}}
+        ]
+      },
+      {
+        "id": "cascode",
+        "topology_delta": {
+          "direction": "forward",
+          "contract": {
+            "schema_version": 1,
+            "id": "common-source-add-cascode-v1",
+            "expected_before_sha256": "a0bb019a7c81a0d4422e90dca0b5ade814d265cd41544ef245104cb3c7856a41",
+            "expected_after_sha256": "2e27d1c68012bc1e7adc0da936a648febde4b685cfa1391512a2d401fb291a51",
+            "operations": [
+              {"operation": "add_net", "net": {"name": "NCAS", "attributes": {"isGlobal": false, "numBits": 1, "sigType": "signal"}}},
+              {"operation": "add_net", "net": {"name": "VCAS", "attributes": {"isGlobal": false, "numBits": 1, "sigType": "signal"}}},
+              {"operation": "reconnect_terminal", "instance": "MN0", "terminal": "D", "expected_net": "OUT", "net": "NCAS"},
+              {
+                "operation": "add_instance",
+                "instance": {
+                  "name": "MNCAS",
+                  "master": {"library": "tsmcN28", "cell": "nch_lvt_mac", "view": "symbol"},
+                  "terminals": {"B": "VSS", "D": "OUT", "G": "VCAS", "S": "NCAS"},
+                  "attributes": {"numInst": 1, "orient": "R0", "xy": [0.0, 0.65]}
+                }
+              },
+              {
+                "operation": "add_pin",
+                "pin": {
+                  "name": "VCAS",
+                  "net": "VCAS",
+                  "direction": "input",
+                  "attributes": {
+                    "master": {"library": "basic", "cell": "ipin", "view": "symbol"},
+                    "numBits": 1,
+                    "orient": "R0",
+                    "xy": [-1.4, 0.65]
+                  }
+                }
+              }
+            ],
+            "inverse_operations": [
+              {
+                "operation": "remove_pin",
+                "expected": {
+                  "name": "VCAS",
+                  "net": "VCAS",
+                  "direction": "input",
+                  "attributes": {
+                    "master": {"library": "basic", "cell": "ipin", "view": "symbol"},
+                    "numBits": 1,
+                    "orient": "R0",
+                    "xy": [-1.4, 0.65]
+                  }
+                }
+              },
+              {
+                "operation": "remove_instance",
+                "expected": {
+                  "name": "MNCAS",
+                  "master": {"library": "tsmcN28", "cell": "nch_lvt_mac", "view": "symbol"},
+                  "terminals": {"B": "VSS", "D": "OUT", "G": "VCAS", "S": "NCAS"},
+                  "attributes": {"numInst": 1, "orient": "R0", "xy": [0.0, 0.65]}
+                }
+              },
+              {"operation": "reconnect_terminal", "instance": "MN0", "terminal": "D", "expected_net": "NCAS", "net": "OUT"},
+              {"operation": "remove_net", "expected": {"name": "VCAS", "attributes": {"isGlobal": false, "numBits": 1, "sigType": "signal"}}},
+              {"operation": "remove_net", "expected": {"name": "NCAS", "attributes": {"isGlobal": false, "numBits": 1, "sigType": "signal"}}}
+            ],
+            "master_parameter_migrations": []
+          }
+        },
+        "design_context": {
+          "schema_version": 1,
+          "id": "multi-alternative-cascode-live",
+          "topology_origin": "existing_oa",
+          "expected_topology_sha256": "2e27d1c68012bc1e7adc0da936a648febde4b685cfa1391512a2d401fb291a51",
+          "roles": [
+            {"role": "signal.input", "nets": ["IN"]},
+            {"role": "signal.output", "nets": ["OUT"]},
+            {"role": "supply.positive", "nets": ["VDD"]},
+            {"role": "supply.return", "nets": ["VSS"]},
+            {"role": "bias.cascode", "nets": ["VCAS"]},
+            {"role": "device.gain", "instances": ["MN0"]},
+            {"role": "device.cascode", "instances": ["MNCAS"]},
+            {"role": "load.resistive", "instances": ["RD0"]}
+          ],
+          "instance_parameter_permissions": [
+            {
+              "instance": "MN0",
+              "parameters": ["Wfg", "l", "nf", "simM"],
+              "modes": ["fixed", "search"]
+            },
+            {
+              "instance": "MNCAS",
+              "parameters": ["Wfg", "l", "nf", "simM"],
+              "modes": ["fixed"]
+            },
+            {
+              "instance": "RD0",
+              "parameters": ["r"],
+              "modes": ["fixed", "search"]
+            }
+          ],
+          "frozen_pins": ["IN", "OUT", "VDD", "VSS"],
+          "topology_edits": {
+            "allowed_operations": ["remove_pin", "remove_instance", "reconnect_terminal", "remove_net"],
+            "mutable_instances": ["MN0", "MNCAS"],
+            "mutable_nets": ["NCAS", "VCAS"],
+            "mutable_pins": ["VCAS"],
+            "max_operations_per_delta": 12
+          },
+          "required_analyses": ["dc", "ac"],
+          "metrics": [
+            "output_dc_v",
+            "supply_current_a",
+            "mn0_ids_a",
+            "mn0_vgs_v",
+            "mn0_vds_v",
+            "mn0_vdsat_v",
+            "mn0_gm_s",
+            "mn0_gds_s",
+            "mncas_ids_a",
+            "mncas_vgs_v",
+            "mncas_vds_v",
+            "mncas_vdsat_v",
+            "low_frequency_gain_v_per_v",
+            "low_frequency_gain_db",
+            "bandwidth_3db_hz",
+            "gain_bandwidth_product_hz",
+            "unity_gain_frequency_hz"
+          ]
+        },
+        "generic_simulation": {
+          "schema_version": 1,
+          "sources": [
+            {"name": "VDD_SRC", "kind": "voltage", "positive_node": "VDD", "negative_node": "0", "dc_value": 0.9},
+            {"name": "VSS_SRC", "kind": "voltage", "positive_node": "VSS", "negative_node": "0", "dc_value": 0.0},
+            {"name": "VCAS_SRC", "kind": "voltage", "positive_node": "VCAS", "negative_node": "0", "dc_value": 0.545},
+            {"name": "VIN_SRC", "kind": "voltage", "positive_node": "IN", "negative_node": "0", "dc_value": 0.35, "ac_magnitude": 1.0, "ac_phase_deg": 0.0}
+          ],
+          "loads": [
+            {"name": "CL0", "kind": "capacitor", "positive_node": "OUT", "negative_node": "0", "value": 2e-15}
+          ],
+          "dc_voltage_metrics": [
+            {"metric": "output_dc_v", "expression": {"positive_node": "OUT", "negative_node": "0"}}
+          ],
+          "dc_current_metrics": [
+            {"metric": "supply_current_a", "source": "VDD_SRC"}
+          ],
+          "operating_point_metrics": [
+            {"metric": "mn0_ids_a", "instance": "MN0", "quantity": "ids"},
+            {"metric": "mn0_vgs_v", "instance": "MN0", "quantity": "vgs"},
+            {"metric": "mn0_vds_v", "instance": "MN0", "quantity": "vds"},
+            {"metric": "mn0_vdsat_v", "instance": "MN0", "quantity": "vdsat"},
+            {"metric": "mn0_gm_s", "instance": "MN0", "quantity": "gm"},
+            {"metric": "mn0_gds_s", "instance": "MN0", "quantity": "gds"},
+            {"metric": "mncas_ids_a", "instance": "MNCAS", "quantity": "ids"},
+            {"metric": "mncas_vgs_v", "instance": "MNCAS", "quantity": "vgs"},
+            {"metric": "mncas_vds_v", "instance": "MNCAS", "quantity": "vds"},
+            {"metric": "mncas_vdsat_v", "instance": "MNCAS", "quantity": "vdsat"}
+          ],
+          "transfer": {
+            "input": {"positive_node": "IN", "negative_node": "0"},
+            "output": {"positive_node": "OUT", "negative_node": "0"}
+          },
+          "netlist_parameter_bindings": [
+            {"instance": "MN0", "oa_parameter": "Wfg", "netlist_parameter": "w"},
+            {"instance": "MN0", "oa_parameter": "l", "netlist_parameter": "l"},
+            {"instance": "MN0", "oa_parameter": "nf", "netlist_parameter": "nf"},
+            {"instance": "MN0", "oa_parameter": "simM", "netlist_parameter": "multi"},
+            {"instance": "MNCAS", "oa_parameter": "Wfg", "netlist_parameter": "w"},
+            {"instance": "MNCAS", "oa_parameter": "l", "netlist_parameter": "l"},
+            {"instance": "MNCAS", "oa_parameter": "nf", "netlist_parameter": "nf"},
+            {"instance": "MNCAS", "oa_parameter": "simM", "netlist_parameter": "multi"},
+            {"instance": "RD0", "oa_parameter": "r", "netlist_parameter": "r"}
+          ]
+        },
+        "instance_parameter_updates": [
+          {"instance": "MNCAS", "parameters": {"Wfg": "750.0n", "l": "30n"}}
+        ]
+      }
+    ]
+  },
+  "constraints": [
+    {"metric": "output_dc_v", "relation": ">=", "value": 0.1},
+    {"metric": "output_dc_v", "relation": "<=", "value": 0.8},
+    {"metric": "low_frequency_gain_v_per_v", "relation": ">=", "value": 5.0},
+    {"metric": "bandwidth_3db_hz", "relation": ">=", "value": 2000000000.0}
+  ],
+  "objective": {
+    "metric": "gain_bandwidth_product_hz",
+    "goal": "maximize"
+  },
+  "limits": {
+    "max_iterations": 6,
+    "timeout_seconds": 1200
+  },
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  }
+}

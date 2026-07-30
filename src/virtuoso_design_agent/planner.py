@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 
 from .catalog import (
     task_requests_oa_parameter_write,
@@ -31,6 +32,65 @@ def _step(
         description=description,
         side_effect=side_effect,
     )
+
+
+def _with_design_context_binding(
+    task: TaskSpec, steps: list[PlanStep]
+) -> list[PlanStep]:
+    context = task.design_context
+    if context is None:
+        return steps
+    if task.topology_refinement is not None:
+        # Topology plans carry separate baseline/alternative context bindings at
+        # their exact state boundaries.
+        return steps
+    result = list(steps)
+    if task.operation is Operation.DESIGN_CLOSE_LOOP:
+        ensure_index = next(
+            (
+                index
+                for index, step in enumerate(result)
+                if step.capability == "schematic.ensure"
+            ),
+            None,
+        )
+        if ensure_index is None:
+            raise ValueError("design_context close-loop requires a schematic step")
+        result[ensure_index] = _step(
+            "inspect-existing",
+            "schematic.inspect",
+            "结构化回读用户提供的既有 schematic；不创建或替换 cellview",
+            SideEffect.READ_ONLY,
+        )
+    insertion_index = next(
+        (
+            index + 1
+            for index, step in enumerate(result)
+            if step.capability == "schematic.inspect"
+        ),
+        None,
+    )
+    if insertion_index is None:
+        raise ValueError("design_context requires a schematic inspection plan step")
+    result.insert(
+        insertion_index,
+        _step(
+            "context-bind",
+            "design.context.bind",
+            (
+                f"把结构化 OA 回读绑定到设计上下文 {context.id!r}：核对 "
+                f"{len(context.roles)} 个角色、冻结对象、实例参数字段、"
+                "声明 analysis/metric 与局部 topology-delta 权限；该审计为 "
+                "software_inference，失败时不得进入后续远端动作"
+            ),
+            SideEffect.READ_ONLY,
+        ),
+    )
+    renumbered: list[PlanStep] = []
+    for index, step in enumerate(result, start=1):
+        suffix = step.id.split("-", 1)[1] if "-" in step.id else step.id
+        renumbered.append(step.model_copy(update={"id": f"{index:02d}-{suffix}"}))
+    return renumbered
 
 
 def _steps_for(task: TaskSpec) -> list[PlanStep]:
@@ -126,6 +186,10 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         ]
     common_source = task.circuit is CircuitKind.COMMON_SOURCE
     differential_pair = task.circuit is CircuitKind.DIFFERENTIAL_PAIR
+    existing_generic = (
+        task.circuit is CircuitKind.EXISTING_SCHEMATIC
+        and task.generic_simulation is not None
+    )
     analysis = task.resolved_analysis()
     declared_parameters = task_semantic_parameter_names(task)
     differential_pair_real_tail = differential_pair and "tail_bias_v" in declared_parameters
@@ -145,9 +209,18 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
     differential_pair_noise = differential_pair and analysis is AnalysisKind.NOISE
     common_source_quality = common_source and analysis is AnalysisKind.QUALITY
     candidate_oa_write = task_requests_oa_parameter_write(task)
-    explicit_instance_search = bool(task.instance_parameter_space)
+    explicit_instance_search = bool(
+        task.instance_parameter_space
+        or task.instance_parameter_updates
+        or (
+            task.candidate_set is not None
+            and task.candidate_set.candidates[0].instance_parameter_updates
+        )
+    )
     template_name = (
-        "共源放大器"
+        "用户既有电路"
+        if existing_generic
+        else "共源放大器"
         if common_source
         else "NMOS 差分对"
         if differential_pair
@@ -159,7 +232,13 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         else "由外部共模/尾电流 testbench 提供理想尾偏置"
     )
     simulation_description = (
-        "从同一次 OA/si 参数与拓扑核对生成的网表，分别运行 Spectre 复数 AC、"
+        (
+            "只读重开用户既有 schematic，从同一次 OA→si 网表核对 exact instance/"
+            "model/node 与声明的 CDF→netlist 参数绑定，再用结构化 source/load wrapper "
+            f"运行 Spectre {analysis.value.upper()}；不写 OA"
+        )
+        if existing_generic
+        else "从同一次 OA/si 参数与拓扑核对生成的网表，分别运行 Spectre 复数 AC、"
         "相干 transient 线性度和 noise；三项均完整才接受候选"
         if common_source_quality
         else "用 OA 导出网表，先核对 DC operating point，再运行 Spectre 复数 AC sweep"
@@ -247,7 +326,13 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         else "在 max_iterations 内运行 OA 同源网表候选"
     )
     evaluation_description = (
-        "联合判断 DC 工作区、增益、首个 -3 dB 带宽、GBW、unity-gain、"
+        (
+            "提取声明的 DC node/source-current/MOS OP 标量；AC 还从用户声明的"
+            "差分或单端 input/output 表达式提取低频增益、首个 -3 dB 带宽、GBW 和"
+            "unity-gain。缺信号、空波形或参数不一致均拒绝"
+        )
+        if existing_generic
+        else "联合判断 DC 工作区、增益、首个 -3 dB 带宽、GBW、unity-gain、"
         "P1dB、THD、真实 VDD 功耗和积分输入参考噪声；任一分析缺证据即拒绝候选"
         if common_source_quality
         else "从复数 VOUT/VIN 提取低频增益、首个 -3 dB 带宽、GBW、"
@@ -298,6 +383,50 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         if differential_pair
         else "从波形指标逐条判断规格"
     )
+    if existing_generic and task.analysis_stages:
+        stage_labels = " → ".join(
+            f"{stage.id}({stage.analysis.value.upper()})"
+            for stage in task.analysis_stages
+        )
+        gated = [
+            stage.id
+            for stage in task.analysis_stages[:-1]
+            if stage.stop_on_failure
+        ]
+        if task.analysis_stage_execution.value == "shared_netlist":
+            simulation_description = (
+                "只读重开用户既有 schematic；每个候选只暂存一次参数，在单个 "
+                "Bridge worker 内只回读一次 OA、只生成并核对一次 si 网表，再按声明"
+                f"顺序 {stage_labels} 运行 Spectre analysis；所有 stage 必须绑定同一 "
+                "netlist path/SHA-256，不接受任意 design deck"
+            )
+        else:
+            simulation_description = (
+                "只读重开用户既有 schematic；每个候选只暂存一次参数，再按声明顺序 "
+                f"{stage_labels} 逐级执行。每一级都从当前 OA→si 同源网表核对 CDF "
+                "绑定后运行对应 Spectre analysis；不接受任意 design deck"
+            )
+        sweep_description = (
+            f"在 max_iterations 内逐候选执行 {len(task.analysis_stages)} 级分析："
+            f"{stage_labels}；"
+            "完整 EDA 结果若在前级门控约束失败，则该候选不再运行后续昂贵分析"
+        )
+        if task.analysis_stage_execution.value == "shared_netlist":
+            sweep_description += (
+                "；每个候选只生成并核对一次 si 网表，并在同一 worker 内复用"
+            )
+        if gated:
+            sweep_description += "；提前终止 gate=" + ", ".join(gated)
+        evaluation_description = (
+            "每级分别保存 metrics、constraint、analysis completeness 和证据来源；"
+            "重复 DC/OP 指标必须数值一致。前级约束失败是有证据的候选拒绝，"
+            "空波形、仿真错误或指标冲突则是 incomplete/system_event，不能冒充不可行"
+        )
+        if task.analysis_stage_execution.value == "shared_netlist":
+            evaluation_description += (
+                "；worker 只负责按同一约束公式提前停，executor 会独立重算并核对终止"
+                "位置；checkpoint 粒度为候选边界，中断后重跑当前候选而不复用半批结果"
+            )
     if task.operating_conditions:
         condition_names = ", ".join(
             condition.name for condition in task.operating_conditions
@@ -316,6 +445,12 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             f"{condition_names}"
         )
     selection_description = "按规格违例与 objective 选择候选"
+    if (
+        existing_generic
+        and task.analysis_stages
+        and task.analysis_stage_execution.value == "shared_netlist"
+    ):
+        selection_description += "；" + evaluation_description
     if task.candidate_set is not None:
         sweep_description += (
             "；候选是显式原子 tuple，semantic/raw/testbench 参数保持成组顺序，"
@@ -368,7 +503,13 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
     netlist = _step(
         "netlist",
         "netlist.generate",
-        "从目标 OA schematic 生成 si Spectre 网表并核对参数一致性",
+        (
+            "从目标 OA schematic 生成 si Spectre 网表，核对完整 flat primitive "
+            "或显式绑定的一层 primitive-child instance/model/node 集合，以及声明的 "
+            "CDF→netlist 参数"
+            if existing_generic
+            else "从目标 OA schematic 生成 si Spectre 网表并核对参数一致性"
+        ),
         SideEffect.REMOTE_COMPUTE,
     )
 
@@ -788,6 +929,329 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             ),
         ]
 
+    if task.topology_refinement is not None:
+        refinement = task.topology_refinement
+        alternatives = refinement.resolved_alternatives()
+        alternative = alternatives[0]
+        contract = alternative.topology_delta.contract
+        parameter_candidate_count = (
+            len(task.candidate_set.candidates)
+            if task.candidate_set is not None
+            else math.prod(
+                len(sweep.values) for sweep in task.instance_parameter_space
+            )
+        )
+        total_candidate_count = (1 + len(alternatives)) * parameter_candidate_count
+        analysis_label = (
+            " → ".join(
+                f"{stage.id}({stage.analysis.value.upper()})"
+                for stage in task.analysis_stages
+            )
+            if task.analysis_stages
+            else task.analysis.value.upper()
+        )
+        if len(alternatives) > 1:
+            multi_steps = [
+                probe,
+                inspect.model_copy(
+                    update={
+                        "id": "02-baseline-inspect",
+                        "description": (
+                            "完整回读共同基线 topology/placement/实例参数并核对 "
+                            f"SHA-256 {contract.expected_before_sha256}；所有备选都必须"
+                            "从这一指纹独立出发"
+                        ),
+                    }
+                ),
+                _step(
+                    "03-baseline-context",
+                    "design.context.bind",
+                    f"绑定共同基线设计上下文 {task.design_context.id!r}",
+                    SideEffect.READ_ONLY,
+                ),
+                _step(
+                    "04-baseline-stage",
+                    "parameters.stage.baseline",
+                    f"在基线运行 {parameter_candidate_count} 个 raw-CDF 参数候选",
+                    SideEffect.REMOTE_WRITE,
+                ),
+                _step(
+                    "05-baseline-sweep",
+                    "simulation.sweep.baseline",
+                    f"从基线 OA→si 同源网表运行 Spectre {analysis_label}",
+                    SideEffect.REMOTE_COMPUTE,
+                ),
+            ]
+            step_number = 6
+            for position, item in enumerate(alternatives, start=1):
+                item_contract = item.topology_delta.contract
+                multi_steps.extend(
+                    [
+                        _step(
+                            f"{step_number:02d}-{item.id}-forward",
+                            "schematic.transform.topology-delta.forward",
+                            (
+                                f"先恢复共同基线，再执行备选 {item.id!r} 的 exact "
+                                f"forward delta；输入={item_contract.expected_before_sha256}，"
+                                f"输出={item_contract.expected_after_sha256}，随后绑定上下文 "
+                                f"{item.design_context.id!r}"
+                            ),
+                            SideEffect.REMOTE_WRITE,
+                        ),
+                        _step(
+                            f"{step_number + 1:02d}-{item.id}-stage",
+                            "parameters.stage.alternative",
+                            (
+                                f"在备选 {item.id!r} 逐项回读固定字段并运行 "
+                                f"{parameter_candidate_count} 个同组候选"
+                            ),
+                            SideEffect.REMOTE_WRITE,
+                        ),
+                        _step(
+                            f"{step_number + 2:02d}-{item.id}-sweep",
+                            "simulation.sweep.alternative",
+                            (
+                                f"从备选 {item.id!r} 的 OA→si 同源网表运行 "
+                                f"Spectre {analysis_label}"
+                            ),
+                            SideEffect.REMOTE_COMPUTE,
+                        ),
+                    ]
+                )
+                step_number += 3
+                if position < len(alternatives):
+                    multi_steps.append(
+                        _step(
+                            f"{step_number:02d}-{item.id}-inverse",
+                            "schematic.transform.topology-delta.inverse",
+                            (
+                                f"按备选 {item.id!r} 的 exact inverse 恢复共同基线并"
+                                "完整回读，禁止链式累积到下一个备选"
+                            ),
+                            SideEffect.REMOTE_WRITE,
+                        )
+                    )
+                    step_number += 1
+            multi_steps.extend(
+                [
+                    _step(
+                        f"{step_number:02d}-select",
+                        "results.select.topology-and-parameters",
+                        (
+                            f"只用本次 EDA 结果在完整 {total_candidate_count} 点、"
+                            f"{1 + len(alternatives)} 个拓扑的离散域中判约束并排序"
+                        ),
+                        SideEffect.READ_ONLY,
+                    ),
+                    _step(
+                        f"{step_number + 1:02d}-finalize",
+                        "design.finalize.topology-and-parameters",
+                        (
+                            "从当前已知完整拓扑 exact inverse 回共同基线，必要时再执行"
+                            "所选备选的 forward delta 并提交参数；无可行点恢复初始基线"
+                        ),
+                        SideEffect.REMOTE_WRITE,
+                    ),
+                ]
+            )
+            step_number += 2
+            if task.winner_verification is not None:
+                verification_label = " → ".join(
+                    f"{stage.id}({stage.analysis.value.upper()})"
+                    for stage in task.winner_verification.analysis_stages
+                )
+                multi_steps.append(
+                    _step(
+                        f"{step_number:02d}-verify-winner",
+                        "simulation.verify-winner",
+                        (
+                            "只对 provisional winner 运行共享网表 winner-only Gate："
+                            f"{verification_label}；失败恢复初始基线且不提升 runner-up"
+                        ),
+                        SideEffect.REMOTE_COMPUTE,
+                    )
+                )
+                step_number += 1
+            multi_steps.extend(
+                [
+                    inspect.model_copy(
+                        update={
+                            "id": f"{step_number:02d}-final-inspect",
+                            "description": (
+                                "独立回读最终 topology SHA-256、设计上下文和目标参数"
+                            ),
+                        }
+                    ),
+                    persist.model_copy(
+                        update={
+                            "id": f"{step_number + 1:02d}-persist",
+                            "description": (
+                                "按扁平 topology-parameter index 保存 checkpoint、"
+                                "证据分层和最终 commit-or-restore 状态"
+                            ),
+                        }
+                    ),
+                ]
+            )
+            return multi_steps
+        winner_verification_steps = []
+        if task.winner_verification is not None:
+            verification_label = " → ".join(
+                f"{stage.id}({stage.analysis.value.upper()})"
+                for stage in task.winner_verification.analysis_stages
+            )
+            condition_label = (
+                ", ".join(
+                    condition.name
+                    for condition in task.winner_verification.operating_conditions
+                )
+                or "nominal"
+            )
+            winner_verification_steps.append(
+                _step(
+                    "14-verify-winner",
+                    "simulation.verify-winner",
+                    (
+                        "只对已暂存的 nominal topology/parameter winner 复用一份核对后"
+                        f"的 si 网表运行 {verification_label}；conditions="
+                        f"{condition_label}。失败时 exact inverse/参数恢复到初始基线，"
+                        "不自动提升未经复核的 runner-up"
+                    ),
+                    SideEffect.REMOTE_COMPUTE,
+                )
+            )
+        final_inspect_id = (
+            "15-final-inspect"
+            if winner_verification_steps
+            else "14-final-inspect"
+        )
+        persist_id = "16-persist" if winner_verification_steps else "15-persist"
+        return [
+            probe,
+            inspect.model_copy(
+                update={
+                    "id": "02-baseline-inspect",
+                    "description": (
+                        "完整回读基线 topology/placement/实例参数，并核对 SHA-256 "
+                        f"{contract.expected_before_sha256}；不创建或替换 cellview"
+                    ),
+                }
+            ),
+            _step(
+                "03-baseline-context",
+                "design.context.bind",
+                (
+                    f"把基线回读绑定到设计上下文 {task.design_context.id!r}；"
+                    "角色、参数权限、analysis/metric 和 forward delta scope 必须全通过"
+                ),
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "04-baseline-stage",
+                "parameters.stage.baseline",
+                (
+                    f"在基线变体 {refinement.baseline_id!r} 上逐点暂存并定向回读 "
+                    f"{parameter_candidate_count} 个完整 raw-CDF 参数候选"
+                ),
+                SideEffect.REMOTE_WRITE,
+            ),
+            _step(
+                "05-baseline-sweep",
+                "simulation.sweep.baseline",
+                (
+                    "每个基线候选从当前 OA schematic 重新 si netlist，核对 CDF 绑定后"
+                    f"运行 Spectre {analysis_label}；前级门控失败时跳过后级，"
+                    "不复用手写 design deck"
+                ),
+                SideEffect.REMOTE_COMPUTE,
+            ),
+            _step(
+                "06-baseline-restore",
+                "parameters.restore.before-topology",
+                "切换拓扑前精确恢复搜索前基线参数并回读，避免候选状态泄漏到 delta",
+                SideEffect.REMOTE_WRITE,
+            ),
+            _step(
+                "07-forward-delta",
+                "schematic.transform.topology-delta.forward",
+                (
+                    f"执行预声明可逆 delta {contract.id!r}：输入 topology SHA-256 "
+                    f"{contract.expected_before_sha256}，输出必须为 "
+                    f"{contract.expected_after_sha256}；失败只按契约恢复，不覆盖 cellview"
+                ),
+                SideEffect.REMOTE_WRITE,
+            ),
+            _step(
+                "08-alternative-inspect",
+                "schematic.inspect.alternative",
+                "独立完整回读变体 topology、placement 和参数，不以 transform 返回码代替",
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "09-alternative-context",
+                "design.context.bind.alternative",
+                (
+                    "把变体回读绑定到独立设计上下文 "
+                    f"{alternative.design_context.id!r}，并核对 inverse delta scope"
+                ),
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "10-alternative-stage",
+                "parameters.stage.alternative",
+                (
+                    f"在变体 {alternative.id!r} 上运行同一组 "
+                    f"{parameter_candidate_count} 个候选；新增实例固定 CDF 值也逐项回读"
+                ),
+                SideEffect.REMOTE_WRITE,
+            ),
+            _step(
+                "11-alternative-sweep",
+                "simulation.sweep.alternative",
+                (
+                    "每个变体候选重新执行同源 OA→si→Spectre，并使用变体自己的"
+                    "结构化 testbench/context；两条路径不共享未经核对的网表"
+                ),
+                SideEffect.REMOTE_COMPUTE,
+            ),
+            _step(
+                "12-select",
+                "results.select.topology-and-parameters",
+                (
+                    f"仅用本次 EDA 指标在完整的 {total_candidate_count} 点拓扑-参数"
+                    "离散域中先判约束、再按 objective 排序；完全同分时保留基线"
+                ),
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "13-finalize",
+                "design.finalize.topology-and-parameters",
+                (
+                    "若变体胜出则提交其完整参数；若基线胜出则先恢复变体参数、"
+                    "执行 exact inverse 再提交基线参数；无可行点或中断时恢复搜索前"
+                    "基线，未知拓扑指纹一律拒绝自动覆盖"
+                ),
+                SideEffect.REMOTE_WRITE,
+            ),
+            *winner_verification_steps,
+            _step(
+                final_inspect_id,
+                "schematic.inspect.final",
+                "独立回读最终 topology SHA-256、设计上下文和所有目标参数",
+                SideEffect.READ_ONLY,
+            ),
+            persist.model_copy(
+                update={
+                    "id": persist_id,
+                    "description": (
+                        "按扁平 topology-parameter candidate index 原子保存 checkpoint、"
+                        "当前候选下一 analysis stage、EDA/Bridge/software-inference "
+                        "分层证据及最终 commit-or-restore 状态"
+                    ),
+                }
+            ),
+        ]
+
     if task.operation is Operation.SCHEMATIC_CREATE:
         create_description = (
             f"显式删除并按受控模板替换已有{template_name} schematic"
@@ -1033,6 +1497,36 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         )
         if explicit_instance_search:
             finalize_description += "；最佳实例字段必须再次定向回读"
+        winner_verification_steps = []
+        if task.winner_verification is not None:
+            verification = task.winner_verification
+            analyses = " → ".join(
+                f"{stage.id}({stage.analysis.value.upper()})"
+                for stage in verification.analysis_stages
+            )
+            conditions = (
+                ", ".join(
+                    condition.name
+                    for condition in verification.operating_conditions
+                )
+                or "nominal"
+            )
+            winner_verification_steps.append(
+                _step(
+                    "08-verify-winner",
+                    "simulation.verify-winner",
+                    (
+                        "只对 nominal provisional winner 暂存后的 OA 运行一次同源 "
+                        f"OA→si→Spectre 复核：{analyses}；conditions={conditions}。"
+                        "失败或不完整则恢复初始 OA，不把未经同等复核的 runner-up "
+                        "自动升级"
+                    ),
+                    SideEffect.REMOTE_COMPUTE,
+                )
+            )
+        finalize_id = "07-finalize"
+        after_id = "09-after" if winner_verification_steps else "08-after"
+        persist_id = "10-persist" if winner_verification_steps else "09-persist"
         return [
             probe,
             inspect.model_copy(update={"id": "02-before"}),
@@ -1056,20 +1550,26 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 SideEffect.READ_ONLY,
             ),
             _step(
-                "07-finalize",
+                finalize_id,
                 "parameters.finalize",
-                finalize_description,
+                (
+                    "暂存 nominal provisional winner；winner-only Gate 通过后保留，"
+                    "否则恢复搜索前 OA 参数"
+                    if winner_verification_steps
+                    else finalize_description
+                ),
                 SideEffect.REMOTE_WRITE if candidate_oa_write else SideEffect.READ_ONLY,
             ),
+            *winner_verification_steps,
             inspect.model_copy(
                 update={
-                    "id": "08-after",
+                    "id": after_id,
                     "description": final_inspect_description,
                 }
             ),
             persist.model_copy(
                 update={
-                    "id": "09-persist",
+                    "id": persist_id,
                     "description": "逐候选原子保存 checkpoint，并写入最终 run record",
                 }
             ),
@@ -1147,8 +1647,11 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
 
 def build_plan(task: TaskSpec) -> ExecutionPlan:
     validate_task_capability(task)
-    steps = _steps_for(task)
+    steps = _with_design_context_binding(task, _steps_for(task))
     task_payload = task.model_dump(mode="json", exclude_none=True)
+    if task.analysis_stage_execution.value == "isolated":
+        # Keep pre-staged and first-generation isolated-stage task tokens stable.
+        task_payload.pop("analysis_stage_execution", None)
     if not task.instance_parameter_space:
         # Preserve tokens for tasks created before raw instance sweeps existed.
         task_payload.pop("instance_parameter_space", None)

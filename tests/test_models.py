@@ -1075,12 +1075,13 @@ def test_existing_schematic_exposes_read_manual_parameters_and_bounded_topology(
     )
     assert build_plan(inspect).operation.value == "schematic.inspect"
 
-    invalid = TaskSpec.model_validate(
-        inspect.model_dump(mode="json")
-        | {"operation": "simulation.run", "parameters": {"vdd_v": 0.9}}
-    )
-    with pytest.raises(UnsupportedCapability, match="manual OA surface"):
-        build_plan(invalid)
+    with pytest.raises(
+        ValidationError, match="requires generic_simulation"
+    ):
+        TaskSpec.model_validate(
+            inspect.model_dump(mode="json")
+            | {"operation": "simulation.run", "parameters": {"vdd_v": 0.9}}
+        )
 
     topology = TaskSpec.model_validate(
         {

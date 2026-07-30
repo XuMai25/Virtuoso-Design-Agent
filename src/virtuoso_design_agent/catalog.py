@@ -135,12 +135,15 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
     ),
     CircuitKind.EXISTING_SCHEMATIC: CircuitCapability(
         circuit=CircuitKind.EXISTING_SCHEMATIC,
-        stage="Bridge-preserving manual OA surface",
+        stage="Bridge-preserving topology-conditioned OA surface",
         executable=True,
         operations=(
             Operation.SCHEMATIC_INSPECT,
             Operation.SCHEMATIC_TRANSFORM,
             Operation.PARAMETERS_APPLY,
+            Operation.SIMULATION_RUN,
+            Operation.DESIGN_TUNE,
+            Operation.DESIGN_CLOSE_LOOP,
             Operation.ADE_PREPARE,
             Operation.ADE_CAPTURE,
             Operation.ADE_RUN,
@@ -155,6 +158,31 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "predeclared topology-delta CAS with bounded add/remove-instance, "
             "terminal reconnect, net/pin operations, complete independent readback and "
             "exact inverse restoration live on a non-overwrite TSMC N28 cell + "
+            "local design-context binding for user-declared roles, frozen objects, "
+            "parameter permissions, analysis/metric intent, and topology-delta scope + "
+            "typed generic OA-to-si DC/AC testbench, signal, OP-save, and "
+            "CDF-to-netlist binding contract live on one TSMC N28 cascode stage, "
+            "with exact specialized-path OP/AC agreement and zero OA writes + "
+            "generic finite raw-instance tuning with checkpointed OA staging, direct "
+            "CDF-to-si binding, Spectre AC, final commit, and transport resume live for "
+            "one flat nominal TSMC N28 width field; no-feasible restoration and budget "
+            "paths locally verified + one predeclared reversible topology alternative "
+            "has completed a live four-point, multi-field, objective-ranked raw-parameter "
+            "domain with OA-to-si-to-Spectre evidence, exact inverse, atomic winner "
+            "writeback, and transport resume on nominal flat TSMC N28; controller-level "
+            "no-feasible and post-save fault paths remain local + "
+            "ordered generic DC/AC/transient/noise stage gates with EDA-completeness "
+            "aware early rejection and candidate-boundary shared-netlist execution "
+            "live on three nominal TSMC N28 multi-field tuples; all metrics exactly "
+            "matched isolated execution while simulation action time fell 58.1% + "
+            "winner-only shared-netlist DC/AC/transient/noise verification live on "
+            "the nominal two-point GBW winner across explicit TT/27C/0.90V and "
+            "SS/125C/0.81V conditions, including transport recovery and final OA "
+            "readback + up to seven common-baseline independent topology alternatives "
+            "with exact inverse/checkpoint selection locally verified; a three-topology, "
+            "two-parameter OA-to-si DC/AC domain, transport resume, and cascode winner "
+            "writeback are live + explicit one-level primitive-child OA/subcircuit graph "
+            "binding locally verified; the hierarchical live OA gate remains pending + "
             "local logical/physical pin and full-placement binding + exact-state "
             "post-save inverse recovery + live instance-scoped "
             "NMOS symbol-master/CDF-subset OA-to-si-to-Spectre round-trip + "
@@ -162,10 +190,11 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "history/result/log and OA-to-runtime-input consistency; native Maestro "
             "CL and VDDxCL sweep setup/input-bundle/RDB point binding and pinned "
             "scalar-to-constraint mapping plus test-scope CL x environmental-corner "
-            "raw-result binding live on TSMC N28; post-save automatic recovery and "
-            "pin/placement replay still require live fault injection; PMOS master "
-            "migration, human capture, real PVT corners, and multi-test/multi-analysis mapping "
-            "remain pending"
+            "raw-result binding live on TSMC N28; generic-delta post-save automatic "
+            "recovery and pin/placement replay are live, while controller-internal "
+            "post-save injection remains pending; PMOS master migration, human capture, "
+            "Maestro real-PVT corner mapping, and multi-test/multi-analysis mapping remain "
+            "pending"
         ),
     ),
     CircuitKind.INVERTER: CircuitCapability(
@@ -359,12 +388,21 @@ def validate_task_capability(task: TaskSpec) -> None:
         raise UnsupportedCapability(
             f"unsupported parameters for {task.circuit.value}: {', '.join(unknown)}"
         )
-    if task.operating_conditions:
+    winner_conditions = (
+        task.winner_verification.operating_conditions
+        if task.winner_verification is not None
+        else []
+    )
+    all_operating_conditions = [
+        *task.operating_conditions,
+        *winner_conditions,
+    ]
+    if all_operating_conditions:
         from .profiles import load_pdk_profile
 
         profile = load_pdk_profile(task.pdk_profile)
         requested_corners = {
-            condition.process_corner for condition in task.operating_conditions
+            condition.process_corner for condition in all_operating_conditions
         }
         available_corners = set(profile.process_corners) | {profile.model_section}
         missing_corners = sorted(requested_corners - available_corners)

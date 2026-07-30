@@ -1274,6 +1274,14 @@ class DeterministicDemoAdapter:
             "write or verify persistent Maestro analyses/outputs"
         )
 
+    def simulate_analysis_stages(
+        self, task: TaskSpec, parameters: dict[str, float]
+    ) -> AdapterResult:
+        raise RuntimeError(
+            "shared-netlist existing-schematic simulation requires real "
+            "OA/si/Spectre evidence and is not available through the demo adapter"
+        )
+
     def simulate(
         self, task: TaskSpec, parameters: dict[str, float]
     ) -> AdapterResult:
@@ -1281,6 +1289,11 @@ class DeterministicDemoAdapter:
             raise RuntimeError(
                 "netlist_preview requires real Spectre/PDK evidence and is not "
                 "available through the demo adapter"
+            )
+        if task.circuit is CircuitKind.EXISTING_SCHEMATIC:
+            raise RuntimeError(
+                "generic existing-schematic simulation requires real OA/si/Spectre "
+                "evidence and is not available through the demo adapter"
             )
         if task.operating_conditions:
             base_task = task.model_copy(update={"operating_conditions": []})

@@ -31,6 +31,7 @@ _WORKER_ACTIONS = {
         "inspect": "inspect_existing_schematic",
         "transform": "transform_existing_schematic_topology_delta",
         "apply": "apply_existing_schematic_parameters",
+        "simulate": "simulate_existing_schematic",
     },
     CircuitKind.INVERTER: {
         "create": "create_inverter",
@@ -316,9 +317,23 @@ class SubprocessBridgeAdapter:
                     windows_job.close()
                 cancel_file.unlink(missing_ok=True)
             raise
-        if windows_job is not None:
-            windows_job.close()
-        cancel_file.unlink(missing_ok=True)
+        try:
+            if windows_job is not None:
+                # The worker has already emitted its result after running all
+                # registered Bridge ``close()`` callbacks.  Clear any helper
+                # descendants that survived those callbacks (for example an
+                # orphaned SSH port-forward) before releasing the Job handle.
+                _terminate_process_tree(process, windows_job=windows_job)
+        except Exception as cleanup_exc:
+            raise BridgeWorkerError(
+                f"Bridge worker completed during {action}, but descendant "
+                "cleanup was not confirmed: "
+                f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+            ) from cleanup_exc
+        finally:
+            if windows_job is not None:
+                windows_job.close()
+            cancel_file.unlink(missing_ok=True)
         result_line = next(
             (line for line in reversed(stdout.splitlines()) if line.startswith(_MARKER)),
             None,
@@ -351,6 +366,16 @@ class SubprocessBridgeAdapter:
                 if task.topology_delta is not None
                 else None
             ),
+            "design_context": (
+                task.design_context.model_dump(mode="json")
+                if task.design_context is not None
+                else None
+            ),
+            "generic_simulation": (
+                task.generic_simulation.model_dump(mode="json")
+                if task.generic_simulation is not None
+                else None
+            ),
             "instance_parameter_updates": [
                 update.model_dump(mode="json")
                 for update in task.instance_parameter_updates
@@ -358,6 +383,13 @@ class SubprocessBridgeAdapter:
             "instance_parameter_space": [
                 sweep.model_dump(mode="json")
                 for sweep in task.instance_parameter_space
+            ],
+            "analysis_stages": [
+                stage.model_dump(mode="json") for stage in task.analysis_stages
+            ],
+            "constraints": [
+                constraint.model_dump(mode="json")
+                for constraint in task.constraints
             ],
             "replace_existing": task.safety.replace_existing,
             "timeout_seconds": task.limits.timeout_seconds,
@@ -588,6 +620,20 @@ class SubprocessBridgeAdapter:
                 if task.resolved_analysis()
                 in {AnalysisKind.QUALITY, AnalysisKind.PSRR}
                 else task.limits.timeout_seconds + 240
+            ),
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.EDA_RESULT)
+
+    def simulate_analysis_stages(
+        self, task: TaskSpec, parameters: dict[str, float]
+    ) -> AdapterResult:
+        payload = self._task_payload(task)
+        payload["parameters"] = parameters
+        data = self._request(
+            "simulate_existing_schematic_stages",
+            payload,
+            timeout=(
+                len(task.analysis_stages) * task.limits.timeout_seconds + 240
             ),
         )
         return AdapterResult(data=data, evidence_source=EvidenceSource.EDA_RESULT)

@@ -55,9 +55,141 @@ VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PD
 | `ade.setup.apply` | 对声明 analysis 做旧状态 CAS，并新增不存在的命名 output/spec；一次保存后独立重开回读 | Maestro setup 写入 |
 | `simulation.run` | 单点仿真并判规格 | scratch/计算 |
 | `design.tune` | 有限搜索；设计参数提交 OA，纯 testbench 条件只记录选择 | 计算；按维度决定是否写 OA |
-| `design.close_loop` | 建图、搜索、应用、回读 | 计算 + OA 写入 |
+| `design.close_loop` | 固定模板完整闭环；或在已有 schematic 上比较一份预声明可逆局部 delta 与同一有限参数域，原子提交 topology+parameters | 计算 + OA 写入 |
 
 因此上层 agent 可以只要求“建原理图”“把这组参数应用进去”“微调 ADE analysis/output”“接收人工 ADE 结果”“后台运行已有 ADE setup”或“只跑仿真”，无需伪装成完整设计任务。
+
+## 用户拓扑驱动的设计上下文
+
+L5B 的输入不是要求 VDA 从空白发明一张复杂电路。用户可以提供已有 OA schematic
+或大致拓扑，再用可选 `design_context` 声明：输入/输出/供电/偏置/器件等角色，冻结的
+instance/net/pin，可固定或搜索的 semantic/CDF 参数，允许触及的局部 topology-delta
+operation 和对象名，以及整个设计需要的 analysis 与 metric。角色可以来自 `user_input`，
+也可以由 Codex 推断后明确标为 `software_inference`；两者都进入上下文 SHA-256 和 plan
+token，不能在执行中静默改变。
+
+planner 把 `design.context.bind` 放在 OA 写入或仿真之前；带上下文的 close-loop 强制
+`create_if_missing=false`，先读取用户已有 schematic，不能在绑定前创建模板。executor 将完整 OA inspect
+规范化为已有 canonical topology graph，核对角色对象、声明的端子到 net 连接、冻结对象、
+实际存在的 CDF 字段和可选 topology fingerprint；审计结果记录为 `software_inference`，
+原始 OA 仍是 `bridge_readback`。带上下文的参数任务只能触及声明为 `fixed`/`search` 的字段；
+带上下文的通用 topology-delta 还必须同时满足 operation 种类、mutable object 和 operation
+数量上限，且 `schematic.transform` 必须提供这个显式 delta，不能借旧专用 transform 绕过
+审计。没有 `design_context` 的独立 `parameters.apply` 继续保留 Bridge 原有参数能力，
+因此新约束不会反向收窄人工直接写入面。
+
+第二个本地纵切为 `existing_schematic simulation.run` 增加了 `generic_simulation`。它只接受
+结构化独立电压/电流源、R/C 负载、单端或差分电压表达式、命名 DC/source-current/MOS OP
+标量，以及显式 OA-CDF→`si` 参数映射；不接受 raw Spectre、SKILL 或 shell 文本。worker
+只读重开同一 OA schematic 并重新绑定 `design_context`，复用现有 Bridge `si -batch` 与
+Spectre runner；仿真前要求 flat primitive instance/model/node 集合完全一致、声明参数按
+Spectre 数值语义一致。DC 和 OP 原始标量、复数 AC 波形及 simulator artifact manifest 是
+`eda_result`，上下文、拓扑/参数比较和波形指标提取是 `software_inference`。
+
+第三个本地纵切把同一契约开放给 `existing_schematic design.tune`，但不增加新的搜索器或
+电路分支。通用调优只接受 `instance_parameter_space`，或只含
+`instance_parameter_updates` 的原子 `candidate_set`；不接受模板专用 semantic space 或
+theory seed。每个固定/搜索 raw 字段必须同时位于 `design_context` 权限和
+`netlist_parameter_bindings` 中，避免“OA 写了值、但没有证明该值进入 `si` 网表”。executor
+直接复用既有逐候选 OA 暂存/定向回读、同源仿真、checkpoint、预算、最佳写回和无可行恢复；
+transport interruption 仍记为 `system_event`，独立 OA 回读后只重试未完成候选。
+
+第四个纵切开放受控的 `existing_schematic design.close_loop`。任务不要求 VDA 从空白
+生成拓扑，而是提供一个 hash-bound 基线、一份已有通用 topology-delta 及其 exact inverse、
+变体独立的 `design_context`/`generic_simulation`，以及同一组完整原子参数候选。首版只比较
+基线与一个局部变体；必须声明 objective，且 `max_iterations` 必须覆盖完整 `2 × N` 域，不能
+根据前缀样本提交某个拓扑。候选可来自人工、理论或 OP 局部模型；推导来源若是
+`software_inference` 必须继续绑定来源 hash，controller 本身不随机生成尺寸。
+
+executor 先穷尽基线候选，精确恢复搜索前参数，再执行 forward delta；独立回读、绑定变体
+上下文后穷尽同一候选域。变体新增实例只允许声明自己的固定 CDF 值，而且必须由变体权限和
+OA→`si` binding 覆盖；保留实例的搜索字段在两条路径中必须相同。每个候选使用扁平全局
+index 写 checkpoint，并保存 topology variant ID/SHA。只有两条路径的全部 `eda_result`、
+参数 `bridge_readback` 和 context/topology `software_inference` 都完整时才按约束与 objective
+选优；完全同分保留基线。变体胜出时提交其参数，基线胜出时先 exact inverse 再提交基线
+参数；全域不可行恢复原始基线。中断恢复只接受完整基线或完整变体指纹，未知/部分 topology
+不会被自动覆盖。
+
+`analysis_stages` 把通用既有 schematic 的候选评估扩展为有序的
+DC/AC/transient/noise Gate。每项顶层 constraint 必须且只能归属一个 stage；非末级必须有
+明确 gate，objective 必须由至少一个声明 stage 产生。executor 分级保存原始 metric、来源、
+constraint 和 completeness：完整 EDA 结果违反前级约束才允许跳过后续分析，缺指标、空波形、
+仿真错误或重复 metric 冲突都属于 incomplete/system evidence，不能伪装成电路不可行。
+transient/noise 与 DC/AC 共用 typed `generic_simulation`，只开放声明的 source/load/transfer、
+coherent amplitude sweep 与普通 noise sweep，不接受 raw design deck。
+
+stage 执行策略是显式契约。缺省 `isolated` 保留 stage 级 checkpoint/resume，每一级独立重开
+OA 并生成 `si` 网表。`shared_netlist` 则在一个候选的单个 worker 中只回读一次 OA、生成并
+解析一次 `si`，再在同一 netlist path/SHA-256 上顺序运行所需 Spectre analysis；worker 可按
+同一 constraint 公式提前停，但 executor 必须独立重算并核对精确 stage prefix、终止位置、
+重复 metric 和共享网表证据。该模式的 checkpoint 粒度降为候选边界，中断后重跑当前候选，
+不会信任半批结果。两个策略改变的是执行成本与恢复粒度，不改变 EDA 真值、候选排序或 OA
+提交规则。真实三候选 Gate 将 9 个 simulation action 从 739.195 s 降为 309.555 s，全部
+metric 与隔离模式逐项相同；详见
+`docs/validation/2026-07-31-existing-schematic-staged-multi-analysis-live.md`。
+
+首个真实 Gate 已在 `vb_pdk_smoke/vda_cs_cascode_gate_001/schematic` 的当前
+`MN0+MNCAS+RD0` 拓扑完成只读 DC/AC。worker 与前置 inspect 都用同一套逻辑/物理 pin
+canonical geometry 重新计算 context topology SHA；首次 live 暴露并修复了二次回读漏掉物理
+pin 属性而产生假哈希漂移的问题。两次成功运行的 topology SHA 和 `si` netlist SHA 均相同，
+9 项 CDF→netlist 映射全部匹配，17 项可对照 OP/AC 指标与旧专用 common-source/cascode
+路径的最坏相对差为 `4.1e-16`。
+
+同一 cell 随后完成真实三点 OA-write 通用调优。executor 只搜索
+`MNCAS.Wfg=750.0n/1u/1.25u`；每点都先定向回读 OA，再证明 `si` 中对应 `MNCAS.w`
+一致，三点保持同一 topology SHA 且各自产生完整 Spectre manifest。候选 1、2 完成后，候选
+3 的 `parameters.stage` read_schematic 遇到 `WinError 10054`；executor 以
+`system_event` 保留失败，从仍为上一个已确认点 `1u` 的 OA 状态恢复初始 `750.0n`，
+checkpoint 指向 index 3。独立 OA/进程审计通过后，resume 没有重复前两个
+Spectre 点，只执行候选 3、最终提交和 after inspect。三个点均满足声明的临时 AC 约束；由于
+没有 objective，首点按声明顺序被提交，这只验证 selection 语义而不证明 AC 性能最优。任务外
+只读 inspect 又确认最终 `MN0.Wfg=1u`、`MNCAS.Wfg=750.0n`、`RD0.r=20K` 与完整结构。
+
+2026-07-31 又在新建且 non-overwrite 的
+`vb_pdk_smoke/vda_existing_close_loop_gate_001/schematic` 完成拓扑+参数 live Gate。create 后先
+由独立 inspect 编译 fresh exact baseline/alternative SHA，不接受模板旧 hash；同一两个
+`(MN0.Wfg,RD0.r)` tuple 分别在普通共源与固定 `RS0=750 ohm` 的源退化变体上跑完四次
+OA→`si`→Spectre AC。四份 topology/parameter binding、271 点波形和 manifest 均匹配，显式
+GBW objective 选择 baseline 的 `Wfg=1.1u,RD=18.5K`。executor 执行 exact inverse、提交完整
+胜出参数，任务外 inspect 再次确认 baseline topology SHA、无 `RS0/NSRC` 且参数一致。候选 1、
+2 后的真实 `WinError 10054` 被记为 `system_event`；恢复验证 exact baseline，resume 从全局
+index 3 继续且没有重跑前缀。
+
+后续纵切不再把 nominal 搜索与昂贵质量复核绑成同一候选域。可选 `winner_verification` 拥有
+独立的 stage、constraint、AC/linearity/noise sweep 和最多五个 operating condition；nominal
+搜索先产生 provisional winner，executor 只暂存该点并用 `shared_netlist` 运行 winner-only Gate。
+逐条件 VDD 必须通过 `operating_condition_supply_source` 绑定到一个已声明的 voltage source；每个
+condition 都使用 profile 映射的 process section、温度和供电。任一条件不完整或不满足约束时，
+executor 恢复搜索前完整 OA 参数并清空 selection，不会自动改选未经同一 Gate 验证的 runner-up。
+2026-07-31 的真实两点任务只对 nominal GBW winner `MN0.Wfg=1u/RD0.r=5K` 运行
+TT/27 ℃/0.90 V 与 SS/125 ℃/0.81 V 的 DC→AC→transient→noise；两条件均通过，最终独立
+OA readback 与 selection 相同。一次 `si.env` SCP/DNS 中断被保留为 `system_event`，恢复初值并
+从 candidate 1 边界续跑。
+
+拓扑 refinement 现接受最多七个独立 alternative，同时保留旧单 alternative task 的兼容解析。
+所有 delta 必须锚定同一个 baseline SHA-256，且 after 指纹互不相同；每个 alternative 各自绑定
+design context、generic simulation 和新增实例的固定参数。executor 将候选域展平为
+`(baseline + alternatives) × parameter candidates`，每个变体都从精确共同基线开始；在进入下一
+变体前先执行当前 inverse。最终 winner 可以是 baseline、最后一个 alternative，也可以是在最后
+一个变体运行完后回到更早 alternative；未知或部分 topology 指纹一律拒绝自动写。checkpoint
+保存扁平 index 和 exact topology identity，本地故障测试覆盖 alternative 中断、恢复、早期与末尾
+变体胜出、全不可行和共享基线拒绝。2026-07-31 的 live Gate 又在一个 non-overwrite 新 cellview 上让
+common-source、固定源极退化和 cascode 三个 variant 共用两个实例参数 tuple，执行完整 6 点 staged
+DC→AC。每点的 OA topology、CDF 参数、`si` primitive/node graph 和 netlist 参数均匹配；三次入口
+SSH/Bridge 中断都在独立 OA 回读证明 exact baseline 或 candidate state 后从扁平 index 2/5/6 恢复，
+没有重跑已完成前缀。最终 winner 为 cascode，controller 从共同 baseline 重建该 variant、写回参数并由
+任务外 inspect 复核。因此 multi-alternative OA round-trip 已 live verified，但仍只证明声明的离散域，
+不是自动发明拓扑或全局优化。
+
+通用 `si` 核对还增加了一个刻意收窄的一层 hierarchy slice。任务必须逐个声明 top-level
+instance、child library/cell/schematic、`si` subcircuit 名和 terminal order。worker 将顶层 call
+与 OA instance/master/端子逐项比较，再用 Bridge 独立回读 child schematic，证明 child pin set
+及 primitive instance/model/node graph 与 subckt body 相同；child topology SHA 和来源进入证据。
+任何未绑定的非 primitive master、nested subcircuit、节点/terminal-order 漂移都会在 Spectre 前
+拒绝。该能力已有 parser/readback fixture 与负向测试，但尚无真实层次化 OA smoke；CDF 派生关系
+（例如 fingers/multiplicity 的总宽度）、更深 hierarchy、并发人工 editor、mismatch/Monte Carlo
+也仍未闭合。现有反相器、共源和差分对 worker 继续作为真实执行后端和回归基线，而不是未来
+能力边界。
 
 `analysis` 与电路参数分离。反相器省略时解析为 `transient`，共源级和差分对省略时解析为 `dc`；AC 必须显式声明 `analysis: "ac"` 以及 `ac_sweep.start_hz/stop_hz`。差分对电源抑制使用独立的 `analysis: "psrr"`，复用 AC sweep 契约但运行差模、VDD 注入和 VSS 注入三条路径；只有该 analysis 可选声明位于 sweep 内的 `evaluation_stop_hz`，用于计算从 start 到该频率的带限最差 PSRR。固定多 analysis 质量门使用 `analysis: "quality"`，并要求 `ac_sweep`、`linearity_sweep`、`noise_sweep` 同时存在。扫频点密度、低频参考点数、参考窗变化、PSRR 评估频带、线性度窗口和噪声频带都属于任务与 plan token。这样换 analysis 或改变指标定义不会复用旧 token，也不会把默认设置伪装成 `user_input`。
 
@@ -86,7 +218,7 @@ VDA 保留两种用途不同的参数表示：
 - `parameters` / `parameter_space` 是电路模板已定义的 canonical semantic parameters，例如 `device_width_um`、`load_resistance_ohm`、`bias_v` 和 AC `load_ff`。它们可参与仿真、规格判定和有限搜索，但并非都写 OA：W/L/RD/RS 是设计参数，bias/VDD/外部负载是 testbench 条件。当前 MOS width semantic 指单指宽 `Wfg`；多指 OA/`si` 一致性另外核对 `finger_width`、`fingers/nf`、`m/multi` 和总有效宽度，不能把网表 `w` 无条件当成 `Wfg`。
 - `instance_parameter_updates` 是人工明确指定的实例级 CDF/OA 写入，例如 `MN0.fingers="2"`、`MN0.m="1"` 或 `RD0.r="22k"`。参数名和值按 Bridge 字符串契约原样传递，不做单位、别名或枚举推断。
 
-`existing_schematic` 是不依赖固定拓扑模板的通用 circuit kind，开放 `schematic.inspect`、预声明 `schematic.transform`、`parameters.apply`、`ade.prepare`、`ade.capture`、`ade.run`、`ade.corners.apply`、`ade.variables.apply` 与 `ade.setup.apply`：inspect 保留 Bridge reader 的完整结构对象、geometry、notes、nets/pins 细节和所有可回读 CDF 参数；transform 只执行上述 exact topology-delta 子集；参数操作允许人工指定任意已有实例；ADE 操作则为已有 design 准备新的 Maestro 人工入口、读取人工状态、后台运行一个已保存 setup，或用显式旧状态前置条件增量修改 corner、变量/selection、analysis 和新增 output/spec，不要求 VDA 理解 DUT 拓扑。反相器和共源模板也能使用相同原始参数与 ADE 交接路径，并可在一个参数任务中组合 semantic parameters 与原始实例参数；semantic 写入先执行，原始 CDF callback 后执行，最终 OA 必须同时满足所有已声明 semantic 值和原始字段值。
+`existing_schematic` 是不依赖固定拓扑模板的通用 circuit kind，开放 `schematic.inspect`、预声明 `schematic.transform`、`parameters.apply`、typed `simulation.run`、有限 raw-instance `design.tune`、受控单-delta `design.close_loop`、`ade.prepare`、`ade.capture`、`ade.run`、`ade.corners.apply`、`ade.variables.apply` 与 `ade.setup.apply`：inspect 保留 Bridge reader 的完整结构对象、geometry、notes、nets/pins 细节和所有可回读 CDF 参数；transform 只执行上述 exact topology-delta 子集；参数操作允许人工指定任意已有实例；通用 simulation/tune/close-loop 使用 design context 与 typed testbench/metric/netlist binding；ADE 操作则为已有 design 准备新的 Maestro 人工入口、读取人工状态、后台运行一个已保存 setup，或用显式旧状态前置条件增量修改 corner、变量/selection、analysis 和新增 output/spec，不要求 VDA 理解 DUT 拓扑。反相器和共源模板也能使用相同原始参数与 ADE 交接路径，并可在一个参数任务中组合 semantic parameters 与原始实例参数；semantic 写入先执行，原始 CDF callback 后执行，最终 OA 必须同时满足所有已声明 semantic 值和原始字段值。
 
 执行路径先结构化回读目标 schematic 并确认实例存在，再复用 Bridge 的 `set_instance_params(..., param_filters=None)` 触发 CDF callback、`schCheck` 和 `dbSave`。通用 reader 为控制输出会省略空值和超长值，因此 VDA 不用摘要缺失来限制 Bridge：写入后另发只读 SKILL，直接打开目标 OA、定位实例 CDF，并逐字段比较真实 `p~>value` 与请求字符串；executor 的 `schematic.inspect.after` 再独立执行一次同样的定向读取。首次值不一致时，worker 至多按任务声明顺序逐字段重放一次；计划必须披露该副作用，最终仍不一致则整个 run 失败。
 
@@ -98,7 +230,7 @@ CDF 的 `display` 和 `editable` 元数据不是写入 allowlist。2026-07-20 �
 
 任务请求及原始值标为 `user_input`；真实 OA 确认标为 `bridge_readback`；demo 只能产生 `software_inference`。完整 inspect 会保留 callback 导致的旁路参数变化，但 VDA 只对任务显式列出的字段宣称确认。`instance_parameter_updates` 不会隐式进入搜索；调优必须用 `instance_parameter_space` 逐维声明 exact instance、未过滤 OA inspect 中真实存在的 CDF 字段名和有限原始字符串集合。executor 将固定实例字段、raw sweep 与 semantic space 组合成一个受 `max_iterations` 截断的确定性笛卡尔积，不把所有 CDF 自动扩成搜索空间。每个 candidate 只把具体点交给 Bridge，要求请求、实际应用映射、立即定向回读一致；candidate/checkpoint 分别保存原始字段与 canonical OA semantic 状态，最佳值或初始值写回后再独立定向回读。独立 `parameters.apply` 继续保留 Bridge 的别名和更广字符串能力；有限搜索为保证初始值恢复而只接受可在完整 readback 中精确定位的实际字段名。
 
-`candidate_set` 是与上述逐维 space 正交的通用原子候选域，只用于 `design.tune`/`design.close_loop`。每个候选同时携带一个完整的 semantic/testbench 参数表和可选的原始实例参数表；所有 tuple 必须声明相同字段面、ID 和参数值组合必须唯一，固定字段不能与候选字段重叠。它与 `parameter_space`、`instance_parameter_space`、专用 `theory_seed` 互斥，因此 executor 按声明顺序逐 tuple 执行，不会把 `W/bias/load/CDF` 再展开成笛卡尔积。同一实例上的固定 raw 字段与候选 raw 字段按字段深合并，既不会丢掉人工固定的 `m`，也不会限制候选调整 `fingers`。独立 `parameters.apply` 和既有逐维搜索均保持原能力面。
+`candidate_set` 是与上述逐维 space 正交的通用原子候选域，只用于 `design.tune`/`design.close_loop`。每个候选同时携带一个完整的 semantic/testbench 参数表和可选的原始实例参数表；所有 tuple 必须声明相同字段面、ID 和参数值组合必须唯一，固定字段不能与候选字段重叠。它与 `parameter_space`、`instance_parameter_space`、专用 `theory_seed` 互斥，因此 executor 按声明顺序逐 tuple 执行，不会把 `W/bias/load/CDF` 再展开成笛卡尔积。同一实例上的固定 raw 字段与候选 raw 字段按字段深合并，既不会丢掉人工固定的 `m`，也不会限制候选调整 `fingers`。对 `existing_schematic design.tune`，候选只能携带 raw instance 字段；这是为了保持拓扑无关，不为未知电路发明 semantic alias。独立 `parameters.apply` 和既有逐维搜索均保持原能力面。
 
 原子候选来源只能是 `user_input` 或 `software_inference`；后者至少绑定一个 SHA-256。候选 ID、预测指标、来源和 hash 进入 task、checkpoint、candidate record 与 `search_audit`，恢复时逐项复核。预测值始终保留为候选来源证据，不能参与最终覆盖：可行性、规格和最终排序仍只使用本次 adapter 返回的真实仿真指标。demo adapter 即使跑通也只能产生 `software_inference`，不能把候选生成器升级成 EDA 证据。
 
@@ -565,11 +697,11 @@ live 首版曾把 PMOS 实例命名为 `PM0/PM1`；OA 和 `si` 一致，但 Spec
 
 ## 进程与资源生命周期
 
-Bridge subprocess adapter 的本地进程边界是一个请求一个 Python worker，不经过 PowerShell。Windows worker 使用隐藏窗口和独立进程组，并在创建后立即加入本次请求专属的 Job Object。Job Object 正常关闭时不带 `KILL_ON_JOB_CLOSE`，因此 Bridge 已建立并写入共享 state 的 tunnel 可以按 Bridge 原语跨 worker 复用。每个请求另有唯一 cancel marker 和调用方 PID；timeout、`KeyboardInterrupt` 或调用方消失时，worker watchdog 先中断主线程，让 action/worker `finally` 恢复 Maestro runtime、关闭 session/client 并删除 marker。协作窗口最多 30 秒，随后仍以 `TerminateJobObject` 回收 worker、SSH/SCP/tar 等全部本地后代。若 Job Object 无法建立，请求在执行 payload 前失败。POSIX 路径使用同一协作信号，再以独立 session/process group TERM→KILL 收敛。
+Bridge subprocess adapter 的本地进程边界是一个请求一个 Python worker，不经过 PowerShell。Windows worker 使用隐藏窗口和独立进程组，并在创建后立即加入本次请求专属的 Job Object。每个请求另有唯一 cancel marker 和调用方 PID；timeout、`KeyboardInterrupt` 或调用方消失时，worker watchdog 先中断主线程，让 action/worker `finally` 恢复 Maestro runtime、关闭 session/client 并删除 marker。协作窗口最多 30 秒，随后仍以 `TerminateJobObject` 回收 worker、SSH/SCP/tar 等全部本地后代。正常返回也会先让 worker 完整执行 `finally` 和输出结构化结果，再清空本次 Job 中仍存活的 helper descendant，避免成功路径遗留端口转发。若 Job Object 无法建立，请求在执行 payload 前失败。POSIX 路径使用同一协作信号，再以独立 session/process group TERM→KILL 收敛。
 
 显式 tunnel 生命周期也不再要求调用方从外层 PowerShell 直接启动 Bridge。`vda bridge start|status|stop` 只代理与 Bridge Python 同一虚拟环境中的公开 `virtuoso-bridge` console script；VDA 不解析连接配置、不实现 SSH，也不接管 Bridge state。Windows launcher 复用 worker 的 `CREATE_NO_WINDOW`、`SW_HIDE`、独立进程组和 Job Object 边界，stdout/stderr 则定向回当前 VDA 终端。默认过滤 Bridge 的 `[cmd]` 原始命令，只显示阶段、warm/状态结果和返回码；`--verbose` 才回显诊断。正常完成只关闭短生命周期 launcher 的句柄，不终止已建立的共享 tunnel；启动过程中 Ctrl+C 则终止仍归本次 Job Object 所有的进程树。该入口是运行体验和进程所有权能力，不产生 `bridge_readback` 或 `eda_result`；只有其委托的 `status` 输出能作为即时工具状态诊断。
 
-worker 内部把本次创建的 `VirtuosoClient`/`SSHClient` 注册为资源，action 无论成功还是异常都逆序显式 `close()`；资源对象向外抛出的关闭异常会使 worker 结构化失败，不会静默吞掉。这里的 `close()` 只释放本次 runner/persistent shell，遵守 Bridge 的共享 tunnel 语义，不调用会影响其他脚本的 `stop()`。Maestro action 另在各自 `finally` 中关闭 background session；direct Spectre 使用 `TemporaryDirectory`，正常/异常 Python 展开时清理本地网表与下载目录。
+worker 内部把本次创建的 `VirtuosoClient`/`SSHClient` 注册为资源，action 无论成功还是异常都逆序显式 `close()`；资源对象向外抛出的关闭异常会使 worker 结构化失败，不会静默吞掉。这里的 `close()` 只释放本次 runner/persistent shell，不调用会影响其他脚本的 `stop()`；共享 tunnel 由独立 `vda bridge start` launcher 按 Bridge 原语建立，不属于请求 worker 的 Job，并一直保留到显式 `vda bridge stop`。Maestro action 另在各自 `finally` 中关闭 background session；direct Spectre 使用 `TemporaryDirectory`，正常/异常 Python 展开时清理本地网表与下载目录。2026-07-31 的真实复核中，资源盘点前后共享 SSH PID 不变且没有新增 worker 后代，`bridge stop` 后 SSH 与 VDA/Bridge Python 进程均为 0。
 
 远端进程不能只靠关闭本地 SSH 来证明结束。direct inverter/common-source/differential-pair/device-characterization 在各自唯一 `/data/xum` 根下上传小型 `vda_spectre_guard.sh`，执行位和 SHA-256 都通过 Bridge 独立回读。guard 以任务 timeout 运行 Spectre，先发 TERM，10 秒后仍未结束则 KILL；Bridge transport 等待比该上限多 15 秒。SpectreSimulator 的 `remote_work_dir` 同时固定到该 VDA 根，因此子运行目录不会散落成无所属的顶层 nonce；成功下载后 Bridge 清理子目录，失败诊断和同源 netlist 根按证据策略保留。
 

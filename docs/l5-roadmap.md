@@ -182,9 +182,12 @@ Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发�
 
 ## L5B：单模块设计代理（产品目标）
 
-面向反相器、单管放大器、差分对等单模块，由规格驱动完成更完整的设计过程：
+面向用户给出大致拓扑或已有 schematic 的单模块，由规格驱动完成更完整的设计细化；
+首版不要求 VDA 从空白发明复杂电路，也不把模块限制为反相器、单管或差分对：
 
-- 从受控拓扑目录中选择或拒绝拓扑。
+- 理解用户声明或确认的端口、器件角色、冻结对象和可修改边界。
+- 在用户起始拓扑周围提出、执行或拒绝受控的局部 topology-delta，而不是大范围重建。
+- 自行计算和调整实际 schematic 暴露的参数，不要求每个新电路增加一套核心 executor。
 - 自动建立 testbench、analysis、output 和 sweep。
 - 处理 DC operating point、AC、tran、noise 和多 corner。
 - 自动流程与可人工打开、调整、重跑的 ADE setup/history 双向交接。
@@ -193,6 +196,100 @@ Bridge 隔离分支进一步加入幂等 SSH 有界退避和仅限 payload 发�
 - 生成可复核的设计报告和未闭合项目。
 
 L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑出一组好看的波形。
+
+2026-07-28 已完成该方向的第一项本地基础：新增 hash-bound `design_context`，把任意
+结构化 OA readback 绑定到用户/Agent 声明的角色、端子连接、冻结对象、实例/semantic
+参数权限、analysis/metric 意图和局部 topology-delta envelope。planner 在所有后续远端
+动作前显式加入只读绑定步骤，executor 将审计记为 `software_inference`；同一审计器已在
+命名和结构不同的单端级、差分级本地图上通过。它先约束已有 inspect/parameter/
+topology-delta 及专用仿真路径，现也作为下述通用 simulation/tune/close-loop 的共同前置；
+这仍是 L5B 通用化基础而不是 L5B closure。
+
+同日第二个本地纵切开放 `existing_schematic simulation.run` 的受限通用 DC/AC 路径。任务以
+typed `generic_simulation` 声明 voltage/current sources、R/C loads、single-ended 或
+differential transfer、DC/source-current/MOS OP metrics 和 OA-CDF→`si` 参数绑定；任何 raw
+Spectre/SKILL/shell 字段均拒绝。worker 在远端计算前再次绑定同一 `design_context`，并要求
+OA 与 `si` 的 flat primitive instance/model/node 集合及声明参数一致，然后复用现有 process
+guard、Spectre runner、PSF 解析和 SHA-256 manifest。首个 nominal TSMC N28 live Gate 已在
+当前 `MN0+MNCAS+RD0` 共栅级联 OA 上完成只读 DC/AC：9 项 CDF 映射、拓扑与网表均一致，
+通用路径的 17 项 OP/AC 指标与旧专用路径最坏相对差 `4.1e-16`。Gate 还真实捕获并修复了
+worker 二次回读漏掉物理 pin geometry 导致的假 context hash 漂移，并在一次 `WinError 10054`
+后恢复 tunnel、确认 `si=0/spectre=0` 再重试。该首个 Gate 当时只覆盖 flat DC/AC；后续纵切
+已加入 staged transient/noise、winner-only PVT 和显式一层 hierarchy 本地契约，但仍不是
+L5B closure。
+
+同日第三个本地纵切完成通用有限实例参数闭环。`existing_schematic design.tune` 现在只接受
+实际 CDF/OA 字段的 `instance_parameter_space`，或只含实例更新的原子 `candidate_set`；每个
+被写字段必须同时在 `design_context` 的 search/fixed 权限和 OA→`si`
+`netlist_parameter_bindings` 内，拒绝未知电路的 semantic alias、theory seed 或未绑定写入。
+executor 没有新增电路分支，直接复用既有逐候选暂存、callback 后定向回读、同源仿真、
+checkpoint、预算、最佳写回和无可行恢复。本地三点 fixture 已覆盖最佳点二次提交、全域不可行
+恢复初值、`best_evaluated` 预算边界，以及候选 2 transport interruption 记为
+`system_event`、恢复初值并从 index 2 重试。
+
+2026-07-29 在同一 `MN0+MNCAS+RD0` TSMC N28 cell 上完成首个真实 OA-write Gate：
+`MNCAS.Wfg=750.0n/1u/1.25u` 三点均完成 OA 定向回读、9 项 CDF→`si` binding、Spectre
+AC 与完整 artifact manifest，三点拓扑指纹一致。候选 1、2 完成后，候选 3 前的真实
+`WinError 10054` 触发基线恢复；checkpoint 保留 completed prefix，独立 OA/资源核验后从
+index 3 续跑，未重复前两个候选。最终任务外 inspect 确认结构不变且
+`MNCAS.Wfg=750.0n`。三点都可行且任务没有 objective，因此回写首个声明点只验证通用状态机，
+不是设计性能最优。当前状态升级为 **generic existing-schematic finite raw-instance OA-write
+tuning live verified for one flat nominal AC field**。
+
+2026-07-31 完成第四个纵切：`existing_schematic design.close_loop` 可在一个 hash-bound
+基线与一份预声明、可逆的局部 topology-delta 间运行相同的有限 raw-instance 候选域。
+首版只允许一个 alternative，强制显式 objective 和覆盖完整 `2×N` 域的预算；候选可由人工、
+理论或 OP 局部模型产生，但 controller 不随机扩点。两条路径分别做 context bind、OA 参数
+写回/回读、OA→`si` binding 和 DC/AC；全部证据齐全后才提交 topology+parameters，完全同分
+保留基线。全不可行恢复执行前基线；transport checkpoint 以全局候选 index 和 topology SHA
+恢复，未知/部分结构拒绝自动覆盖。本地 fixture 已覆盖多字段原子 objective、alternative 与
+baseline winner、全不可行和 alternative 中断恢复。fixture 中的 `eda_result` 只用于验证状态
+机，不是电路性能证据。
+
+同日已在 non-overwrite 的 `vda_existing_close_loop_gate_001` 完成真实同源 Gate。create 后从
+实际 OA inspect 编译 fresh baseline/alternative hash；两个 `(MN0.Wfg,RD0.r)` tuple 在普通共源
+和固定 `RS0=750 ohm` 的源退化变体上共完成四次 OA→`si`→Spectre AC。四点的拓扑/参数绑定、
+271 点波形和 manifest 均完整；按 GBW 选择 baseline 的 `1.1 um/18.5 kohm`，随后 exact inverse
+与独立 inspect 确认无 `RS0/NSRC` 且胜出参数已写回。baseline 两点之后的真实
+`WinError 10054` 被记为 `system_event`，恢复 exact baseline 后从 checkpoint index 3 继续，
+没有重算前缀。状态升级为 **single-delta existing-schematic topology-and-parameter same-source
+close-loop live verified at nominal top_tt**。
+
+2026-07-31 随后闭合 staged generic multi-analysis 的首个真实纵切。任务可把
+DC/AC/transient/noise 声明成有序 stage，把每项 constraint 唯一分配给对应分析；只有完整
+EDA 结果违反前级约束才提前淘汰，missing metric/空结果/仿真异常保持 incomplete。新建的
+`vda_l5b_staged_gate_001` 用 3 个原子 `(MN0.Wfg,RD0.r)` tuple 实际执行 9 个 analysis：首点
+在 DC 后拒绝，另两点完成 gain/BW、THD/功耗与 noise，按 GBW 选择并独立回读
+`1u/5K`。显式 `shared_netlist` 又把每个候选合并成一次 worker/OA readback/`si`，executor
+独立复算 gate 和 stage prefix；9 个 simulation action 从 739.195 s 降为 309.555 s，完整
+成功命令从约 787 s 降为 358 s，三点全部指标与隔离模式逐项相等。首次 live 暴露“一项
+metric 同时有上下界”的索引缺陷，修复后从 candidate-boundary checkpoint 成功续跑，失败前后
+OA 恢复均有独立回读。
+
+同日继续完成三个面向 L5B 通用性的纵切。第一，`winner_verification` 将便宜 nominal 搜索与昂贵
+质量 Gate 分开：只把 provisional winner 暂存后，才按独立约束和显式 operating conditions 运行
+DC/AC/transient/noise；失败或不完整会恢复搜索前 OA 并撤回推荐，不自动提升未复核 runner-up。
+真实两点 TSMC N28 Gate 以 GBW 选择 `MN0.Wfg=1u/RD0.r=5K`，只对该点运行
+TT/27 ℃/0.90 V 与 SS/125 ℃/0.81 V 的四分析；两条件全部通过，任务外 OA 回读一致。
+一次候选 1 下载 `si.env` 的 DNS/SCP 中断被记为 `system_event`，恢复并从 exact candidate
+boundary 完成。
+
+第二，topology refinement 从一个 delta 泛化为最多七个共同基线、after 指纹各异的 independent
+alternatives。controller 展平 topology×parameter domain，在每个 alternative 之间 exact inverse
+回共同基线，允许 baseline、最后或更早 alternative 胜出；checkpoint 和恢复均绑定 exact topology
+identity，未知/部分状态不写。该 controller 随后在 non-overwrite 新 cellview 上完成 common-source、固定
+源极退化和 cascode 三 topology × 两参数 tuple 的真实 Gate：6/6 OA→`si` DC/AC 完整，三次 transport
+中断均在任务外 exact readback 后从 index 2/5/6 恢复，最终写回唯一满足 gain/BW 门的 cascode
+`MN0.Wfg=1.1u/MNCAS.Wfg=750n/RD0.r=18.5K`。选择范围仍明确为完整声明离散域，不宣称连续或全局最优。
+第三，generic `si` 核对增加显式一层 hierarchy binding：top-level
+subcell call、terminal order、child OA pin/primitive graph 与 subckt body 必须逐项一致，nested 或
+未绑定 hierarchy 在 Spectre 前拒绝。hierarchy 目前有本地正向、负向和中断测试，但尚无 live OA Gate。
+
+这仍不是 L5B closure。派生 CDF、深层 hierarchy、一层 hierarchy 的真实 OA→`si`、并发人工
+editor、mismatch/Monte Carlo 仍是边界；本次 PVT 也只是 winner 的两个声明条件，不是 foundry
+signoff corner set。下一项优先工作应在用户首次提供的实际单模块拓扑上使用这些通用契约，按
+规格选择最小必要 analysis/PVT，并在实际设计需要 subcell 时补一层 hierarchy live 证据；不再为已知
+三点域增加随机候选。
 
 ## L5C：物理实现闭环
 
@@ -237,6 +334,10 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
   -> 结构化 standalone Spectre 轻量 A/B（共源/共栅级联已完成无 OA/si/Maestro 的 TSMC N28 live preview、完整 manifest 和进程归零；方向与 OA→si 一致，绝对值不作同源复现）
   -> preview shortlist → 普通 OA 同源复核（已知九点域 3/3 live；未见差分对八点域先冻结 top-3、后跑完整真值并以 ρ=1.0 保留 winner；机制已提炼为默认 fast path，不再安排独立应用 Gate）
   -> active-load + 对称源极退化组合拓扑（新 cellview forward/readback/七实例 si/DC/AC/CMRR/noise/transient/ICMR/PSRR/inverse/恢复态 DC 均已 live；质量闭环未过）
+  -> 用户拓扑 design_context（角色/冻结边界/参数权限/analysis/metric/topology-delta scope 本地 Gate 已通过）
+  -> existing_schematic 通用 OA→si DC/AC testbench/结果契约（本地 + nominal 共栅级联 live Gate 已通过；未增加电路专用 executor）
+  -> 通用 instance-parameter candidate/checkpoint/writeback（本地可行/不可行/预算/中断恢复、单字段 OA-write 与多字段 objective live 已通过）
+  -> 理论诊断 + topology/parameter refinement controller（单-delta nominal flat AC、staged DC/AC/transient/noise 与 shared-netlist live；winner-only 两条件 PVT live；三个 independent alternative 的 OA round-trip/checkpoint/winner writeback live；最多七个 alternative 与显式一层 hierarchy 本地 Gate 已通过，hierarchy live 待做）
   -> L5B 单模块闭环
   -> layout/DRC/LVS/PEX Gate
 ```

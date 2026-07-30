@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "id": "existing-schematic-generic-ac-demo",
+  "operation": "simulation.run",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vda_test",
+    "cell": "vda_user_stage",
+    "view": "schematic"
+  },
+  "analysis": "ac",
+  "ac_sweep": {
+    "start_hz": 1000.0,
+    "stop_hz": 100000000000.0,
+    "points_per_decade": 20,
+    "reference_points": 5,
+    "max_reference_variation_db": 0.5
+  },
+  "design_context": {
+    "schema_version": 1,
+    "id": "user-provided-single-ended-stage",
+    "roles": [
+      {
+        "role": "signal.input",
+        "nets": ["IN"]
+      },
+      {
+        "role": "signal.output",
+        "nets": ["OUT"]
+      },
+      {
+        "role": "device.input",
+        "instances": ["MN0"]
+      },
+      {
+        "role": "device.input_gate",
+        "terminals": [
+          {
+            "instance": "MN0",
+            "terminal": "G",
+            "net": "IN"
+          }
+        ]
+      }
+    ],
+    "instance_parameter_permissions": [
+      {
+        "instance": "MN0",
+        "parameters": ["w", "l"],
+        "modes": ["fixed", "search"]
+      }
+    ],
+    "required_analyses": ["dc", "ac"],
+    "metrics": [
+      "output_dc_v",
+      "supply_current_a",
+      "device_ids_a",
+      "low_frequency_gain_db",
+      "bandwidth_3db_hz",
+      "gain_bandwidth_product_hz"
+    ]
+  },
+  "generic_simulation": {
+    "schema_version": 1,
+    "sources": [
+      {
+        "name": "VDD_SRC",
+        "kind": "voltage",
+        "positive_node": "VDD",
+        "negative_node": "0",
+        "dc_value": 0.9
+      },
+      {
+        "name": "VSS_SRC",
+        "kind": "voltage",
+        "positive_node": "VSS",
+        "negative_node": "0",
+        "dc_value": 0.0
+      },
+      {
+        "name": "VIN_SRC",
+        "kind": "voltage",
+        "positive_node": "IN",
+        "negative_node": "0",
+        "dc_value": 0.45,
+        "ac_magnitude": 1.0,
+        "ac_phase_deg": 0.0
+      }
+    ],
+    "loads": [
+      {
+        "name": "CL0",
+        "kind": "capacitor",
+        "positive_node": "OUT",
+        "negative_node": "0",
+        "value": 1e-15
+      }
+    ],
+    "dc_voltage_metrics": [
+      {
+        "metric": "output_dc_v",
+        "expression": {
+          "positive_node": "OUT",
+          "negative_node": "0"
+        }
+      }
+    ],
+    "dc_current_metrics": [
+      {
+        "metric": "supply_current_a",
+        "source": "VDD_SRC"
+      }
+    ],
+    "operating_point_metrics": [
+      {
+        "metric": "device_ids_a",
+        "instance": "MN0",
+        "quantity": "ids"
+      }
+    ],
+    "transfer": {
+      "input": {
+        "positive_node": "IN",
+        "negative_node": "0"
+      },
+      "output": {
+        "positive_node": "OUT",
+        "negative_node": "0"
+      }
+    },
+    "netlist_parameter_bindings": [
+      {
+        "instance": "MN0",
+        "oa_parameter": "w",
+        "netlist_parameter": "w"
+      },
+      {
+        "instance": "MN0",
+        "oa_parameter": "l",
+        "netlist_parameter": "l"
+      }
+    ]
+  },
+  "constraints": [
+    {
+      "metric": "low_frequency_gain_db",
+      "relation": ">=",
+      "value": 10.0
+    },
+    {
+      "metric": "bandwidth_3db_hz",
+      "relation": ">=",
+      "value": 1000000.0
+    }
+  ],
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 600
+  },
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": false,
+    "replace_existing": false
+  }
+}

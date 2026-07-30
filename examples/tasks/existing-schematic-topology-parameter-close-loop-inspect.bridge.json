@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "existing-topology-parameter-close-loop-inspect",
+  "operation": "schematic.inspect",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_existing_close_loop_gate_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 300
+  },
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": false,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  }
+}
