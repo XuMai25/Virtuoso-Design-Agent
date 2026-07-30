@@ -29,6 +29,8 @@ _WORKER_ACTIONS = {
     },
     CircuitKind.EXISTING_SCHEMATIC: {
         "inspect": "inspect_existing_schematic",
+        "generate_symbol": "generate_existing_schematic_symbol",
+        "inspect_symbol": "inspect_existing_schematic_symbol",
         "transform": "transform_existing_schematic_topology_delta",
         "apply": "apply_existing_schematic_parameters",
         "simulate": "simulate_existing_schematic",
@@ -376,6 +378,11 @@ class SubprocessBridgeAdapter:
                 if task.generic_simulation is not None
                 else None
             ),
+            "symbol_generation": (
+                task.symbol_generation.model_dump(mode="json")
+                if task.symbol_generation is not None
+                else None
+            ),
             "instance_parameter_updates": [
                 update.model_dump(mode="json")
                 for update in task.instance_parameter_updates
@@ -410,6 +417,7 @@ class SubprocessBridgeAdapter:
             Operation.ADE_VARIABLES_APPLY,
             Operation.ADE_CORNERS_APPLY,
             Operation.ADE_SETUP_APPLY,
+            Operation.SCHEMATIC_SYMBOL_GENERATE,
         }:
             payload["analysis"] = task.resolved_analysis().value
             payload["analysis_source"] = (
@@ -517,6 +525,22 @@ class SubprocessBridgeAdapter:
     def inspect_schematic(self, task: TaskSpec) -> AdapterResult:
         data = self._request(
             _WORKER_ACTIONS[task.circuit]["inspect"],
+            self._task_payload(task),
+            timeout=min(task.limits.timeout_seconds, 120),
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
+
+    def generate_schematic_symbol(self, task: TaskSpec) -> AdapterResult:
+        data = self._request(
+            _WORKER_ACTIONS[task.circuit]["generate_symbol"],
+            self._task_payload(task),
+            timeout=min(task.limits.timeout_seconds, 180),
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
+
+    def inspect_schematic_symbol(self, task: TaskSpec) -> AdapterResult:
+        data = self._request(
+            _WORKER_ACTIONS[task.circuit]["inspect_symbol"],
             self._task_payload(task),
             timeout=min(task.limits.timeout_seconds, 120),
         )

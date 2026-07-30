@@ -281,15 +281,20 @@ identity，未知/部分状态不写。该 controller 随后在 non-overwrite �
 源极退化和 cascode 三 topology × 两参数 tuple 的真实 Gate：6/6 OA→`si` DC/AC 完整，三次 transport
 中断均在任务外 exact readback 后从 index 2/5/6 恢复，最终写回唯一满足 gain/BW 门的 cascode
 `MN0.Wfg=1.1u/MNCAS.Wfg=750n/RD0.r=18.5K`。选择范围仍明确为完整声明离散域，不宣称连续或全局最优。
-第三，generic `si` 核对增加显式一层 hierarchy binding：top-level
-subcell call、terminal order、child OA pin/primitive graph 与 subckt body 必须逐项一致，nested 或
-未绑定 hierarchy 在 Spectre 前拒绝。hierarchy 目前有本地正向、负向和中断测试，但尚无 live OA Gate。
+第三，generic `si` 核对增加显式一层 hierarchy binding：top-level subcell call、terminal order、
+child OA pin/primitive graph、canonical topology/placement 与 subckt body 必须逐项一致，nested 或
+未绑定 hierarchy 在 Spectre 前拒绝。2026-07-31 已在两个 non-overwrite cellview 上完成 live Gate：
+先从 child schematic 非覆盖生成并独立回读 sibling symbol，再把 flat top 增量替换为同库 child instance。
+flat/hierarchical 两条 OA→`si`→Spectre DC/AC 的 output DC、供电电流、gain、BW、GBW、unity 最坏
+相对差 `4.09e-15`。raw `si` netlist 保留为 `eda_result`，为无扩展名 include 增加 Spectre language
+header 的 `.scs` envelope 单独标为 `software_inference`。
 
-这仍不是 L5B closure。派生 CDF、深层 hierarchy、一层 hierarchy 的真实 OA→`si`、并发人工
-editor、mismatch/Monte Carlo 仍是边界；本次 PVT 也只是 winner 的两个声明条件，不是 foundry
-signoff corner set。下一项优先工作应在用户首次提供的实际单模块拓扑上使用这些通用契约，按
-规格选择最小必要 analysis/PVT，并在实际设计需要 subcell 时补一层 hierarchy live 证据；不再为已知
-三点域增加随机候选。
+这仍不是 L5B closure。派生 CDF、深层 hierarchy、跨层 child 参数寻址/写回、并发人工 editor、
+mismatch/Monte Carlo 仍是边界；本次 PVT 也只是 winner 的两个声明条件，不是 foundry signoff
+corner set。下一项优先工作不是再换拓扑重复证明层级仿真，而是让用户给定层级模块中的 child 实例
+参数可以通过显式路径进入现有 candidate/checkpoint/winner-verification 状态机，并在一个小域里证明
+跨层参数 OA 回读、`si` 绑定、不可行恢复和最终写回。之后应在用户首次提供的实际单模块拓扑上按
+规格选择最小必要 analysis/PVT；不再为已知域增加随机候选。
 
 ## L5C：物理实现闭环
 
@@ -337,7 +342,7 @@ signoff corner set。下一项优先工作应在用户首次提供的实际单�
   -> 用户拓扑 design_context（角色/冻结边界/参数权限/analysis/metric/topology-delta scope 本地 Gate 已通过）
   -> existing_schematic 通用 OA→si DC/AC testbench/结果契约（本地 + nominal 共栅级联 live Gate 已通过；未增加电路专用 executor）
   -> 通用 instance-parameter candidate/checkpoint/writeback（本地可行/不可行/预算/中断恢复、单字段 OA-write 与多字段 objective live 已通过）
-  -> 理论诊断 + topology/parameter refinement controller（单-delta nominal flat AC、staged DC/AC/transient/noise 与 shared-netlist live；winner-only 两条件 PVT live；三个 independent alternative 的 OA round-trip/checkpoint/winner writeback live；最多七个 alternative 与显式一层 hierarchy 本地 Gate 已通过，hierarchy live 待做）
+  -> 理论诊断 + topology/parameter refinement controller（单-delta nominal flat AC、staged DC/AC/transient/noise 与 shared-netlist live；winner-only 两条件 PVT live；三个 independent alternative 的 OA round-trip/checkpoint/winner writeback live；最多七个 alternative 本地通过；一层 primitive-child symbol/OA/si/DC/AC live 已通过；跨层 child 参数调优待做）
   -> L5B 单模块闭环
   -> layout/DRC/LVS/PEX Gate
 ```

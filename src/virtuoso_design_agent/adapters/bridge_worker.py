@@ -6885,10 +6885,11 @@ def _generic_topology_allowed_master_libraries(
     before_snapshot: Any,
     operations: list[Any],
     profile: dict[str, Any],
+    target_library: str,
 ) -> list[str]:
     allowed = {
         item.master.library for item in before_snapshot.instances
-    } | {"analogLib", str(profile["tech_library"])}
+    } | {"analogLib", str(profile["tech_library"]), target_library}
     requested = {
         operation.instance.master.library
         for operation in operations
@@ -8206,6 +8207,294 @@ def inspect_common_source(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _symbol_source_contract(
+    summary: dict[str, Any], settings: dict[str, Any]
+) -> dict[str, Any]:
+    expected_sha256 = str(settings["expected_schematic_topology_sha256"])
+    actual_sha256 = topology_fingerprint(snapshot_from_inspection(summary))
+    if actual_sha256 != expected_sha256:
+        raise RuntimeError(
+            "symbol source topology mismatch: expected "
+            f"{expected_sha256}, got {actual_sha256}"
+        )
+    raw_pins = summary.get("bridge_schematic", {}).get("pins")
+    if not isinstance(raw_pins, dict):
+        raise RuntimeError("symbol source schematic pin readback is missing")
+    observed_pins = sorted(
+        (
+            {
+                "name": str(name),
+                "direction": str(value.get("direction") or "inputOutput"),
+                "num_bits": int(value.get("numBits") or 1),
+            }
+            for name, value in raw_pins.items()
+            if isinstance(value, dict)
+        ),
+        key=lambda item: item["name"],
+    )
+    expected_pins = sorted(
+        (
+            {
+                "name": str(item["name"]),
+                "direction": str(item["direction"]),
+                "num_bits": int(item.get("num_bits", 1)),
+            }
+            for item in settings["expected_pins"]
+        ),
+        key=lambda item: item["name"],
+    )
+    if observed_pins != expected_pins:
+        raise RuntimeError(
+            "symbol source pin contract mismatch: expected "
+            f"{expected_pins!r}, got {observed_pins!r}"
+        )
+    return {
+        "expected_topology_sha256": expected_sha256,
+        "observed_topology_sha256": actual_sha256,
+        "topology_match": True,
+        "expected_pins": expected_pins,
+        "observed_pins": observed_pins,
+        "pins_match": True,
+        "evidence_source": "bridge_readback",
+    }
+
+
+def _parse_symbol_readback(raw: str) -> dict[str, Any]:
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if not lines or lines[0] != "SYMBOL" or lines[-1] != "END":
+        raise RuntimeError("symbol readback has invalid section framing")
+    terminals: list[dict[str, Any]] = []
+    bbox: str | None = None
+    for line in lines[1:-1]:
+        parts = line.split("|")
+        if parts[0] == "TERM" and len(parts) == 4:
+            try:
+                num_bits = int(parts[3])
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"symbol terminal has invalid numBits: {line!r}"
+                ) from exc
+            terminals.append(
+                {
+                    "name": parts[1],
+                    "direction": parts[2],
+                    "num_bits": num_bits,
+                }
+            )
+        elif parts[0] == "BBOX" and len(parts) == 2 and bbox is None:
+            bbox = parts[1]
+        else:
+            raise RuntimeError(f"invalid symbol readback record: {line!r}")
+    names = [item["name"] for item in terminals]
+    if not terminals or len(names) != len(set(names)):
+        raise RuntimeError("symbol readback terminals are empty or repeated")
+    if bbox is None or bbox.lower() == "nil":
+        raise RuntimeError("symbol readback has an empty bounding box")
+    return {
+        "terminals": terminals,
+        "terminal_order": names,
+        "bbox_skill": bbox,
+        "non_empty_bbox": True,
+    }
+
+
+def _read_schematic_symbol(
+    client, library: str, cell: str
+) -> dict[str, Any]:
+    from virtuoso_bridge import decode_skill_output
+
+    escaped_library = _skill_string(library)
+    escaped_cell = _skill_string(cell)
+    skill = " ".join(
+        [
+            "let((rbCv rbResult)",
+            "rbCv=dbOpenCellViewByType("
+            f'"{escaped_library}" "{escaped_cell}" '
+            '"symbol" "schematicSymbol" "r")',
+            'unless(rbCv error("target symbol view is missing"))',
+            'rbResult="SYMBOL\\n"',
+            "foreach(rbTerm rbCv~>terminals",
+            'rbResult=strcat(rbResult sprintf(nil "TERM|%s|%s|%d\\n" '
+            'rbTerm~>name if(rbTerm~>direction rbTerm~>direction "inputOutput") '
+            "if(rbTerm~>numBits rbTerm~>numBits 1)))",
+            ")",
+            'rbResult=strcat(rbResult sprintf(nil "BBOX|%L\\n" rbCv~>bBox))',
+            "dbClose(rbCv)",
+            'strcat(rbResult "END\\n"))',
+        ]
+    )
+    result = client.execute_skill(skill, timeout=60)
+    errors = getattr(result, "errors", None) or []
+    if errors:
+        raise RuntimeError(f"symbol readback failed: {errors[0]}")
+    return _parse_symbol_readback(
+        decode_skill_output(str(getattr(result, "output", "")))
+    )
+
+
+def _schematic_env_literal(client, variable: str) -> str:
+    from virtuoso_bridge import decode_skill_output
+
+    result = client.execute_skill(
+        f'sprintf(nil "%L" schGetEnv("{_skill_string(variable)}"))',
+        timeout=30,
+    )
+    errors = getattr(result, "errors", None) or []
+    if errors:
+        raise RuntimeError(
+            f"schematic environment readback failed for {variable}: {errors[0]}"
+        )
+    literal = decode_skill_output(str(getattr(result, "output", ""))).strip()
+    if not literal:
+        raise RuntimeError(
+            f"schematic environment readback was empty for {variable}"
+        )
+    return literal
+
+
+def _delete_new_symbol_view(client, library: str, cell: str) -> bool:
+    result = client.execute_skill(
+        "let((rbView) "
+        f'rbView=ddGetObj("{_skill_string(library)}" '
+        f'"{_skill_string(cell)}" "symbol") '
+        "if(rbView ddDeleteObj(rbView) t))",
+        timeout=60,
+    )
+    errors = getattr(result, "errors", None) or []
+    if errors:
+        raise RuntimeError(f"new symbol rollback failed: {errors[0]}")
+    return not _cellview_exists(client, library, cell, "symbol")
+
+
+def _fresh_existing_schematic_summary(
+    client, library: str, cell: str
+) -> dict[str, Any]:
+    if not _schematic_exists(client, library, cell):
+        raise RuntimeError(
+            f"target schematic does not exist: {library}/{cell}/schematic"
+        )
+    data = _read_schematic(client, library, cell)
+    pin_geometry, placement = _schematic_geometry_bundle(client, library, cell)
+    return _existing_schematic_summary(
+        data,
+        pin_geometry=pin_geometry,
+        placement=placement,
+    )
+
+
+def generate_existing_schematic_symbol(payload: dict[str, Any]) -> dict[str, Any]:
+    settings = payload.get("symbol_generation")
+    if not isinstance(settings, dict):
+        raise RuntimeError("symbol generation contract is missing")
+    client = _client()
+    library, cell = _target(payload)
+    source = _fresh_existing_schematic_summary(client, library, cell)
+    source_contract = _symbol_source_contract(source, settings)
+    if _cellview_exists(client, library, cell, "symbol"):
+        raise RuntimeError(
+            f"refusing to modify existing symbol view {library}/{cell}/symbol"
+        )
+
+    setting_before = _schematic_env_literal(client, "ssgSortPins")
+    escaped_library = _skill_string(library)
+    escaped_cell = _skill_string(cell)
+    pin_sort = str(settings["pin_sort"])
+    skill = " ".join(
+        [
+            "let((rbOldSort rbPinList rbGenerated)",
+            'rbOldSort=schGetEnv("ssgSortPins")',
+            "unwindProtect(",
+            "progn(",
+            f'schSetEnv("ssgSortPins" "{_skill_string(pin_sort)}")',
+            "rbPinList=schSchemToPinList("
+            f'"{escaped_library}" "{escaped_cell}" "schematic")',
+            'unless(rbPinList error("source schematic produced no symbol pin list"))',
+            "rbGenerated=schPinListToSymbol("
+            f'"{escaped_library}" "{escaped_cell}" "symbol" rbPinList)',
+            'unless(rbGenerated error("Cadence symbol generation returned nil"))',
+            "t)",
+            'schSetEnv("ssgSortPins" rbOldSort)',
+            "))",
+        ]
+    )
+    result = client.execute_skill(skill, timeout=120)
+    errors = getattr(result, "errors", None) or []
+    output = str(getattr(result, "output", "")).strip().strip('"').lower()
+    setting_after = _schematic_env_literal(client, "ssgSortPins")
+    failure: str | None = None
+    if errors:
+        failure = str(errors[0])
+    elif output != "t":
+        failure = f"unexpected Cadence symbol generation result: {output!r}"
+    elif setting_after != setting_before:
+        failure = (
+            "schematic symbol pin-sort setting was not restored: "
+            f"before={setting_before!r}, after={setting_after!r}"
+        )
+    elif not _cellview_exists(client, library, cell, "symbol"):
+        failure = "Cadence symbol generation did not create the sibling view"
+    if failure is not None:
+        rolled_back = True
+        if _cellview_exists(client, library, cell, "symbol"):
+            rolled_back = _delete_new_symbol_view(client, library, cell)
+        raise RuntimeError(
+            f"symbol generation failed: {failure}; new-view rollback={rolled_back}"
+        )
+    return {
+        "created": True,
+        "already_exists": False,
+        "source_contract": source_contract,
+        "target": {"library": library, "cell": cell, "view": "symbol"},
+        "cadence_api": ["schSchemToPinList", "schPinListToSymbol"],
+        "pin_sort": pin_sort,
+        "session_setting": {
+            "name": "ssgSortPins",
+            "before_skill_literal": setting_before,
+            "after_skill_literal": setting_after,
+            "restored": True,
+        },
+        "replace_existing": False,
+    }
+
+
+def inspect_existing_schematic_symbol(payload: dict[str, Any]) -> dict[str, Any]:
+    settings = payload.get("symbol_generation")
+    if not isinstance(settings, dict):
+        raise RuntimeError("symbol inspection contract is missing")
+    client = _client()
+    library, cell = _target(payload)
+    source = _fresh_existing_schematic_summary(client, library, cell)
+    source_contract = _symbol_source_contract(source, settings)
+    if not _cellview_exists(client, library, cell, "symbol"):
+        raise RuntimeError(f"symbol view does not exist: {library}/{cell}/symbol")
+    readback = _read_schematic_symbol(client, library, cell)
+    expected = sorted(
+        (
+            {
+                "name": str(item["name"]),
+                "direction": str(item["direction"]),
+                "num_bits": int(item.get("num_bits", 1)),
+            }
+            for item in settings["expected_pins"]
+        ),
+        key=lambda item: item["name"],
+    )
+    observed = sorted(readback["terminals"], key=lambda item: item["name"])
+    if observed != expected:
+        raise RuntimeError(
+            f"generated symbol terminal mismatch: expected {expected!r}, got "
+            f"{observed!r}"
+        )
+    return {
+        "target": {"library": library, "cell": cell, "view": "symbol"},
+        "source_contract": source_contract,
+        **readback,
+        "expected_terminals": expected,
+        "terminals_match": True,
+        "evidence_source": "bridge_readback",
+    }
+
+
 def inspect_existing_schematic(payload: dict[str, Any]) -> dict[str, Any]:
     client = _client()
     library, cell = _target(payload)
@@ -8334,6 +8623,12 @@ def inspect_existing_schematic(payload: dict[str, Any]) -> dict[str, Any]:
                 }
     if partial_prefix_state is not None:
         summary["partial_prefix_state"] = partial_prefix_state
+    raw_symbol_generation = payload.get("symbol_generation")
+    if isinstance(raw_symbol_generation, dict):
+        summary["symbol_source_contract"] = _symbol_source_contract(
+            summary,
+            raw_symbol_generation,
+        )
     return _attach_targeted_parameter_verification(
         client,
         library,
@@ -8505,6 +8800,7 @@ def _resume_partial_generic_topology_prefix(
         current_snapshot,
         operations[prefix_length:],
         payload["profile"],
+        library,
     )
     return {
         "contract_id": execution.contract.id,
@@ -8635,6 +8931,7 @@ def transform_existing_schematic_topology_delta(
         before_snapshot,
         operations,
         payload["profile"],
+        library,
     )
     migrations = _directed_master_parameter_migrations(execution)
     if migrations:
@@ -9881,10 +10178,11 @@ def _logical_netlist_records(text: str) -> list[str]:
         stripped = raw_line.strip()
         if not stripped or stripped.startswith("//"):
             continue
+        # Spectre ``si`` indents ordinary instances inside a subckt.  Indent is
+        # therefore not a continuation marker; only an explicit leading ``+``
+        # or a trailing backslash on the prior record joins physical lines.
         continuation = bool(current) and (
-            raw_line[:1].isspace()
-            or stripped.startswith("+")
-            or current.endswith("\\")
+            stripped.startswith("+") or current.endswith("\\")
         )
         if continuation:
             current = (
@@ -11331,6 +11629,7 @@ def _parse_existing_schematic_netlist(
     schematic: dict[str, Any],
     settings: GenericOaSimulationSpec,
     hierarchy_schematics: dict[tuple[str, str], dict[str, Any]] | None = None,
+    hierarchy_summaries: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Prove a primitive or explicitly bound one-level OA hierarchy matches si."""
 
@@ -11466,7 +11765,14 @@ def _parse_existing_schematic_netlist(
                 child_parsed,
                 scope=hierarchy_binding.subcircuit,
             )
-            child_summary = _existing_schematic_summary(child)
+            child_summary = (hierarchy_summaries or {}).get(child_key)
+            if child_summary is None:
+                child_summary = _existing_schematic_summary(child)
+            child_placement_sha256 = (
+                child_summary.get("placement", {}).get("sha256")
+                if isinstance(child_summary.get("placement"), dict)
+                else None
+            )
             hierarchy_checks.append(
                 {
                     "instance": name,
@@ -11482,6 +11788,12 @@ def _parse_existing_schematic_netlist(
                         snapshot_from_inspection(child_summary)
                     ),
                     "child_topology_source": "bridge_readback",
+                    "child_placement_sha256": child_placement_sha256,
+                    "child_placement_source": (
+                        "bridge_readback"
+                        if child_placement_sha256 is not None
+                        else None
+                    ),
                     "subcircuit_source": "eda_result",
                     "consistency_source": "software_inference",
                     "child_instances": child_checks,
@@ -12303,6 +12615,7 @@ def _generate_oa_netlist(
             raise RuntimeError("generic OA netlisting requires generic_simulation")
         settings = GenericOaSimulationSpec.model_validate(raw_settings)
         hierarchy_schematics: dict[tuple[str, str], dict[str, Any]] = {}
+        hierarchy_summaries: dict[tuple[str, str], dict[str, Any]] = {}
         target_library, target_cell = _target(payload)
         for binding in settings.hierarchy_bindings:
             child_key = (binding.library, binding.cell)
@@ -12319,12 +12632,22 @@ def _generate_oa_netlist(
                     f"{binding.library}/{binding.cell}/schematic"
                 )
             hierarchy_schematics[child_key] = child
+            child_pin_geometry, child_placement = _schematic_geometry_bundle(
+                client,
+                *child_key,
+            )
+            hierarchy_summaries[child_key] = _existing_schematic_summary(
+                child,
+                pin_geometry=child_pin_geometry,
+                placement=child_placement,
+            )
         try:
             parsed = _parse_existing_schematic_netlist(
                 netlist_text,
                 schematic,
                 settings,
                 hierarchy_schematics,
+                hierarchy_summaries,
             )
         except Exception as exc:
             raise RuntimeError(
@@ -12333,10 +12656,42 @@ def _generate_oa_netlist(
             ) from exc
     else:
         raise RuntimeError(f"unsupported OA netlist circuit: {circuit}")
+    spectre_netlist_path = remote_netlist
+    spectre_netlist_sha256 = hashlib.sha256(
+        netlist_text.encode("utf-8")
+    ).hexdigest()
+    spectre_netlist_transform = "raw_si_netlist"
+    if circuit == "existing_schematic":
+        # ``si`` writes its language declaration to a separate netlistHeader,
+        # while the generated ``netlist`` body can start directly with a
+        # Spectre subckt.  An include file without a .scs suffix may be parsed
+        # as SPICE regardless of the parent deck state.  Keep the raw si file
+        # immutable for evidence and upload a deterministic one-line language
+        # envelope for simulation consumption.
+        spectre_netlist_text = "simulator lang=spectre\n" + netlist_text
+        local_spectre_netlist = work_dir / "oa_netlist_spectre.scs"
+        local_spectre_netlist.write_text(
+            spectre_netlist_text,
+            encoding="utf-8",
+        )
+        spectre_netlist_path = f"{run_dir}/vda_oa_netlist.scs"
+        _upload_file(
+            client,
+            local_spectre_netlist,
+            spectre_netlist_path,
+            timeout=min(timeout, 60),
+        )
+        spectre_netlist_sha256 = hashlib.sha256(
+            spectre_netlist_text.encode("utf-8")
+        ).hexdigest()
+        spectre_netlist_transform = "prepend_simulator_lang_spectre"
     return {
         "remote_run_dir": run_dir,
         "remote_netlist_path": remote_netlist,
         "netlist_sha256": hashlib.sha256(netlist_text.encode("utf-8")).hexdigest(),
+        "spectre_netlist_path": spectre_netlist_path,
+        "spectre_netlist_sha256": spectre_netlist_sha256,
+        "spectre_netlist_transform": spectre_netlist_transform,
         "parsed": parsed,
         "si_log_tail": log_text.splitlines()[-12:],
     }
@@ -15261,7 +15616,10 @@ def simulate_existing_schematic(
         deck = render_generic_oa_testbench(
             settings,
             analysis=analysis,
-            remote_netlist_path=netlist_evidence["remote_netlist_path"],
+            remote_netlist_path=netlist_evidence.get(
+                "spectre_netlist_path",
+                netlist_evidence["remote_netlist_path"],
+            ),
             model_configuration=model_configuration,
             ac_sweep=ac_sweep if isinstance(ac_sweep, dict) else None,
             linearity_sweep=(
@@ -15448,6 +15806,22 @@ def simulate_existing_schematic(
                     "generator": "Cadence si -batch",
                     "remote_path": netlist_evidence["remote_netlist_path"],
                     "sha256": netlist_evidence["netlist_sha256"],
+                    "spectre_include": {
+                        "source": "software_inference",
+                        "remote_path": netlist_evidence.get(
+                            "spectre_netlist_path",
+                            netlist_evidence["remote_netlist_path"],
+                        ),
+                        "sha256": netlist_evidence.get(
+                            "spectre_netlist_sha256",
+                            netlist_evidence["netlist_sha256"],
+                        ),
+                        "transform": netlist_evidence.get(
+                            "spectre_netlist_transform",
+                            "raw_si_netlist",
+                        ),
+                        "raw_si_netlist_preserved": True,
+                    },
                     "si_log_tail": netlist_evidence["si_log_tail"],
                     **netlist_evidence["parsed"],
                     "consistency_source": "software_inference",
@@ -17625,6 +17999,8 @@ _ACTIONS = {
     "apply_maestro_corners": apply_maestro_corners,
     "apply_maestro_setup": apply_maestro_setup,
     "inspect_existing_schematic": inspect_existing_schematic,
+    "generate_existing_schematic_symbol": generate_existing_schematic_symbol,
+    "inspect_existing_schematic_symbol": inspect_existing_schematic_symbol,
     "transform_existing_schematic_topology_delta": (
         transform_existing_schematic_topology_delta
     ),

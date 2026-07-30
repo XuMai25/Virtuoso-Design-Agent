@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "id": "hierarchy-child-create-live",
+  "operation": "schematic.create",
+  "circuit": "common_source",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_l5b_hier_child_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "parameters": {
+    "device_width_um": 1.0,
+    "length_um": 0.03,
+    "load_resistance_ohm": 20000.0
+  },
+  "create_if_missing": true,
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 600
+  }
+}

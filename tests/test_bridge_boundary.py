@@ -6045,7 +6045,26 @@ def test_generic_topology_master_scope_is_existing_or_profile_bound() -> None:
             before,
             [disallowed],
             {"tech_library": "tsmcN28"},
+            "target_lib",
         )
+
+    same_target = disallowed.model_copy(
+        update={
+            "instance": disallowed.instance.model_copy(
+                update={
+                    "master": disallowed.instance.master.model_copy(
+                        update={"library": "target_lib"}
+                    )
+                }
+            )
+        }
+    )
+    assert bridge_worker._generic_topology_allowed_master_libraries(
+        before,
+        [same_target],
+        {"tech_library": "tsmcN28"},
+        "target_lib",
+    ) == ["analogLib", "existing_blocks", "target_lib", "tsmcN28"]
 
 
 def test_pin_geometry_readback_is_structured_and_bound_to_placement() -> None:

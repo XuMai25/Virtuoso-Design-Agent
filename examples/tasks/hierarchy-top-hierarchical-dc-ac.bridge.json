@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "id": "hierarchy-top-hierarchical-dc-ac-live",
+  "operation": "simulation.run",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_l5b_hier_top_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis_stages": [
+    {
+      "id": "bias",
+      "analysis": "dc",
+      "constraint_metrics": ["output_dc_v"]
+    },
+    {
+      "id": "gain-bandwidth",
+      "analysis": "ac",
+      "constraint_metrics": ["low_frequency_gain_v_per_v", "bandwidth_3db_hz"]
+    }
+  ],
+  "analysis_stage_execution": "shared_netlist",
+  "ac_sweep": {
+    "start_hz": 1000.0,
+    "stop_hz": 1000000000000.0,
+    "points_per_decade": 30,
+    "reference_points": 5,
+    "max_reference_variation_db": 0.5
+  },
+  "design_context": {
+    "schema_version": 1,
+    "id": "hierarchy-one-level-common-source",
+    "topology_origin": "existing_oa",
+    "expected_topology_sha256": "d558b41830cfe50cb7c344bde426346c5236e3a89c5af3a77ed0a863d9d5fd6a",
+    "roles": [
+      {"role": "signal.input", "nets": ["IN"]},
+      {"role": "signal.output", "nets": ["OUT"]},
+      {"role": "supply.positive", "nets": ["VDD"]},
+      {"role": "supply.return", "nets": ["VSS"]},
+      {"role": "block.amplifier", "instances": ["XAMP"]}
+    ],
+    "frozen_instances": ["XAMP"],
+    "frozen_nets": ["IN", "OUT", "VDD", "VSS"],
+    "frozen_pins": ["IN", "OUT", "VDD", "VSS"],
+    "required_analyses": ["dc", "ac"],
+    "metrics": [
+      "output_dc_v",
+      "supply_current_a",
+      "low_frequency_gain_v_per_v",
+      "low_frequency_gain_db",
+      "bandwidth_3db_hz",
+      "gain_bandwidth_product_hz",
+      "unity_gain_frequency_hz"
+    ]
+  },
+  "generic_simulation": {
+    "schema_version": 1,
+    "sources": [
+      {
+        "name": "VDD_SRC",
+        "kind": "voltage",
+        "positive_node": "VDD",
+        "negative_node": "0",
+        "dc_value": 0.9
+      },
+      {
+        "name": "VSS_SRC",
+        "kind": "voltage",
+        "positive_node": "VSS",
+        "negative_node": "0",
+        "dc_value": 0.0
+      },
+      {
+        "name": "VIN_SRC",
+        "kind": "voltage",
+        "positive_node": "IN",
+        "negative_node": "0",
+        "dc_value": 0.35,
+        "ac_magnitude": 1.0,
+        "ac_phase_deg": 0.0
+      }
+    ],
+    "loads": [
+      {
+        "name": "CL0",
+        "kind": "capacitor",
+        "positive_node": "OUT",
+        "negative_node": "0",
+        "value": 2e-15
+      }
+    ],
+    "dc_voltage_metrics": [
+      {
+        "metric": "output_dc_v",
+        "expression": {"positive_node": "OUT", "negative_node": "0"}
+      }
+    ],
+    "dc_current_metrics": [
+      {"metric": "supply_current_a", "source": "VDD_SRC"}
+    ],
+    "transfer": {
+      "input": {"positive_node": "IN", "negative_node": "0"},
+      "output": {"positive_node": "OUT", "negative_node": "0"}
+    },
+    "netlist_parameter_bindings": [],
+    "hierarchy_bindings": [
+      {
+        "instance": "XAMP",
+        "library": "vb_pdk_smoke",
+        "cell": "vda_l5b_hier_child_001",
+        "view": "schematic",
+        "subcircuit": "vda_l5b_hier_child_001",
+        "terminal_order": ["IN", "OUT", "VDD", "VSS"]
+      }
+    ]
+  },
+  "constraints": [
+    {"metric": "output_dc_v", "relation": ">=", "value": 0.1},
+    {"metric": "output_dc_v", "relation": "<=", "value": 0.8},
+    {
+      "metric": "low_frequency_gain_v_per_v",
+      "relation": ">=",
+      "value": 1.0
+    },
+    {
+      "metric": "bandwidth_3db_hz",
+      "relation": ">=",
+      "value": 100000000.0
+    }
+  ],
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 600
+  }
+}

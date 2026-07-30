@@ -139,6 +139,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
         executable=True,
         operations=(
             Operation.SCHEMATIC_INSPECT,
+            Operation.SCHEMATIC_SYMBOL_GENERATE,
             Operation.SCHEMATIC_TRANSFORM,
             Operation.PARAMETERS_APPLY,
             Operation.SIMULATION_RUN,
@@ -181,8 +182,12 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "readback + up to seven common-baseline independent topology alternatives "
             "with exact inverse/checkpoint selection locally verified; a three-topology, "
             "two-parameter OA-to-si DC/AC domain, transport resume, and cascode winner "
-            "writeback are live + explicit one-level primitive-child OA/subcircuit graph "
-            "binding locally verified; the hierarchical live OA gate remains pending + "
+            "writeback are live + non-overwrite schematic-to-symbol generation with exact "
+            "source/pin binding, session-setting restoration, and independent symbol "
+            "readback is live + explicit one-level primitive-child OA/subcircuit graph "
+            "binding, canonical child topology/placement evidence, and flat-versus-"
+            "hierarchical OA-to-si-to-Spectre DC/AC equivalence are live on nominal TSMC "
+            "N28 (maximum relative metric difference 4.09e-15) + "
             "local logical/physical pin and full-placement binding + exact-state "
             "post-save inverse recovery + live instance-scoped "
             "NMOS symbol-master/CDF-subset OA-to-si-to-Spectre round-trip + "

@@ -85,6 +85,7 @@ class DeterministicDemoAdapter:
 
     def __init__(self) -> None:
         self._schematics: dict[tuple[str, str], dict[str, Any]] = {}
+        self._symbols: dict[tuple[str, str], dict[str, Any]] = {}
 
     def probe(self, pdk_profile: str) -> AdapterResult:
         return AdapterResult(
@@ -421,6 +422,47 @@ class DeterministicDemoAdapter:
             data["topology"] = schematic["topology"]
         return AdapterResult(
             data=data,
+            evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+        )
+
+    def generate_schematic_symbol(self, task: TaskSpec) -> AdapterResult:
+        settings = task.symbol_generation
+        if settings is None:
+            raise RuntimeError("demo symbol generation requires its contract")
+        key = self._key(task)
+        if key not in self._schematics:
+            raise RuntimeError("demo source schematic does not exist")
+        if key in self._symbols:
+            raise RuntimeError("demo symbol view already exists")
+        pins = [pin.model_dump(mode="json") for pin in settings.expected_pins]
+        self._symbols[key] = {
+            "target": {
+                "library": key[0],
+                "cell": key[1],
+                "view": "symbol",
+            },
+            "terminals": pins,
+            "pin_sort": settings.pin_sort,
+            "non_empty_bbox": True,
+        }
+        return AdapterResult(
+            data={
+                "created": True,
+                "already_exists": False,
+                "source_topology_sha256": (
+                    settings.expected_schematic_topology_sha256
+                ),
+                "session_setting_restored": True,
+            },
+            evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+        )
+
+    def inspect_schematic_symbol(self, task: TaskSpec) -> AdapterResult:
+        symbol = self._symbols.get(self._key(task))
+        if symbol is None:
+            raise RuntimeError("demo symbol view does not exist")
+        return AdapterResult(
+            data=dict(symbol),
             evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
         )
 

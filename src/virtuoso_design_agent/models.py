@@ -35,6 +35,7 @@ class Operation(str, Enum):
     DEVICE_CHARACTERIZE = "device.characterize"
     SCHEMATIC_CREATE = "schematic.create"
     SCHEMATIC_INSPECT = "schematic.inspect"
+    SCHEMATIC_SYMBOL_GENERATE = "schematic.symbol.generate"
     SCHEMATIC_TRANSFORM = "schematic.transform"
     PARAMETERS_APPLY = "parameters.apply"
     ADE_PREPARE = "ade.prepare"
@@ -158,6 +159,36 @@ class DesignTarget(StrictModel):
     library: str = Field(min_length=1, pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$")
     cell: str = Field(min_length=1, pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$")
     view: str = Field(default="schematic", pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$")
+
+
+class SchematicSymbolPinSpec(StrictModel):
+    """One source-schematic terminal required in the generated symbol."""
+
+    name: StrictStr = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$")
+    direction: Literal["input", "output", "inputOutput"]
+    num_bits: int = Field(default=1, ge=1, le=4096)
+
+
+class SchematicSymbolGenerationSpec(StrictModel):
+    """Non-overwrite sibling-symbol generation bound to an exact source graph."""
+
+    schema_version: Literal[1] = 1
+    expected_schematic_topology_sha256: StrictStr = Field(
+        pattern=r"^[0-9a-f]{64}$"
+    )
+    expected_pins: list[SchematicSymbolPinSpec] = Field(
+        min_length=1,
+        max_length=128,
+    )
+    pin_sort: Literal["alphanumeric", "geometric"] = "geometric"
+    output_view: Literal["symbol"] = "symbol"
+
+    @model_validator(mode="after")
+    def validate_expected_pins(self) -> "SchematicSymbolGenerationSpec":
+        names = [pin.name for pin in self.expected_pins]
+        if len(names) != len(set(names)):
+            raise ValueError("symbol-generation expected pins must be unique")
+        return self
 
 
 class InstanceParameterUpdate(StrictModel):
@@ -2155,6 +2186,7 @@ class TaskSpec(StrictModel):
     ade_variables: AdeVariablesApplySpec | None = None
     ade_corners: AdeCornersApplySpec | None = None
     ade_setup: AdeSetupApplySpec | None = None
+    symbol_generation: SchematicSymbolGenerationSpec | None = None
     schematic_transform: SchematicTransformSpec | None = None
     topology_delta: TopologyDeltaExecutionSpec | None = None
     topology_refinement: ExistingSchematicTopologyRefinementSpec | None = None
@@ -2336,6 +2368,70 @@ class TaskSpec(StrictModel):
         if self.device_characterization is not None:
             raise ValueError(
                 "device_characterization settings require operation='device.characterize'"
+            )
+        if self.operation is Operation.SCHEMATIC_SYMBOL_GENERATE:
+            if self.circuit is not CircuitKind.EXISTING_SCHEMATIC:
+                raise ValueError(
+                    "schematic.symbol.generate requires circuit='existing_schematic'"
+                )
+            if self.target.view != "schematic":
+                raise ValueError(
+                    "schematic.symbol.generate requires target.view='schematic'; "
+                    "the output is the sibling symbol view"
+                )
+            if self.symbol_generation is None:
+                raise ValueError(
+                    "schematic.symbol.generate requires symbol_generation settings"
+                )
+            if (
+                self.expected_target_topology_variant is not None
+                or self.analysis is not None
+                or self.analysis_stages
+                or self.ac_sweep is not None
+                or self.linearity_sweep is not None
+                or self.noise_sweep is not None
+                or self.ade_capture is not None
+                or self.ade_prepare is not None
+                or self.ade_run is not None
+                or self.ade_variables is not None
+                or self.ade_corners is not None
+                or self.ade_setup is not None
+                or self.schematic_transform is not None
+                or self.topology_delta is not None
+                or self.topology_refinement is not None
+                or self.winner_verification is not None
+                or self.device_characterization is not None
+                or self.netlist_preview is not None
+                or self.design_context is not None
+                or self.generic_simulation is not None
+                or self.operating_conditions
+                or self.parameters
+                or self.instance_parameter_updates
+                or self.parameter_space
+                or self.candidate_set is not None
+                or self.theory_seed is not None
+                or self.instance_parameter_space
+                or self.constraints
+                or self.objective is not None
+                or self.create_if_missing
+            ):
+                raise ValueError(
+                    "schematic.symbol.generate accepts only its exact source/pin "
+                    "contract, target, PDK, limits, and safety settings"
+                )
+            if self.safety.allow_remote_compute:
+                raise ValueError(
+                    "schematic.symbol.generate is an OA write, not remote compute"
+                )
+            if self.safety.replace_existing:
+                raise ValueError(
+                    "schematic.symbol.generate never replaces an existing symbol view"
+                )
+            return self
+        if self.symbol_generation is not None:
+            raise ValueError(
+                "symbol_generation settings require "
+                "operation='schematic.symbol.generate'"
             )
         generic_existing_simulation = (
             self.circuit is CircuitKind.EXISTING_SCHEMATIC

@@ -184,6 +184,55 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 SideEffect.LOCAL_WRITE,
             ),
         ]
+    if task.operation is Operation.SCHEMATIC_SYMBOL_GENERATE:
+        settings = task.symbol_generation
+        if settings is None:  # TaskSpec validation owns the user-facing error.
+            raise ValueError("symbol-generation settings are missing")
+        return [
+            _step(
+                "01-probe",
+                "bridge.probe",
+                "只读核对 Bridge、Virtuoso 与声明的 foundry PDK profile",
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "02-source-inspect",
+                "schematic.inspect.source",
+                (
+                    "完整回读源 schematic，核对 topology SHA-256 与 "
+                    f"{len(settings.expected_pins)} 个声明 terminal；不依赖当前 GUI 焦点"
+                ),
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "03-symbol-generate",
+                "schematic.symbol.generate",
+                (
+                    "仅在 sibling symbol view 明确不存在时调用 Cadence "
+                    "schSchemToPinList→schPinListToSymbol；临时设置 pin sort 并用 "
+                    "unwindProtect 恢复原会话值，绝不覆盖已有 symbol"
+                ),
+                SideEffect.REMOTE_WRITE,
+            ),
+            _step(
+                "04-symbol-inspect",
+                "schematic.symbol.inspect",
+                (
+                    "在独立 Bridge worker 中只读重开 symbol，逐项回读 terminal "
+                    "方向/位宽及非空边界框，并再次核对源 schematic 未变化"
+                ),
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "05-persist",
+                "evidence.persist",
+                (
+                    "保存 source/symbol OA 回读与会话设置恢复证据；view 创建成功"
+                    "本身不等于层次化 si/Spectre 已通过"
+                ),
+                SideEffect.LOCAL_WRITE,
+            ),
+        ]
     common_source = task.circuit is CircuitKind.COMMON_SOURCE
     differential_pair = task.circuit is CircuitKind.DIFFERENTIAL_PAIR
     existing_generic = (

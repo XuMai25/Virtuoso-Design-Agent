@@ -190,7 +190,7 @@ class GenericOaSimulationSpec(_StrictModel):
     transfer: GenericTransferSpec | None = None
     dynamic_analysis: GenericDynamicAnalysisSpec | None = None
     netlist_parameter_bindings: list[GenericNetlistParameterBinding] = Field(
-        min_length=1,
+        default_factory=list,
         max_length=128,
     )
     hierarchy_bindings: list[GenericHierarchyBinding] = Field(
@@ -522,6 +522,10 @@ def render_generic_oa_testbench(
     lines = [
         "simulator lang=spectre",
         model_configuration,
+        # Foundry model include trees may leave Spectre in a SPICE language
+        # section.  Reassert the language before consuming the OA ``si``
+        # netlist; flat primitives can otherwise mask this hierarchy-only bug.
+        "simulator lang=spectre",
         f'include "{remote_netlist_path}"',
         "",
     ]

@@ -5886,6 +5886,19 @@ class TaskExecutor:
                     "schematic.inspect", lambda: self.adapter.inspect_schematic(task)
                 )
                 self._bind_design_context(task, inspected)
+            elif operation is Operation.SCHEMATIC_SYMBOL_GENERATE:
+                self._action(
+                    "schematic.inspect.source",
+                    lambda: self.adapter.inspect_schematic(task),
+                )
+                self._action(
+                    "schematic.symbol.generate",
+                    lambda: self.adapter.generate_schematic_symbol(task),
+                )
+                self._action(
+                    "schematic.symbol.inspect",
+                    lambda: self.adapter.inspect_schematic_symbol(task),
+                )
             elif operation is Operation.SCHEMATIC_TRANSFORM:
                 before = self._action(
                     "schematic.inspect.before",

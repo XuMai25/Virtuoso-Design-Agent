@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "id": "hierarchy-top-transform-live",
+  "operation": "schematic.transform",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_l5b_hier_top_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "design_context": {
+    "schema_version": 1,
+    "id": "hierarchy-wrap-transform",
+    "topology_origin": "existing_oa",
+    "expected_topology_sha256": "a0bb019a7c81a0d4422e90dca0b5ade814d265cd41544ef245104cb3c7856a41",
+    "roles": [
+      {"role": "signal.input", "nets": ["IN"]},
+      {"role": "signal.output", "nets": ["OUT"]},
+      {"role": "supply.positive", "nets": ["VDD"]},
+      {"role": "supply.return", "nets": ["VSS"]},
+      {"role": "device.gain", "instances": ["MN0"]},
+      {"role": "load.resistive", "instances": ["RD0"]}
+    ],
+    "frozen_nets": ["IN", "OUT", "VDD", "VSS"],
+    "frozen_pins": ["IN", "OUT", "VDD", "VSS"],
+    "topology_edits": {
+      "allowed_operations": ["add_instance", "remove_instance"],
+      "mutable_instances": ["MN0", "RD0", "XAMP"],
+      "mutable_nets": [],
+      "mutable_pins": [],
+      "max_operations_per_delta": 3
+    }
+  },
+  "topology_delta": {
+    "direction": "forward",
+    "resume_partial_prefix": false,
+    "contract": {
+      "schema_version": 1,
+      "id": "hierarchy-wrap-common-source-v1",
+      "expected_before_sha256": "a0bb019a7c81a0d4422e90dca0b5ade814d265cd41544ef245104cb3c7856a41",
+      "expected_after_sha256": "d558b41830cfe50cb7c344bde426346c5236e3a89c5af3a77ed0a863d9d5fd6a",
+      "operations": [
+        {
+          "operation": "remove_instance",
+          "expected": {
+            "name": "MN0",
+            "master": {
+              "library": "tsmcN28",
+              "cell": "nch_lvt_mac",
+              "view": "symbol"
+            },
+            "terminals": {"B": "VSS", "D": "OUT", "G": "IN", "S": "VSS"},
+            "attributes": {"numInst": 1, "orient": "R0", "xy": [0.0, 0.0]}
+          }
+        },
+        {
+          "operation": "remove_instance",
+          "expected": {
+            "name": "RD0",
+            "master": {
+              "library": "analogLib",
+              "cell": "res",
+              "view": "symbol"
+            },
+            "terminals": {"MINUS": "OUT", "PLUS": "VDD"},
+            "attributes": {"numInst": 1, "orient": "R0", "xy": [0.0, 1.3]}
+          }
+        },
+        {
+          "operation": "add_instance",
+          "instance": {
+            "name": "XAMP",
+            "master": {
+              "library": "vb_pdk_smoke",
+              "cell": "vda_l5b_hier_child_001",
+              "view": "symbol"
+            },
+            "terminals": {"IN": "IN", "OUT": "OUT", "VDD": "VDD", "VSS": "VSS"},
+            "attributes": {"numInst": 1, "orient": "R0", "xy": [0.0, 0.65]}
+          }
+        }
+      ],
+      "inverse_operations": [
+        {
+          "operation": "remove_instance",
+          "expected": {
+            "name": "XAMP",
+            "master": {
+              "library": "vb_pdk_smoke",
+              "cell": "vda_l5b_hier_child_001",
+              "view": "symbol"
+            },
+            "terminals": {"IN": "IN", "OUT": "OUT", "VDD": "VDD", "VSS": "VSS"},
+            "attributes": {"numInst": 1, "orient": "R0", "xy": [0.0, 0.65]}
+          }
+        },
+        {
+          "operation": "add_instance",
+          "instance": {
+            "name": "RD0",
+            "master": {
+              "library": "analogLib",
+              "cell": "res",
+              "view": "symbol"
+            },
+            "terminals": {"MINUS": "OUT", "PLUS": "VDD"},
+            "attributes": {"numInst": 1, "orient": "R0", "xy": [0.0, 1.3]}
+          }
+        },
+        {
+          "operation": "add_instance",
+          "instance": {
+            "name": "MN0",
+            "master": {
+              "library": "tsmcN28",
+              "cell": "nch_lvt_mac",
+              "view": "symbol"
+            },
+            "terminals": {"B": "VSS", "D": "OUT", "G": "IN", "S": "VSS"},
+            "attributes": {"numInst": 1, "orient": "R0", "xy": [0.0, 0.0]}
+          }
+        }
+      ],
+      "master_parameter_migrations": []
+    }
+  },
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 600
+  }
+}

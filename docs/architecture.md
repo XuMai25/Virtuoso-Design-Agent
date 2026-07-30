@@ -45,6 +45,7 @@ VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PD
 | `device.characterize` | 在声明的 foundry PDK/model section、温度、合法几何和有限偏置域内运行独立 NMOS/PMOS OP 表征，保存 raw manifest/hash 并审计留出点；没有 OA target | scratch/计算，不写 OA |
 | `schematic.create` | 建图并结构回读 | OA 写入 |
 | `schematic.inspect` | 读取拓扑、参数、pins | 只读 |
+| `schematic.symbol.generate` | 从精确绑定的 existing schematic 非覆盖生成 sibling symbol，恢复 session 设置并独立回读 terminals/bBox | OA symbol 写入 |
 | `schematic.transform` | 对已知拓扑应用可审计的小变更；除共源源极退化、反相器 core→ADE testbench、差分对真实尾管、对称源极退化与 PMOS 电流镜负载专用变换外，`existing_schematic` 可执行一份带完整结构指纹的预声明 topology-delta | OA 写入 |
 | `parameters.apply` | 应用指定参数并回读 | OA 写入 |
 | `ade.prepare` | 为已有 design 新建持久化 Spectre-backed Maestro view/test；拒绝已有 view | Maestro OA 写入 |
@@ -183,13 +184,25 @@ SSH/Bridge 中断都在独立 OA 回读证明 exact baseline 或 candidate state
 
 通用 `si` 核对还增加了一个刻意收窄的一层 hierarchy slice。任务必须逐个声明 top-level
 instance、child library/cell/schematic、`si` subcircuit 名和 terminal order。worker 将顶层 call
-与 OA instance/master/端子逐项比较，再用 Bridge 独立回读 child schematic，证明 child pin set
-及 primitive instance/model/node graph 与 subckt body 相同；child topology SHA 和来源进入证据。
-任何未绑定的非 primitive master、nested subcircuit、节点/terminal-order 漂移都会在 Spectre 前
-拒绝。该能力已有 parser/readback fixture 与负向测试，但尚无真实层次化 OA smoke；CDF 派生关系
-（例如 fingers/multiplicity 的总宽度）、更深 hierarchy、并发人工 editor、mismatch/Monte Carlo
-也仍未闭合。现有反相器、共源和差分对 worker 继续作为真实执行后端和回归基线，而不是未来
-能力边界。
+与 OA instance/master/端子逐项比较，再用 Bridge 独立回读 child schematic，证明 child pin set、
+primitive instance/model/node graph、canonical topology SHA 和完整 placement SHA 与 subckt body/任务
+绑定一致。任何未绑定的非 primitive master、nested subcircuit、节点/terminal-order 漂移都会在
+Spectre 前拒绝。
+
+2026-07-31 的 live Gate 先用 `schematic.symbol.generate` 从全新 child schematic 非覆盖生成 sibling
+symbol。任务绑定源 topology SHA、精确 pin 名/方向/宽度和目标 `symbol` view；worker 复用 Cadence
+`schSchemToPinList`/`schPinListToSymbol`，用 `unwindProtect` 保证临时 `ssgSortPins` 在成功或失败后都
+恢复，只允许清理本次新建但未通过审计的 symbol。保存后由独立 worker 重开 symbol，核对 terminal
+direction/width 与非空 bBox；已有 symbol 一律拒绝，不提供静默 refresh/overwrite。
+
+随后另一个 non-overwrite top cell 从 flat `MN0+RD0` 增量替换为同库 child symbol instance，且最终
+OA→`si`→Spectre DC/AC 与 flat reference 的六项核心标量最坏相对差为 `4.09e-15`。Cadence `si`
+产生的无扩展名 raw netlist 被原样保留并标为 `eda_result`；为避免 Spectre 把被 include 文件按 SPICE
+解析，VDA 只生成一个确定性的 `.scs` envelope，在首行加入 `simulator lang=spectre`。raw/envelope
+路径、大小、SHA-256 和变换名分开记录，envelope 生成属于 `software_inference`，不会把包装后的文件
+冒充原始 `si` 输出。CDF 派生关系（例如 fingers/multiplicity 的总宽度）、跨层 child 参数写回、
+更深 hierarchy、并发人工 editor、mismatch/Monte Carlo 仍未闭合。现有反相器、共源和差分对 worker
+继续作为真实执行后端和回归基线，而不是未来能力边界。
 
 `analysis` 与电路参数分离。反相器省略时解析为 `transient`，共源级和差分对省略时解析为 `dc`；AC 必须显式声明 `analysis: "ac"` 以及 `ac_sweep.start_hz/stop_hz`。差分对电源抑制使用独立的 `analysis: "psrr"`，复用 AC sweep 契约但运行差模、VDD 注入和 VSS 注入三条路径；只有该 analysis 可选声明位于 sweep 内的 `evaluation_stop_hz`，用于计算从 start 到该频率的带限最差 PSRR。固定多 analysis 质量门使用 `analysis: "quality"`，并要求 `ac_sweep`、`linearity_sweep`、`noise_sweep` 同时存在。扫频点密度、低频参考点数、参考窗变化、PSRR 评估频带、线性度窗口和噪声频带都属于任务与 plan token。这样换 analysis 或改变指标定义不会复用旧 token，也不会把默认设置伪装成 `user_input`。
 
@@ -218,7 +231,7 @@ VDA 保留两种用途不同的参数表示：
 - `parameters` / `parameter_space` 是电路模板已定义的 canonical semantic parameters，例如 `device_width_um`、`load_resistance_ohm`、`bias_v` 和 AC `load_ff`。它们可参与仿真、规格判定和有限搜索，但并非都写 OA：W/L/RD/RS 是设计参数，bias/VDD/外部负载是 testbench 条件。当前 MOS width semantic 指单指宽 `Wfg`；多指 OA/`si` 一致性另外核对 `finger_width`、`fingers/nf`、`m/multi` 和总有效宽度，不能把网表 `w` 无条件当成 `Wfg`。
 - `instance_parameter_updates` 是人工明确指定的实例级 CDF/OA 写入，例如 `MN0.fingers="2"`、`MN0.m="1"` 或 `RD0.r="22k"`。参数名和值按 Bridge 字符串契约原样传递，不做单位、别名或枚举推断。
 
-`existing_schematic` 是不依赖固定拓扑模板的通用 circuit kind，开放 `schematic.inspect`、预声明 `schematic.transform`、`parameters.apply`、typed `simulation.run`、有限 raw-instance `design.tune`、受控单-delta `design.close_loop`、`ade.prepare`、`ade.capture`、`ade.run`、`ade.corners.apply`、`ade.variables.apply` 与 `ade.setup.apply`：inspect 保留 Bridge reader 的完整结构对象、geometry、notes、nets/pins 细节和所有可回读 CDF 参数；transform 只执行上述 exact topology-delta 子集；参数操作允许人工指定任意已有实例；通用 simulation/tune/close-loop 使用 design context 与 typed testbench/metric/netlist binding；ADE 操作则为已有 design 准备新的 Maestro 人工入口、读取人工状态、后台运行一个已保存 setup，或用显式旧状态前置条件增量修改 corner、变量/selection、analysis 和新增 output/spec，不要求 VDA 理解 DUT 拓扑。反相器和共源模板也能使用相同原始参数与 ADE 交接路径，并可在一个参数任务中组合 semantic parameters 与原始实例参数；semantic 写入先执行，原始 CDF callback 后执行，最终 OA 必须同时满足所有已声明 semantic 值和原始字段值。
+`existing_schematic` 是不依赖固定拓扑模板的通用 circuit kind，开放 `schematic.inspect`、`schematic.symbol.generate`、预声明 `schematic.transform`、`parameters.apply`、typed `simulation.run`、有限 raw-instance `design.tune`、受控单-delta `design.close_loop`、`ade.prepare`、`ade.capture`、`ade.run`、`ade.corners.apply`、`ade.variables.apply` 与 `ade.setup.apply`：inspect 保留 Bridge reader 的完整结构对象、geometry、notes、nets/pins 细节和所有可回读 CDF 参数；symbol generation 只从精确绑定且不存在 symbol 的 schematic 建立人工/层级复用入口；transform 只执行上述 exact topology-delta 子集；参数操作允许人工指定任意已有实例；通用 simulation/tune/close-loop 使用 design context 与 typed testbench/metric/netlist binding；ADE 操作则为已有 design 准备新的 Maestro 人工入口、读取人工状态、后台运行一个已保存 setup，或用显式旧状态前置条件增量修改 corner、变量/selection、analysis 和新增 output/spec，不要求 VDA 理解 DUT 拓扑。反相器和共源模板也能使用相同原始参数与 ADE 交接路径，并可在一个参数任务中组合 semantic parameters 与原始实例参数；semantic 写入先执行，原始 CDF callback 后执行，最终 OA 必须同时满足所有已声明 semantic 值和原始字段值。
 
 执行路径先结构化回读目标 schematic 并确认实例存在，再复用 Bridge 的 `set_instance_params(..., param_filters=None)` 触发 CDF callback、`schCheck` 和 `dbSave`。通用 reader 为控制输出会省略空值和超长值，因此 VDA 不用摘要缺失来限制 Bridge：写入后另发只读 SKILL，直接打开目标 OA、定位实例 CDF，并逐字段比较真实 `p~>value` 与请求字符串；executor 的 `schematic.inspect.after` 再独立执行一次同样的定向读取。首次值不一致时，worker 至多按任务声明顺序逐字段重放一次；计划必须披露该副作用，最终仍不一致则整个 run 失败。
 

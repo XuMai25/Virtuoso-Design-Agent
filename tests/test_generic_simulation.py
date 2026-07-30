@@ -605,6 +605,20 @@ def test_generic_task_rejects_missing_context_bad_binding_and_dynamic_analysis()
         TaskSpec.model_validate(unsupported)
 
 
+def test_read_only_generic_simulation_allows_no_parameter_binding_but_tuning_does_not() -> None:
+    read_only = _task().model_dump(mode="json")
+    read_only["generic_simulation"]["netlist_parameter_bindings"] = []
+    task = TaskSpec.model_validate(read_only)
+
+    assert task.generic_simulation is not None
+    assert task.generic_simulation.netlist_parameter_bindings == []
+
+    tuning = _tune_payload()
+    tuning["generic_simulation"]["netlist_parameter_bindings"] = []
+    with pytest.raises(ValidationError, match="OA-to-si netlist parameter bindings"):
+        TaskSpec.model_validate(tuning)
+
+
 def test_generic_tuning_requires_bound_raw_instance_fields() -> None:
     task = _tune_task()
     plan = build_plan(task)
@@ -1138,6 +1152,10 @@ def test_generic_testbench_renderer_emits_only_typed_dc_ac_surface() -> None:
     )
 
     assert 'include "/data/xum/run/netlist"' in deck
+    model_index = deck.index('include "/data/model.scs" section=top_tt')
+    netlist_index = deck.index('include "/data/xum/run/netlist"')
+    assert deck.index("simulator lang=spectre", model_index) < netlist_index
+    assert deck.count("simulator lang=spectre") == 2
     assert "VIN_SRC (IN 0) vsource dc=0.45 mag=1 phase=0 type=dc" in deck
     assert "CL0 (OUT 0) capacitor c=1e-15" in deck
     assert "ac ac start=100 stop=100000000 dec=10" in deck
@@ -1306,16 +1324,44 @@ def test_generic_si_parser_proves_explicit_one_level_hierarchy() -> None:
     ]
     netlist = """
 subckt vda_child IN OUT VDD VSS
-MN0 (OUT IN VSS VSS) nch_lvt_mac w=1u l=30n
+    MN0 (OUT IN VSS VSS) nch_lvt_mac w=1u l=30n \\
+        multi=1 nf=1
 ends vda_child
 XAMP (IN OUT VDD VSS) vda_child scale=2
 """
 
+    child_summary = {
+        "topology": {
+            "instances": [
+                {
+                    "name": "MN0",
+                    "library": "tsmcN28",
+                    "cell": "nch_lvt_mac",
+                    "view": "symbol",
+                    "terminals": {
+                        "D": "OUT",
+                        "G": "IN",
+                        "S": "VSS",
+                        "B": "VSS",
+                    },
+                }
+            ],
+            "nets": [
+                {"name": name} for name in ("IN", "OUT", "VDD", "VSS")
+            ],
+            "pins": [
+                {"name": name, "net": name}
+                for name in ("IN", "OUT", "VDD", "VSS")
+            ],
+        },
+        "placement": {"sha256": "1" * 64},
+    }
     parsed = bridge_worker._parse_existing_schematic_netlist(
         netlist,
         top,
         GenericOaSimulationSpec.model_validate(raw_settings),
         {("vda_test", "vda_child"): child},
+        {("vda_test", "vda_child"): child_summary},
     )
 
     assert parsed["flat_primitive_scope"] is False
@@ -1325,6 +1371,7 @@ XAMP (IN OUT VDD VSS) vda_child scale=2
     assert parsed["hierarchy_bindings"][0]["child_topology_source"] == (
         "bridge_readback"
     )
+    assert parsed["hierarchy_bindings"][0]["child_placement_sha256"] == "1" * 64
     assert parsed["parameter_bindings"][0]["oa_value"] == "2"
 
     with pytest.raises(RuntimeError, match="node mismatch"):

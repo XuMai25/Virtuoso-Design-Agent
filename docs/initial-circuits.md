@@ -306,19 +306,24 @@ gain 和 bandwidth。该 policy 是事后校准，下一拓扑不得直接外推
 
 ## 跨电路 Gate：通用微调事务
 
-状态：instance/net/reconnect 子集已在共源和“电流镜负载 + 对称源退化”两个新 cellview 完成真实 OA/`si`/Spectre forward 与 exact inverse；NMOS `nch_lvt_mac -> nch_mac -> nch_lvt_mac` 的 master/CDF、`si` model、DC/AC 和恢复态也已 live。post-save 自动 recovery 的失败分支仍只有本地故障注入。
+状态：instance/net/reconnect 子集已在共源和“电流镜负载 + 对称源退化”两个新 cellview 完成真实 OA/`si`/Spectre forward 与 exact inverse；NMOS `nch_lvt_mac -> nch_mac -> nch_lvt_mac` 的 master/CDF、`si` model、DC/AC 和恢复态也已 live。2026-07-31 又从全新 child schematic 非覆盖生成 sibling symbol，并在另一个 top cell 上把 flat 共源增量替换为该 child；一层 OA→`si`→Spectre DC/AC 与 flat reference 的六项核心指标最坏相对差 `4.09e-15`。post-save 自动 recovery 的失败分支仍只有本地故障注入。
 
 - 保存后审计失败不会盲目 inverse。只有独立回读证明当前 topology 正好是该次契约的预期输出，才执行相反方向；状态未知或存在额外结构漂移时不写。
 - `replace_master` 只作用于一个具名实例并对旧 master 做 CAS。新旧 symbol 必须有完全相同的端子集合、方向和 pin bBox；目标 master/CDF 字段也要在写前只读验证。
 - 每个替换必须声明旧/新 CDF 字符串子集。未声明字段的策略固定为 `record_only`，因此完整前后参数表属于 `bridge_readback` 证据，但不声称全部字段可迁移。
 - 正向/反向与故障恢复都复用同一契约。请求失败但恢复成功时仍记失败，不把“已恢复”包装成变换成功。
-- Bridge 仓库没有修改。正常 master/CDF forward/inverse 已在新 `vda_master_migration_001` 真实验证；下一步若验证自动恢复，必须在另一个 disposable `vda_` cellview 做受控 post-save 失败注入，不能破坏该基线。pin 创建/删除及通用 wire/shape snapshot 仍在后面。
+- `schematic.symbol.generate` 要求精确 source topology/pin 绑定、目标 symbol 不存在、session 设置成功/失败都恢复，并在保存后由独立 worker 重开核对 terminals 与非空 bBox；不提供覆盖或 refresh。
+- 一层 hierarchy 只接受任务显式声明的 top instance、child、subckt 与 terminal order；child 必须是 primitive-only，完整 child topology/placement 与 `si` body 同源。跨层参数调优、nested hierarchy 与派生 CDF 尚未闭合。
+- Bridge 仓库没有修改。正常 master/CDF forward/inverse 已在新 `vda_master_migration_001` 真实验证；下一步若验证自动恢复，必须在另一个 disposable `vda_` cellview 做受控 post-save 失败注入，不能破坏该基线。
 
 详见
 [`2026-07-26-topology-recovery-master-migration-local.md`](validation/2026-07-26-topology-recovery-master-migration-local.md)。
 
 对应 live round-trip 见
 [`2026-07-26-topology-master-migration-live.md`](validation/2026-07-26-topology-master-migration-live.md)。
+
+一层 hierarchy 的 symbol、OA/`si` 和 flat/hierarchical DC/AC 对照见
+[`2026-07-31-existing-schematic-one-level-hierarchy-live.md`](validation/2026-07-31-existing-schematic-one-level-hierarchy-live.md)。
 
 ## 升级原则
 
