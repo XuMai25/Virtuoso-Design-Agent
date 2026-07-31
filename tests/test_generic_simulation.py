@@ -1410,6 +1410,82 @@ def test_generic_si_parser_matches_topology_and_bound_parameters() -> None:
         )
 
 
+def test_generic_si_parser_rechecks_discovered_derived_callbacks() -> None:
+    raw_schematic = _raw_schematic()
+    raw_schematic["instances"][0]["params"].update(
+        {"Wfg": "1u", "ad": "5e-14", "as": "5e-14"}
+    )
+    raw_settings = _generic_spec()
+    raw_settings["netlist_parameter_bindings"] = [
+        {
+            "instance": "MN0",
+            "oa_parameter": "Wfg",
+            "netlist_parameter": "w",
+            "derived_callbacks": [
+                {"oa_parameter": "ad", "netlist_parameter": "ad"},
+                {"oa_parameter": "as", "netlist_parameter": "as"},
+            ],
+            "discovery_source": {
+                "discovery_task_id": "binding-discovery",
+                "discovery_plan_token": "0123456789abcdef",
+                "discovery_task_sha256": "a" * 64,
+                "discovery_run_sha256": "b" * 64,
+                "classification": (
+                    "direct_literal_binding_with_derived_callbacks"
+                ),
+                "topology_sha256": "c" * 64,
+                "complete_cdf_sha256": "d" * 64,
+            },
+        }
+    ]
+    settings = GenericOaSimulationSpec.model_validate(raw_settings)
+    netlist = (
+        "MN0 (OUT IN VSS VSS) nch_lvt_mac "
+        "w=1u l=30n ad=5e-14 as=5e-14\n"
+    )
+
+    parsed = bridge_worker._parse_existing_schematic_netlist(
+        netlist,
+        raw_schematic,
+        settings,
+    )
+
+    assert parsed["derived_callback_consistency"] == "matched"
+    assert [
+        item["oa_parameter"] for item in parsed["derived_callback_bindings"]
+    ] == ["ad", "as"]
+    assert settings.netlist_parameter_bindings[0].discovery_source is not None
+
+    with pytest.raises(RuntimeError, match="derived callback mismatch"):
+        bridge_worker._parse_existing_schematic_netlist(
+            netlist.replace("ad=5e-14", "ad=6e-14"),
+            raw_schematic,
+            settings,
+        )
+
+    with pytest.raises(RuntimeError, match="missing derived callback parameter"):
+        bridge_worker._parse_existing_schematic_netlist(
+            netlist.replace(" ad=5e-14", ""),
+            raw_schematic,
+            settings,
+        )
+
+    duplicate = _generic_spec()
+    duplicate["netlist_parameter_bindings"] = [
+        {
+            "instance": "MN0",
+            "oa_parameter": "w",
+            "netlist_parameter": "w",
+            "derived_callbacks": [
+                {"oa_parameter": "ad", "netlist_parameter": "ad"},
+                {"oa_parameter": "ad", "netlist_parameter": "as"},
+            ],
+        }
+    ]
+    with pytest.raises(ValidationError, match="repeats a derived OA callback"):
+        GenericOaSimulationSpec.model_validate(duplicate)
+
+
 def test_generic_si_parser_rejects_unknown_testbench_node() -> None:
     raw = _generic_spec()
     raw["sources"][2]["positive_node"] = "MISSING"

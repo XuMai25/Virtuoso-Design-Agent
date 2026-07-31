@@ -12167,6 +12167,7 @@ def _parse_existing_schematic_netlist(
         )
 
     parameter_checks: list[dict[str, str]] = []
+    derived_callback_checks: list[dict[str, str]] = []
     for binding in resolved_parameter_bindings:
         scoped = split_instance_path(binding.instance)[0] is not None
         oa_instance = (
@@ -12213,6 +12214,42 @@ def _parse_existing_schematic_netlist(
                 "netlist_value": netlist_value,
             }
         )
+        for callback in binding.derived_callbacks or []:
+            if callback.oa_parameter not in oa_parameters:
+                raise RuntimeError(
+                    "OA readback is missing derived callback parameter "
+                    f"{binding.instance}.{callback.oa_parameter}"
+                )
+            if callback.netlist_parameter not in netlist_parameters:
+                raise RuntimeError(
+                    "si netlist is missing derived callback parameter "
+                    f"{binding.instance}.{callback.netlist_parameter}"
+                )
+            callback_oa_value = str(oa_parameters[callback.oa_parameter])
+            callback_netlist_value = str(
+                netlist_parameters[callback.netlist_parameter]
+            )
+            if not spectre_values_equal(
+                callback_oa_value,
+                callback_netlist_value,
+            ):
+                raise RuntimeError(
+                    "OA/si derived callback mismatch for "
+                    f"{binding.instance}.{callback.oa_parameter}->"
+                    f"{callback.netlist_parameter}: {callback_oa_value!r} != "
+                    f"{callback_netlist_value!r}"
+                )
+            derived_callback_checks.append(
+                {
+                    "instance": binding.instance,
+                    "primary_oa_parameter": binding.oa_parameter,
+                    "primary_netlist_parameter": binding.netlist_parameter,
+                    "oa_parameter": callback.oa_parameter,
+                    "netlist_parameter": callback.netlist_parameter,
+                    "oa_value": callback_oa_value,
+                    "netlist_value": callback_netlist_value,
+                }
+            )
 
     if settings is not None:
         missing_op_instances = sorted(
@@ -12238,6 +12275,9 @@ def _parse_existing_schematic_netlist(
         ),
         "hierarchy_bindings": hierarchy_checks,
     }
+    if derived_callback_checks:
+        result["derived_callback_bindings"] = derived_callback_checks
+        result["derived_callback_consistency"] = "matched"
     if include_parameter_inventory:
         parameter_inventory = {
             name: {

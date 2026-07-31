@@ -241,6 +241,13 @@ task/context ID、instance、CDF 字段、probe 值及可选一层 hierarchy bin
 分类规则变化时可用 `vda binding-reclassify` 重新校验已保存的 real-Bridge 三阶段 artifact 和恢复
 签名；它不连接远端、不写 OA，也不改写原 run record。
 
+需要把发现结果用于普通任务时，使用 `vda onboarding-resolve-bindings`，不要把 classification 中的
+字段人工复制回 resolution。resolution 先声明允许的实例/CDF 字段，但对应
+`netlist_parameter_bindings` 留空；CLI 接受一个或多个 discovery task/run pair，逐个核对原计划、
+真实 Bridge adapter、EDA action、target/PDK/topology、完整 CDF baseline、artifact hashes、恢复和
+当前分类。输出 TaskSpec 的 binding 内嵌 source hashes，并携带可执行期复核的 derived callback 列表。
+这一路径既可生成 `simulation.run`，也可生成原有 `design.tune`；不会自动打开远端 compute/write。
+
 stage-1 run 还必须满足：真实 Bridge adapter、成功状态、完整且连续的 candidate record、穷尽声明
 topology×parameter 域、唯一 selected candidate，以及与 selected hash 一致的最终 Bridge topology
 回读。独立 inspect 必须晚于 stage 1，target/PDK/hash 必须相同。输出 task 冻结所有读回结构并固定

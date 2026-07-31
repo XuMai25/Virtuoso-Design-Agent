@@ -294,9 +294,15 @@ def _validate_parameter_surface(
         (binding.instance, binding.oa_parameter)
         for binding in simulation.netlist_parameter_bindings
     }
+    observed_binding_fields = set(binding_fields)
+    observed_binding_fields.update(
+        (binding.instance, callback.oa_parameter)
+        for binding in simulation.netlist_parameter_bindings
+        for callback in binding.derived_callbacks or []
+    )
     outside_inventory = sorted(
         (instance, parameter)
-        for instance, parameter in permission_fields | binding_fields
+        for instance, parameter in permission_fields | observed_binding_fields
         if parameter not in inventory.get(instance, set())
     )
     if outside_inventory:

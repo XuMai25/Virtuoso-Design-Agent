@@ -120,6 +120,17 @@ OA 状态是 `bridge_readback`，raw `si` 是 `eda_result`，分类是 `software
 `system_event`。详见
 [`validation/2026-08-01-existing-schematic-parameter-binding-discovery-live.md`](validation/2026-08-01-existing-schematic-parameter-binding-discovery-live.md)。
 
+`vda onboarding-resolve-bindings` 负责下一段 handoff，而不是新增仿真器。输入仍是普通 onboarding
+draft 和 user-input resolution，但 resolution 只声明字段权限、分析和 testbench，不手填待发现的
+mapping；每个 `--binding-source` 提供一对真实 discovery TaskSpec/run。编译器重新计算 source plan
+token、重放本地 reclassification、核对 target/PDK/topology/完整 CDF，并拒绝已有人工 mapping 冲突。
+输出的 `GenericNetlistParameterBinding` 同时保存 primary mapping、discovery task/run SHA-256、分类和
+同实例 derived callback 列表，因此 plan token 也绑定发现证据。普通 OA→`si` parser 除主字段外还会
+逐项检查 callback OA/netlist 值；任何缺失或不一致都会在 Spectre 规格判定前失败。旧 binding 的新增
+字段默认 `None` 并在 canonical task JSON 中省略，既有 task token 不变。compiler 输出继续固定
+compute/write/replace=false；本地编译不是新的 EDA 结果。详见
+[`validation/2026-08-01-onboarding-discovered-binding-promotion-local.md`](validation/2026-08-01-onboarding-discovered-binding-promotion-local.md)。
+
 `vda binding-discovery-task` 把一对成功的 real-Bridge read-only inspect task/run 与一个很小的
 `user_input` intent 编译成上述完整 TaskSpec。它复用 onboarding 的 task/run/token/target/PDK/
 action evidence 验证，直接继承 topology、placement、冻结对象和未过滤 CDF inventory；不会按

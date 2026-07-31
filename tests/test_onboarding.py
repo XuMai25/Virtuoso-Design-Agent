@@ -8,6 +8,11 @@ from pathlib import Path
 
 import pytest
 
+from virtuoso_design_agent.adapters import bridge_worker
+from virtuoso_design_agent.binding_promotion import (
+    OnboardingBindingPromotionCompilation,
+    compile_onboarding_with_discovered_bindings,
+)
 from virtuoso_design_agent.binding_discovery_compiler import (
     ParameterBindingDiscoveryCompilation,
     ParameterBindingDiscoveryIntent,
@@ -26,6 +31,7 @@ from virtuoso_design_agent.onboarding_promotion import (
     compile_onboarding_post_refinement,
 )
 from virtuoso_design_agent.onboarding_resolution import resolve_onboarding_draft
+from virtuoso_design_agent.parameter_binding import canonical_parameter_table_sha256
 from virtuoso_design_agent.planner import build_plan
 from virtuoso_design_agent.topology_delta import (
     apply_topology_delta_execution,
@@ -179,6 +185,297 @@ def _inventory(draft, instance_path: str):
     return next(
         item for item in draft.parameter_inventory if item.instance_path == instance_path
     )
+
+
+def _binding_resolution_payload(draft_path: Path) -> dict:
+    return {
+        "schema_version": 1,
+        "draft_sha256": hashlib.sha256(draft_path.read_bytes()).hexdigest(),
+        "task_id": "binding-promoted-ac",
+        "context_id": "binding-promoted-ac-context",
+        "operation": "simulation.run",
+        "roles": [
+            {"role": "signal.input", "nets": ["IN"]},
+            {"role": "signal.output", "nets": ["OUT"]},
+            {"role": "supply.positive", "nets": ["VDD"]},
+            {"role": "supply.return", "nets": ["VSS"]},
+            {"role": "device.gain", "instances": ["MN0"]},
+        ],
+        "instance_parameter_permissions": [
+            {
+                "instance": "MN0",
+                "parameters": ["Wfg"],
+                "modes": ["fixed"],
+            }
+        ],
+        "required_analyses": ["ac"],
+        "metrics": [
+            "low_frequency_gain_v_per_v",
+            "bandwidth_3db_hz",
+            "gain_bandwidth_product_hz",
+        ],
+        "generic_simulation": {
+            "sources": [
+                {
+                    "name": "VDD_SRC",
+                    "kind": "voltage",
+                    "positive_node": "VDD",
+                    "dc_value": 0.9,
+                },
+                {
+                    "name": "VSS_SRC",
+                    "kind": "voltage",
+                    "positive_node": "VSS",
+                    "dc_value": 0.0,
+                },
+                {
+                    "name": "VIN_SRC",
+                    "kind": "voltage",
+                    "positive_node": "IN",
+                    "dc_value": 0.35,
+                    "ac_magnitude": 1.0,
+                },
+            ],
+            "loads": [
+                {
+                    "name": "CL0",
+                    "kind": "capacitor",
+                    "positive_node": "OUT",
+                    "value": 2e-15,
+                }
+            ],
+            "transfer": {
+                "input": {"positive_node": "IN"},
+                "output": {"positive_node": "OUT"},
+            },
+            "netlist_parameter_bindings": [],
+        },
+        "analysis": "ac",
+        "ac_sweep": {
+            "start_hz": 1e3,
+            "stop_hz": 1e10,
+            "points_per_decade": 20,
+        },
+        "limits": {"max_iterations": 1, "timeout_seconds": 600},
+        "evidence_source": "user_input",
+    }
+
+
+def _write_promotable_binding_source(
+    root: Path,
+    inspect_task_path: Path,
+    inspect_run_path: Path,
+    *,
+    mirrored_callbacks: bool = True,
+) -> tuple[Path, Path]:
+    safe_task, _compilation = compile_parameter_binding_discovery_task(
+        inspect_task_path,
+        inspect_run_path,
+        ParameterBindingDiscoveryIntent(
+            task_id="binding-promote-source",
+            context_id="binding-promote-source-context",
+            instance="MN0",
+            oa_parameter="Wfg",
+            probe_value="2u",
+        ),
+    )
+    task_payload = safe_task.model_dump(mode="json", exclude_none=True)
+    task_payload["safety"]["allow_remote_compute"] = True
+    task_payload["safety"]["allow_remote_write"] = True
+    task = TaskSpec.model_validate(task_payload)
+    task_path = root / "binding-promote-source-task.json"
+    task_path.write_text(
+        task.model_dump_json(indent=2, exclude_none=True) + "\n",
+        encoding="utf-8",
+    )
+
+    assert task.parameter_binding_discovery is not None
+    expected = dict(task.parameter_binding_discovery.expected_instance_parameters)
+    topology_sha256 = task.design_context.expected_topology_sha256
+    assert topology_sha256 is not None
+    stage_payloads: dict[str, dict] = {}
+    for stage_name, width in (
+        ("baseline", "1u"),
+        ("probe", "2u"),
+        ("restored", "1u"),
+    ):
+        oa_parameters = dict(expected)
+        oa_parameters["Wfg"] = width
+        area = "5e-14"
+        if stage_name == "probe" and mirrored_callbacks:
+            area = "1e-13"
+        oa_parameters["ad"] = area
+        oa_parameters["as"] = area
+        netlist_area = "1e-13" if stage_name == "probe" else "5e-14"
+        inventory = {
+            "MN0": {
+                "model": "nch_lvt_mac",
+                "nodes": ["OUT", "IN", "VSS", "VSS"],
+                "parameters": {
+                    "w": width,
+                    "l": "30n",
+                    "ad": netlist_area,
+                    "as": netlist_area,
+                },
+            },
+            "RD0": {
+                "model": "resistor",
+                "nodes": ["VDD", "OUT"],
+                "parameters": {"r": "20K"},
+            },
+        }
+        signature = hashlib.sha256(
+            json.dumps(
+                inventory,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        work_dir = root / f"{stage_name}-binding-work"
+        work_dir.mkdir()
+        (work_dir / "oa_netlist.scs").write_text(
+            "MN0 (OUT IN VSS VSS) nch_lvt_mac "
+            f"w={width} l=30n ad={netlist_area} as={netlist_area}\n"
+            "RD0 (VDD OUT) resistor r=20K\n",
+            encoding="utf-8",
+        )
+        (work_dir / "si_batch_stdout.log").write_text(
+            "End netlisting\n",
+            encoding="utf-8",
+        )
+        artifact_bundle = bridge_worker._persist_binding_netlist_artifacts(  # noqa: SLF001
+            work_dir,
+            root / "binding-evidence",
+            stage_name,
+        )
+        netlist_sha256 = next(
+            item["sha256"]
+            for item in artifact_bundle["files"]
+            if item["relative_path"] == f"{stage_name}/oa_netlist.scs"
+        )
+        remote_dir = (
+            "/data/xum/virtuoso_bridge_smoke/"
+            f"vda_binding_promotion_{stage_name}"
+        )
+        stage_payloads[stage_name] = {
+            "oa_instance_parameters": oa_parameters,
+            "oa_instance_parameters_sha256": canonical_parameter_table_sha256(
+                oa_parameters
+            ),
+            "oa_topology_sha256": topology_sha256,
+            "oa_source": "bridge_readback",
+            "netlist_instance_parameters": inventory["MN0"]["parameters"],
+            "instance": "MN0",
+            "instance_model": "nch_lvt_mac",
+            "instance_nodes": inventory["MN0"]["nodes"],
+            "instance_parameters": inventory["MN0"]["parameters"],
+            "parameter_inventory": inventory,
+            "canonical_netlist_signature_sha256": signature,
+            "raw_netlist": {
+                "source": "eda_result",
+                "remote_path": f"{remote_dir}/netlist",
+                "remote_retained": False,
+                "sha256": netlist_sha256,
+            },
+            "artifact_bundle": artifact_bundle,
+            "remote_cleanup": {
+                "source": "system_event",
+                "remote_path": remote_dir,
+                "removed": True,
+            },
+            "source": "eda_result",
+        }
+
+    now = datetime.now(UTC)
+    record = RunRecord(
+        task_id=task.id,
+        plan_token=build_plan(task).confirmation_token,
+        adapter="virtuoso-bridge-subprocess",
+        status=RunStatus.PARTIAL,
+        started_at=now,
+        finished_at=now + timedelta(seconds=3),
+        actions=[
+            ActionRecord(
+                action="parameters.binding.discover",
+                status="succeeded",
+                started_at=now,
+                finished_at=now + timedelta(seconds=3),
+                evidence_source=EvidenceSource.EDA_RESULT,
+                details={
+                    "contract": task.parameter_binding_discovery.model_dump(
+                        mode="json"
+                    ),
+                    **stage_payloads,
+                    "restoration": {
+                        "oa_exact": True,
+                        "canonical_netlist_signature_exact": True,
+                        "verified": True,
+                    },
+                    "spectre_simulation_performed": False,
+                    "classification": {
+                        "status": "ambiguous_netlist_change",
+                        "source": "software_inference",
+                    },
+                },
+            )
+        ],
+    )
+    run_path = root / "binding-promote-source-run.json"
+    run_path.write_text(
+        record.model_dump_json(indent=2, exclude_none=True) + "\n",
+        encoding="utf-8",
+    )
+    return task_path, run_path
+
+
+def _write_binding_promotion_inputs(
+    root: Path,
+    *,
+    mirrored_callbacks: bool = True,
+) -> tuple[Path, Path, Path, Path]:
+    inspect_task, inspect_run = _write_inspection(
+        root,
+        stem="binding-promote-inspect",
+        library="vda_test",
+        cell="vda_binding_promote",
+        topology=_flat_topology(),
+        instance_parameters={
+            "MN0": {
+                "Wfg": "1u",
+                "l": "30n",
+                "ad": "5e-14",
+                "as": "5e-14",
+            },
+            "RD0": {"r": "20K"},
+        },
+    )
+    draft = build_onboarding_draft(
+        inspect_task,
+        inspect_run,
+        draft_id="binding-promote-draft",
+    )
+    draft_path = root / "binding-promote-draft.json"
+    draft_path.write_text(
+        draft.model_dump_json(indent=2, exclude_none=True) + "\n",
+        encoding="utf-8",
+    )
+    resolution_path = root / "binding-promote-resolution.json"
+    resolution_path.write_text(
+        json.dumps(
+            _binding_resolution_payload(draft_path),
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    discovery_task, discovery_run = _write_promotable_binding_source(
+        root,
+        inspect_task,
+        inspect_run,
+        mirrored_callbacks=mirrored_callbacks,
+    )
+    return draft_path, resolution_path, discovery_task, discovery_run
 
 
 def test_binding_discovery_compiler_preserves_fresh_complete_cdf_and_is_safe(
@@ -383,6 +680,199 @@ def test_binding_discovery_task_cli_writes_task_and_hash_handoff(
     assert compiled_task.safety.allow_remote_write is False
     assert record.instance == "MN0"
     assert record.evidence_sources["field_selection_and_probe"] == "user_input"
+
+
+def test_onboarding_binding_promotion_compiles_and_rechecks_callbacks(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    draft, resolution, discovery_task, discovery_run = (
+        _write_binding_promotion_inputs(tmp_path)
+    )
+
+    task, compilation = compile_onboarding_with_discovered_bindings(
+        draft,
+        resolution,
+        [(discovery_task, discovery_run)],
+    )
+    repeated_task, repeated_compilation = (
+        compile_onboarding_with_discovered_bindings(
+            draft,
+            resolution,
+            [(discovery_task, discovery_run)],
+        )
+    )
+
+    assert task == repeated_task
+    assert compilation == repeated_compilation
+    assert task.safety.allow_remote_compute is False
+    assert task.safety.allow_remote_write is False
+    assert task.safety.replace_existing is False
+    assert task.generic_simulation is not None
+    assert len(task.generic_simulation.netlist_parameter_bindings) == 1
+    binding = task.generic_simulation.netlist_parameter_bindings[0]
+    assert binding.instance == "MN0"
+    assert binding.oa_parameter == "Wfg"
+    assert binding.netlist_parameter == "w"
+    assert binding.derived_callbacks is not None
+    assert [item.oa_parameter for item in binding.derived_callbacks] == [
+        "ad",
+        "as",
+    ]
+    assert binding.discovery_source is not None
+    assert binding.discovery_source.classification == (
+        "direct_literal_binding_with_derived_callbacks"
+    )
+    assert binding.discovery_source.discovery_task_sha256 == hashlib.sha256(
+        discovery_task.read_bytes()
+    ).hexdigest()
+    assert binding.discovery_source.discovery_run_sha256 == hashlib.sha256(
+        discovery_run.read_bytes()
+    ).hexdigest()
+    assert compilation.compiled_plan_token == build_plan(task).confirmation_token
+    assert compilation.execution_enabled is False
+    assert compilation.remote_execution_performed is False
+    assert compilation.oa_write_performed is False
+    assert compilation.promoted_bindings[0].discovery_run_status == "partial"
+    assert compilation.compiled_task_sha256 == hashlib.sha256(
+        (
+            task.model_dump_json(indent=2, exclude_none=True) + "\n"
+        ).encode("utf-8")
+    ).hexdigest()
+
+    with pytest.raises(ValueError, match="repeats an OA field"):
+        compile_onboarding_with_discovered_bindings(
+            draft,
+            resolution,
+            [
+                (discovery_task, discovery_run),
+                (discovery_task, discovery_run),
+            ],
+        )
+
+    output = tmp_path / "binding-promoted-task.json"
+    record_output = tmp_path / "binding-promotion-record.json"
+    assert (
+        main(
+            [
+                "onboarding-resolve-bindings",
+                str(draft),
+                str(resolution),
+                "--binding-source",
+                str(discovery_task),
+                str(discovery_run),
+                "--output",
+                str(output),
+                "--record-output",
+                str(record_output),
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert TaskSpec.model_validate_json(output.read_bytes()) == task
+    assert hashlib.sha256(output.read_bytes()).hexdigest() == (
+        compilation.compiled_task_sha256
+    )
+    assert OnboardingBindingPromotionCompilation.model_validate_json(
+        record_output.read_bytes()
+    ) == compilation
+
+
+def test_onboarding_binding_promotion_rejects_unmirrored_callback_delta(
+    tmp_path: Path,
+) -> None:
+    draft, resolution, discovery_task, discovery_run = (
+        _write_binding_promotion_inputs(
+            tmp_path,
+            mirrored_callbacks=False,
+        )
+    )
+
+    with pytest.raises(ValueError, match="did not prove a promotable"):
+        compile_onboarding_with_discovered_bindings(
+            draft,
+            resolution,
+            [(discovery_task, discovery_run)],
+        )
+
+
+def test_onboarding_binding_promotion_compiles_normal_tuning_without_manual_map(
+    tmp_path: Path,
+) -> None:
+    draft, resolution, discovery_task, discovery_run = (
+        _write_binding_promotion_inputs(tmp_path)
+    )
+    payload = json.loads(resolution.read_text(encoding="utf-8"))
+    payload["task_id"] = "binding-promoted-tune"
+    payload["operation"] = "design.tune"
+    payload["instance_parameter_permissions"][0]["modes"] = ["search"]
+    payload["instance_parameter_space"] = [
+        {
+            "instance": "MN0",
+            "parameter": "Wfg",
+            "values": ["1u", "1.5u"],
+        }
+    ]
+    payload["objective"] = {
+        "metric": "gain_bandwidth_product_hz",
+        "goal": "maximize",
+    }
+    payload["constraints"] = [
+        {
+            "metric": "low_frequency_gain_v_per_v",
+            "relation": ">=",
+            "value": 1.0,
+        }
+    ]
+    payload["limits"]["max_iterations"] = 2
+    resolution.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    task, compilation = compile_onboarding_with_discovered_bindings(
+        draft,
+        resolution,
+        [(discovery_task, discovery_run)],
+    )
+
+    assert task.operation.value == "design.tune"
+    assert task.instance_parameter_space[0].parameter == "Wfg"
+    assert task.generic_simulation is not None
+    assert task.generic_simulation.netlist_parameter_bindings[0].oa_parameter == (
+        "Wfg"
+    )
+    assert compilation.compiled_plan_token == build_plan(task).confirmation_token
+    assert task.safety.allow_remote_compute is False
+    assert task.safety.allow_remote_write is False
+
+
+def test_onboarding_binding_promotion_rejects_manual_mapping_collision(
+    tmp_path: Path,
+) -> None:
+    draft, resolution, discovery_task, discovery_run = (
+        _write_binding_promotion_inputs(tmp_path)
+    )
+    payload = json.loads(resolution.read_text(encoding="utf-8"))
+    payload["generic_simulation"]["netlist_parameter_bindings"] = [
+        {
+            "instance": "MN0",
+            "oa_parameter": "Wfg",
+            "netlist_parameter": "w",
+        }
+    ]
+    resolution.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="already mapped by onboarding intent"):
+        compile_onboarding_with_discovered_bindings(
+            draft,
+            resolution,
+            [(discovery_task, discovery_run)],
+        )
 
 
 def test_onboarding_draft_is_read_only_deterministic_and_preserves_all_cdf(

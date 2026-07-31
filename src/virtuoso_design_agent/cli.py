@@ -16,6 +16,7 @@ from .binding_discovery_compiler import (
     ParameterBindingDiscoveryIntent,
     compile_parameter_binding_discovery_task,
 )
+from .binding_promotion import compile_onboarding_with_discovered_bindings
 from .bridge_lifecycle import BridgeLifecycleError, run_bridge_lifecycle
 from .catalog import UnsupportedCapability, catalog_as_dicts
 from .cascode_seed import (
@@ -514,7 +515,7 @@ def _cmd_binding_discovery_task(args: argparse.Namespace) -> int:
     )
     for path, payload in outputs:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(payload + "\n", encoding="utf-8")
+        path.write_bytes((payload + "\n").encode("utf-8"))
     print(outputs[0][1])
     print(outputs[1][1])
     return 0
@@ -544,6 +545,31 @@ def _cmd_onboarding_resolve(args: argparse.Namespace) -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(payload + "\n", encoding="utf-8")
     print(payload)
+    return 0
+
+
+def _cmd_onboarding_resolve_bindings(args: argparse.Namespace) -> int:
+    binding_sources = [
+        (Path(task_path), Path(run_path))
+        for task_path, run_path in args.binding_source
+    ]
+    task, compilation = compile_onboarding_with_discovered_bindings(
+        args.draft,
+        args.resolution,
+        binding_sources,
+    )
+    outputs = (
+        (args.output, task.model_dump_json(indent=2, exclude_none=True)),
+        (
+            args.record_output,
+            compilation.model_dump_json(indent=2, exclude_none=True),
+        ),
+    )
+    for path, payload in outputs:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((payload + "\n").encode("utf-8"))
+    print(outputs[0][1])
+    print(outputs[1][1])
     return 0
 
 
@@ -1155,6 +1181,40 @@ def build_parser() -> argparse.ArgumentParser:
     onboarding_resolve.add_argument("resolution", type=Path)
     onboarding_resolve.add_argument("--output", type=Path, required=True)
     onboarding_resolve.set_defaults(handler=_cmd_onboarding_resolve)
+
+    onboarding_resolve_bindings = subparsers.add_parser(
+        "onboarding-resolve-bindings",
+        help=(
+            "compile locally revalidated OA-to-si discovery runs into a normal "
+            "disabled onboarding TaskSpec"
+        ),
+    )
+    onboarding_resolve_bindings.add_argument("draft", type=Path)
+    onboarding_resolve_bindings.add_argument("resolution", type=Path)
+    onboarding_resolve_bindings.add_argument(
+        "--binding-source",
+        action="append",
+        nargs=2,
+        required=True,
+        metavar=("DISCOVERY_TASK", "DISCOVERY_RUN"),
+        help=(
+            "add one exact binding-discovery task/run pair; repeat for each "
+            "authorized CDF field"
+        ),
+    )
+    onboarding_resolve_bindings.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+    )
+    onboarding_resolve_bindings.add_argument(
+        "--record-output",
+        type=Path,
+        required=True,
+    )
+    onboarding_resolve_bindings.set_defaults(
+        handler=_cmd_onboarding_resolve_bindings
+    )
 
     onboarding_promote = subparsers.add_parser(
         "onboarding-promote",

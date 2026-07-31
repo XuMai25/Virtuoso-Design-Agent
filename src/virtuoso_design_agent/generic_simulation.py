@@ -261,10 +261,52 @@ class GenericOperatingPointMetric(_StrictModel):
     quantity: StrictStr = Field(pattern=_IDENTIFIER_PATTERN)
 
 
+class GenericDerivedCallbackBinding(_StrictModel):
+    oa_parameter: StrictStr = Field(pattern=_IDENTIFIER_PATTERN)
+    netlist_parameter: StrictStr = Field(pattern=_IDENTIFIER_PATTERN)
+
+
+class GenericBindingDiscoverySource(_StrictModel):
+    discovery_task_id: StrictStr = Field(min_length=1, max_length=128)
+    discovery_plan_token: StrictStr = Field(min_length=1, max_length=64)
+    discovery_task_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    discovery_run_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    classification: Literal[
+        "direct_literal_binding",
+        "direct_literal_binding_with_derived_callbacks",
+    ]
+    topology_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    complete_cdf_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    evidence_source: Literal["software_inference"] = "software_inference"
+
+
 class GenericNetlistParameterBinding(_StrictModel):
     instance: StrictStr = Field(pattern=INSTANCE_PATH_PATTERN)
     oa_parameter: StrictStr = Field(pattern=_IDENTIFIER_PATTERN)
     netlist_parameter: StrictStr = Field(pattern=_IDENTIFIER_PATTERN)
+    derived_callbacks: list[GenericDerivedCallbackBinding] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=32,
+    )
+    discovery_source: GenericBindingDiscoverySource | None = None
+
+    @model_validator(mode="after")
+    def validate_derived_callbacks(self) -> "GenericNetlistParameterBinding":
+        callbacks = self.derived_callbacks or []
+        oa_parameters = [item.oa_parameter for item in callbacks]
+        netlist_parameters = [item.netlist_parameter for item in callbacks]
+        if len(oa_parameters) != len(set(oa_parameters)):
+            raise ValueError("generic binding repeats a derived OA callback")
+        if len(netlist_parameters) != len(set(netlist_parameters)):
+            raise ValueError("generic binding repeats a derived netlist callback")
+        if self.oa_parameter in set(oa_parameters):
+            raise ValueError("generic binding primary OA field repeats as a callback")
+        if self.netlist_parameter in set(netlist_parameters):
+            raise ValueError(
+                "generic binding primary netlist field repeats as a callback"
+            )
+        return self
 
 
 class GenericHierarchyBinding(_StrictModel):
@@ -420,14 +462,19 @@ class GenericOaSimulationSpec(_StrictModel):
                 "generic simulation requires a DC/OP metric or an AC transfer"
             )
 
-        oa_bindings = [
-            (item.instance, item.oa_parameter)
-            for item in self.netlist_parameter_bindings
-        ]
-        netlist_bindings = [
-            (item.instance, item.netlist_parameter)
-            for item in self.netlist_parameter_bindings
-        ]
+        oa_bindings = []
+        netlist_bindings = []
+        for item in self.netlist_parameter_bindings:
+            oa_bindings.append((item.instance, item.oa_parameter))
+            netlist_bindings.append((item.instance, item.netlist_parameter))
+            oa_bindings.extend(
+                (item.instance, callback.oa_parameter)
+                for callback in item.derived_callbacks or []
+            )
+            netlist_bindings.extend(
+                (item.instance, callback.netlist_parameter)
+                for callback in item.derived_callbacks or []
+            )
         if len(oa_bindings) != len(set(oa_bindings)):
             raise ValueError("generic simulation repeats an OA parameter binding")
         if len(netlist_bindings) != len(set(netlist_bindings)):
