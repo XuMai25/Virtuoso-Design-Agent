@@ -35,6 +35,7 @@ from .models import (
     RunStatus,
     TaskSpec,
 )
+from .onboarding import build_onboarding_draft
 from .op_small_signal import (
     OperatingPointSmallSignalPolicy,
     analyze_operating_point_small_signal_run,
@@ -448,6 +449,24 @@ def _cmd_topology_compile(args: argparse.Namespace) -> int:
         master_parameter_migrations=migrations,
     )
     payload = contract.model_dump_json(indent=2)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(payload + "\n", encoding="utf-8")
+    print(payload)
+    return 0
+
+
+def _cmd_onboarding_draft(args: argparse.Namespace) -> int:
+    child_inspections = [
+        (top_instance, Path(task_path), Path(run_path))
+        for top_instance, task_path, run_path in args.child_inspection
+    ]
+    draft = build_onboarding_draft(
+        args.inspect_task,
+        args.inspect_run,
+        draft_id=args.id,
+        child_inspections=child_inspections,
+    )
+    payload = draft.model_dump_json(indent=2, exclude_none=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(payload + "\n", encoding="utf-8")
     print(payload)
@@ -958,6 +977,30 @@ def build_parser() -> argparse.ArgumentParser:
     topology_compile.add_argument("--id", required=True)
     topology_compile.add_argument("--output", type=Path, required=True)
     topology_compile.set_defaults(handler=_cmd_topology_compile)
+
+    onboarding_draft = subparsers.add_parser(
+        "onboarding-draft",
+        help=(
+            "compile exact read-only existing-schematic inspection evidence into "
+            "a non-executable design-context and simulation draft"
+        ),
+    )
+    onboarding_draft.add_argument("inspect_task", type=Path)
+    onboarding_draft.add_argument("inspect_run", type=Path)
+    onboarding_draft.add_argument("--id", required=True)
+    onboarding_draft.add_argument(
+        "--child-inspection",
+        action="append",
+        nargs=3,
+        default=[],
+        metavar=("TOP_INSTANCE", "INSPECT_TASK", "INSPECT_RUN"),
+        help=(
+            "bind one exact child schematic readback to a top instance; repeat for "
+            "each unique one-level child"
+        ),
+    )
+    onboarding_draft.add_argument("--output", type=Path, required=True)
+    onboarding_draft.set_defaults(handler=_cmd_onboarding_draft)
 
     run = subparsers.add_parser("run", help="plan or execute a task")
     run.add_argument("task", type=Path)

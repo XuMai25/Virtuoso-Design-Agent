@@ -79,6 +79,17 @@ planner 把 `design.context.bind` 放在 OA 写入或仿真之前；带上下文
 审计。没有 `design_context` 的独立 `parameters.apply` 继续保留 Bridge 原有参数能力，
 因此新约束不会反向收窄人工直接写入面。
 
+`vda onboarding-draft` 在首次编写上述上下文前增加一个只读编译边界。它只接受成功的
+real-Bridge `existing_schematic + schematic.inspect` 任务及其 run record，并重算 plan token；
+task/run SHA-256、task ID、target、PDK、topology/placement SHA-256 和未过滤实例参数表均写入
+草案来源。显式一层 child 还必须与 top instance master、同 PDK/同 library、pin/terminal 集合
+和唯一 child 使用关系一致。编译器把完整 CDF inventory 原样保留，但初始权限全为
+`not_authorized`；所有实例、net 和 pin 默认冻结，只产生需要用户确认的角色候选，且
+`generic_simulation.executable=false`。因此草案不能绕过 `design_context`、仿真授权或
+OA→`si` 参数绑定，也不会把网络名启发式包装成电路真源。读取的 OA 内容仍是
+`bridge_readback`，规范化、候选和 hash binding 是 `software_inference`。详见
+[`existing-schematic-onboarding.md`](existing-schematic-onboarding.md)。
+
 第二个本地纵切为 `existing_schematic simulation.run` 增加了 `generic_simulation`。它只接受
 结构化独立电压/电流源、R/C 负载、单端或差分电压表达式、命名 DC/source-current/MOS OP
 标量，以及显式 OA-CDF→`si` 参数映射；不接受 raw Spectre、SKILL 或 shell 文本。worker

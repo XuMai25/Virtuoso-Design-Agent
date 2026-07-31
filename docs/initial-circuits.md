@@ -314,6 +314,7 @@ gain 和 bandwidth。该 policy 是事后校准，下一拓扑不得直接外推
 - 正向/反向与故障恢复都复用同一契约。请求失败但恢复成功时仍记失败，不把“已恢复”包装成变换成功。
 - `schematic.symbol.generate` 要求精确 source topology/pin 绑定、目标 symbol 不存在、session 设置成功/失败都恢复，并在保存后由独立 worker 重开核对 terminals 与非空 bBox；不提供覆盖或 refresh。
 - 一层 hierarchy 只接受任务显式声明的 top instance、child、subckt 与 terminal order；child 必须是 primitive-only，完整 child topology/placement 与 `si` body 同源。严格 `TOP/CHILD` 路径已能进入原有有限 candidate/checkpoint/winner 状态机，但 shared-child per-instance override、nested hierarchy 与派生 CDF 尚未闭合。
+- 只读 onboarding 编译器把 inspect task/run/plan token/target/PDK 与 topology/placement hash 绑定，保留完整 CDF inventory，但默认冻结结构、授予零参数权限并输出不可执行 testbench。保留的 flat 与一层 hierarchy 真实记录各本地重放 235 个字段；它只生成待确认草案，不代表用户意图或仿真契约已经闭合。
 - Bridge 仓库没有修改。正常 master/CDF forward/inverse 已在新 `vda_master_migration_001` 真实验证；下一步若验证自动恢复，必须在另一个 disposable `vda_` cellview 做受控 post-save 失败注入，不能破坏该基线。
 
 详见
@@ -327,6 +328,9 @@ gain 和 bandwidth。该 policy 是事后校准，下一拓扑不得直接外推
 
 一层 child 参数写回、同源 DC/AC 与有限调优见
 [`2026-07-31-existing-schematic-hierarchical-parameter-tuning-live.md`](validation/2026-07-31-existing-schematic-hierarchical-parameter-tuning-live.md)。
+
+只读自动接入的 flat/hierarchy 历史证据重放见
+[`2026-07-31-existing-schematic-onboarding-local.md`](validation/2026-07-31-existing-schematic-onboarding-local.md)。
 
 ## 升级原则
 

@@ -205,6 +205,13 @@ L5B 的完成标准是“单模块规格闭环可重复”，不是能偶尔跑�
 topology-delta 及专用仿真路径，现也作为下述通用 simulation/tune/close-loop 的共同前置；
 这仍是 L5B 通用化基础而不是 L5B closure。
 
+2026-07-31 又补上首次接入编译器：`vda onboarding-draft` 从 hash/plan-bound 的只读
+real-Bridge inspect 任务与 run record 生成待确认草案。它保留完整 CDF inventory，默认冻结
+全部已见结构、授予零参数权限，并将 testbench 固定为不可执行；显式一层 child 只建立
+`TOP/CHILD` scope，不猜 `si` terminal order。保留的 flat 与 hierarchy 真实证据各本地重放
+235 个 CDF 字段。这个结果降低手抄 JSON 和漏字段风险，但尚未把用户意图解析为可执行
+TaskSpec，因此仍不是一次新的 live OA Gate。
+
 同日第二个本地纵切开放 `existing_schematic simulation.run` 的受限通用 DC/AC 路径。任务以
 typed `generic_simulation` 声明 voltage/current sources、R/C loads、single-ended 或
 differential transfer、DC/source-current/MOS OP metrics 和 OA-CDF→`si` 参数绑定；任何 raw
@@ -298,9 +305,12 @@ CDF 写回/回读、`si` subckt 的 `Wfg→w`/`r→r` 一致性、shared-netlist
 
 这仍不是 L5B closure。派生 CDF、深层 hierarchy、shared-child per-instance override、并发人工 editor、
 mismatch/Monte Carlo 仍是边界；本次 PVT 也只是 winner 的两个声明条件，不是 foundry signoff corner
-set。下一项优先工作是在用户首次提供的非夹具单模块上复用已闭合的 topology/parameter/hierarchy
-控制器，按真实规格选择最小必要 analysis 与可选 PVT。只有真实模块需要时，才新增多个唯一 child
-scope、output/OP metric 映射、per-instance override 或派生 CDF；不再为已知三点域增加随机候选。
+set。下一项优先工作是完成 onboarding resolution 编译器：只消费上述 hash-bound 草案与用户确认的
+角色、参数权限、sources/loads、analysis/metrics 和 OA→`si` bindings；每项选择必须来自草案 inventory，
+缺失或冲突就拒绝，成功时生成可被现有 schema/planner 接受的普通 `existing_schematic` TaskSpec。
+随后才在用户首次提供的非夹具单模块上复用已闭合的 topology/parameter/hierarchy 控制器，按真实规格
+选择最小必要 analysis 与可选 PVT。只有真实模块需要时，才新增多个唯一 child scope、output/OP
+metric 映射、per-instance override 或派生 CDF；不再为已知三点域增加随机候选。
 
 ## L5C：物理实现闭环
 
@@ -345,7 +355,7 @@ scope、output/OP metric 映射、per-instance override 或派生 CDF；不再�
   -> 结构化 standalone Spectre 轻量 A/B（共源/共栅级联已完成无 OA/si/Maestro 的 TSMC N28 live preview、完整 manifest 和进程归零；方向与 OA→si 一致，绝对值不作同源复现）
   -> preview shortlist → 普通 OA 同源复核（已知九点域 3/3 live；未见差分对八点域先冻结 top-3、后跑完整真值并以 ρ=1.0 保留 winner；机制已提炼为默认 fast path，不再安排独立应用 Gate）
   -> active-load + 对称源极退化组合拓扑（新 cellview forward/readback/七实例 si/DC/AC/CMRR/noise/transient/ICMR/PSRR/inverse/恢复态 DC 均已 live；质量闭环未过）
-  -> 用户拓扑 design_context（角色/冻结边界/参数权限/analysis/metric/topology-delta scope 本地 Gate 已通过）
+  -> 用户拓扑 onboarding + design_context（inspect→零权限/不可执行草案的 flat/hierarchy 本地重放已通过；用户确认→普通 TaskSpec 的 resolution 尚待闭合）
   -> existing_schematic 通用 OA→si DC/AC testbench/结果契约（本地 + nominal 共栅级联 live Gate 已通过；未增加电路专用 executor）
   -> 通用 instance-parameter candidate/checkpoint/writeback（本地可行/不可行/预算/中断恢复、单字段 OA-write 与多字段 objective live 已通过）
   -> 理论诊断 + topology/parameter refinement controller（单-delta nominal flat AC、staged DC/AC/transient/noise 与 shared-netlist live；winner-only 两条件 PVT live；三个 independent alternative 的 OA round-trip/checkpoint/winner writeback live；最多七个 alternative 本地通过；一层 primitive-child symbol/OA/si/DC/AC 与 scoped child 参数调优 live 已通过）

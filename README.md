@@ -55,6 +55,7 @@ Gate 8 已把 Gate 7D 的真实器件表和 validation hash 编译成六个不�
 - 源极退化不新建第二套模板或仿真器：add 在同一 common-source cellview 中把 `MN0.S: VSS -> NSRC`，只新增 `RS0(NSRC,VSS)`；remove 只删除 VDA 创建的 RS0 两条端子 stub/标签、恢复 `MN0.S: NSRC -> VSS`。同一 inspect、参数应用、`si` 网表解析、DC/AC 指标和有限搜索路径动态识别两种变体。
 - `existing_schematic` 提供不依赖固定电路模板的 Bridge 能力面：`schematic.inspect` 保留 Bridge 的完整结构结果和所有可回读 CDF 参数；`parameters.apply` 可按实例透传 Bridge 接受的参数字符串，写入后用定向 CDF 读取再次核对。反相器/共源模板仍可在同一任务中组合 semantic parameters 与原始实例参数。固定模板与通用既有 schematic 都可用 `instance_parameter_space` 或原子 `candidate_set` 声明有限的 `instance.parameter -> raw strings` 域；搜索字段名必须来自未过滤 OA inspect 的实际 CDF 名，不猜 Bridge 别名。这不收窄独立 `parameters.apply` 的原有 Bridge 能力。
 - 可选 `design_context` 开始把上述低层能力收敛为“用户给大致拓扑、VDA 做局部细化”的 L5B 路径。上下文以 SHA-256 绑定 instance/net/pin/terminal 角色、冻结对象、允许固定或搜索的 semantic/CDF 字段、analysis/metric 意图，以及 topology-delta 可用 operation、mutable object 和数量上限。planner 在写入/仿真前加入 `design.context.bind`；executor 对 canonical OA graph、端子连接和真实 CDF 字段做只读审计，OA 原始状态是 `bridge_readback`，绑定判断是 `software_inference`。未携带上下文的人工 `parameters.apply` 保持原 Bridge 能力。`existing_schematic simulation.run/design.tune` 现已接入 typed `generic_simulation`：可声明独立电压/电流源、R/C 负载、单端或差分 transfer、DC/source-current/MOS OP metric 和 OA-CDF→`si` 参数绑定；它复用 Bridge 的 `si`/Spectre/进程 guard/manifest，不接受 raw deck 文本，也没有增加电路专用 executor。调优只允许实际实例字段，而且每个 fixed/searched raw 字段都必须有 context 权限和 OA→`si` 绑定；现有 candidate/checkpoint 状态机负责逐点暂存、定向回读、规格判定、预算语义、最佳提交、全不可行恢复和 transport resume。首个真实只读 Gate 已在共栅级联 OA 上让通用 worker 的 DC OP、gain、BW、GBW 和 unity 与旧专用路径逐项一致，最坏相对数值差 `4.1e-16`；随后真实 OA-write Gate 完成单字段三点搜索和 transport resume。`existing_schematic design.close_loop` 再把同一能力用于 hash-bound 基线与预声明可逆局部 delta，强制 objective 和完整拓扑×参数预算，controller 不随机造点。2026-07-31 的新 cell live Gate 在普通共源和固定 `RS0=750 ohm` 的源退化变体上跑完同一两个 `(MN0.Wfg,RD0.r)` tuple；四份 OA→`si`→Spectre AC 证据完整，GBW objective 选择 baseline 的 `1.1u/18.5K`，exact inverse 与任务外回读一致。真实 `WinError 10054` 后从 checkpoint index 3 续跑且未重复前缀。随后 staged generic contract 把 DC/AC/transient/noise 作为有序 Gate：完整前级 EDA 失败才跳过昂贵分析，缺指标保持 incomplete。显式 `shared_netlist` 让每个候选只启动一次 worker、回读一次 OA、生成一次 `si`，executor 独立复算 gate；真实三点任务的 9 个指标集合与隔离模式逐项相同，simulation action 从 739.195 s 降到 309.555 s，winner `1u/5K` 已独立 OA 回读。
+- `vda onboarding-draft` 把首次接入从手写 JSON 收窄为可审计编译步骤：输入必须是一对成功的 real-Bridge `existing_schematic + schematic.inspect` 任务/run，且 task ID、重算 plan token、target、PDK、task/run SHA-256、topology/placement SHA-256 和完整未过滤 CDF 表全部一致。输出默认冻结所有已见对象、保留所有 CDF 字段但授予零参数权限，只给出需确认的 pin/net 角色候选，并把 `generic_simulation` 固定为不可执行。显式 child inspect 可建立唯一一层 `TOP/CHILD` inventory；它不会猜 `si` terminal order。保留的真实 flat 与一层 hierarchy 证据已分别本地重放 235 个 CDF 字段；这只是 `bridge_readback` 到待确认契约的 `software_inference`，不是新的 live OA Gate，也不是自动设计意图识别。
 - staged controller 现可先用便宜 nominal stage 选 provisional winner，再只对该点运行独立 `winner_verification`。昂贵 Gate 可声明自己的 DC/AC/transient/noise stage、约束、sweep 与最多五个 PVT 条件；供电条件必须绑定到明确 source。Gate 失败或不完整时恢复搜索前 OA、清空推荐，不会静默升级 runner-up。真实两点 TSMC N28 Gate 只对 nominal GBW winner `1u/5K` 运行 TT/27 ℃/0.90 V 与 SS/125 ℃/0.81 V 的四分析，并由任务外回读确认写回。拓扑 refinement 也已从一个 delta 泛化为最多七个共同基线、输出指纹各异的 independent alternatives；每个 alternative 必须先回到共同基线再 forward，checkpoint 用扁平 topology×parameter index 恢复，未知/部分结构拒绝写入。2026-07-31 的新 cell live Gate 又让 common-source、固定 `RS0=750 ohm` 的 source-degenerated 与 cascode 三个 variant 共用两个参数 tuple，完整执行 6/6 份 OA→`si` DC/AC；三次 SSH/Bridge 中断均经任务外 OA 回读后从 index 2/5/6 恢复且不重跑前缀，最终按 gain/BW 门和 GBW objective 写回 cascode `1.1u/18.5K`。一层 hierarchy 通过显式 top instance、child library/cell、`si` subckt 和 terminal order 绑定；worker 独立回读 child OA，并证明 child primitive graph、完整 topology/placement 与 subckt body 一致，未绑定 subcell、嵌套 subckt或端子/节点漂移均拒绝。该路径已用非覆盖 child symbol 和 top cell 完成真实 OA→`si`→Spectre DC/AC，flat/hierarchical 六项核心指标最坏相对差 `4.09e-15`。现在 `TOP/CHILD` 参数路径还能在 exact child scope 下进入原有 candidate/checkpoint/winner 状态机；真实三点 `W/RD` Gate 证明 child CDF 写入、定向回读、subckt 参数绑定、规格优先选择和最终 winner 写回。全不可行恢复与写后中断续跑已由本地故障注入覆盖。深层 hierarchy、共享 child 的 per-instance override、派生 CDF、并发人工 editor、mismatch/Monte Carlo 仍未闭合，因此仍不能称为 L5B closure。
 - `ade.prepare` 与 `ade.capture` 保留显式人工介入边界。`prepare` 只在目标 Maestro view 不存在时新建持久化 Spectre test，可显式指向另一个既有 design schematic；已有 view 一律拒绝，也不预设 analysis/stimulus/sweep/output。`capture` 核对人工聚焦的目标，捕获 setup、history、真实 Spectre netlist/PSF/log 哈希和逐点 output/spec。自动分支中，`ade.corners.apply` 只在 exact tests 与旧 corner 有序列表匹配时 add-only 新增 corner；`ade.variables.apply` 只有在 expected tests、可选 enabled corners、全部声明 scope 旧值和目标 global-selection 状态匹配时才更新变量或 selection；`ade.setup.apply` 对声明 analysis 做旧状态 CAS，并只新增不存在的命名 net/point output 与可选 spec。三个 setup 写 operation 都只保存一次并独立重开回读，已有已配置 session 时拒绝。`ade.run` 为每个 test 临时把 background session 的 project/results dir 定向到唯一 `/data/xum` scratch，运行或按显式 history/scratch 恢复后还原原值；它读取逐点 output/spec，并对 exact-history companion 与唯一 runtime input 根生成大小/SHA-256 清单。任务可显式要求把哈希绑定的 `input.scs` 或 `input.scs`+sibling `netlist` 输入束的 design header、实例、节点和已知 primitive raw 参数映射与 Maestro/OA 回读核对；原生 sweep 又可严格绑定 setup、global-variable selections、共享符号输入束、RDB point/corner 和 completion log。corner 模式通过 Bridge 公开 `include_raw=True` 取得原始 Detail CSV，在 VDA 层保留 Bridge 0.7.0 尚未结构化的正交 corner 列；不会修改 Bridge。若 Bridge completion wait 超时，只有运行前后恰好新增一个名称且其 log 已 completed 时才继续，多个新 history、同名覆盖或未完成日志均拒绝。配置/OA 回读属于 `bridge_readback`，运行输入与结果属于 `eda_result`，兼容性归一化、history 选择和一致性判断属于 `software_inference`。可选 `result_mapping` 再固定 exact scalar output expression、单位 scale 和 VDA constraints/objective。若人工旧 output 在声明点必然产生 calculator `eval err`，`expected_output_evaluation_errors` 只能按 exact test/output/point selector 声明未映射项；worker 与 executor 都要求 RDB 单元格和 log error 数完全相等、未解释错误为零，不能作为通用忽略开关。未声明时保持普通 Bridge-preserving run。它不能证明 history 名称此前不存在。旧 ADE L state 的非破坏迁移尚未纳入已验证 VDA operation。
 - 对远端计算和 OA 写入分别授权；真实执行还需要计划 token，避免一句模糊指令直接改库。
@@ -95,6 +96,23 @@ Windows 子进程使用隐藏窗口和 Job Object；进度、Bridge warm 耗时�
 Bridge 的公开 CLI，不复制 SSH、daemon 或 state 逻辑。正常启动后共享 tunnel 按 Bridge
 语义继续存在；中断时只回收本次仍受控的启动进程树。`status` 会探测 daemon 并查询
 Spectre 版本，但不会访问 OA、运行设计仿真或形成 `eda_result`。
+
+首次接入用户已有 schematic 时，可以把一次成功的只读 inspect 任务及其 run record 编译成
+待确认草案，而不手抄实例、网络、pin 和 CDF 字段：
+
+```powershell
+.\.venv\Scripts\vda.exe onboarding-draft `
+  examples\tasks\existing-schematic-multi-alternative-inspect.bridge.json `
+  artifacts\runs\existing-schematic-multi-alternative\inspect-after-create-20260731.json `
+  --id my-module-onboarding `
+  --output artifacts\runs\onboarding\my-module-draft.json
+```
+
+草案固定为只读、零参数权限且不可执行；用户仍需确认电路角色、可调字段、testbench、analysis、
+metric 和 OA→`si` 映射。任务/run hash、plan token、target、PDK、topology/placement 指纹和完整
+CDF 表都被绑定，不能拿旧回读悄悄生成新任务。一层 child 可用重复的 `--child-inspection`
+显式加入；共享 child alias 会拒绝。完整流程见
+[已有 schematic 自动接入](docs/existing-schematic-onboarding.md)。
 
 用户已经给出 schematic 时，可以先检查通用有限参数闭环的计划，不需要增加电路模板：
 
@@ -653,6 +671,7 @@ direct `si`/Spectre 路径还会在每个唯一 `/data/xum/.../vda_<task>_<nonce
 - [2026-07-31 winner-only PVT、多拓扑与一层 hierarchy Gate](docs/validation/2026-07-31-existing-schematic-winner-verification-multi-topology-hierarchy.md)
 - [2026-07-31 existing-schematic 多 topology alternative 真实闭环 Gate](docs/validation/2026-07-31-existing-schematic-multi-alternative-live.md)
 - [2026-07-31 existing-schematic 一层 child 参数调优真实 Gate](docs/validation/2026-07-31-existing-schematic-hierarchical-parameter-tuning-live.md)
+- [2026-07-31 existing-schematic 自动接入编译器本地 Gate](docs/validation/2026-07-31-existing-schematic-onboarding-local.md)
 - [2026-07-19 共源放大器 Gate 2A DC smoke](docs/validation/2026-07-19-common-source-gate2a-dc-smoke.md)
 - [2026-07-19 显式实例参数能力验证](docs/validation/2026-07-19-explicit-instance-parameters.md)
 - [2026-07-20 源极退化原位变更实现验证](docs/validation/2026-07-20-source-degeneration-in-place.md)
