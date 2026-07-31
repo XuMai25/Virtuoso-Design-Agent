@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "id": "vda-pmos-loaded-cs-onboarding-seed-apply",
+  "operation": "parameters.apply",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_pmos_loaded_cs_onboarding_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "instance_parameter_updates": [
+    {
+      "instance": "MN0",
+      "parameters": {
+        "Wfg": "500n",
+        "l": "30n"
+      }
+    },
+    {
+      "instance": "MP0",
+      "parameters": {
+        "Wfg": "1.9u",
+        "l": "30n"
+      }
+    }
+  ],
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 300
+  }
+}

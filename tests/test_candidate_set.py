@@ -188,7 +188,7 @@ def test_atomic_candidates_keep_mixed_fields_together_and_record_provenance() ->
             lambda task: task["candidate_set"]["candidates"][1][
                 "parameters"
             ].pop("load_ff"),
-            "same semantic and raw fields",
+            "same semantic, raw, and testbench fields",
         ),
         (
             lambda task: task["candidate_set"]["candidates"][1].update(

@@ -18,7 +18,7 @@ from pydantic import (
 )
 
 from .design_context import DesignContext, validate_topology_delta_scope
-from .generic_simulation import GenericOaSimulationSpec
+from .generic_simulation import GenericOaSimulationSpec, GenericTestbenchOverrides
 from .instance_path import (
     INSTANCE_PATH_PATTERN,
     is_scoped_instance_path,
@@ -284,6 +284,7 @@ class AtomicCandidate(StrictModel):
     instance_parameter_updates: list[InstanceParameterUpdate] = Field(
         default_factory=list
     )
+    testbench_overrides: GenericTestbenchOverrides | None = None
     predicted_metrics: dict[StrictStr, float] = Field(default_factory=dict)
 
     @field_validator("parameters", "predicted_metrics")
@@ -300,9 +301,13 @@ class AtomicCandidate(StrictModel):
 
     @model_validator(mode="after")
     def validate_complete_tuple(self) -> "AtomicCandidate":
-        if not self.parameters and not self.instance_parameter_updates:
+        if (
+            not self.parameters
+            and not self.instance_parameter_updates
+            and self.testbench_overrides is None
+        ):
             raise ValueError(
-                "atomic candidate requires semantic or instance parameters"
+                "atomic candidate requires semantic, instance, or testbench parameters"
             )
         instances = [update.instance for update in self.instance_parameter_updates]
         if len(instances) != len(set(instances)):
@@ -317,13 +322,24 @@ class AtomicCandidate(StrictModel):
             for update in self.instance_parameter_updates
         }
 
-    def field_identity(self) -> tuple[frozenset[str], frozenset[tuple[str, str]]]:
+    def field_identity(
+        self,
+    ) -> tuple[
+        frozenset[str],
+        frozenset[tuple[str, str]],
+        frozenset[tuple[str, str, str]],
+    ]:
         return (
             frozenset(self.parameters),
             frozenset(
                 (update.instance, parameter)
                 for update in self.instance_parameter_updates
                 for parameter in update.parameters
+            ),
+            (
+                self.testbench_overrides.field_identity()
+                if self.testbench_overrides is not None
+                else frozenset()
             ),
         )
 
@@ -335,7 +351,12 @@ class AtomicCandidate(StrictModel):
                 for parameter, value in update.parameters.items()
             )
         )
-        return (tuple(sorted(self.parameters.items())), raw_values)
+        testbench_values = (
+            self.testbench_overrides.value_identity()
+            if self.testbench_overrides is not None
+            else ()
+        )
+        return (tuple(sorted(self.parameters.items())), raw_values, testbench_values)
 
 
 class AtomicCandidateSet(StrictModel):
@@ -352,7 +373,8 @@ class AtomicCandidateSet(StrictModel):
         fields = [candidate.field_identity() for candidate in self.candidates]
         if any(identity != fields[0] for identity in fields[1:]):
             raise ValueError(
-                "atomic candidates must declare the same semantic and raw fields"
+                "atomic candidates must declare the same semantic, raw, and "
+                "testbench fields"
             )
         values = [candidate.value_identity() for candidate in self.candidates]
         if len(values) != len(set(values)):
@@ -2568,8 +2590,24 @@ class TaskSpec(StrictModel):
             ):
                 raise ValueError(
                     "generic existing-schematic candidate_set entries may contain "
-                    "only instance_parameter_updates"
+                    "only instance_parameter_updates and typed testbench_overrides"
                 )
+            if self.candidate_set is not None:
+                for candidate in self.candidate_set.candidates:
+                    if candidate.testbench_overrides is None:
+                        continue
+                    effective_simulation = candidate.testbench_overrides.apply_to(
+                        self.generic_simulation
+                    )
+                    for requested_analysis in self.resolved_analyses():
+                        effective_simulation.validate_analysis(
+                            requested_analysis.value
+                        )
+                    if self.winner_verification is not None:
+                        for stage in self.winner_verification.analysis_stages:
+                            effective_simulation.validate_analysis(
+                                stage.analysis.value
+                            )
             if self.create_if_missing:
                 raise ValueError(
                     "existing_schematic simulation/tuning requires an "
@@ -2669,6 +2707,14 @@ class TaskSpec(StrictModel):
             raise ValueError(
                 "generic_simulation requires existing_schematic simulation.run or "
                 "a tuning operation"
+            )
+        if (
+            self.candidate_set is not None
+            and self.candidate_set.candidates[0].testbench_overrides is not None
+            and not generic_existing_simulation
+        ):
+            raise ValueError(
+                "candidate testbench_overrides require existing_schematic tuning"
             )
         if self.winner_verification is not None:
             if (
@@ -3918,6 +3964,8 @@ class CandidateEvaluation(StrictModel):
     )
     parameters: dict[str, float]
     instance_parameters: dict[str, dict[str, str]] = Field(default_factory=dict)
+    testbench_overrides: GenericTestbenchOverrides | None = None
+    testbench_override_evidence_source: EvidenceSource | None = None
     oa_parameters: dict[str, float] = Field(default_factory=dict)
     metrics: dict[str, float]
     constraints: list[ConstraintEvaluation]
@@ -4000,6 +4048,8 @@ class RunRecord(StrictModel):
     candidates: list[CandidateEvaluation] = Field(default_factory=list)
     selected_parameters: dict[str, float] | None = None
     selected_instance_parameters: dict[str, dict[str, str]] | None = None
+    selected_testbench_overrides: GenericTestbenchOverrides | None = None
+    selected_testbench_override_evidence_source: EvidenceSource | None = None
     selected_metrics: dict[str, float] | None = None
     selected_topology_variant_id: str | None = None
     selected_topology_sha256: str | None = Field(

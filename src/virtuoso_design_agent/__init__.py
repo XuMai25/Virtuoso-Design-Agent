@@ -1,7 +1,7 @@
 """Virtuoso Design Agent public package."""
 
 from .design_context import DesignContext
-from .generic_simulation import GenericOaSimulationSpec
+from .generic_simulation import GenericOaSimulationSpec, GenericTestbenchOverrides
 from .models import (
     CircuitKind,
     ExistingSchematicTopologyRefinementSpec,
@@ -14,6 +14,7 @@ __all__ = [
     "DesignContext",
     "ExistingSchematicTopologyRefinementSpec",
     "GenericOaSimulationSpec",
+    "GenericTestbenchOverrides",
     "Operation",
     "TaskSpec",
 ]

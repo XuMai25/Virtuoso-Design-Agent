@@ -1082,7 +1082,145 @@ def test_generic_atomic_candidate_set_is_instance_only_and_ordered() -> None:
     payload["candidate_set"]["candidates"][1]["parameters"] = {
         "device_width_um": 1.0
     }
-    with pytest.raises(ValidationError, match="only instance_parameter_updates"):
+    with pytest.raises(
+        ValidationError,
+        match="only instance_parameter_updates and typed testbench_overrides",
+    ):
+        TaskSpec.model_validate(payload)
+
+
+def _joint_candidate_payload() -> dict:
+    payload = _tune_payload(max_iterations=2)
+    payload["instance_parameter_space"] = []
+    payload["candidate_set"] = {
+        "source": {"id": "joint-oa-testbench-shortlist"},
+        "candidates": [
+            {
+                "id": "low-bias-light-load",
+                "instance_parameter_updates": [
+                    {"instance": "MN0", "parameters": {"w": "1u"}}
+                ],
+                "testbench_overrides": {
+                    "sources": {
+                        "VIN_SRC": {"dc_value": 0.40, "ac_magnitude": 1.0}
+                    },
+                    "loads": {"CL0": 1e-15},
+                },
+            },
+            {
+                "id": "high-bias-heavy-load",
+                "instance_parameter_updates": [
+                    {"instance": "MN0", "parameters": {"w": "2u"}}
+                ],
+                "testbench_overrides": {
+                    "sources": {
+                        "VIN_SRC": {"dc_value": 0.50, "ac_magnitude": 1.0}
+                    },
+                    "loads": {"CL0": 2e-15},
+                },
+            },
+        ],
+    }
+    return payload
+
+
+def test_generic_atomic_candidate_accepts_joint_oa_and_testbench_values() -> None:
+    task = TaskSpec.model_validate(_joint_candidate_payload())
+    inputs = TaskExecutor._candidate_inputs(task)
+
+    assert [item.atomic_candidate_id for item in inputs] == [
+        "low-bias-light-load",
+        "high-bias-heavy-load",
+    ]
+    assert inputs[0].instance_parameters == {"MN0": {"w": "1u"}}
+    assert inputs[0].testbench_overrides is not None
+    assert inputs[0].testbench_overrides.loads == {"CL0": pytest.approx(1e-15)}
+    assert (
+        inputs[0].testbench_override_evidence_source
+        is EvidenceSource.USER_INPUT
+    )
+
+
+def _add_unknown_source_to_all_candidates(payload: dict) -> None:
+    for candidate in payload["candidate_set"]["candidates"]:
+        candidate["testbench_overrides"]["sources"]["UNKNOWN"] = {
+            "dc_value": 0.4
+        }
+
+
+def _add_unknown_load_to_all_candidates(payload: dict) -> None:
+    for candidate in payload["candidate_set"]["candidates"]:
+        candidate["testbench_overrides"]["loads"]["UNKNOWN"] = 1e-15
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            _add_unknown_source_to_all_candidates,
+            "unknown sources",
+        ),
+        (
+            _add_unknown_load_to_all_candidates,
+            "unknown loads",
+        ),
+        (
+            lambda payload: payload["candidate_set"]["candidates"][1][
+                "testbench_overrides"
+            ]["sources"]["VIN_SRC"].pop("ac_magnitude"),
+            "same semantic, raw, and testbench fields",
+        ),
+        (
+            lambda payload: payload["candidate_set"]["candidates"][0][
+                "testbench_overrides"
+            ]["sources"]["VIN_SRC"].update({"ac_magnitude": 0.0}),
+            "nonzero source ac_magnitude",
+        ),
+    ],
+)
+def test_generic_atomic_candidate_rejects_invalid_testbench_overrides(
+    mutate, message: str
+) -> None:
+    payload = _joint_candidate_payload()
+    mutate(payload)
+
+    with pytest.raises(ValidationError, match=message):
+        TaskSpec.model_validate(payload)
+
+
+def test_candidate_testbench_overrides_are_existing_schematic_only() -> None:
+    payload = {
+        "id": "unsupported-testbench-candidate",
+        "operation": "design.tune",
+        "circuit": "common_source",
+        "target": {"library": "vda_test", "cell": "vda_cs"},
+        "analysis": "ac",
+        "ac_sweep": {"start_hz": 1e3, "stop_hz": 1e9},
+        "candidate_set": {
+            "candidates": [
+                {
+                    "id": "candidate-1",
+                    "parameters": {"device_width_um": 1.0},
+                    "testbench_overrides": {
+                        "sources": {"VIN": {"dc_value": 0.4}}
+                    },
+                }
+            ]
+        },
+        "constraints": [
+            {"metric": "gain_db", "relation": ">=", "value": 1.0}
+        ],
+        "safety": {
+            "allow_remote_compute": True,
+            "allow_remote_write": True,
+            "allowed_library": "vda_test",
+        },
+    }
+
+    with pytest.raises(
+        ValidationError,
+        match="testbench_overrides require existing_schematic tuning",
+    ):
         TaskSpec.model_validate(payload)
 
 
@@ -1530,6 +1668,42 @@ class _GenericTuningAdapter(_GenericAdapter):
             self.interrupt_width = None
             raise AdapterInterrupted("transport reset after generic OA staging")
         gain_db = {"1u": 10.0, "2u": 20.0, "3u": 15.0}[self.width]
+        return AdapterResult(
+            data={
+                "parameters": {},
+                "metrics": {"low_frequency_gain_db": gain_db},
+                "metric_sources": {"low_frequency_gain_db": "eda_result"},
+                "analysis_complete": True,
+            },
+            evidence_source=EvidenceSource.EDA_RESULT,
+        )
+
+
+class _JointOaTestbenchAdapter(_GenericTuningAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.simulated_conditions: list[tuple[str, float, float]] = []
+
+    def simulate(self, task, parameters):
+        assert parameters == {}
+        assert task.generic_simulation is not None
+        vin = next(
+            source
+            for source in task.generic_simulation.sources
+            if source.name == "VIN_SRC"
+        )
+        load = next(
+            item for item in task.generic_simulation.loads if item.name == "CL0"
+        )
+        condition = (self.width, vin.dc_value, load.value)
+        self.simulated_conditions.append(condition)
+        if self.interrupt_width == self.width:
+            self.interrupt_width = None
+            raise AdapterInterrupted("transport reset after joint candidate staging")
+        gain_db = {
+            ("1u", 0.40, 1e-15): 10.0,
+            ("2u", 0.50, 2e-15): 25.0,
+        }[condition]
         return AdapterResult(
             data={
                 "parameters": {},
@@ -2214,6 +2388,85 @@ def test_generic_tuning_commits_best_raw_instance_candidate(tmp_path) -> None:
         for action in record.actions
         if action.action == "parameters.apply.best"
     ).evidence_source is EvidenceSource.BRIDGE_READBACK
+
+
+def test_generic_tuning_keeps_joint_oa_and_testbench_candidate_atomic(
+    tmp_path,
+) -> None:
+    task = TaskSpec.model_validate(_joint_candidate_payload())
+    plan = build_plan(task)
+    adapter = _JointOaTestbenchAdapter()
+    checkpoint_path = tmp_path / "joint-oa-testbench.checkpoint.json"
+
+    record = TaskExecutor(adapter).execute(
+        task,
+        plan,
+        token=plan.confirmation_token,
+        checkpoint_path=checkpoint_path,
+    )
+
+    assert record.status is RunStatus.SUCCEEDED
+    assert adapter.simulated_conditions == [
+        ("1u", 0.40, 1e-15),
+        ("2u", 0.50, 2e-15),
+    ]
+    assert record.selected_instance_parameters == {"MN0": {"w": "2u"}}
+    assert record.selected_testbench_overrides is not None
+    assert record.selected_testbench_overrides.sources[
+        "VIN_SRC"
+    ].dc_value == pytest.approx(0.50)
+    assert record.selected_testbench_overrides.loads["CL0"] == pytest.approx(
+        2e-15
+    )
+    assert record.selected_testbench_override_evidence_source is (
+        EvidenceSource.USER_INPUT
+    )
+    assert record.candidates[1].testbench_override_evidence_source is (
+        EvidenceSource.USER_INPUT
+    )
+    assert load_execution_checkpoint(checkpoint_path).complete is True
+
+
+def test_joint_oa_testbench_checkpoint_resumes_exact_candidate(tmp_path) -> None:
+    task = TaskSpec.model_validate(_joint_candidate_payload())
+    plan = build_plan(task)
+    adapter = _JointOaTestbenchAdapter()
+    adapter.interrupt_width = "2u"
+    checkpoint_path = tmp_path / "joint-oa-testbench-resume.json"
+
+    first = TaskExecutor(adapter).execute(
+        task,
+        plan,
+        token=plan.confirmation_token,
+        checkpoint_path=checkpoint_path,
+    )
+    checkpoint = load_execution_checkpoint(checkpoint_path)
+
+    assert first.status is RunStatus.FAILED
+    assert checkpoint.next_candidate_index == 2
+    assert checkpoint.candidates[0].testbench_overrides is not None
+    assert checkpoint.candidates[0].testbench_overrides.loads["CL0"] == pytest.approx(
+        1e-15
+    )
+
+    resumed = TaskExecutor(adapter).execute(
+        task,
+        plan,
+        token=plan.confirmation_token,
+        checkpoint_path=checkpoint_path,
+        resume_checkpoint=checkpoint,
+    )
+
+    assert resumed.status is RunStatus.SUCCEEDED
+    assert adapter.simulated_conditions == [
+        ("1u", 0.40, 1e-15),
+        ("2u", 0.50, 2e-15),
+        ("2u", 0.50, 2e-15),
+    ]
+    assert resumed.selected_testbench_overrides is not None
+    assert resumed.selected_testbench_overrides.loads["CL0"] == pytest.approx(
+        2e-15
+    )
 
 
 def test_generic_tuning_objective_selects_one_atomic_multi_field_tuple() -> None:

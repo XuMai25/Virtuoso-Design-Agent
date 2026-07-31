@@ -18,6 +18,7 @@ from .calculator_expressions import calculator_expressions_equal
 from .catalog import task_requests_oa_parameter_write
 from .characterization import normalize_mos_characterization
 from .design_context import audit_design_context
+from .generic_simulation import GenericTestbenchOverrides
 from .metrics import evaluate_constraints
 from .models import (
     ActionRecord,
@@ -84,6 +85,8 @@ _DIFFERENTIAL_PAIR_OPTIONAL_OA_PARAMETERS = (
 class _CandidateInput:
     parameters: dict[str, float]
     instance_parameters: dict[str, dict[str, str]]
+    testbench_overrides: GenericTestbenchOverrides | None = None
+    testbench_override_evidence_source: EvidenceSource | None = None
     atomic_candidate_id: str | None = None
     atomic_candidate_predicted_metrics: dict[str, float] = field(default_factory=dict)
     atomic_candidate_evidence_source: EvidenceSource | None = None
@@ -231,6 +234,12 @@ class TaskExecutor:
                         fixed_instance_parameters,
                         candidate.instance_parameters(),
                     ),
+                    testbench_overrides=candidate.testbench_overrides,
+                    testbench_override_evidence_source=(
+                        task.candidate_set.source.evidence_source
+                        if candidate.testbench_overrides is not None
+                        else None
+                    ),
                     atomic_candidate_id=candidate.id,
                     atomic_candidate_predicted_metrics=dict(
                         candidate.predicted_metrics
@@ -278,6 +287,8 @@ class TaskExecutor:
         parameters: dict[str, float],
         simulation: AdapterResult,
         instance_parameters: dict[str, dict[str, str]] | None = None,
+        testbench_overrides: GenericTestbenchOverrides | None = None,
+        testbench_override_evidence_source: EvidenceSource | None = None,
         oa_parameters: dict[str, float] | None = None,
         atomic_candidate_id: str | None = None,
         atomic_candidate_predicted_metrics: dict[str, float] | None = None,
@@ -297,6 +308,10 @@ class TaskExecutor:
                 simulation,
                 raw_conditions,
                 instance_parameters=instance_parameters,
+                testbench_overrides=testbench_overrides,
+                testbench_override_evidence_source=(
+                    testbench_override_evidence_source
+                ),
                 oa_parameters=oa_parameters,
                 atomic_candidate_id=atomic_candidate_id,
                 atomic_candidate_predicted_metrics=(
@@ -344,6 +359,10 @@ class TaskExecutor:
             topology_sha256=topology_sha256,
             parameters=evaluated_parameters,
             instance_parameters=instance_parameters or {},
+            testbench_overrides=testbench_overrides,
+            testbench_override_evidence_source=(
+                testbench_override_evidence_source
+            ),
             oa_parameters=oa_parameters or {},
             metrics=metrics,
             constraints=constraints,
@@ -732,6 +751,10 @@ class TaskExecutor:
                 instance: dict(parameters)
                 for instance, parameters in candidate.instance_parameters.items()
             },
+            testbench_overrides=candidate.testbench_overrides,
+            testbench_override_evidence_source=(
+                candidate.testbench_override_evidence_source
+            ),
             oa_parameters=oa_parameters or {},
             metrics=metrics,
             constraints=constraints,
@@ -938,6 +961,10 @@ class TaskExecutor:
                 instance: dict(parameters)
                 for instance, parameters in candidate.instance_parameters.items()
             },
+            testbench_overrides=candidate.testbench_overrides,
+            testbench_override_evidence_source=(
+                candidate.testbench_override_evidence_source
+            ),
             oa_parameters=oa_parameters or {},
             metrics=aggregate_metrics,
             constraints=aggregate_constraints,
@@ -998,6 +1025,8 @@ class TaskExecutor:
         raw_conditions: Any,
         *,
         instance_parameters: dict[str, dict[str, str]] | None = None,
+        testbench_overrides: GenericTestbenchOverrides | None = None,
+        testbench_override_evidence_source: EvidenceSource | None = None,
         oa_parameters: dict[str, float] | None = None,
         atomic_candidate_id: str | None = None,
         atomic_candidate_predicted_metrics: dict[str, float] | None = None,
@@ -1199,6 +1228,10 @@ class TaskExecutor:
             topology_sha256=topology_sha256,
             parameters=evaluated_parameters,
             instance_parameters=instance_parameters or {},
+            testbench_overrides=testbench_overrides,
+            testbench_override_evidence_source=(
+                testbench_override_evidence_source
+            ),
             oa_parameters=oa_parameters or {},
             metrics=aggregate_metrics,
             constraints=aggregate_constraints,
@@ -2369,14 +2402,23 @@ class TaskExecutor:
     def _candidate_task(
         task: TaskSpec,
         instance_parameters: dict[str, dict[str, str]],
+        testbench_overrides: GenericTestbenchOverrides | None = None,
     ) -> TaskSpec:
         updates = [
             InstanceParameterUpdate(instance=instance, parameters=parameters)
             for instance, parameters in sorted(instance_parameters.items())
         ]
+        generic_simulation = task.generic_simulation
+        if testbench_overrides is not None:
+            if generic_simulation is None:
+                raise ValueError(
+                    "candidate testbench overrides require generic_simulation"
+                )
+            generic_simulation = testbench_overrides.apply_to(generic_simulation)
         return task.model_copy(
             update={
                 "instance_parameter_updates": updates,
+                "generic_simulation": generic_simulation,
                 # Candidate enumeration belongs to VDA.  The Bridge receives only
                 # the exact point that it must apply/read back for this action.
                 "instance_parameter_space": [],
@@ -3474,6 +3516,16 @@ class TaskExecutor:
                     "do not match task"
                 )
             if (
+                candidate.testbench_overrides
+                != declared_candidate.testbench_overrides
+                or candidate.testbench_override_evidence_source
+                != declared_candidate.testbench_override_evidence_source
+            ):
+                raise ValueError(
+                    f"checkpoint candidate {candidate.index} testbench overrides "
+                    "do not match task"
+                )
+            if (
                 candidate.atomic_candidate_id
                 != declared_candidate.atomic_candidate_id
                 or candidate.atomic_candidate_predicted_metrics
@@ -3628,8 +3680,13 @@ class TaskExecutor:
         task: TaskSpec,
         stage: AnalysisStageSpec,
         instance_parameters: dict[str, dict[str, str]],
+        testbench_overrides: GenericTestbenchOverrides | None = None,
     ) -> TaskSpec:
-        candidate_task = cls._candidate_task(task, instance_parameters)
+        candidate_task = cls._candidate_task(
+            task,
+            instance_parameters,
+            testbench_overrides,
+        )
         return candidate_task.model_copy(
             update={
                 "analysis": stage.analysis,
@@ -3731,7 +3788,9 @@ class TaskExecutor:
             stage_completed = not stage_parameters
             applied_state: _AppliedCandidateState | None = None
             candidate_task = self._candidate_task(
-                task, candidate.instance_parameters
+                task,
+                candidate.instance_parameters,
+                candidate.testbench_overrides,
             )
             try:
                 if stage_parameters:
@@ -3781,7 +3840,7 @@ class TaskExecutor:
                         completed_stages,
                         terminated_after_stage,
                     ) = self._evaluate_shared_analysis_stage_batch(
-                        task,
+                        candidate_task,
                         batch_result,
                     )
                 else:
@@ -3792,6 +3851,7 @@ class TaskExecutor:
                             task,
                             stage,
                             candidate.instance_parameters,
+                            candidate.testbench_overrides,
                         )
                         result = self._action(
                             (
@@ -3803,7 +3863,7 @@ class TaskExecutor:
                             ),
                         )
                         stage_evaluation = self._evaluate_analysis_stage(
-                            task, stage, result
+                            analysis_task, stage, result
                         )
                         completed_stages.append(stage_evaluation)
                         if stage_progress is not None:
@@ -3830,7 +3890,7 @@ class TaskExecutor:
                 if stage_parameters and not stage_completed:
                     raise
                 failed = self._merge_analysis_stage_candidate(
-                    task,
+                    candidate_task,
                     index,
                     candidate,
                     completed_stages,
@@ -3863,7 +3923,7 @@ class TaskExecutor:
 
             evaluations.append(
                 self._merge_analysis_stage_candidate(
-                    task,
+                    candidate_task,
                     index,
                     candidate,
                     completed_stages,
@@ -4040,7 +4100,9 @@ class TaskExecutor:
             stage_completed = not stage_parameters
             applied_state: _AppliedCandidateState | None = None
             candidate_task = self._candidate_task(
-                task, candidate.instance_parameters
+                task,
+                candidate.instance_parameters,
+                candidate.testbench_overrides,
             )
             try:
                 if stage_parameters:
@@ -4090,6 +4152,10 @@ class TaskExecutor:
                         topology_sha256=topology_sha256,
                         parameters=candidate.parameters,
                         instance_parameters=candidate.instance_parameters,
+                        testbench_overrides=candidate.testbench_overrides,
+                        testbench_override_evidence_source=(
+                            candidate.testbench_override_evidence_source
+                        ),
                         oa_parameters=(
                             applied_state.oa_parameters
                             if applied_state is not None
@@ -4129,11 +4195,15 @@ class TaskExecutor:
                 continue
             evaluations.append(
                 self._evaluate_candidate(
-                    task,
+                    candidate_task,
                     index,
                     candidate.parameters,
                     result,
                     instance_parameters=candidate.instance_parameters,
+                    testbench_overrides=candidate.testbench_overrides,
+                    testbench_override_evidence_source=(
+                        candidate.testbench_override_evidence_source
+                    ),
                     oa_parameters=(
                         applied_state.oa_parameters
                         if applied_state is not None
@@ -4307,6 +4377,7 @@ class TaskExecutor:
         candidate_task = cls._candidate_task(
             variant_task,
             selected.instance_parameters,
+            selected.testbench_overrides,
         )
         return candidate_task.model_copy(
             update={
@@ -4358,6 +4429,10 @@ class TaskExecutor:
                 instance: dict(parameters)
                 for instance, parameters in selected.instance_parameters.items()
             },
+            testbench_overrides=selected.testbench_overrides,
+            testbench_override_evidence_source=(
+                selected.testbench_override_evidence_source
+            ),
             atomic_candidate_id=selected.atomic_candidate_id,
             atomic_candidate_predicted_metrics=dict(
                 selected.atomic_candidate_predicted_metrics
@@ -4704,6 +4779,8 @@ class TaskExecutor:
         )
         selected_parameters: dict[str, float] | None = None
         selected_instance_parameters: dict[str, dict[str, str]] | None = None
+        selected_testbench_overrides: GenericTestbenchOverrides | None = None
+        selected_testbench_override_evidence_source: EvidenceSource | None = None
         selected_metrics: dict[str, float] | None = None
         selected_topology_variant_id: str | None = None
         selected_topology_sha256: str | None = None
@@ -5360,6 +5437,10 @@ class TaskExecutor:
                     instance: dict(parameters)
                     for instance, parameters in selected.instance_parameters.items()
                 }
+                selected_testbench_overrides = selected.testbench_overrides
+                selected_testbench_override_evidence_source = (
+                    selected.testbench_override_evidence_source
+                )
                 selected_metrics = dict(selected.metrics)
                 selected_topology_variant_id = selected.topology_variant_id
                 selected_topology_sha256 = selected.topology_sha256
@@ -5474,6 +5555,8 @@ class TaskExecutor:
                         recover_initial_baseline()
                         selected_parameters = None
                         selected_instance_parameters = None
+                        selected_testbench_overrides = None
+                        selected_testbench_override_evidence_source = None
                         selected_metrics = None
                         selected_topology_variant_id = None
                         selected_topology_sha256 = None
@@ -5528,6 +5611,8 @@ class TaskExecutor:
             status = RunStatus.FAILED
             selected_parameters = None
             selected_instance_parameters = None
+            selected_testbench_overrides = None
+            selected_testbench_override_evidence_source = None
             selected_metrics = None
             selected_topology_variant_id = None
             selected_topology_sha256 = None
@@ -5573,6 +5658,10 @@ class TaskExecutor:
             candidates=candidates,
             selected_parameters=selected_parameters,
             selected_instance_parameters=selected_instance_parameters,
+            selected_testbench_overrides=selected_testbench_overrides,
+            selected_testbench_override_evidence_source=(
+                selected_testbench_override_evidence_source
+            ),
             selected_metrics=selected_metrics,
             selected_topology_variant_id=selected_topology_variant_id,
             selected_topology_sha256=selected_topology_sha256,
@@ -5626,6 +5715,8 @@ class TaskExecutor:
         )
         selected_parameters: dict[str, float] | None = None
         selected_instance_parameters: dict[str, dict[str, str]] | None = None
+        selected_testbench_overrides: GenericTestbenchOverrides | None = None
+        selected_testbench_override_evidence_source: EvidenceSource | None = None
         selected_metrics: dict[str, float] | None = None
         winner_verification: CandidateEvaluation | None = None
         winner_verification_rejected = False
@@ -7239,6 +7330,10 @@ class TaskExecutor:
                         selected_instance_parameters = (
                             selected.instance_parameters or None
                         )
+                        selected_testbench_overrides = selected.testbench_overrides
+                        selected_testbench_override_evidence_source = (
+                            selected.testbench_override_evidence_source
+                        )
                         selected_metrics = selected.metrics
                         if task.operating_conditions:
                             notes.append(
@@ -7274,6 +7369,8 @@ class TaskExecutor:
                             except BaseException:
                                 selected_parameters = None
                                 selected_instance_parameters = None
+                                selected_testbench_overrides = None
+                                selected_testbench_override_evidence_source = None
                                 selected_metrics = None
                                 raise
                             if winner_verification.feasible:
@@ -7292,6 +7389,8 @@ class TaskExecutor:
                                 )
                                 selected_parameters = None
                                 selected_instance_parameters = None
+                                selected_testbench_overrides = None
+                                selected_testbench_override_evidence_source = None
                                 selected_metrics = None
                                 notes.append(
                                     "the nominal provisional winner failed or did not "
@@ -7387,6 +7486,10 @@ class TaskExecutor:
             candidates=candidates,
             selected_parameters=selected_parameters,
             selected_instance_parameters=selected_instance_parameters,
+            selected_testbench_overrides=selected_testbench_overrides,
+            selected_testbench_override_evidence_source=(
+                selected_testbench_override_evidence_source
+            ),
             selected_metrics=selected_metrics,
             winner_verification=winner_verification,
             search_audit=search_audit,

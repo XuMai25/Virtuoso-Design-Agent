@@ -40,6 +40,11 @@
 
 跨拓扑的基础有两条。`existing_schematic` 可以不依赖固定模板读取已有 schematic，并用 `instance_parameter_updates` 人工指定实例原始 CDF 参数和值字符串；固定模板还可把它与 W/L/R semantic parameters 组合。写入必须经过 callback、立即定向 OA 回读和独立再次回读。已有真实仿真 adapter 的固定模板可进一步用 `instance_parameter_space` 显式选择少量实际 CDF 字段参与有限调优，但不会自动枚举或猜别名。ADE 路径保留 prepare/capture/corner/variable/setup/run 的正交能力和明确真源；当前 ADE live 证据仍不证明真实 process/temperature corner、history 名唯一或 multi-test 通用映射。direct `si`/Spectre 已证明三条件 PVT，但不会把该状态静默包装成 Maestro setup。通用 OA smoke 已枚举 MN0 的 233 个 CDF 字段；专用新 cell 上又真实闭合 `MN0.fingers=2` 和 `RD0.r=22K` 的双重回读。`MN0.m=2` 被当前 PDK callback 恢复为 `1`，因此保留为字段不可持久化边界。这些能力只证明“按名字修改并以 OA 值确认”“对显式有限字段执行有证据搜索”或“准备、修改声明 setup 范围、运行当前 ADE 状态”，不证明 VDA 理解任意参数的物理作用。
 
+通用原子候选还可以把实际 OA CDF 更新与 typed source/load testbench override 组成一个完整 tuple。
+候选只能改已声明的激励数值和 R/C value，不能改变连接或 topology；字段集合、checkpoint 和最终
+selection 都按完整 tuple 核对。2026-07-31 的新 PMOS 有源负载共源级因此能联合微调 `MP0.Wfg`
+和 VBP，同时把 CL 固定在候选身份中；最终只有 W/L 写回 OA，VBP/CL 不冒充 schematic/ADE 参数。
+
 Gate 2 已分别覆盖 bias/load、W/RD/RS 和 L/VDD 网格，能对固定 OA 设计执行有限 PVT 验证，也能在任务显式要求时让每个 testbench 候选跨相同 PVT 集合评估；该能力不默认启用，也没有把全部维度塞入一个爆炸式联合搜索。OA 设计变量跨 PVT 的写回路径已有本地测试，尚未 live。实现不要求为源极退化新建模板或复制执行器：`schematic.transform` 在同一 common-source cellview 上应用固定 add/remove delta，`source_resistance_ohm` 随后直接进入原有 `parameters.apply`/`design.tune`。remove 可绑定 add 前 placement 哈希；该专用旧路径保存后的任意后置失败仍没有 snapshot 回滚，不能借用后续通用 topology-delta 的本地恢复能力来宣称已闭合。任何拓扑都必须先满足偏置和工作区，再比较增益/带宽。
 
 ## Gate 3：差分对
@@ -315,7 +320,7 @@ gain 和 bandwidth。该 policy 是事后校准，下一拓扑不得直接外推
 - `schematic.symbol.generate` 要求精确 source topology/pin 绑定、目标 symbol 不存在、session 设置成功/失败都恢复，并在保存后由独立 worker 重开核对 terminals 与非空 bBox；不提供覆盖或 refresh。
 - 一层 hierarchy 只接受任务显式声明的 top instance、child、subckt 与 terminal order；child 必须是 primitive-only，完整 child topology/placement 与 `si` body 同源。严格 `TOP/CHILD` 路径已能进入原有有限 candidate/checkpoint/winner 状态机，但 shared-child per-instance override、nested hierarchy 与派生 CDF 尚未闭合。
 - 只读 onboarding 编译器把 inspect task/run/plan token/target/PDK 与 topology/placement hash 绑定，保留完整 CDF inventory，但默认冻结结构、授予零参数权限并输出不可执行 testbench。保留的 flat 与一层 hierarchy 真实记录各本地重放 235 个字段；它只生成待确认草案，不代表用户意图或仿真契约已经闭合。
-- onboarding resolution 编译器现能把精确 draft hash 与最终 `user_input` 角色、参数权限、typed testbench、analysis/metric 和有限候选合成为普通 `simulation.run`/`design.tune` TaskSpec。所有对象必须来自草案 inventory，权限与 OA→`si` binding 必须一一相等；输出安全开关仍关闭。flat AC 与一层 child 两点 tuning 的真实历史草案均已生成有效计划，但本轮没有新 OA/Spectre 结果。
+- onboarding resolution 编译器现能把精确 draft hash 与最终 `user_input` 角色、参数权限、typed testbench、analysis/metric 和有限候选合成为普通 `simulation.run`/`design.tune` TaskSpec。所有对象必须来自草案 inventory，权限与 OA→`si` binding 必须一一相等；输出安全开关仍关闭。flat AC 与一层 child 两点 tuning 的真实历史草案均已生成有效计划。随后新 `vda_pmos_loaded_cs_onboarding_001` 已真实走完非覆盖 create、通用 PMOS 负载 delta、draft/resolution、同源 DC、三点 OA+testbench 联合 DC/AC、checkpoint recovery 和 winner W/L 写回；完整记录见 [`2026-07-31-pmos-loaded-common-source-onboarding-live.md`](validation/2026-07-31-pmos-loaded-common-source-onboarding-live.md)。
 - Bridge 仓库没有修改。正常 master/CDF forward/inverse 已在新 `vda_master_migration_001` 真实验证；下一步若验证自动恢复，必须在另一个 disposable `vda_` cellview 做受控 post-save 失败注入，不能破坏该基线。
 
 详见

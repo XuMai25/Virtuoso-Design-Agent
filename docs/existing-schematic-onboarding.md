@@ -110,7 +110,8 @@ Agent 或用户先在 resolution 文件中逐项完成：
 4. 声明 DC/OP metric、transfer、analysis 和必要 sweep；
 5. 为每个可写字段声明 OA-CDF 到 `si` 参数映射；
 6. 对 hierarchy 确认 subcircuit、terminal order 和 primitive boundary；
-7. 最后才增加 constraints、objective、candidate domain 和预算。
+7. 最后才增加 constraints、objective、candidate domain 和预算；需要联合微调偏置或负载时，
+   把 typed testbench override 与 OA CDF 更新放进同一个原子 candidate。
 
 然后用草案文件和 resolution 编译普通任务：
 
@@ -140,13 +141,26 @@ Agent 或用户先在 resolution 文件中逐项完成：
 必须在生成后的普通任务上显式修改安全开关并重新取得 plan token。
 `simulation.run` 还拒绝任何参数 update/search、objective 或 `max_iterations>1`，避免声明一个 planner
 不会执行的静默写入；需要改变参数时必须明确使用 `design.tune` 或独立 `parameters.apply`。
-`simulation.run` 还拒绝任何参数 update/search、objective 或 `max_iterations>1`，避免声明一个 planner
-不会执行的静默写入；需要改变参数时必须明确使用 `design.tune` 或独立 `parameters.apply`。
-`simulation.run` 还拒绝任何参数 update/search、objective 或 `max_iterations>1`，避免声明一个 planner
-不会执行的静默写入；需要改变参数时必须明确使用 `design.tune` 或独立 `parameters.apply`。
 
 正常 `TaskSpec`、planner、token、OA 写后回读、`si` 一致性和 checkpoint 仍是最终执行边界。
 onboarding 草案不会绕过任何一项，也不会削弱无 `design_context` 的独立 `parameters.apply` 能力。
+
+## 候选级 testbench 微调
+
+`existing_schematic design.tune` 的原子 `candidate_set` 可以同时携带
+`instance_parameter_updates` 和 typed `testbench_overrides`。source override 只允许
+`dc_value`、`ac_magnitude`、`ac_phase_deg`；load override 只允许已声明 R/C 的正有限 value。
+名称必须存在于 resolution 确认的 `generic_simulation`，source/load 类型、节点连接、transfer、
+metric 和 OA topology 均保持冻结。每个候选必须包含完全相同的 OA/testbench 字段集合；executor
+将完整 tuple 写入 candidate record、checkpoint 和 selection，恢复时不会只凭 OA 参数误认候选。
+
+这类值属于本次仿真条件，不会写入 OA 或自动保存为 ADE/Maestro variable。2026-07-31 的首次 live
+路径在新 PMOS 有源负载共源级上用同一候选联合改变 `MP0.Wfg` 与 `VBP_SRC.dc_value`，固定
+`VIN_SRC.dc_value` 和 `CL0.value`，并完成 OA→`si`→Spectre DC/AC、transport resume 和 winner
+W/L 写回。任务与完整边界见
+[`../examples/tasks/pmos-loaded-common-source-onboarding-tune.bridge.json`](../examples/tasks/pmos-loaded-common-source-onboarding-tune.bridge.json)
+和
+[`validation/2026-07-31-pmos-loaded-common-source-onboarding-live.md`](validation/2026-07-31-pmos-loaded-common-source-onboarding-live.md)。
 
 ## 当前边界
 

@@ -100,6 +100,13 @@ draft 继承，最终交给现有 `TaskSpec` 再做 analysis/metric/candidate/bu
 `simulation.run` 与 `design.tune`；输出安全开关固定关闭，所以编译成功只证明计划契约完整，不产生
 `eda_result` 或新的 `bridge_readback`。
 
+获得任务级远端授权后，编译结果仍须作为普通任务显式打开 compute/write 并重新 plan，不能沿用
+resolution 阶段的 token。2026-07-31 首个全新拓扑 live Gate 在非覆盖创建的 PMOS 有源负载共源级上
+走完 create→通用 topology-delta→inspect→draft→resolution→DC→三点 shared-netlist tune。它复用
+既有 executor，把 `MP0.Wfg` 与 VBP source 条件放入同一原子候选；真实 winner 只提交 OA W/L，
+testbench override 留在 run record。完整证据与边界见
+[`validation/2026-07-31-pmos-loaded-common-source-onboarding-live.md`](validation/2026-07-31-pmos-loaded-common-source-onboarding-live.md)。
+
 第二个本地纵切为 `existing_schematic simulation.run` 增加了 `generic_simulation`。它只接受
 结构化独立电压/电流源、R/C 负载、单端或差分电压表达式、命名 DC/source-current/MOS OP
 标量，以及显式 OA-CDF→`si` 参数映射；不接受 raw Spectre、SKILL 或 shell 文本。worker
@@ -109,12 +116,14 @@ Spectre 数值语义一致。DC 和 OP 原始标量、复数 AC 波形及 simula
 `eda_result`，上下文、拓扑/参数比较和波形指标提取是 `software_inference`。
 
 第三个本地纵切把同一契约开放给 `existing_schematic design.tune`，但不增加新的搜索器或
-电路分支。通用调优只接受 `instance_parameter_space`，或只含
-`instance_parameter_updates` 的原子 `candidate_set`；不接受模板专用 semantic space 或
-theory seed。每个固定/搜索 raw 字段必须同时位于 `design_context` 权限和
+电路分支。通用调优接受 `instance_parameter_space`，或由 `instance_parameter_updates` 与可选
+typed `testbench_overrides` 组成的原子 `candidate_set`；不接受模板专用 semantic space 或
+theory seed。override 只能修改已声明 source 的数值激励或已声明 R/C load 的正有限 value，
+不能改变 source/load 类型、连接、transfer、metric 或 OA topology。每个固定/搜索 raw 字段必须同时位于 `design_context` 权限和
 `netlist_parameter_bindings` 中，避免“OA 写了值、但没有证明该值进入 `si` 网表”。executor
 直接复用既有逐候选 OA 暂存/定向回读、同源仿真、checkpoint、预算、最佳写回和无可行恢复；
-transport interruption 仍记为 `system_event`，独立 OA 回读后只重试未完成候选。
+候选间要求 OA/testbench 字段集合完全相同，checkpoint 和 selection 保存完整 tuple。transport
+interruption 仍记为 `system_event`，独立 OA 回读后只重试未完成候选。
 
 第四个纵切开放受控的 `existing_schematic design.close_loop`。任务不要求 VDA 从空白
 生成拓扑，而是提供一个 hash-bound 基线、一份已有通用 topology-delta 及其 exact inverse、

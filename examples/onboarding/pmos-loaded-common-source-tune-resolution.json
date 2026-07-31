@@ -1,0 +1,240 @@
+{
+  "schema_version": 1,
+  "draft_sha256": "be420f1ad66d961e25281702f2acf433c7f8e2fc859a9e74f7da129226c1c7e9",
+  "task_id": "pmos-loaded-common-source-onboarding-tune-live",
+  "context_id": "pmos-loaded-common-source-onboarding",
+  "operation": "design.tune",
+  "roles": [
+    {"role": "signal.input", "nets": ["IN"], "evidence_source": "user_input"},
+    {"role": "bias.pmos_gate", "nets": ["VBP"], "evidence_source": "user_input"},
+    {"role": "signal.output", "nets": ["OUT"], "evidence_source": "user_input"},
+    {"role": "supply.positive", "nets": ["VDD"], "evidence_source": "user_input"},
+    {"role": "supply.return", "nets": ["VSS"], "evidence_source": "user_input"},
+    {"role": "device.gain", "instances": ["MN0"], "evidence_source": "user_input"},
+    {"role": "load.active", "instances": ["MP0"], "evidence_source": "user_input"},
+    {
+      "role": "device.input_gate",
+      "terminals": [{"instance": "MN0", "terminal": "G", "net": "IN"}],
+      "evidence_source": "user_input"
+    },
+    {
+      "role": "device.bias_gate",
+      "terminals": [{"instance": "MP0", "terminal": "G", "net": "VBP"}],
+      "evidence_source": "user_input"
+    }
+  ],
+  "instance_parameter_permissions": [
+    {"instance": "MN0", "parameters": ["Wfg", "l"], "modes": ["search"]},
+    {"instance": "MP0", "parameters": ["Wfg", "l"], "modes": ["search"]}
+  ],
+  "required_analyses": ["dc", "ac"],
+  "metrics": [
+    "output_dc_v",
+    "supply_current_a",
+    "mn0_ids_a",
+    "mn0_vgs_v",
+    "mn0_vds_v",
+    "mn0_vdsat_v",
+    "mn0_gm_s",
+    "mn0_gds_s",
+    "mp0_ids_a",
+    "mp0_vgs_v",
+    "mp0_vds_v",
+    "mp0_vdsat_v",
+    "mp0_gm_s",
+    "mp0_gds_s",
+    "low_frequency_gain_v_per_v",
+    "low_frequency_gain_db",
+    "bandwidth_3db_hz",
+    "gain_bandwidth_product_hz",
+    "unity_gain_frequency_hz",
+    "phase_at_unity_gain_deg"
+  ],
+  "generic_simulation": {
+    "schema_version": 1,
+    "sources": [
+      {
+        "name": "VSS_SRC",
+        "kind": "voltage",
+        "positive_node": "VSS",
+        "negative_node": "0",
+        "dc_value": 0.0
+      },
+      {
+        "name": "VDD_SRC",
+        "kind": "voltage",
+        "positive_node": "VDD",
+        "negative_node": "VSS",
+        "dc_value": 0.9
+      },
+      {
+        "name": "VIN_SRC",
+        "kind": "voltage",
+        "positive_node": "IN",
+        "negative_node": "VSS",
+        "dc_value": 0.35,
+        "ac_magnitude": 1.0,
+        "ac_phase_deg": 0.0
+      },
+      {
+        "name": "VBP_SRC",
+        "kind": "voltage",
+        "positive_node": "VBP",
+        "negative_node": "VSS",
+        "dc_value": 0.57
+      }
+    ],
+    "loads": [
+      {
+        "name": "CL0",
+        "kind": "capacitor",
+        "positive_node": "OUT",
+        "negative_node": "VSS",
+        "value": 2e-15
+      }
+    ],
+    "dc_voltage_metrics": [
+      {
+        "metric": "output_dc_v",
+        "expression": {"positive_node": "OUT", "negative_node": "VSS"}
+      }
+    ],
+    "dc_current_metrics": [
+      {"metric": "supply_current_a", "source": "VDD_SRC"}
+    ],
+    "operating_point_metrics": [
+      {"metric": "mn0_ids_a", "instance": "MN0", "quantity": "ids"},
+      {"metric": "mn0_vgs_v", "instance": "MN0", "quantity": "vgs"},
+      {"metric": "mn0_vds_v", "instance": "MN0", "quantity": "vds"},
+      {"metric": "mn0_vdsat_v", "instance": "MN0", "quantity": "vdsat"},
+      {"metric": "mn0_gm_s", "instance": "MN0", "quantity": "gm"},
+      {"metric": "mn0_gds_s", "instance": "MN0", "quantity": "gds"},
+      {"metric": "mp0_ids_a", "instance": "MP0", "quantity": "ids"},
+      {"metric": "mp0_vgs_v", "instance": "MP0", "quantity": "vgs"},
+      {"metric": "mp0_vds_v", "instance": "MP0", "quantity": "vds"},
+      {"metric": "mp0_vdsat_v", "instance": "MP0", "quantity": "vdsat"},
+      {"metric": "mp0_gm_s", "instance": "MP0", "quantity": "gm"},
+      {"metric": "mp0_gds_s", "instance": "MP0", "quantity": "gds"}
+    ],
+    "transfer": {
+      "input": {"positive_node": "IN", "negative_node": "VSS"},
+      "output": {"positive_node": "OUT", "negative_node": "VSS"}
+    },
+    "netlist_parameter_bindings": [
+      {"instance": "MN0", "oa_parameter": "Wfg", "netlist_parameter": "w"},
+      {"instance": "MN0", "oa_parameter": "l", "netlist_parameter": "l"},
+      {"instance": "MP0", "oa_parameter": "Wfg", "netlist_parameter": "w"},
+      {"instance": "MP0", "oa_parameter": "l", "netlist_parameter": "l"}
+    ],
+    "operating_condition_supply_source": "VDD_SRC"
+  },
+  "analysis_stage_execution": "shared_netlist",
+  "analysis_stages": [
+    {
+      "id": "bias-and-region",
+      "analysis": "dc",
+      "constraint_metrics": ["output_dc_v", "mn0_vds_v", "mp0_vds_v"],
+      "stop_on_failure": true
+    },
+    {
+      "id": "gain-and-bandwidth",
+      "analysis": "ac",
+      "constraint_metrics": ["low_frequency_gain_v_per_v", "bandwidth_3db_hz"],
+      "stop_on_failure": true
+    }
+  ],
+  "ac_sweep": {
+    "start_hz": 1000.0,
+    "stop_hz": 1000000000000.0,
+    "points_per_decade": 30,
+    "reference_points": 5,
+    "max_reference_variation_db": 0.5
+  },
+  "candidate_set": {
+    "source": {
+      "generator": "theory_then_standalone_preview",
+      "id": "pmos-loaded-common-source-preview-top3",
+      "bindings": {
+        "theory_seed": "6f79b1afaa621fa00f27912681ef53dda8a2c4e802b0ccdfc57ccfd6b662478b",
+        "standalone_preview_run": "6f547ddeb0dc50db4def32a22b5135e78af05754a3aec94f615922871ec534ca"
+      },
+      "evidence_source": "software_inference"
+    },
+    "candidates": [
+      {
+        "id": "preview-vbp-strong",
+        "instance_parameter_updates": [
+          {"instance": "MN0", "parameters": {"Wfg": "500n", "l": "30n"}},
+          {"instance": "MP0", "parameters": {"Wfg": "1.9u", "l": "30n"}}
+        ],
+        "testbench_overrides": {
+          "sources": {
+            "VIN_SRC": {"dc_value": 0.35},
+            "VBP_SRC": {"dc_value": 0.56}
+          },
+          "loads": {"CL0": 2e-15}
+        },
+        "predicted_metrics": {
+          "output_dc_v": 0.5602171361827867,
+          "low_frequency_gain_v_per_v": 3.473111169309896,
+          "bandwidth_3db_hz": 6014442528.119577,
+          "gain_bandwidth_product_hz": 20888827521.584553
+        }
+      },
+      {
+        "id": "preview-wp-low",
+        "instance_parameter_updates": [
+          {"instance": "MN0", "parameters": {"Wfg": "500n", "l": "30n"}},
+          {"instance": "MP0", "parameters": {"Wfg": "1.7u", "l": "30n"}}
+        ],
+        "testbench_overrides": {
+          "sources": {
+            "VIN_SRC": {"dc_value": 0.35},
+            "VBP_SRC": {"dc_value": 0.57}
+          },
+          "loads": {"CL0": 2e-15}
+        },
+        "predicted_metrics": {
+          "output_dc_v": 0.4874059800913267,
+          "low_frequency_gain_v_per_v": 3.608523771764922,
+          "bandwidth_3db_hz": 5655337980.952886,
+          "gain_bandwidth_product_hz": 20407421541.633526
+        }
+      },
+      {
+        "id": "preview-center",
+        "instance_parameter_updates": [
+          {"instance": "MN0", "parameters": {"Wfg": "500n", "l": "30n"}},
+          {"instance": "MP0", "parameters": {"Wfg": "1.9u", "l": "30n"}}
+        ],
+        "testbench_overrides": {
+          "sources": {
+            "VIN_SRC": {"dc_value": 0.35},
+            "VBP_SRC": {"dc_value": 0.57}
+          },
+          "loads": {"CL0": 2e-15}
+        },
+        "predicted_metrics": {
+          "output_dc_v": 0.5142421257925864,
+          "low_frequency_gain_v_per_v": 3.54652221084552,
+          "bandwidth_3db_hz": 5700222476.669171,
+          "gain_bandwidth_product_hz": 20215965620.268074
+        }
+      }
+    ]
+  },
+  "constraints": [
+    {"metric": "output_dc_v", "relation": ">=", "value": 0.3},
+    {"metric": "output_dc_v", "relation": "<=", "value": 0.65},
+    {"metric": "mn0_vds_v", "relation": ">=", "value": 0.12},
+    {"metric": "mp0_vds_v", "relation": "<=", "value": -0.12},
+    {"metric": "low_frequency_gain_v_per_v", "relation": ">=", "value": 3.0},
+    {"metric": "bandwidth_3db_hz", "relation": ">=", "value": 3000000000.0}
+  ],
+  "objective": {
+    "metric": "gain_bandwidth_product_hz",
+    "goal": "maximize"
+  },
+  "limits": {"max_iterations": 3, "timeout_seconds": 900},
+  "evidence_source": "user_input"
+}

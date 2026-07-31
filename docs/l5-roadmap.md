@@ -80,7 +80,7 @@ one nominal TSMC N28 differential-pair local domain**。gain/BW/GBW/power 最大
 [`fast-preview-shortlist-workflow.md`](fast-preview-shortlist-workflow.md)，以后直接复用，不再靠
 每轮对话重新推导。
 
-PDK 路线默认按晶圆厂 CMOS 工艺推进：当前以 TSMC N28 LVT profile 为缺省；同工艺的 `nch_mac/pch_mac` 通过继承式 `nics4304_tsmc28_svt` 显式选择。NMOS 共源的 LVT/SVT OA/`si`/Spectre round-trip 已 live，PMOS 和其他拓扑仍需独立 Gate。后续优先通过独立 profile 接入 TSMC/SMIC 的实际晶体管 PDK。profile 继承只复用静态工艺配置，不复用性能证据。TSV、hybrid-bonding 等封装/3D PDK 不进入普通电路设计的默认路径；若未来需要，将作为显式选择和独立 Gate，而不是当前 profile 的替代品。
+PDK 路线默认按晶圆厂 CMOS 工艺推进：当前以 TSMC N28 LVT profile 为缺省；同工艺的 `nch_mac/pch_mac` 通过继承式 `nics4304_tsmc28_svt` 显式选择。NMOS 共源的 LVT/SVT OA/`si`/Spectre round-trip、standalone NMOS/PMOS 表征以及 PMOS 有源负载共源级 nominal onboarding Gate 已 live；其他 profile、工艺和拓扑仍需独立 Gate。后续优先通过独立 profile 接入 TSMC/SMIC 的实际晶体管 PDK。profile 继承只复用静态工艺配置，不复用性能证据。TSV、hybrid-bonding 等封装/3D PDK 不进入普通电路设计的默认路径；若未来需要，将作为显式选择和独立 Gate，而不是当前 profile 的替代品。
 
 当前实现状态：`OA schematic -> si -> Spectre -> metrics`、供电能量积分、失败注入和候选级 checkpoint/resume 已通过本地测试。2026-07-19 live 结果覆盖 OA/`si` 参数一致性、非空 timing/current 波形、收紧规格、不可行 + 预算耗尽恢复，以及一个经历 3 次 tunnel 中断后仍完成 9/9 候选、最佳参数写回和独立 OA 回读的恢复任务。反相器 L5A 的同源有限闭环与显式恢复 Gate 已通过；Bridge 本地隔离补丁又通过强制断链只读 smoke，闭合 Windows stale state 与调用边界自动重建。运行中传输的随机 reset/timeout 仍是跨 Gate 的底层可靠性债务。
 
@@ -217,6 +217,15 @@ TaskSpec，因此仍不是一次新的 live OA Gate。
 来自草案 inventory，再复用现有 `TaskSpec`/planner。真实历史 flat 草案已生成只读 AC 计划，
 hierarchy 草案已生成两点 shared-netlist tuning 计划；两个输出的 remote compute/write 均为 false。
 因此“inspect→草案→普通任务”的本地接入链已闭合，但没有产生新的 EDA 结果。
+
+随后首个“用户没有现成 schematic”的 live Gate 把这条链用于新 PMOS 有源负载共源级。VDA 先
+非覆盖创建最小 OA 基线，再用通用 delta 做局部负载替换；theory + standalone preview 从六个物理
+候选冻结 top-3，普通 `existing_schematic design.tune` 再把两管 CDF 与 VBP/CL typed testbench
+条件作为原子 tuple 执行同源 DC/AC。三点均可行，离散域 winner 的 gain/BW/GBW 为
+`3.23223 V/V / 5.72128 GHz / 18.4925 GHz`，最终 W/L 写回与独立 OA 回读一致；VBP/CL 不写 OA。
+这证明首次接入可到达真实选择与恢复，不证明遗漏三点的 OA winner retention、连续最优或 L5B
+质量闭环。下一项有产品价值的纵切是让 resolution 编译用户确认的可逆 topology envelope 和
+winner-only quality intent，而不是继续扩大这个已知三点域。
 
 同日第二个本地纵切开放 `existing_schematic simulation.run` 的受限通用 DC/AC 路径。任务以
 typed `generic_simulation` 声明 voltage/current sources、R/C loads、single-ended 或

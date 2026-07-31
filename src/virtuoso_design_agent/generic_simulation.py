@@ -9,9 +9,17 @@ OA schematic by the existing Bridge path.
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 from .instance_path import INSTANCE_PATH_PATTERN
 
@@ -130,6 +138,110 @@ class GenericPassiveLoad(_StrictModel):
         if self.positive_node == self.negative_node:
             raise ValueError(f"load {self.name!r} nodes must differ")
         return self
+
+
+class GenericSourceValueOverride(_StrictModel):
+    """Candidate-local source values; source kind and connectivity stay frozen."""
+
+    dc_value: float | None = None
+    ac_magnitude: float | None = Field(default=None, ge=0.0)
+    ac_phase_deg: float | None = Field(default=None, ge=-360.0, le=360.0)
+
+    @model_validator(mode="after")
+    def require_one_value(self) -> "GenericSourceValueOverride":
+        if (
+            self.dc_value is None
+            and self.ac_magnitude is None
+            and self.ac_phase_deg is None
+        ):
+            raise ValueError("source override requires at least one value")
+        return self
+
+
+class GenericTestbenchOverrides(_StrictModel):
+    """One typed candidate-local patch for existing source/load values."""
+
+    sources: dict[StrictStr, GenericSourceValueOverride] = Field(
+        default_factory=dict,
+        max_length=32,
+    )
+    loads: dict[StrictStr, float] = Field(default_factory=dict, max_length=32)
+
+    @field_validator("sources", "loads")
+    @classmethod
+    def validate_names(cls, value: dict[str, Any]) -> dict[str, Any]:
+        invalid = sorted(
+            name
+            for name in value
+            if re.fullmatch(_IDENTIFIER_PATTERN, name) is None
+        )
+        if invalid:
+            raise ValueError(
+                "testbench override names must be identifiers: "
+                + ", ".join(invalid)
+            )
+        return value
+
+    @field_validator("loads")
+    @classmethod
+    def validate_load_values(cls, value: dict[str, float]) -> dict[str, float]:
+        if any(number <= 0.0 for number in value.values()):
+            raise ValueError("testbench load override values must be positive")
+        return value
+
+    @model_validator(mode="after")
+    def require_one_override(self) -> "GenericTestbenchOverrides":
+        if not self.sources and not self.loads:
+            raise ValueError("testbench overrides cannot be empty")
+        return self
+
+    def field_identity(self) -> frozenset[tuple[str, str, str]]:
+        fields = {
+            ("source", name, field)
+            for name, values in self.sources.items()
+            for field in ("dc_value", "ac_magnitude", "ac_phase_deg")
+            if getattr(values, field) is not None
+        }
+        fields.update(("load", name, "value") for name in self.loads)
+        return frozenset(fields)
+
+    def value_identity(self) -> tuple[Any, ...]:
+        source_values = tuple(
+            sorted(
+                (name, field, getattr(values, field))
+                for name, values in self.sources.items()
+                for field in ("dc_value", "ac_magnitude", "ac_phase_deg")
+                if getattr(values, field) is not None
+            )
+        )
+        load_values = tuple(sorted(self.loads.items()))
+        return source_values, load_values
+
+    def apply_to(self, spec: "GenericOaSimulationSpec") -> "GenericOaSimulationSpec":
+        source_names = {source.name for source in spec.sources}
+        load_names = {load.name for load in spec.loads}
+        unknown_sources = sorted(set(self.sources) - source_names)
+        unknown_loads = sorted(set(self.loads) - load_names)
+        if unknown_sources:
+            raise ValueError(
+                "testbench overrides reference unknown sources: "
+                + ", ".join(unknown_sources)
+            )
+        if unknown_loads:
+            raise ValueError(
+                "testbench overrides reference unknown loads: "
+                + ", ".join(unknown_loads)
+            )
+
+        raw = spec.model_dump(mode="json")
+        for source in raw["sources"]:
+            values = self.sources.get(source["name"])
+            if values is not None:
+                source.update(values.model_dump(exclude_none=True, mode="json"))
+        for load in raw["loads"]:
+            if load["name"] in self.loads:
+                load["value"] = self.loads[load["name"]]
+        return GenericOaSimulationSpec.model_validate(raw)
 
 
 class GenericVoltageMetric(_StrictModel):
