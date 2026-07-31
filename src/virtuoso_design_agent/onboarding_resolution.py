@@ -37,6 +37,7 @@ from .models import (
     MetricConstraint,
     NoiseSweep,
     Objective,
+    Operation,
     SafetyPolicy,
     TaskSpec,
 )
@@ -276,7 +277,8 @@ def _validate_role_bindings(
 
 def _validate_parameter_surface(
     draft: ExistingSchematicOnboardingDraft,
-    resolution: ExistingSchematicOnboardingResolution,
+    permissions: list[InstanceParameterPermission],
+    simulation: GenericOaSimulationSpec,
 ) -> None:
     inventory: dict[str, set[str]] = {}
     for item in draft.parameter_inventory:
@@ -285,12 +287,12 @@ def _validate_parameter_surface(
         inventory[item.instance_path] = set(item.fields)
     permission_fields = {
         (permission.instance, parameter)
-        for permission in resolution.instance_parameter_permissions
+        for permission in permissions
         for parameter in permission.parameters
     }
     binding_fields = {
         (binding.instance, binding.oa_parameter)
-        for binding in resolution.generic_simulation.netlist_parameter_bindings
+        for binding in simulation.netlist_parameter_bindings
     }
     outside_inventory = sorted(
         (instance, parameter)
@@ -310,6 +312,75 @@ def _validate_parameter_surface(
             "resolution parameter permission/binding surface differs; every authorized "
             "CDF field needs one exact OA-to-si binding"
         )
+
+
+def validate_fixed_topology_onboarding_task(
+    draft: ExistingSchematicOnboardingDraft,
+    task: TaskSpec,
+) -> None:
+    """Rebind one normal fixed-topology task to a fresh onboarding readback."""
+
+    if task.circuit is not CircuitKind.EXISTING_SCHEMATIC or task.operation not in {
+        Operation.SIMULATION_RUN,
+        Operation.DESIGN_TUNE,
+    }:
+        raise ValueError(
+            "post-refinement onboarding requires a fixed-topology existing-schematic "
+            "simulation or tuning task"
+        )
+    if task.target != draft.source.target or task.pdk_profile != draft.source.pdk_profile:
+        raise ValueError("post-refinement task target or PDK differs from its readback")
+    if task.design_context is None or task.generic_simulation is None:
+        raise ValueError("post-refinement task lacks design context or simulation intent")
+    context = task.design_context
+    if context.topology_origin != "existing_oa":
+        raise ValueError("post-refinement task requires existing-OA topology origin")
+    if context.expected_topology_sha256 != draft.topology_sha256:
+        raise ValueError("post-refinement task topology differs from its readback")
+    if (
+        context.topology_edits.allowed_operations
+        or context.topology_edits.mutable_instances
+        or context.topology_edits.mutable_nets
+        or context.topology_edits.mutable_pins
+    ):
+        raise ValueError("post-refinement tuning must freeze the selected topology")
+    if context.frozen_instances != draft.design_context_draft.frozen_instances:
+        raise ValueError("post-refinement task does not freeze every read-back instance")
+    if context.frozen_nets != draft.design_context_draft.frozen_nets:
+        raise ValueError("post-refinement task does not freeze every read-back net")
+    if context.frozen_pins != draft.design_context_draft.frozen_pins:
+        raise ValueError("post-refinement task does not freeze every read-back pin")
+    if (
+        context.hierarchy_parameter_scopes
+        != draft.design_context_draft.hierarchy_parameter_scopes
+    ):
+        raise ValueError("post-refinement hierarchy scopes differ from fresh readback")
+    if (
+        task.safety.allow_remote_compute
+        or task.safety.allow_remote_write
+        or task.safety.replace_existing
+    ):
+        raise ValueError("post-refinement compiler output must keep remote flags disabled")
+    _validate_role_bindings(
+        draft.topology,
+        context.roles,
+        scope="post-refinement",
+    )
+    _validate_parameter_surface(
+        draft,
+        context.instance_parameter_permissions,
+        task.generic_simulation,
+    )
+    _validate_simulation_objects(
+        draft.topology,
+        task.generic_simulation,
+        scope="post-refinement",
+    )
+    _validate_hierarchy_bindings(
+        draft,
+        draft.topology,
+        task.generic_simulation,
+    )
 
 
 def _validate_alternative_parameter_surface(
@@ -473,7 +544,11 @@ def resolve_onboarding_draft(
         intent.roles,
         scope="final",
     )
-    _validate_parameter_surface(draft, intent)
+    _validate_parameter_surface(
+        draft,
+        intent.instance_parameter_permissions,
+        intent.generic_simulation,
+    )
     _validate_simulation_objects(
         draft.topology,
         intent.generic_simulation,
@@ -640,4 +715,5 @@ __all__ = [
     "ExistingSchematicOnboardingResolution",
     "OnboardingTopologyAlternative",
     "resolve_onboarding_draft",
+    "validate_fixed_topology_onboarding_task",
 ]

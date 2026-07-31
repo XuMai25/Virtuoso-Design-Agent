@@ -36,6 +36,7 @@ from .models import (
     TaskSpec,
 )
 from .onboarding import build_onboarding_draft
+from .onboarding_promotion import compile_onboarding_post_refinement
 from .onboarding_resolution import (
     ExistingSchematicOnboardingResolution,
     resolve_onboarding_draft,
@@ -486,6 +487,34 @@ def _cmd_onboarding_resolve(args: argparse.Namespace) -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(payload + "\n", encoding="utf-8")
     print(payload)
+    return 0
+
+
+def _cmd_onboarding_promote(args: argparse.Namespace) -> int:
+    child_inspections = [
+        (top_instance, Path(task_path), Path(run_path))
+        for top_instance, task_path, run_path in args.child_inspection
+    ]
+    draft, task, compilation = compile_onboarding_post_refinement(
+        args.source_task,
+        args.source_run,
+        args.winner_inspect_task,
+        args.winner_inspect_run,
+        args.intent,
+        child_inspections=child_inspections,
+    )
+    outputs = (
+        (args.draft_output, draft.model_dump_json(indent=2, exclude_none=True)),
+        (args.task_output, task.model_dump_json(indent=2, exclude_none=True)),
+        (
+            args.record_output,
+            compilation.model_dump_json(indent=2, exclude_none=True),
+        ),
+    )
+    for path, payload in outputs:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((payload + "\n").encode("utf-8"))
+    print(compilation.model_dump_json(indent=2, exclude_none=True))
     return 0
 
 
@@ -1029,6 +1058,34 @@ def build_parser() -> argparse.ArgumentParser:
     onboarding_resolve.add_argument("resolution", type=Path)
     onboarding_resolve.add_argument("--output", type=Path, required=True)
     onboarding_resolve.set_defaults(handler=_cmd_onboarding_resolve)
+
+    onboarding_promote = subparsers.add_parser(
+        "onboarding-promote",
+        help=(
+            "bind a completed topology-refinement winner and fresh CDF readback "
+            "into a normal fixed-topology tuning task"
+        ),
+    )
+    onboarding_promote.add_argument("source_task", type=Path)
+    onboarding_promote.add_argument("source_run", type=Path)
+    onboarding_promote.add_argument("winner_inspect_task", type=Path)
+    onboarding_promote.add_argument("winner_inspect_run", type=Path)
+    onboarding_promote.add_argument("intent", type=Path)
+    onboarding_promote.add_argument(
+        "--child-inspection",
+        action="append",
+        nargs=3,
+        default=[],
+        metavar=("TOP_INSTANCE", "INSPECT_TASK", "INSPECT_RUN"),
+        help=(
+            "bind one fresh child readback for a retained one-level hierarchy; "
+            "repeat for each unique child"
+        ),
+    )
+    onboarding_promote.add_argument("--draft-output", type=Path, required=True)
+    onboarding_promote.add_argument("--task-output", type=Path, required=True)
+    onboarding_promote.add_argument("--record-output", type=Path, required=True)
+    onboarding_promote.set_defaults(handler=_cmd_onboarding_promote)
 
     run = subparsers.add_parser("run", help="plan or execute a task")
     run.add_argument("task", type=Path)

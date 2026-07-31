@@ -195,6 +195,45 @@ onboarding 草案不会绕过任何一项，也不会削弱无 `design_context` 
 nominal 真实 winner，才运行 linearity/noise 或显式 operating conditions；失败时沿用现有恢复与
 withhold 语义。编译动作本身不运行 EDA，也不自动打开 PVT。
 
+## 写后 CDF promotion
+
+首次 delta 之前，新增实例还不存在于 OA，因此 resolution 只允许它携带 fixed 初值。第一阶段真实
+`design.close_loop` 选定并写回 topology winner 后，必须再运行一次独立、只读
+`schematic.inspect`。然后用 `onboarding-promote` 把真实 CDF inventory 提升为第二阶段调优权限：
+
+```powershell
+.\.venv\Scripts\vda.exe onboarding-promote `
+  <stage1-close-loop-task.json> `
+  <stage1-close-loop-run.json> `
+  <winner-inspect-task.json> `
+  <winner-inspect-run.json> `
+  <promotion-intent.json> `
+  --draft-output <post-readback-draft.json> `
+  --task-output <stage2-design-tune.json> `
+  --record-output <promotion-record.json>
+```
+
+若保留一层 hierarchy，像 `onboarding-draft` 一样重复提供
+`--child-inspection TOP_INSTANCE TASK RUN`。promotion intent 必须用最终 stage-1 task 的文件
+SHA-256 绑定，可同时预声明 baseline 与最多三个 alternative 分支。每个分支给出：
+
+- variant ID，以及新 draft/task/context ID；
+- fresh readback 后允许的完整 CDF permission 集合；
+- 与权限集合一一相等的完整 OA→`si` binding；
+- 可选 fixed update、完整原子 candidate set 和 winner-only verification；
+- 第二阶段预算。
+
+编译器不根据实例类型猜参数，也不会把 `RS0.r`、MOS `Wfg` 或其他名字写死。实际 winner 决定使用
+哪个分支；每个授权字段都必须出现在 winner inspect 的未过滤 CDF inventory 中。这样人工指定任意
+真实 CDF 字段仍可进入调优，但仿真型调优还必须给出精确 `si` binding；只想直接改一个实例字段时，
+原有独立 `parameters.apply` 仍可使用，不经过 promotion。
+
+stage-1 run 还必须满足：真实 Bridge adapter、成功状态、完整且连续的 candidate record、穷尽声明
+topology×parameter 域、唯一 selected candidate，以及与 selected hash 一致的最终 Bridge topology
+回读。独立 inspect 必须晚于 stage 1，target/PDK/hash 必须相同。输出 task 冻结所有读回结构并固定
+关闭 compute/write/replace；要真实运行第二阶段必须重新授权、重新 plan。若任一步中断，先用原
+checkpoint 恢复该阶段；promotion 本身不保存远端状态，相同输入会确定性重建完全相同的三份 artifact。
+
 ## 候选级 testbench 微调
 
 `existing_schematic design.tune` 的原子 `candidate_set` 可以同时携带
@@ -220,4 +259,5 @@ W/L 写回。任务与完整边界见
 - 不推断深层 hierarchy、派生 CDF、per-instance override 或 `si` terminal order；
 - topology refinement 不能删除或替换已绑定的一层 child；新增 hierarchy 与 child-scope 改写尚未开放；
 - 新增实例 CDF 名在本地来自 `user_input`，必须在真实 delta 写后由 Bridge readback 再确认；
-- 编译器已生成 topology refinement 与 winner-only quality/PVT 契约，但尚未为该新入口单独执行 live EDA；首次 live integration 留给真实用户模块，而不是再造一个测试电路。
+- promotion 已能在真实写后 readback 上把新增或人工指定 CDF 提升为第二阶段 search，并将 quality/PVT 只交给该阶段 winner；当前只完成本地编译 Gate，首次端到端 live integration 留给真实用户模块，而不是再造一个测试电路；
+- promotion 不推断派生 CDF 语义或未知 `si` 参数名；这些仍须 profile/人工 intent 与真实 netlist 一致性证明。

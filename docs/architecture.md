@@ -111,6 +111,24 @@ winner-only analysis/metric 必须已出现在 resolution 的 required/optional 
 不收窄已有低层能力。该编译纵切没有新增 controller 或 worker，详见
 [`validation/2026-07-31-onboarding-refinement-resolution-local.md`](validation/2026-07-31-onboarding-refinement-resolution-local.md)。
 
+拓扑 winner 写回后，`vda onboarding-promote` 提供第二个、仍然不执行 EDA 的 evidence boundary。
+输入必须是开启过显式 compute/write 授权且 `replace_existing=false` 的真实 close-loop task、plan-bound
+成功 run、以及晚于该 run 的独立只读 winner inspect。run 必须保存完整且有序的 topology×parameter
+candidate 域、`domain_exhausted=true`、唯一可行 selected state 和 `schematic.inspect.final`
+`bridge_readback`；fresh inspect 的 target/PDK/topology fingerprint 必须与 selected state 相同。
+promotion intent 以 source-task SHA-256 绑定，并可为 baseline 与每个 alternative 预声明不同 tuning
+分支。编译器只取实际 winner 分支，把该分支的完整 CDF permission、OA→`si` binding、原子候选和
+winner-only verification 对 fresh inventory 重做 onboarding 校验，再输出冻结全部结构的普通
+`design.tune`。新增器件参数由此只有在真实写后回读存在时才从 fixed 初值提升为 search；未知 CDF、
+缺 binding、未覆盖 winner、非耗尽 run、旧 inspect 或结构漂移均拒绝。
+
+handoff 将 source task/run、winner inspect task/run、promotion intent 和 post-readback draft 六个文件
+SHA-256 写入 candidate source，并另存 compiled task SHA-256 与 plan token。draft/task/record 采用确定性
+UTF-8/LF 序列化，同一输入可在中断后幂等重建；阶段一和阶段二各自沿用既有 checkpoint，因而没有
+跨两个 executor 偷运半完成状态。编译任务仍固定关闭 compute/write/replace，真实第二阶段必须再次
+开启权限并重新 plan。详见
+[`validation/2026-07-31-onboarding-post-refinement-promotion-local.md`](validation/2026-07-31-onboarding-post-refinement-promotion-local.md)。
+
 获得任务级远端授权后，编译结果仍须作为普通任务显式打开 compute/write 并重新 plan，不能沿用
 resolution 阶段的 token。2026-07-31 首个全新拓扑 live Gate 在非覆盖创建的 PMOS 有源负载共源级上
 走完 create→通用 topology-delta→inspect→draft→resolution→DC→三点 shared-netlist tune。它复用

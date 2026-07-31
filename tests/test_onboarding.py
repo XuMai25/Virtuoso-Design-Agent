@@ -17,9 +17,13 @@ from virtuoso_design_agent.models import (
     TaskSpec,
 )
 from virtuoso_design_agent.onboarding import build_onboarding_draft
+from virtuoso_design_agent.onboarding_promotion import (
+    compile_onboarding_post_refinement,
+)
 from virtuoso_design_agent.onboarding_resolution import resolve_onboarding_draft
 from virtuoso_design_agent.planner import build_plan
 from virtuoso_design_agent.topology_delta import (
+    apply_topology_delta_execution,
     compile_topology_delta,
     snapshot_from_inspection,
     topology_fingerprint,
@@ -1016,6 +1020,469 @@ def test_onboarding_resolution_compiles_topology_and_winner_only_quality(
     assert task.safety.allow_remote_write is False
     assert task.limits.max_iterations == 4
     assert build_plan(task).confirmation_token
+
+
+def _write_post_refinement_fixture(
+    root: Path,
+) -> tuple[Path, Path, Path, Path, Path]:
+    draft_path = _write_onboarding_draft(root)
+    resolution = _close_loop_resolution(draft_path)
+    winner_verification = resolution["winner_verification"]
+    resolution_without_winner = deepcopy(resolution)
+    resolution_without_winner.pop("winner_verification")
+    source_task = resolve_onboarding_draft(draft_path, resolution_without_winner)
+    source_payload = source_task.model_dump(mode="json", exclude_none=True)
+    source_payload["safety"].update(
+        {
+            "allow_remote_compute": True,
+            "allow_remote_write": True,
+            "allowed_library": "vda_test",
+            "required_cell_prefix": "vda_",
+            "replace_existing": False,
+        }
+    )
+    source_task = TaskSpec.model_validate(source_payload)
+    source_task_path = root / "refinement-task.json"
+    source_task_path.write_text(
+        source_task.model_dump_json(indent=2, exclude_none=True) + "\n",
+        encoding="utf-8",
+    )
+    assert source_task.topology_refinement is not None
+    alternative = source_task.topology_refinement.resolved_alternatives()[0]
+    after = apply_topology_delta_execution(
+        snapshot_from_inspection(_flat_topology()),
+        alternative.topology_delta,
+    )
+    baseline_hash = source_task.design_context.expected_topology_sha256
+    after_hash = topology_fingerprint(after)
+    assert baseline_hash is not None
+    candidate_inputs = source_task.candidate_set.candidates
+    candidates = []
+    for index in range(1, 5):
+        topology_variant_id = "baseline" if index <= 2 else alternative.id
+        topology_sha256 = baseline_hash if index <= 2 else after_hash
+        source_candidate = candidate_inputs[(index - 1) % 2]
+        instance_parameters = source_candidate.instance_parameters()
+        if index > 2:
+            instance_parameters["RS0"] = {"r": "1K"}
+        metrics = {
+            "output_dc_v": 0.45 + index * 0.01,
+            "low_frequency_gain_v_per_v": 2.0 + index,
+            "bandwidth_3db_hz": 1e9 + index * 1e8,
+            "gain_bandwidth_product_hz": 3e9 + index * 1e9,
+        }
+        candidates.append(
+            {
+                "index": index,
+                "topology_variant_id": topology_variant_id,
+                "topology_sha256": topology_sha256,
+                "parameters": {},
+                "instance_parameters": instance_parameters,
+                "testbench_overrides": (
+                    source_candidate.testbench_overrides.model_dump(mode="json")
+                    if source_candidate.testbench_overrides is not None
+                    else None
+                ),
+                "testbench_override_evidence_source": (
+                    "user_input"
+                    if source_candidate.testbench_overrides is not None
+                    else None
+                ),
+                "metrics": metrics,
+                "constraints": [],
+                "feasible": True,
+                "total_violation": 0.0,
+                "objective_value": metrics["gain_bandwidth_product_hz"],
+                "evidence_source": "eda_result",
+                "metric_sources": {
+                    name: "eda_result" for name in metrics
+                },
+            }
+        )
+    selected = candidates[-1]
+    now = datetime.now(UTC) - timedelta(minutes=1)
+    source_run = RunRecord.model_validate(
+        {
+            "task_id": source_task.id,
+            "plan_token": build_plan(source_task).confirmation_token,
+            "adapter": "virtuoso-bridge-subprocess",
+            "status": "succeeded",
+            "started_at": now,
+            "finished_at": now + timedelta(seconds=10),
+            "actions": [
+                {
+                    "action": "schematic.inspect.final",
+                    "status": "succeeded",
+                    "started_at": now + timedelta(seconds=9),
+                    "finished_at": now + timedelta(seconds=10),
+                    "evidence_source": "bridge_readback",
+                    "details": {"topology": after.model_dump(mode="json")},
+                }
+            ],
+            "candidates": candidates,
+            "selected_parameters": {},
+            "selected_instance_parameters": selected["instance_parameters"],
+            "selected_testbench_overrides": selected["testbench_overrides"],
+            "selected_testbench_override_evidence_source": "user_input",
+            "selected_metrics": selected["metrics"],
+            "selected_topology_variant_id": alternative.id,
+            "selected_topology_sha256": after_hash,
+            "search_audit": {
+                "declared_candidate_count": 4,
+                "attempted_candidate_count": 4,
+                "completed_candidate_count": 4,
+                "topology_variant_count": 2,
+                "domain_exhausted": True,
+                "selection_scope": "best_in_declared_discrete_domain",
+                "statement": "best feasible point in the declared discrete domain",
+            },
+        }
+    )
+    source_run_path = root / "refinement-run.json"
+    source_run_path.write_text(
+        source_run.model_dump_json(indent=2, exclude_none=True) + "\n",
+        encoding="utf-8",
+    )
+    inspect_task_path, inspect_run_path = _write_inspection(
+        root,
+        stem="winner",
+        library="vda_test",
+        cell="vda_flat",
+        topology=after.model_dump(mode="json"),
+        instance_parameters={
+            "MN0": {"Wfg": "1.1u", "l": "30n"},
+            "RD0": {"r": "20K"},
+            "RS0": {"r": "1K", "isnoisy": "yes"},
+        },
+    )
+    intent = {
+        "schema_version": 1,
+        "source_task_sha256": hashlib.sha256(
+            source_task_path.read_bytes()
+        ).hexdigest(),
+        "variants": [
+            {
+                "topology_variant_id": "baseline",
+                "draft_id": "post-refinement-baseline",
+                "task_id": "post-refinement-baseline-tune",
+                "context_id": "post-refinement-baseline-tune-context",
+                "instance_parameter_permissions": [
+                    {
+                        "instance": "MN0",
+                        "parameters": ["Wfg"],
+                        "modes": ["search"],
+                    }
+                ],
+                "netlist_parameter_bindings": [
+                    {
+                        "instance": "MN0",
+                        "oa_parameter": "Wfg",
+                        "netlist_parameter": "w",
+                    }
+                ],
+                "candidate_set": {
+                    "source": {
+                        "generator": "user_declared",
+                        "id": "post-readback-baseline-point",
+                        "evidence_source": "user_input",
+                    },
+                    "candidates": [
+                        {
+                            "id": "baseline-width",
+                            "instance_parameter_updates": [
+                                {
+                                    "instance": "MN0",
+                                    "parameters": {"Wfg": "1.05u"},
+                                }
+                            ],
+                        }
+                    ],
+                },
+                "limits": {"max_iterations": 1, "timeout_seconds": 600},
+                "evidence_source": "user_input",
+            },
+            {
+                "topology_variant_id": alternative.id,
+                "draft_id": "post-refinement-winner",
+                "task_id": "post-refinement-fine-tune",
+                "context_id": "post-refinement-fine-tune-context",
+                "instance_parameter_permissions": [
+                    {
+                        "instance": "MN0",
+                        "parameters": ["Wfg"],
+                        "modes": ["search"],
+                    },
+                    {
+                        "instance": "RS0",
+                        "parameters": ["r"],
+                        "modes": ["search"],
+                    },
+                ],
+                "netlist_parameter_bindings": [
+                    {
+                        "instance": "MN0",
+                        "oa_parameter": "Wfg",
+                        "netlist_parameter": "w",
+                    },
+                    {
+                        "instance": "RS0",
+                        "oa_parameter": "r",
+                        "netlist_parameter": "r",
+                    },
+                ],
+                "candidate_set": {
+                    "source": {
+                        "generator": "user_declared",
+                        "id": "post-readback-two-point",
+                        "evidence_source": "user_input",
+                    },
+                    "candidates": [
+                        {
+                            "id": "rs-750",
+                            "instance_parameter_updates": [
+                                {
+                                    "instance": "MN0",
+                                    "parameters": {"Wfg": "1.05u"},
+                                },
+                                {
+                                    "instance": "RS0",
+                                    "parameters": {"r": "750"},
+                                },
+                            ],
+                        },
+                        {
+                            "id": "rs-1k",
+                            "instance_parameter_updates": [
+                                {
+                                    "instance": "MN0",
+                                    "parameters": {"Wfg": "1.1u"},
+                                },
+                                {
+                                    "instance": "RS0",
+                                    "parameters": {"r": "1K"},
+                                },
+                            ],
+                        },
+                    ],
+                },
+                "winner_verification": winner_verification,
+                "limits": {"max_iterations": 2, "timeout_seconds": 600},
+                "evidence_source": "user_input",
+            }
+        ],
+        "evidence_source": "user_input",
+    }
+    intent_path = root / "promotion-intent.json"
+    intent_path.write_text(
+        json.dumps(intent, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return (
+        source_task_path,
+        source_run_path,
+        inspect_task_path,
+        inspect_run_path,
+        intent_path,
+    )
+
+
+def test_onboarding_promotion_compiles_readback_bound_fine_tuning(
+    tmp_path: Path,
+) -> None:
+    paths = _write_post_refinement_fixture(tmp_path)
+
+    first = compile_onboarding_post_refinement(*paths)
+    second = compile_onboarding_post_refinement(*paths)
+
+    assert first == second
+    draft, task, compilation = first
+    assert _inventory(draft, "RS0").fields["r"].raw_value == "1K"
+    assert task.operation.value == "design.tune"
+    assert task.topology_refinement is None
+    assert task.design_context is not None
+    assert task.design_context.expected_topology_sha256 == (
+        compilation.selected_topology_sha256
+    )
+    assert {
+        (permission.instance, parameter, tuple(permission.modes))
+        for permission in task.design_context.instance_parameter_permissions
+        for parameter in permission.parameters
+    } == {
+        ("MN0", "Wfg", ("search",)),
+        ("RS0", "r", ("search",)),
+    }
+    assert task.candidate_set is not None
+    assert [item.id for item in task.candidate_set.candidates] == [
+        "rs-750",
+        "rs-1k",
+    ]
+    assert len(task.candidate_set.source.bindings) == 6
+    assert task.winner_verification is not None
+    assert task.safety.allow_remote_compute is False
+    assert task.safety.allow_remote_write is False
+    assert task.safety.replace_existing is False
+    assert compilation.compiled_plan_token == build_plan(task).confirmation_token
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda paths: _mutate_json(
+                paths[1],
+                lambda value: value["search_audit"].__setitem__(
+                    "completed_candidate_count", 3
+                ),
+            ),
+            "exhausted topology-parameter audit",
+        ),
+        (
+            lambda paths: _mutate_json(
+                paths[3],
+                lambda value: value["actions"][1]["details"][
+                    "instance_parameters"
+                ]["RS0"].pop("r"),
+            ),
+            "lacks selected parameter RS0.r",
+        ),
+        (
+            lambda paths: _drift_winner_parameter(paths),
+            "winner inspection selected parameter drifted: RS0.r",
+        ),
+        (
+            lambda paths: _disable_source_authority(paths),
+            "explicit compute/write authority",
+        ),
+        (
+            lambda paths: _drift_winner_topology(paths),
+            "winner inspection topology differs from selected topology",
+        ),
+        (
+            lambda paths: _mutate_json(
+                paths[4],
+                lambda value: value.__setitem__(
+                    "variants", [value["variants"][0]]
+                ),
+            ),
+            "does not cover the selected topology winner",
+        ),
+    ],
+)
+def test_onboarding_promotion_rejects_untrusted_stage_transition(
+    tmp_path: Path,
+    mutation,
+    message: str,
+) -> None:
+    paths = _write_post_refinement_fixture(tmp_path)
+    mutation(paths)
+
+    with pytest.raises(ValueError, match=message):
+        compile_onboarding_post_refinement(*paths)
+
+
+def _mutate_json(path: Path, mutation) -> None:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    mutation(payload)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _disable_source_authority(paths: tuple[Path, ...]) -> None:
+    source_task_path, _source_run, _inspect_task, _inspect_run, intent_path = paths
+    _mutate_json(
+        source_task_path,
+        lambda value: value["safety"].__setitem__("allow_remote_write", False),
+    )
+    _mutate_json(
+        intent_path,
+        lambda value: value.__setitem__(
+            "source_task_sha256",
+            hashlib.sha256(source_task_path.read_bytes()).hexdigest(),
+        ),
+    )
+
+
+def _drift_winner_topology(paths: tuple[Path, ...]) -> None:
+    _source_task, _source_run, _inspect_task, inspect_run_path, _intent = paths
+
+    def mutate(payload: dict) -> None:
+        topology = payload["actions"][1]["details"]["topology"]
+        rs0 = next(
+            item for item in topology["instances"] if item["name"] == "RS0"
+        )
+        rs0["master"]["cell"] = "res_drifted"
+
+    _mutate_json(inspect_run_path, mutate)
+
+
+def _drift_winner_parameter(paths: tuple[Path, ...]) -> None:
+    _source_task, _source_run, _inspect_task, inspect_run_path, _intent = paths
+    _mutate_json(
+        inspect_run_path,
+        lambda value: value["actions"][1]["details"][
+            "instance_parameters"
+        ]["RS0"].__setitem__("r", "2K"),
+    )
+
+
+def test_onboarding_promotion_cli_writes_reusable_artifacts(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    paths = _write_post_refinement_fixture(tmp_path)
+    draft_output = tmp_path / "post-draft.json"
+    task_output = tmp_path / "post-task.json"
+    record_output = tmp_path / "post-record.json"
+
+    assert (
+        main(
+            [
+                "onboarding-promote",
+                *(str(path) for path in paths),
+                "--draft-output",
+                str(draft_output),
+                "--task-output",
+                str(task_output),
+                "--record-output",
+                str(record_output),
+            ]
+        )
+        == 0
+    )
+    task = TaskSpec.model_validate_json(task_output.read_text(encoding="utf-8"))
+    record = json.loads(record_output.read_text(encoding="utf-8"))
+    assert task.operation.value == "design.tune"
+    assert record["compiled_task_sha256"] == hashlib.sha256(
+        task_output.read_bytes()
+    ).hexdigest()
+    assert record["post_readback_draft_sha256"] == hashlib.sha256(
+        draft_output.read_bytes()
+    ).hexdigest()
+    first_outputs = (
+        draft_output.read_bytes(),
+        task_output.read_bytes(),
+        record_output.read_bytes(),
+    )
+    assert (
+        main(
+            [
+                "onboarding-promote",
+                *(str(path) for path in paths),
+                "--draft-output",
+                str(draft_output),
+                "--task-output",
+                str(task_output),
+                "--record-output",
+                str(record_output),
+            ]
+        )
+        == 0
+    )
+    assert first_outputs == (
+        draft_output.read_bytes(),
+        task_output.read_bytes(),
+        record_output.read_bytes(),
+    )
+    assert "ready_for_plan" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

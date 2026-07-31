@@ -105,3 +105,11 @@ git diff --check
 integration 留给下一次真实用户模块：写后必须重新 inspect 新实例 CDF，再由正常 OA→`si`/ADE 路径
 验证参数进入网表，并只对真实 winner 运行任务实际需要的质量分析与可选 PVT。不会为了重复证明编译器
 再造一个电路或把每个候选都跑一遍。
+
+## 后续状态
+
+同日已增加写后 CDF promotion compiler，见
+[`2026-07-31-onboarding-post-refinement-promotion-local.md`](2026-07-31-onboarding-post-refinement-promotion-local.md)。
+新增实例不再永久限制为 fixed：真实 topology winner 写回并独立 inspect 后，fresh inventory 中已确认且
+有显式 OA→`si` binding 的字段可进入普通第二阶段 `design.tune`。该后续仍是本地契约验证，没有新增
+远端 EDA 证据。

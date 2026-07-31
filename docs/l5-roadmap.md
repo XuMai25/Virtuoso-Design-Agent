@@ -231,6 +231,14 @@ winner。alternative 未改变接口时继承 baseline testbench，不再复制�
 compute/write，复用原 `design.close_loop` executor。该能力先以本地 contract Gate 闭合；不为它再造
 一个测试电路，首次 live integration 留给下一次真实用户模块使用。
 
+紧接着的本地纵切补齐写后参数 promotion。`vda onboarding-promote` 以最终 stage-1 task SHA-256、
+真实成功且穷尽声明域的 close-loop run、最终 Bridge topology readback 和更晚的独立 winner inspect
+为入口；实际 selected variant 自动选择预声明 tuning 分支。只有 fresh inventory 中真实存在、同时有
+显式 permission 与 OA→`si` binding 的字段才能进入第二阶段原子候选，因此新增器件不再永久停留在
+fixed 初值。输出是普通固定拓扑 `design.tune`，quality/PVT 只对其真实 winner 运行，安全开关仍关闭；
+两阶段分别复用原 checkpoint，promotion artifact 可幂等重建。当前 867 项本地回归通过，尚未用一个
+新测试电路重复跑远端；首次 live 使用应绑定实际用户模块与实际规格。
+
 同日第二个本地纵切开放 `existing_schematic simulation.run` 的受限通用 DC/AC 路径。任务以
 typed `generic_simulation` 声明 voltage/current sources、R/C loads、single-ended 或
 differential transfer、DC/source-current/MOS OP metrics 和 OA-CDF→`si` 参数绑定；任何 raw
