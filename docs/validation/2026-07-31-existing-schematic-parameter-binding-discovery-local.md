@@ -113,13 +113,37 @@ worker 返回 classification 后，父 executor 从 raw OA 表与全 netlist inv
 
 示例只用于查看计划，compute/write 开关为 false；其中 topology hash 与 CDF 表不得用于真实 cell。
 
+## Fresh-inspect 编译入口
+
+`vda binding-discovery-task` 复用 onboarding 的真实 inspect source 审计，把 inspect task/run 与一个
+很小的显式 intent 编译成完整 probe task 和 hash handoff。它不会要求 Agent 或用户手工复制 CDF：
+
+- source task/run、重算 token、target、PDK、action 和 `bridge_readback` 必须一致；
+- exact topology/placement、冻结对象和目标实例全部 CDF 字段原样继承；
+- intent 只选择 instance、OA 字段、probe 值和可选一层 hierarchy binding；
+- 未见 instance/field、缺 child scope、terminal binding 不一致或 probe 等于原值均拒绝；
+- 输出 task 的 compute/write 固定为 false，另存 source/intent/task/CDF SHA-256 compilation record。
+
+`tests/test_onboarding.py` 新增 4 个结果，覆盖 flat 完整 CDF 保留、未知字段拒绝、显式一层 child 和
+CLI 双 artifact 输出。合并后完整回归为 `890 passed`。
+
 ## 当前边界与下一 Gate
 
-本轮没有连接服务器、没有 OA 写入、没有远端计算，也没有修改
-`C:\Users\aknigsesl\tools\virtuoso-bridge-lite`。因此只称为本地恢复/证据契约已验证。
+随后已对 `vb_pdk_smoke/vda_cs_cascode_gate_001/schematic` 做一次真实只读 fresh inspect：
 
-下一道真实 Gate 应只挑一个已保留、非关键的 `vda_` cellview 和一个已知能直接进入 `si` 的字段，
-先由 fresh inspect 生成完整 CDF CAS，再执行一次三网表 probe。它要证明：真实 Bridge CDF callback、
-`si` inventory、artifact manifest、远端清理、任务外独立 OA 回读和进程归零均成立。该 Gate 仍不需要
-Spectre，也不需要遍历每个字段；只验证机制一次。派生 CDF transformation、多字段 callback、深层
-hierarchy 和并发人工 editor 保持后续独立能力，不因本地 direct-binding 测试而宣称闭合。
+- run：`artifacts/runs/binding-discovery/fresh-inspect-20260731.json`，状态 succeeded；
+- topology：`2e27d1c68012bc1e7adc0da936a648febde4b685cfa1391512a2d401fb291a51`；
+- placement：`a1c08ba5a1ccadeb3cc20be1dbd5d1f9c0649628386adef62d77c16abd0f94fa`；
+- `MNCAS.Wfg=750.0n`，完整 CDF 为 233 项，SHA-256
+  `320ef706ec51d47ffd3e009316e34aca3111fad1daad51d10684486d03c5d812`；
+- 编译后的 safe task 仍为 compute/write=false；授权副本计划 token 为 `74c70848fbfc9317`；
+- inspect 没有写 OA、没有运行 `si`/Spectre；结束后 `vda bridge status` 为 tunnel NOT running。
+
+本轮仍没有执行 binding probe，也没有修改
+`C:\Users\aknigsesl\tools\virtuoso-bridge-lite`。因此只称为真实 readback 到可审查任务的编译已验证，
+不能称为真实 OA→`si` binding discovery 已闭合。
+
+下一道真实 Gate 已收窄为同一 cell 的 `MNCAS.Wfg: 750.0n -> 800n -> 750.0n`。它运行三次 `si`、
+不运行 Spectre、不创建/替换 cellview，并只在成功证据已落本地后清理各自精确 `/data/xum/.../vda_*`
+scratch。还需用户对该 token 和临时 OA 写入明确确认。派生 CDF transformation、多字段 callback、
+深层 hierarchy 和并发人工 editor 保持后续独立能力，不因这次 direct-binding smoke 而宣称闭合。

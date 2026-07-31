@@ -144,6 +144,23 @@ discovery 计划：
 真实任务必须从同一目标的 fresh readback 重建它们；discovery 只返回可回填的 mapping，不保留
 probe 值，也不运行 Spectre。
 
+不需要人工复制几百项 CDF。对一次成功的真实只读 inspect，可用显式 intent 自动编译任务和
+hash handoff：
+
+```powershell
+.\.venv\Scripts\vda.exe binding-discovery-task `
+  examples\tasks\existing-schematic-inspect.bridge.json `
+  artifacts\runs\fresh-inspect.json `
+  examples\onboarding\parameter-binding-discovery-intent.json `
+  --output artifacts\runs\binding-discovery.safe.json `
+  --record-output artifacts\runs\binding-discovery-compilation.json
+```
+
+编译器复核 inspect task/run/token/target/PDK/证据源，原样保留目标实例完整 CDF 表和 topology/
+placement hash；未知实例或字段直接拒绝。输出的 compute/write 开关固定为 false，真实执行仍需
+基于这份 task 单独授权，不会因为编译成功自动触发 OA probe。一层 child 可通过显式
+`--child-inspection` 与 intent 中的 terminal-order binding 接入；不猜 hierarchy。
+
 已有 binding 后，再检查通用有限参数闭环的计划，不需要增加电路模板：
 
 ```powershell

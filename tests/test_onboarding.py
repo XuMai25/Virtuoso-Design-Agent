@@ -8,6 +8,11 @@ from pathlib import Path
 
 import pytest
 
+from virtuoso_design_agent.binding_discovery_compiler import (
+    ParameterBindingDiscoveryCompilation,
+    ParameterBindingDiscoveryIntent,
+    compile_parameter_binding_discovery_task,
+)
 from virtuoso_design_agent.cli import main
 from virtuoso_design_agent.models import (
     ActionRecord,
@@ -174,6 +179,210 @@ def _inventory(draft, instance_path: str):
     return next(
         item for item in draft.parameter_inventory if item.instance_path == instance_path
     )
+
+
+def test_binding_discovery_compiler_preserves_fresh_complete_cdf_and_is_safe(
+    tmp_path: Path,
+) -> None:
+    task_path, run_path = _write_inspection(
+        tmp_path,
+        stem="binding-flat",
+        library="vda_test",
+        cell="vda_binding_flat",
+        topology=_flat_topology(),
+        instance_parameters={
+            "MN0": {
+                "Wfg": "1u",
+                "l": "30n",
+                "fingers": "1",
+                "m": "1",
+                "customFlag": "KEEP_ME",
+            },
+            "RD0": {"r": "20K"},
+        },
+    )
+    intent = ParameterBindingDiscoveryIntent(
+        task_id="binding-flat-discovery",
+        context_id="binding-flat-context",
+        instance="MN0",
+        oa_parameter="Wfg",
+        probe_value="1.25u",
+    )
+
+    task, compilation = compile_parameter_binding_discovery_task(
+        task_path,
+        run_path,
+        intent,
+    )
+    repeated_task, repeated_compilation = compile_parameter_binding_discovery_task(
+        task_path,
+        run_path,
+        intent,
+    )
+
+    assert task == repeated_task
+    assert compilation == repeated_compilation
+    assert task.operation.value == "parameters.binding.discover"
+    assert task.safety.allow_remote_compute is False
+    assert task.safety.allow_remote_write is False
+    assert task.safety.replace_existing is False
+    assert task.design_context is not None
+    assert task.design_context.expected_topology_sha256 == topology_fingerprint(
+        snapshot_from_inspection(_flat_topology())
+    )
+    assert task.design_context.frozen_instances == ["MN0", "RD0"]
+    assert task.design_context.instance_parameter_permissions[0].model_dump() == {
+        "instance": "MN0",
+        "parameters": ["Wfg"],
+        "modes": ["fixed"],
+    }
+    assert task.parameter_binding_discovery is not None
+    assert task.parameter_binding_discovery.expected_instance_parameters == {
+        "Wfg": "1u",
+        "customFlag": "KEEP_ME",
+        "fingers": "1",
+        "l": "30n",
+        "m": "1",
+    }
+    assert compilation.complete_cdf_parameter_count == 5
+    assert compilation.original_value == "1u"
+    assert compilation.execution_enabled is False
+    assert compilation.source_run_sha256 != compilation.compiled_task_sha256
+    assert build_plan(task).requires_remote_compute is True
+    assert build_plan(task).requires_remote_write is True
+
+
+def test_binding_discovery_compiler_rejects_a_field_absent_from_fresh_readback(
+    tmp_path: Path,
+) -> None:
+    task_path, run_path = _write_inspection(
+        tmp_path,
+        stem="binding-missing",
+        library="vda_test",
+        cell="vda_binding_missing",
+        topology=_flat_topology(),
+        instance_parameters={"MN0": {"Wfg": "1u"}, "RD0": {"r": "20K"}},
+    )
+    intent = ParameterBindingDiscoveryIntent(
+        task_id="binding-missing-discovery",
+        context_id="binding-missing-context",
+        instance="MN0",
+        oa_parameter="notInOa",
+        probe_value="2u",
+    )
+
+    with pytest.raises(ValueError, match="absent from the complete fresh CDF"):
+        compile_parameter_binding_discovery_task(task_path, run_path, intent)
+
+
+def test_binding_discovery_compiler_supports_one_explicit_child_scope(
+    tmp_path: Path,
+) -> None:
+    top_task, top_run = _write_inspection(
+        tmp_path,
+        stem="binding-top",
+        library="vda_test",
+        cell="vda_binding_top",
+        topology=_hierarchical_topology(),
+        instance_parameters={"XAMP": {}},
+    )
+    child_task, child_run = _write_inspection(
+        tmp_path,
+        stem="binding-child",
+        library="vda_test",
+        cell="vda_child",
+        topology=_flat_topology(),
+        instance_parameters={"MN0": {"Wfg": "1u", "l": "30n"}, "RD0": {"r": "20K"}},
+    )
+    intent = ParameterBindingDiscoveryIntent.model_validate(
+        {
+            "task_id": "binding-child-discovery",
+            "context_id": "binding-child-context",
+            "instance": "XAMP/MN0",
+            "oa_parameter": "Wfg",
+            "probe_value": "1.25u",
+            "hierarchy_bindings": [
+                {
+                    "instance": "XAMP",
+                    "library": "vda_test",
+                    "cell": "vda_child",
+                    "subcircuit": "vda_child",
+                    "terminal_order": ["IN", "OUT", "VDD", "VSS"],
+                }
+            ],
+        }
+    )
+
+    task, compilation = compile_parameter_binding_discovery_task(
+        top_task,
+        top_run,
+        intent,
+        child_inspections=[("XAMP", child_task, child_run)],
+    )
+
+    assert task.parameter_binding_discovery is not None
+    assert task.parameter_binding_discovery.instance == "XAMP/MN0"
+    assert task.parameter_binding_discovery.expected_instance_parameters == {
+        "Wfg": "1u",
+        "l": "30n",
+    }
+    assert task.design_context is not None
+    assert task.design_context.roles[0].instances == ["XAMP"]
+    assert task.design_context.hierarchy_parameter_scopes[0].top_instance == "XAMP"
+    assert compilation.parameter_target.cell == "vda_child"
+
+
+def test_binding_discovery_task_cli_writes_task_and_hash_handoff(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    task_path, run_path = _write_inspection(
+        tmp_path,
+        stem="binding-cli",
+        library="vda_test",
+        cell="vda_binding_cli",
+        topology=_flat_topology(),
+        instance_parameters={"MN0": {"Wfg": "1u", "l": "30n"}, "RD0": {"r": "20K"}},
+    )
+    intent_path = tmp_path / "binding-intent.json"
+    intent_path.write_text(
+        ParameterBindingDiscoveryIntent(
+            task_id="binding-cli-discovery",
+            context_id="binding-cli-context",
+            instance="MN0",
+            oa_parameter="Wfg",
+            probe_value="1.25u",
+        ).model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+    output = tmp_path / "binding-task.json"
+    record_output = tmp_path / "binding-record.json"
+
+    assert (
+        main(
+            [
+                "binding-discovery-task",
+                str(task_path),
+                str(run_path),
+                str(intent_path),
+                "--output",
+                str(output),
+                "--record-output",
+                str(record_output),
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    compiled_task = TaskSpec.model_validate_json(output.read_text(encoding="utf-8"))
+    record = ParameterBindingDiscoveryCompilation.model_validate_json(
+        record_output.read_text(encoding="utf-8")
+    )
+    assert compiled_task.id == "binding-cli-discovery"
+    assert compiled_task.safety.allow_remote_write is False
+    assert record.instance == "MN0"
+    assert record.evidence_sources["field_selection_and_probe"] == "user_input"
 
 
 def test_onboarding_draft_is_read_only_deterministic_and_preserves_all_cdf(

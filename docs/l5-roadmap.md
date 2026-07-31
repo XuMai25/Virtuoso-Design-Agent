@@ -338,9 +338,14 @@ netlisting。任务以 exact topology 和目标实例完整 CDF 表做 CAS；wor
 才输出 direct binding。inert、callback-coupled、非字面派生、跨实例/多字段和结构变化均不提升。
 19 个定向测试结果覆盖模型/计划、无 testbench 的全 inventory、六类判定、失败/中断恢复、父进程
 独立复判、artifact hash、远端清理路径防逃逸、executor 证据分层和 Bridge worker 路由；完整本地
-回归为 886 passed。三份 netlist/log 先落本地 hash manifest，再精确清理成功的远端 `si` scratch。
-该 Gate 没有修改 Bridge，也尚未执行真实 OA，因此状态是
-**reversible OA-CDF to si direct-binding discovery locally verified; live smoke pending**。
+回归原为 886 passed。三份 netlist/log 先落本地 hash manifest，再精确清理成功的远端 `si` scratch。
+随后增加 `binding-discovery-task` 编译边界：复用真实 inspect source 审计，自动继承完整 CDF、
+topology/placement 和冻结对象，输出 source/intent/task/CDF hash handoff，且执行开关固定关闭；flat、
+未知字段拒绝、显式一层 child 与 CLI 输出新增 4 个测试，完整回归为 890 passed。真实只读 inspect 已
+从 `vda_cs_cascode_gate_001/MNCAS` 捕获 233 项 CDF 与 fresh topology，生成 `Wfg 750.0n -> 800n`
+的可审查任务；没有写 OA、没有运行 `si`/Spectre，Bridge tunnel 已退出。该 Gate 没有修改 Bridge，
+也尚未执行真实 probe，因此状态是 **readback-to-safe-task compilation live verified; reversible
+OA-CDF to si direct-binding live smoke pending**。
 
 这仍不是 L5B closure。派生 CDF、深层 hierarchy、shared-child per-instance override、并发人工 editor、
 mismatch/Monte Carlo 仍是边界；本次 PVT 也只是 winner 的两个声明条件，不是 foundry signoff corner

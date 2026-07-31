@@ -12,6 +12,10 @@ from pydantic import ValidationError
 
 from .adapters import DeterministicDemoAdapter, SubprocessBridgeAdapter
 from .adapters.subprocess_bridge import BridgeWorkerError
+from .binding_discovery_compiler import (
+    ParameterBindingDiscoveryIntent,
+    compile_parameter_binding_discovery_task,
+)
 from .bridge_lifecycle import BridgeLifecycleError, run_bridge_lifecycle
 from .catalog import UnsupportedCapability, catalog_as_dicts
 from .cascode_seed import (
@@ -483,6 +487,35 @@ def _cmd_onboarding_draft(args: argparse.Namespace) -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(payload + "\n", encoding="utf-8")
     print(payload)
+    return 0
+
+
+def _cmd_binding_discovery_task(args: argparse.Namespace) -> int:
+    child_inspections = [
+        (top_instance, Path(task_path), Path(run_path))
+        for top_instance, task_path, run_path in args.child_inspection
+    ]
+    intent = ParameterBindingDiscoveryIntent.model_validate_json(
+        args.intent.read_text(encoding="utf-8")
+    )
+    task, compilation = compile_parameter_binding_discovery_task(
+        args.inspect_task,
+        args.inspect_run,
+        intent,
+        child_inspections=child_inspections,
+    )
+    outputs = (
+        (args.output, task.model_dump_json(indent=2, exclude_none=True)),
+        (
+            args.record_output,
+            compilation.model_dump_json(indent=2, exclude_none=True),
+        ),
+    )
+    for path, payload in outputs:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload + "\n", encoding="utf-8")
+    print(outputs[0][1])
+    print(outputs[1][1])
     return 0
 
 
@@ -1054,6 +1087,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     onboarding_draft.add_argument("--output", type=Path, required=True)
     onboarding_draft.set_defaults(handler=_cmd_onboarding_draft)
+
+    binding_discovery_task = subparsers.add_parser(
+        "binding-discovery-task",
+        help=(
+            "compile fresh read-only inspection evidence and one explicit CDF "
+            "probe intent into a non-executable binding-discovery TaskSpec"
+        ),
+    )
+    binding_discovery_task.add_argument("inspect_task", type=Path)
+    binding_discovery_task.add_argument("inspect_run", type=Path)
+    binding_discovery_task.add_argument("intent", type=Path)
+    binding_discovery_task.add_argument(
+        "--child-inspection",
+        action="append",
+        nargs=3,
+        default=[],
+        metavar=("TOP_INSTANCE", "INSPECT_TASK", "INSPECT_RUN"),
+        help=(
+            "bind one exact child readback for a scoped probe; repeat for each "
+            "one-level child named by the intent"
+        ),
+    )
+    binding_discovery_task.add_argument("--output", type=Path, required=True)
+    binding_discovery_task.add_argument(
+        "--record-output",
+        type=Path,
+        required=True,
+    )
+    binding_discovery_task.set_defaults(handler=_cmd_binding_discovery_task)
 
     onboarding_resolve = subparsers.add_parser(
         "onboarding-resolve",

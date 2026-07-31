@@ -231,6 +231,12 @@ CDF 表和 exact topology 编译为独立 `parameters.binding.discover` 任务�
 `direct_literal_binding` 时提供可回填的 mapping，callback-coupled/派生/多字段结果不会自动提升。
 只想直接改一个实例字段时，原有独立 `parameters.apply` 仍可使用，不经过 discovery 或 promotion。
 
+这里的“编译”已有正式入口 `vda binding-discovery-task`，输入同一对 inspect task/run 和一个只含
+task/context ID、instance、CDF 字段、probe 值及可选一层 hierarchy binding 的 intent。编译器复用
+本章 read-only source 审计，保留完整 CDF inventory 并输出 hash handoff；生成 TaskSpec 的
+`allow_remote_compute`/`allow_remote_write` 均为 false。它不自动修改 onboarding resolution，也不把
+发现结果直接写入另一个 task；mapping 的采用仍是后续显式 intent/promotion 边界。
+
 stage-1 run 还必须满足：真实 Bridge adapter、成功状态、完整且连续的 candidate record、穷尽声明
 topology×parameter 域、唯一 selected candidate，以及与 selected hash 一致的最终 Bridge topology
 回读。独立 inspect 必须晚于 stage 1，target/PDK/hash 必须相同。输出 task 冻结所有读回结构并固定

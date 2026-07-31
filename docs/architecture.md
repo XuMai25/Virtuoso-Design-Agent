@@ -102,6 +102,13 @@ manifest，再按 `_generate_oa_netlist` 返回且经 POSIX 规范化的精确 `
 `eda_result`，分类是 `software_inference`，恢复/清理是 `system_event`。当前仅完成本地契约、
 解析器与故障注入 Gate，尚无新的真实 OA smoke。
 
+`vda binding-discovery-task` 把一对成功的 real-Bridge read-only inspect task/run 与一个很小的
+`user_input` intent 编译成上述完整 TaskSpec。它复用 onboarding 的 task/run/token/target/PDK/
+action evidence 验证，直接继承 topology、placement、冻结对象和未过滤 CDF inventory；不会按
+器件类型补字段或猜 alias。输出另带 source task/run、intent、compiled task、完整 CDF 的 SHA-256
+handoff，且 remote compute/write 固定关闭。flat 与显式一层 child 使用同一编译器；child 的
+scope、subcircuit 和 terminal order 必须完整声明，深层 hierarchy 仍拒绝。
+
 `vda onboarding-draft` 在首次编写上述上下文前增加一个只读编译边界。它只接受成功的
 real-Bridge `existing_schematic + schematic.inspect` 任务及其 run record，并重算 plan token；
 task/run SHA-256、task ID、target、PDK、topology/placement SHA-256 和未过滤实例参数表均写入
