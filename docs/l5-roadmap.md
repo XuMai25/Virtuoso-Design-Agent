@@ -356,19 +356,23 @@ OA-CDF to si binding with fully mirrored derived callback effects live verified*
 其他 PDK、深层 hierarchy 和并发人工 editor 仍未覆盖；合并前完整本地回归为 `895 passed`。详见
 [`validation/2026-08-01-existing-schematic-parameter-binding-discovery-live.md`](validation/2026-08-01-existing-schematic-parameter-binding-discovery-live.md)。
 
-同日继续完成 discovery→normal-task 的本地 Gate。`onboarding-resolve-bindings` 输入 hash-bound
+同日继续完成 discovery→normal-task Gate。`onboarding-resolve-bindings` 输入 hash-bound
 onboarding draft、未手填 mapping 的 resolution，以及一个或多个真实 discovery task/run；它复算
 plan、重新校验三阶段 artifact/CDF/恢复，再把 primary、derived callback 和 source hashes 编译进
 普通 `simulation.run` 或 `design.tune`。generic OA→`si` parser 运行时新增 callback 逐项等值核对；
 旧 binding 缺省字段不进入 canonical JSON，因此旧 plan token 保持。实际 `MNCAS.Wfg` evidence 已
-本地生成关闭远端开关的 shared-netlist DC/AC TaskSpec，task SHA-256
+先生成关闭远端开关的 shared-netlist DC/AC TaskSpec，task SHA-256
 `62564c46d99ba0a0212384ebbc30e861461ce026a9869a7cbf2bb2bc737a850e`，安全 plan token
-`06b9987ea5b404df`。完整回归为 `900 passed`；尚未把该编译结果作为新 live DC/AC run 执行。详见
-[`validation/2026-08-01-onboarding-discovered-binding-promotion-local.md`](validation/2026-08-01-onboarding-discovered-binding-promotion-local.md)。
+`06b9987ea5b404df`；随后 compute-only token `abec578d3742d07a` 真实完成一次 OA readback、一次 `si`
+和共享 DC/AC。`Wfg/w` 与六个 callback 全部匹配，netlist SHA 与旧独立 generic DC/AC 完全相同，
+12 个共同指标最大相对差 `9.84e-16`。新增 `execution-scope` 确定性重建最小执行权限但仍要求用户确认；
+`onboarding-binding-audit` 把 promotion/scope/task/run、stage manifest 和规格复算成 passed artifact。
+完整回归为 `904 passed`。详见[本地编译记录](validation/2026-08-01-onboarding-discovered-binding-promotion-local.md)
+和[真实执行记录](validation/2026-08-01-onboarding-discovered-binding-promotion-live.md)。
 
 这仍不是 L5B closure。派生 CDF、深层 hierarchy、shared-child per-instance override、并发人工 editor、
 mismatch/Monte Carlo 仍是边界；本次 PVT 也只是 winner 的两个声明条件，不是 foundry signoff corner
-set。下一项优先工作是在用户首次提供的非夹具单模块上运行这条接入链：只读 inspect 后生成 draft，
+set。下一项优先工作仍是在用户首次提供的非夹具单模块上运行这条接入链：只读 inspect 后生成 draft，
 由用户给出的拓扑/规格和 Agent 的电路分析形成 resolution，先编译并审查最小 DC/AC TaskSpec，再执行
 真实 OA→`si` 仿真。只有 DC operating point 合格且任务确实需要时，才加入 tuning、AC 以外 analysis
 或可选 PVT；只有真实模块暴露缺口时，才新增多个唯一 child scope、output/OP metric 映射、
@@ -419,7 +423,7 @@ per-instance override 或派生 CDF。不再在已知 fixture 上增加随机候
   -> active-load + 对称源极退化组合拓扑（新 cellview forward/readback/七实例 si/DC/AC/CMRR/noise/transient/ICMR/PSRR/inverse/恢复态 DC 均已 live；质量闭环未过）
   -> 用户拓扑 onboarding + design_context（inspect→零权限草案→用户确认 resolution→普通 safe TaskSpec 的 flat/hierarchy 本地链已通过；首个非 fixture 模块 live Gate 待做）
   -> existing_schematic 通用 OA→si DC/AC testbench/结果契约（本地 + nominal 共栅级联 live Gate 已通过；未增加电路专用 executor）
-  -> existing_schematic CDF→si binding 自动发现与 handoff（flat TSMC N28 Wfg→w 与同实例 derived callback 已 live；自动编译到 normal TaskSpec 和运行期 callback recheck 已本地通过；新 live DC/AC 待执行）
+  -> existing_schematic CDF→si binding 自动发现与 handoff（flat TSMC N28 Wfg→w 与同实例 derived callback 已 live；normal TaskSpec、最小 execution scope、共享 DC/AC 运行期 callback recheck 和事后 evidence audit 均已通过）
   -> 通用 instance-parameter candidate/checkpoint/writeback（本地可行/不可行/预算/中断恢复、单字段 OA-write 与多字段 objective live 已通过）
   -> 理论诊断 + topology/parameter refinement controller（单-delta nominal flat AC、staged DC/AC/transient/noise 与 shared-netlist live；winner-only 两条件 PVT live；三个 independent alternative 的 OA round-trip/checkpoint/winner writeback live；最多七个 alternative 本地通过；一层 primitive-child symbol/OA/si/DC/AC 与 scoped child 参数调优 live 已通过）
   -> L5B 单模块闭环

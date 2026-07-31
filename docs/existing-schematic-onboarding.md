@@ -248,6 +248,13 @@ task/context ID、instance、CDF 字段、probe 值及可选一层 hierarchy bin
 当前分类。输出 TaskSpec 的 binding 内嵌 source hashes，并携带可执行期复核的 derived callback 列表。
 这一路径既可生成 `simulation.run`，也可生成原有 `design.tune`；不会自动打开远端 compute/write。
 
+需要进入真实执行时，先对该安全 TaskSpec 运行 `vda execution-scope`。它从已有 plan 自动推导最小
+compute/write 权限并生成新的 task/token，始终保留 `replace_existing=false` 和
+`user_confirmation_required=true`；不会自行执行或代替人工确认。shared-netlist `simulation.run`
+完成后，可用 `vda onboarding-binding-audit` 把 promotion、scope、task、run 四条 hash 链一次复判。
+当前 validator 只接受成功的 compute-only real-Bridge shared-netlist smoke；OA-write tuning 仍服从原有
+checkpoint、恢复和最终回读证据，不会被这个只读 validator 误称为已覆盖。
+
 stage-1 run 还必须满足：真实 Bridge adapter、成功状态、完整且连续的 candidate record、穷尽声明
 topology×parameter 域、唯一 selected candidate，以及与 selected hash 一致的最终 Bridge topology
 回读。独立 inspect 必须晚于 stage 1，target/PDK/hash 必须相同。输出 task 冻结所有读回结构并固定

@@ -16,6 +16,7 @@ from .binding_discovery_compiler import (
     ParameterBindingDiscoveryIntent,
     compile_parameter_binding_discovery_task,
 )
+from .binding_execution_audit import audit_onboarding_binding_execution
 from .binding_promotion import compile_onboarding_with_discovered_bindings
 from .bridge_lifecycle import BridgeLifecycleError, run_bridge_lifecycle
 from .catalog import UnsupportedCapability, catalog_as_dicts
@@ -33,6 +34,7 @@ from .executor import (
     load_execution_checkpoint,
     save_run_record,
 )
+from .execution_scope import compile_execution_scope
 from .models import (
     DEFAULT_PDK_PROFILE,
     ExecutionPlan,
@@ -570,6 +572,37 @@ def _cmd_onboarding_resolve_bindings(args: argparse.Namespace) -> int:
         path.write_bytes((payload + "\n").encode("utf-8"))
     print(outputs[0][1])
     print(outputs[1][1])
+    return 0
+
+
+def _cmd_execution_scope(args: argparse.Namespace) -> int:
+    task, compilation = compile_execution_scope(args.task)
+    outputs = (
+        (args.output, task.model_dump_json(indent=2, exclude_none=True)),
+        (
+            args.record_output,
+            compilation.model_dump_json(indent=2, exclude_none=True),
+        ),
+    )
+    for path, payload in outputs:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((payload + "\n").encode("utf-8"))
+    print(outputs[0][1])
+    print(outputs[1][1])
+    return 0
+
+
+def _cmd_onboarding_binding_audit(args: argparse.Namespace) -> int:
+    audit = audit_onboarding_binding_execution(
+        args.promotion,
+        args.execution_scope,
+        args.task,
+        args.run_record,
+    )
+    payload = audit.model_dump_json(indent=2, exclude_none=True)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_bytes((payload + "\n").encode("utf-8"))
+    print(payload)
     return 0
 
 
@@ -1215,6 +1248,36 @@ def build_parser() -> argparse.ArgumentParser:
     onboarding_resolve_bindings.set_defaults(
         handler=_cmd_onboarding_resolve_bindings
     )
+
+    execution_scope = subparsers.add_parser(
+        "execution-scope",
+        help=(
+            "derive the minimum executable safety flags and a new confirmation "
+            "token from one disabled TaskSpec without executing it"
+        ),
+    )
+    execution_scope.add_argument("task", type=Path)
+    execution_scope.add_argument("--output", type=Path, required=True)
+    execution_scope.add_argument(
+        "--record-output",
+        type=Path,
+        required=True,
+    )
+    execution_scope.set_defaults(handler=_cmd_execution_scope)
+
+    onboarding_binding_audit = subparsers.add_parser(
+        "onboarding-binding-audit",
+        help=(
+            "audit one promoted-binding shared-netlist Bridge run against its "
+            "promotion record, execution scope, exact task, and manifests"
+        ),
+    )
+    onboarding_binding_audit.add_argument("promotion", type=Path)
+    onboarding_binding_audit.add_argument("execution_scope", type=Path)
+    onboarding_binding_audit.add_argument("task", type=Path)
+    onboarding_binding_audit.add_argument("run_record", type=Path)
+    onboarding_binding_audit.add_argument("--output", type=Path, required=True)
+    onboarding_binding_audit.set_defaults(handler=_cmd_onboarding_binding_audit)
 
     onboarding_promote = subparsers.add_parser(
         "onboarding-promote",

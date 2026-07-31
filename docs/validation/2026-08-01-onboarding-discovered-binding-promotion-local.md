@@ -94,12 +94,15 @@ vda onboarding-resolve-bindings --help: passed
 git diff --check: passed
 ```
 
-## 尚未验证的边界与下一 Gate
+## 后续 live Gate
 
 本 Gate 没有连接远端、没有写 OA、没有运行 Spectre。下一步应只做一次直接下游验证：把同一编译
 结果仅开启 `allow_remote_compute`，对现有目标执行一次 OA readback、一次 `si` netlisting 和共享
 DC/AC，确认运行期 callback 检查消费的是实际 OA 与网表，而不是 fixture。该 smoke 不需要 OA 写入，
 不创建或替换 cellview；执行前仍须用新 TaskSpec 重算 token 并明确授权远端计算。
+
+该 Gate 已于同日通过，见
+[`2026-08-01-onboarding-discovered-binding-promotion-live.md`](2026-08-01-onboarding-discovered-binding-promotion-live.md)。
 
 任意其他 OA 字段、PMOS、其他 PDK、层次化 per-instance callback、并发人工编辑以及 callback
 公式跨 PVT 的稳定性仍未由本记录覆盖。

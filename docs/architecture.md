@@ -131,6 +131,16 @@ token、重放本地 reclassification、核对 target/PDK/topology/完整 CDF，
 compute/write/replace=false；本地编译不是新的 EDA 结果。详见
 [`validation/2026-08-01-onboarding-discovered-binding-promotion-local.md`](validation/2026-08-01-onboarding-discovered-binding-promotion-local.md)。
 
+安全 TaskSpec 到真实执行之间不再依赖手工改 JSON。`vda execution-scope` 只接受 compute/write 均关闭
+且 `replace_existing=false` 的任务，读取现有 plan step 的 side effect，恰好开启计划真正要求的
+compute/write 权限，并输出新的 canonical UTF-8/LF TaskSpec、SHA-256、plan token 和
+`user_confirmation_required=true` handoff；它本身不执行，也不构成用户授权。对于 discovery promotion
+的 shared-netlist `simulation.run`，`vda onboarding-binding-audit` 再把 promotion、execution scope、
+执行 TaskSpec 和 real-Bridge run 四份精确 artifact 绑定起来，复算 token/constraints，并检查一次 OA
+readback、一次 `si`、primary/derived callback、stage 顺序与 manifest identity。2026-08-01 live Gate
+已经通过，详见
+[`validation/2026-08-01-onboarding-discovered-binding-promotion-live.md`](validation/2026-08-01-onboarding-discovered-binding-promotion-live.md)。
+
 `vda binding-discovery-task` 把一对成功的 real-Bridge read-only inspect task/run 与一个很小的
 `user_input` intent 编译成上述完整 TaskSpec。它复用 onboarding 的 task/run/token/target/PDK/
 action evidence 验证，直接继承 topology、placement、冻结对象和未过滤 CDF inventory；不会按
