@@ -225,8 +225,11 @@ SHA-256 绑定，可同时预声明 baseline 与最多三个 alternative 分支�
 
 编译器不根据实例类型猜参数，也不会把 `RS0.r`、MOS `Wfg` 或其他名字写死。实际 winner 决定使用
 哪个分支；每个授权字段都必须出现在 winner inspect 的未过滤 CDF inventory 中。这样人工指定任意
-真实 CDF 字段仍可进入调优，但仿真型调优还必须给出精确 `si` binding；只想直接改一个实例字段时，
-原有独立 `parameters.apply` 仍可使用，不经过 promotion。
+真实 CDF 字段仍可进入调优，但仿真型调优还必须给出精确 `si` binding。若 onboarding inventory
+已经证明 OA 字段存在、但陌生 device/PDK 的 netlist 字段未知，可先把 fresh inspect 的完整目标实例
+CDF 表和 exact topology 编译为独立 `parameters.binding.discover` 任务；它只在可逆三网表差分得到
+`direct_literal_binding` 时提供可回填的 mapping，callback-coupled/派生/多字段结果不会自动提升。
+只想直接改一个实例字段时，原有独立 `parameters.apply` 仍可使用，不经过 discovery 或 promotion。
 
 stage-1 run 还必须满足：真实 Bridge adapter、成功状态、完整且连续的 candidate record、穷尽声明
 topology×parameter 域、唯一 selected candidate，以及与 selected hash 一致的最终 Bridge topology

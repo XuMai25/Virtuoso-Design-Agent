@@ -142,6 +142,7 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             Operation.SCHEMATIC_SYMBOL_GENERATE,
             Operation.SCHEMATIC_TRANSFORM,
             Operation.PARAMETERS_APPLY,
+            Operation.PARAMETERS_BINDING_DISCOVER,
             Operation.SIMULATION_RUN,
             Operation.DESIGN_TUNE,
             Operation.DESIGN_CLOSE_LOOP,
@@ -178,6 +179,10 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "the actual topology branch, and emits a frozen safe design.tune task with fresh "
             "permission/binding validation, deterministic artifacts, and winner-only quality; "
             "drift/recovery paths are local and first end-to-end use awaits a real module + "
+            "reversible single-CDF baseline/probe/restore si binding discovery now requires "
+            "an exact topology and complete instance CDF CAS, promotes only one literal "
+            "netlist change, rejects callback-coupled/derived/ambiguous/inert results, and "
+            "restores OA on injected si failure locally; first live probe remains pending + "
             "a first non-overwrite PMOS-loaded common-source onboarding path has completed "
             "create, generic topology delta, inspect/draft/resolve, typed OA-CDF plus testbench "
             "atomic-candidate tuning, shared-netlist DC/AC, checkpoint transport recovery, and "

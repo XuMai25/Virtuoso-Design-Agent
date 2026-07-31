@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "id": "existing-schematic-parameter-binding-discovery-demo",
+  "operation": "parameters.binding.discover",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vda_test",
+    "cell": "vda_binding_discovery_001",
+    "view": "schematic"
+  },
+  "design_context": {
+    "schema_version": 1,
+    "id": "binding-discovery-demo-context",
+    "expected_topology_sha256": "9c73bfc4a4924732ea4e08f4745062aa2e239a74d9b2aa30a69df29e21181fd8",
+    "roles": [
+      {
+        "role": "device.input",
+        "instances": ["MN0"]
+      },
+      {
+        "role": "signal.input",
+        "nets": ["IN"]
+      },
+      {
+        "role": "signal.output",
+        "nets": ["OUT"]
+      }
+    ],
+    "instance_parameter_permissions": [
+      {
+        "instance": "MN0",
+        "parameters": ["Wfg"],
+        "modes": ["fixed"]
+      }
+    ]
+  },
+  "parameter_binding_discovery": {
+    "schema_version": 1,
+    "instance": "MN0",
+    "oa_parameter": "Wfg",
+    "probe_value": "2u",
+    "expected_instance_parameters": {
+      "Wfg": "1u",
+      "fingers": "1",
+      "l": "30n",
+      "m": "1",
+      "model": "nch_lvt_mac"
+    }
+  },
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 600
+  },
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": false,
+    "allowed_library": "vda_test",
+    "replace_existing": false
+  }
+}

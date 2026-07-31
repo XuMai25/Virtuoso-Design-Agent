@@ -330,6 +330,18 @@ CDF 写回/回读、`si` subckt 的 `Wfg→w`/`r→r` 一致性、shared-netlist
 全不可行恢复和 child 写后 checkpoint resume。详见
 [`validation/2026-07-31-existing-schematic-hierarchical-parameter-tuning-live.md`](validation/2026-07-31-existing-schematic-hierarchical-parameter-tuning-live.md)。
 
+2026-07-31 又补上新器件接入时的一个通用本地 Gate：`parameters.binding.discover` 不要求先知道
+`si` 参数名，而是对一个 context-authorized CDF 字段执行 baseline/probe/restore 三次自动
+netlisting。任务以 exact topology 和目标实例完整 CDF 表做 CAS；worker 在 probe netlisting
+失败时仍从 `finally` 恢复，下一次运行也只允许从声明 probe 中断态先恢复。只有 OA 单字段变化、
+`si` 单字段变化、两端值字面/工程单位等价并且第三份 canonical netlist signature 回到 baseline，
+才输出 direct binding。inert、callback-coupled、非字面派生、跨实例/多字段和结构变化均不提升。
+19 个定向测试结果覆盖模型/计划、无 testbench 的全 inventory、六类判定、失败/中断恢复、父进程
+独立复判、artifact hash、远端清理路径防逃逸、executor 证据分层和 Bridge worker 路由；完整本地
+回归为 886 passed。三份 netlist/log 先落本地 hash manifest，再精确清理成功的远端 `si` scratch。
+该 Gate 没有修改 Bridge，也尚未执行真实 OA，因此状态是
+**reversible OA-CDF to si direct-binding discovery locally verified; live smoke pending**。
+
 这仍不是 L5B closure。派生 CDF、深层 hierarchy、shared-child per-instance override、并发人工 editor、
 mismatch/Monte Carlo 仍是边界；本次 PVT 也只是 winner 的两个声明条件，不是 foundry signoff corner
 set。下一项优先工作是在用户首次提供的非夹具单模块上运行这条接入链：只读 inspect 后生成 draft，
@@ -383,6 +395,7 @@ per-instance override 或派生 CDF。不再在已知 fixture 上增加随机候
   -> active-load + 对称源极退化组合拓扑（新 cellview forward/readback/七实例 si/DC/AC/CMRR/noise/transient/ICMR/PSRR/inverse/恢复态 DC 均已 live；质量闭环未过）
   -> 用户拓扑 onboarding + design_context（inspect→零权限草案→用户确认 resolution→普通 safe TaskSpec 的 flat/hierarchy 本地链已通过；首个非 fixture 模块 live Gate 待做）
   -> existing_schematic 通用 OA→si DC/AC testbench/结果契约（本地 + nominal 共栅级联 live Gate 已通过；未增加电路专用 executor）
+  -> existing_schematic CDF→si binding 自动发现（完整 CDF CAS、三次 netlisting、失败/中断恢复和歧义拒绝已本地通过；真实单字段 smoke 待授权）
   -> 通用 instance-parameter candidate/checkpoint/writeback（本地可行/不可行/预算/中断恢复、单字段 OA-write 与多字段 objective live 已通过）
   -> 理论诊断 + topology/parameter refinement controller（单-delta nominal flat AC、staged DC/AC/transient/noise 与 shared-netlist live；winner-only 两条件 PVT live；三个 independent alternative 的 OA round-trip/checkpoint/winner writeback live；最多七个 alternative 本地通过；一层 primitive-child symbol/OA/si/DC/AC 与 scoped child 参数调优 live 已通过）
   -> L5B 单模块闭环

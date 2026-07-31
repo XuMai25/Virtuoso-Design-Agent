@@ -18,7 +18,11 @@ from pydantic import (
 )
 
 from .design_context import DesignContext, validate_topology_delta_scope
-from .generic_simulation import GenericOaSimulationSpec, GenericTestbenchOverrides
+from .generic_simulation import (
+    GenericOaSimulationSpec,
+    GenericTestbenchOverrides,
+    ParameterBindingDiscoverySpec,
+)
 from .instance_path import (
     INSTANCE_PATH_PATTERN,
     is_scoped_instance_path,
@@ -43,6 +47,7 @@ class Operation(str, Enum):
     SCHEMATIC_SYMBOL_GENERATE = "schematic.symbol.generate"
     SCHEMATIC_TRANSFORM = "schematic.transform"
     PARAMETERS_APPLY = "parameters.apply"
+    PARAMETERS_BINDING_DISCOVER = "parameters.binding.discover"
     ADE_PREPARE = "ade.prepare"
     ADE_CAPTURE = "ade.capture"
     ADE_RUN = "ade.run"
@@ -2222,6 +2227,7 @@ class TaskSpec(StrictModel):
     netlist_preview: NetlistPreviewSpec | None = None
     design_context: DesignContext | None = None
     generic_simulation: GenericOaSimulationSpec | None = None
+    parameter_binding_discovery: ParameterBindingDiscoverySpec | None = None
     operating_conditions: list[OperatingCondition] = Field(
         default_factory=list,
         max_length=5,
@@ -2306,6 +2312,7 @@ class TaskSpec(StrictModel):
                 or self.winner_verification is not None
                 or self.design_context is not None
                 or self.generic_simulation is not None
+                or self.parameter_binding_discovery is not None
                 or self.netlist_preview is not None
                 or self.expected_target_topology_variant is not None
                 or self.operating_conditions
@@ -2358,6 +2365,7 @@ class TaskSpec(StrictModel):
                 or self.winner_verification is not None
                 or self.design_context is not None
                 or self.generic_simulation is not None
+                or self.parameter_binding_discovery is not None
                 or self.device_characterization is not None
                 or self.expected_target_topology_variant is not None
                 or self.operating_conditions
@@ -2396,6 +2404,119 @@ class TaskSpec(StrictModel):
             raise ValueError(
                 "device_characterization settings require operation='device.characterize'"
             )
+        if self.operation is Operation.PARAMETERS_BINDING_DISCOVER:
+            if self.circuit is not CircuitKind.EXISTING_SCHEMATIC:
+                raise ValueError(
+                    "parameters.binding.discover requires "
+                    "circuit='existing_schematic'"
+                )
+            if self.target.view != "schematic":
+                raise ValueError(
+                    "parameters.binding.discover requires target.view='schematic'"
+                )
+            discovery = self.parameter_binding_discovery
+            if discovery is None:
+                raise ValueError(
+                    "parameters.binding.discover requires "
+                    "parameter_binding_discovery settings"
+                )
+            if self.design_context is None:
+                raise ValueError(
+                    "parameters.binding.discover requires design_context"
+                )
+            if self.design_context.expected_topology_sha256 is None:
+                raise ValueError(
+                    "parameters.binding.discover requires an exact expected "
+                    "topology SHA-256 in design_context"
+                )
+            if (
+                self.expected_target_topology_variant is not None
+                or self.analysis is not None
+                or self.analysis_stages
+                or self.ac_sweep is not None
+                or self.linearity_sweep is not None
+                or self.noise_sweep is not None
+                or self.ade_capture is not None
+                or self.ade_prepare is not None
+                or self.ade_run is not None
+                or self.ade_variables is not None
+                or self.ade_corners is not None
+                or self.ade_setup is not None
+                or self.symbol_generation is not None
+                or self.schematic_transform is not None
+                or self.topology_delta is not None
+                or self.topology_refinement is not None
+                or self.winner_verification is not None
+                or self.generic_simulation is not None
+                or self.operating_conditions
+                or self.parameters
+                or self.instance_parameter_updates
+                or self.parameter_space
+                or self.candidate_set is not None
+                or self.theory_seed is not None
+                or self.instance_parameter_space
+                or self.constraints
+                or self.objective is not None
+                or self.create_if_missing
+            ):
+                raise ValueError(
+                    "parameters.binding.discover accepts only its reversible probe "
+                    "contract, design_context, target, PDK, limits, and safety"
+                )
+            self.design_context.validate_parameter_scope(
+                fixed_semantic=set(),
+                searched_semantic=set(),
+                fixed_instance={(discovery.instance, discovery.oa_parameter)},
+                searched_instance=set(),
+            )
+            scope_by_top_instance = {
+                scope.top_instance: scope
+                for scope in self.design_context.hierarchy_parameter_scopes
+            }
+            binding_by_top_instance = {
+                binding.instance: binding
+                for binding in discovery.hierarchy_bindings
+            }
+            if set(binding_by_top_instance) != set(scope_by_top_instance):
+                raise ValueError(
+                    "binding discovery hierarchy bindings must exactly match the "
+                    "design-context hierarchy parameter scopes"
+                )
+            for scoped_top_instance, scope in scope_by_top_instance.items():
+                binding = binding_by_top_instance.get(scoped_top_instance)
+                if binding is None:
+                    raise ValueError(
+                        "binding discovery hierarchy parameter scope requires a "
+                        f"matching si hierarchy binding for {scoped_top_instance!r}"
+                    )
+                if (binding.library, binding.cell, binding.view) != (
+                    scope.library,
+                    scope.cell,
+                    scope.view,
+                ):
+                    raise ValueError(
+                        "binding discovery hierarchy binding disagrees with the "
+                        f"design-context scope for {scoped_top_instance!r}"
+                    )
+            top_instance = split_instance_path(discovery.instance)[0]
+            if top_instance is not None:
+                scope = scope_by_top_instance.get(top_instance)
+                binding = binding_by_top_instance.get(top_instance)
+                if scope is None or binding is None:
+                    raise ValueError(
+                        "scoped binding discovery requires matching design-context "
+                        "scope and si hierarchy binding"
+                    )
+            if self.safety.replace_existing:
+                raise ValueError(
+                    "parameters.binding.discover never replaces a cellview"
+                )
+            return self
+        if self.parameter_binding_discovery is not None:
+            raise ValueError(
+                "parameter_binding_discovery settings require "
+                "operation='parameters.binding.discover'"
+            )
         if self.operation is Operation.SCHEMATIC_SYMBOL_GENERATE:
             if self.circuit is not CircuitKind.EXISTING_SCHEMATIC:
                 raise ValueError(
@@ -2431,6 +2552,7 @@ class TaskSpec(StrictModel):
                 or self.netlist_preview is not None
                 or self.design_context is not None
                 or self.generic_simulation is not None
+                or self.parameter_binding_discovery is not None
                 or self.operating_conditions
                 or self.parameters
                 or self.instance_parameter_updates

@@ -135,6 +135,14 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
                 "  explicit instance parameters: parameters.apply"
                 f"{raw_tuning} + OA readback"
             )
+            if (
+                Operation.PARAMETERS_BINDING_DISCOVER.value
+                in item["operations"]
+            ):
+                print(
+                    "  parameter binding discovery: reversible OA probe + "
+                    "three si netlists"
+                )
         print(f"  evidence gate: {item['evidence_gate']}")
     return 0
 

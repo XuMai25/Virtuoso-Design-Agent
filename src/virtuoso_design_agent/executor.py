@@ -42,6 +42,10 @@ from .models import (
     SchematicTransformAction,
     TaskSpec,
 )
+from .parameter_binding import (
+    classify_parameter_binding_probe,
+    validate_parameter_binding_eda_stage,
+)
 from .safety import authorize_execution
 from .spectre_values import spectre_scalar, spectre_values_equal
 from .topology_delta import (
@@ -6234,6 +6238,246 @@ class TaskExecutor:
                         lambda: self.adapter.inspect_schematic(task),
                     )
                     selected_parameters = dict(task.parameters)
+            elif operation is Operation.PARAMETERS_BINDING_DISCOVER:
+                discovery = task.parameter_binding_discovery
+                if discovery is None:
+                    raise RuntimeError(
+                        "parameter binding discovery contract disappeared after plan"
+                    )
+                expected = {
+                    str(name): str(value)
+                    for name, value in sorted(
+                        discovery.expected_instance_parameters.items()
+                    )
+                }
+
+                def exact_inspection_table(
+                    result: AdapterResult,
+                    *,
+                    label: str,
+                ) -> dict[str, str]:
+                    raw = (result.data.get("instance_parameters") or {}).get(
+                        discovery.instance
+                    )
+                    if not isinstance(raw, dict):
+                        raise RuntimeError(
+                            f"{label} is missing the complete target CDF table for "
+                            f"{discovery.instance}"
+                        )
+                    table = {
+                        str(name): str(value)
+                        for name, value in sorted(raw.items())
+                    }
+                    if table != expected:
+                        raise RuntimeError(
+                            f"{label} target CDF table does not match the binding "
+                            "discovery CAS baseline"
+                        )
+                    return table
+
+                before = self._action(
+                    "schematic.inspect.before",
+                    lambda: self.adapter.inspect_schematic(task),
+                )
+                self._bind_design_context(task, before)
+                exact_inspection_table(before, label="pre-probe OA readback")
+                raw_discovery = self._action(
+                    "parameters.binding.discover",
+                    lambda: self.adapter.discover_parameter_binding(task),
+                )
+                data = raw_discovery.data
+                if data.get("contract") != discovery.model_dump(mode="json"):
+                    raise RuntimeError(
+                        "binding discovery adapter did not echo the exact probe contract"
+                    )
+                if data.get("target") != task.target.model_dump(mode="json"):
+                    raise RuntimeError(
+                        "binding discovery adapter target does not match the task"
+                    )
+                if data.get("spectre_simulation_performed") is not False:
+                    raise RuntimeError(
+                        "binding discovery must stop after si netlisting and cannot "
+                        "run Spectre"
+                    )
+                if data.get("oa_write_performed") is not True:
+                    raise RuntimeError(
+                        "binding discovery did not report its temporary OA write"
+                    )
+                real_eda_discovery = (
+                    raw_discovery.evidence_source is EvidenceSource.EDA_RESULT
+                )
+                if real_eda_discovery and data.get("remote_compute_performed") is not True:
+                    raise RuntimeError(
+                        "real binding discovery did not report its three remote si "
+                        "netlisting stages"
+                    )
+                restoration = data.get("restoration")
+                if (
+                    not isinstance(restoration, dict)
+                    or restoration.get("oa_exact") is not True
+                    or restoration.get("canonical_netlist_signature_exact") is not True
+                    or restoration.get("verified") is not True
+                ):
+                    raise RuntimeError(
+                        "binding discovery did not prove exact OA and canonical si "
+                        "restoration"
+                    )
+                for stage_name in ("baseline", "probe", "restored"):
+                    stage = data.get(stage_name)
+                    if not isinstance(stage, dict):
+                        raise RuntimeError(
+                            f"binding discovery is missing the {stage_name} evidence"
+                        )
+                    if not isinstance(stage.get("oa_instance_parameters"), dict):
+                        raise RuntimeError(
+                            f"binding discovery {stage_name} lacks OA CDF evidence"
+                        )
+                    if not isinstance(
+                        stage.get("netlist_instance_parameters"), dict
+                    ):
+                        raise RuntimeError(
+                            f"binding discovery {stage_name} lacks si parameter evidence"
+                        )
+                    if not isinstance(stage.get("parameter_inventory"), dict):
+                        raise RuntimeError(
+                            f"binding discovery {stage_name} lacks the complete si "
+                            "parameter inventory"
+                        )
+                    signature = stage.get("canonical_netlist_signature_sha256")
+                    if not isinstance(signature, str) or len(signature) != 64:
+                        raise RuntimeError(
+                            f"binding discovery {stage_name} lacks a canonical si "
+                            "signature"
+                        )
+                    if real_eda_discovery:
+                        if stage.get("oa_source") != "bridge_readback":
+                            raise RuntimeError(
+                                f"binding discovery {stage_name} OA state is not "
+                                "Bridge readback"
+                            )
+                        validate_parameter_binding_eda_stage(stage_name, stage)
+                if data["baseline"]["oa_instance_parameters"] != expected:
+                    raise RuntimeError(
+                        "binding discovery baseline CDF table changed before netlisting"
+                    )
+                if data["restored"]["oa_instance_parameters"] != expected:
+                    raise RuntimeError(
+                        "binding discovery returned a non-baseline restored CDF table"
+                    )
+                probe_value = data["probe"]["oa_instance_parameters"].get(
+                    discovery.oa_parameter
+                )
+                if probe_value is None or not spectre_values_equal(
+                    probe_value,
+                    discovery.probe_value,
+                ):
+                    raise RuntimeError(
+                        "binding discovery probe evidence does not contain the "
+                        "declared OA value"
+                    )
+                if (
+                    data["baseline"].get("canonical_netlist_signature_sha256")
+                    != data["restored"].get(
+                        "canonical_netlist_signature_sha256"
+                    )
+                ):
+                    raise RuntimeError(
+                        "binding discovery canonical si signature did not restore"
+                    )
+                classification = data.get("classification")
+                allowed_statuses = {
+                    "direct_literal_binding",
+                    "single_netlist_parameter_nonliteral",
+                    "callback_coupled",
+                    "ambiguous_netlist_change",
+                    "netlist_structure_changed",
+                    "inert",
+                }
+                if (
+                    not isinstance(classification, dict)
+                    or classification.get("status") not in allowed_statuses
+                    or classification.get("source") != "software_inference"
+                    or classification.get("same_name_assumption_used", False)
+                    is not False
+                ):
+                    raise RuntimeError(
+                        "binding discovery returned an invalid differential "
+                        "classification"
+                    )
+                independent_classification = classify_parameter_binding_probe(
+                    discovery,
+                    baseline_oa_parameters={
+                        str(name): str(value)
+                        for name, value in data["baseline"][
+                            "oa_instance_parameters"
+                        ].items()
+                    },
+                    probe_oa_parameters={
+                        str(name): str(value)
+                        for name, value in data["probe"][
+                            "oa_instance_parameters"
+                        ].items()
+                    },
+                    baseline_netlist_inventory=data["baseline"][
+                        "parameter_inventory"
+                    ],
+                    probe_netlist_inventory=data["probe"]["parameter_inventory"],
+                )
+                if classification != independent_classification:
+                    raise RuntimeError(
+                        "binding discovery adapter classification does not match "
+                        "the parent executor's independent evidence evaluation"
+                    )
+                promoted = classification.get("promoted_binding")
+                if classification["status"] == "direct_literal_binding":
+                    if (
+                        not isinstance(promoted, dict)
+                        or promoted.get("instance") != discovery.instance
+                        or promoted.get("oa_parameter")
+                        != discovery.oa_parameter
+                        or not isinstance(promoted.get("netlist_parameter"), str)
+                        or not promoted["netlist_parameter"]
+                        or classification.get("literal_identity_verified") is not True
+                    ):
+                        raise RuntimeError(
+                            "direct binding classification lacks one exact promoted "
+                            "OA-to-si mapping"
+                        )
+                    notes.append(
+                        "one direct literal OA-CDF to si binding was discovered; "
+                        "the probe value was not retained in OA"
+                    )
+                else:
+                    if promoted is not None:
+                        raise RuntimeError(
+                            "non-direct binding classification cannot promote a "
+                            "netlist parameter"
+                        )
+                    status = RunStatus.PARTIAL
+                    notes.append(
+                        "the reversible probe completed, but no direct literal "
+                        f"binding was promoted ({classification['status']})"
+                    )
+                self._action(
+                    "parameters.binding.evaluate",
+                    lambda: AdapterResult(
+                        data={
+                            "classification": classification,
+                            "restoration": restoration,
+                            "interrupted_probe_recovery": data.get(
+                                "interrupted_probe_recovery"
+                            ),
+                            "probe_was_not_retained": True,
+                        },
+                        evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+                    ),
+                )
+                after = self._action(
+                    "schematic.inspect.after",
+                    lambda: self.adapter.inspect_schematic(task),
+                )
+                self._bind_design_context(task, after)
+                exact_inspection_table(after, label="post-probe OA readback")
             elif operation is Operation.ADE_PREPARE:
                 prepared = self._action(
                     "ade.prepare", lambda: self.adapter.prepare_ade(task)

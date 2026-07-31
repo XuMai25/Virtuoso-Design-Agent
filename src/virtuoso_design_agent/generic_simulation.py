@@ -22,6 +22,7 @@ from pydantic import (
 )
 
 from .instance_path import INSTANCE_PATH_PATTERN
+from .spectre_values import spectre_values_equal
 
 
 _IDENTIFIER_PATTERN = r"^[A-Za-z_][A-Za-z0-9_$]*$"
@@ -280,6 +281,63 @@ class GenericHierarchyBinding(_StrictModel):
     def validate_hierarchy_binding(self) -> "GenericHierarchyBinding":
         if len(self.terminal_order) != len(set(self.terminal_order)):
             raise ValueError("hierarchy binding terminal_order contains duplicates")
+        return self
+
+
+class ParameterBindingDiscoverySpec(_StrictModel):
+    """One reversible OA-CDF probe used to discover an ``si`` parameter binding.
+
+    The complete target-instance CDF table is part of the compare-and-swap
+    precondition.  This lets a later retry distinguish a clean baseline from a
+    probe value left behind by an interrupted worker, and prevents callback
+    side effects from silently becoming the new baseline.
+    """
+
+    schema_version: Literal[1] = 1
+    instance: StrictStr = Field(pattern=INSTANCE_PATH_PATTERN)
+    oa_parameter: StrictStr = Field(pattern=_IDENTIFIER_PATTERN)
+    probe_value: StrictStr = Field(min_length=1, max_length=1024)
+    expected_instance_parameters: dict[StrictStr, StrictStr] = Field(
+        min_length=1,
+        max_length=512,
+    )
+    hierarchy_bindings: list[GenericHierarchyBinding] = Field(
+        default_factory=list,
+        max_length=32,
+    )
+
+    @model_validator(mode="after")
+    def validate_probe(self) -> "ParameterBindingDiscoverySpec":
+        invalid_names = sorted(
+            name
+            for name in self.expected_instance_parameters
+            if re.fullmatch(_IDENTIFIER_PATTERN, name) is None
+        )
+        if invalid_names:
+            raise ValueError(
+                "binding discovery expected CDF table has invalid field names: "
+                + ", ".join(invalid_names)
+            )
+        original = self.expected_instance_parameters.get(self.oa_parameter)
+        if original is None:
+            raise ValueError(
+                "binding discovery OA parameter is missing from the expected "
+                "instance CDF table"
+            )
+        if spectre_values_equal(original, self.probe_value):
+            raise ValueError(
+                "binding discovery probe must differ from the expected original "
+                "value under Spectre scalar semantics"
+            )
+        hierarchy_instances = [item.instance for item in self.hierarchy_bindings]
+        if len(hierarchy_instances) != len(set(hierarchy_instances)):
+            raise ValueError("binding discovery repeats a hierarchy instance binding")
+        top_instance = self.instance.split("/", 1)[0] if "/" in self.instance else None
+        if top_instance is not None and top_instance not in set(hierarchy_instances):
+            raise ValueError(
+                "scoped binding discovery requires a matching hierarchy binding "
+                f"for {top_instance!r}"
+            )
         return self
 
 

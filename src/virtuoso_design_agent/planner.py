@@ -233,6 +233,89 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 SideEffect.LOCAL_WRITE,
             ),
         ]
+    if task.operation is Operation.PARAMETERS_BINDING_DISCOVER:
+        discovery = task.parameter_binding_discovery
+        if discovery is None:  # TaskSpec validation owns the user-facing error.
+            raise ValueError("parameter binding discovery settings are missing")
+        field = f"{discovery.instance}.{discovery.oa_parameter}"
+        return [
+            _step(
+                "01-probe",
+                "bridge.probe",
+                "只读核对 Bridge、Virtuoso、si 与声明的 foundry PDK profile",
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "02-inspect-before",
+                "schematic.inspect",
+                (
+                    f"完整回读目标 schematic，并要求 {field} 及该实例的完整 "
+                    "CDF 表与任务 CAS 前置条件一致"
+                ),
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "03-netlist-baseline",
+                "parameters.binding.netlist-baseline",
+                "从未修改 OA 生成 baseline si 网表并保存实例参数签名；不运行 Spectre",
+                SideEffect.REMOTE_COMPUTE,
+            ),
+            _step(
+                "04-probe-write",
+                "parameters.binding.probe",
+                (
+                    f"只把 {field} 暂存为显式 probe 值，立即定向回读并捕获 "
+                    "CDF callback 的完整实例参数变化"
+                ),
+                SideEffect.REMOTE_WRITE,
+            ),
+            _step(
+                "05-netlist-probe",
+                "parameters.binding.netlist-probe",
+                "重新生成 si 网表并与 baseline 的完整 top/scoped 实例参数表做因果差分",
+                SideEffect.REMOTE_COMPUTE,
+            ),
+            _step(
+                "06-restore",
+                "parameters.binding.restore",
+                (
+                    "在 worker finally 中写回精确原值；中断重试只允许从完整 "
+                    "baseline 或声明 probe 状态恢复"
+                ),
+                SideEffect.REMOTE_WRITE,
+            ),
+            _step(
+                "07-netlist-restored",
+                "parameters.binding.netlist-restored",
+                "独立回读完整 CDF 表并第三次 netlist，要求 canonical si 签名恢复",
+                SideEffect.REMOTE_COMPUTE,
+            ),
+            _step(
+                "08-evaluate",
+                "parameters.binding.evaluate",
+                (
+                    "只有 OA 仅改变目标字段、全 si inventory 仅改变目标实例的一个"
+                    "参数、两端值均字面/工程单位等价且 OA/si 完整恢复时才提升为"
+                    "可执行 binding；其余结果保留诊断但不提升"
+                ),
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "09-inspect-after",
+                "schematic.inspect",
+                "在独立 adapter action 中再次确认目标 OA 完整恢复且 topology 未漂移",
+                SideEffect.READ_ONLY,
+            ),
+            _step(
+                "10-persist",
+                "evidence.persist",
+                (
+                    "保存 OA 回读=bridge_readback、si 网表=eda_result、差分判定="
+                    "software_inference；不把同名字段或 return code 当作 binding"
+                ),
+                SideEffect.LOCAL_WRITE,
+            ),
+        ]
     common_source = task.circuit is CircuitKind.COMMON_SOURCE
     differential_pair = task.circuit is CircuitKind.DIFFERENTIAL_PAIR
     existing_generic = (

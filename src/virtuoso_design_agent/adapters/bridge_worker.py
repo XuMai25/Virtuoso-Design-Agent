@@ -15,8 +15,10 @@ import io
 import json
 import math
 import os
+import posixpath
 import re
 import shlex
+import shutil
 import sys
 import tempfile
 import threading
@@ -36,8 +38,11 @@ from virtuoso_design_agent.design_context import (
     audit_design_context,
 )
 from virtuoso_design_agent.generic_simulation import (
+    GenericHierarchyBinding,
+    GenericNetlistParameterBinding,
     GenericOaSimulationSpec,
     GenericVoltageExpression,
+    ParameterBindingDiscoverySpec,
     render_generic_oa_testbench,
 )
 from virtuoso_design_agent.instance_path import split_instance_path
@@ -50,6 +55,10 @@ from virtuoso_design_agent.netlist_preview import (
     NetlistPreviewSpec,
     NetlistPreviewVariant,
     render_spectre_preview_deck,
+)
+from virtuoso_design_agent.parameter_binding import (
+    canonical_parameter_table_sha256,
+    classify_parameter_binding_probe,
 )
 from virtuoso_design_agent.metrics import (
     aggregate_common_source_linearity_metrics,
@@ -11914,9 +11923,13 @@ def _verify_primitive_scope(
 def _parse_existing_schematic_netlist(
     text: str,
     schematic: dict[str, Any],
-    settings: GenericOaSimulationSpec,
+    settings: GenericOaSimulationSpec | None,
     hierarchy_schematics: dict[tuple[str, str], dict[str, Any]] | None = None,
     hierarchy_summaries: dict[tuple[str, str], dict[str, Any]] | None = None,
+    *,
+    hierarchy_bindings: list[GenericHierarchyBinding] | None = None,
+    parameter_bindings: list[GenericNetlistParameterBinding] | None = None,
+    include_parameter_inventory: bool = False,
 ) -> dict[str, Any]:
     """Prove a primitive or explicitly bound one-level OA hierarchy matches si."""
 
@@ -11939,8 +11952,18 @@ def _parse_existing_schematic_netlist(
             f"missing={sorted(expected_names - actual_names)}, "
             f"extra={sorted(actual_names - expected_names)}"
         )
+    resolved_hierarchy_bindings = (
+        list(settings.hierarchy_bindings)
+        if settings is not None
+        else list(hierarchy_bindings or [])
+    )
+    resolved_parameter_bindings = (
+        list(settings.netlist_parameter_bindings)
+        if settings is not None
+        else list(parameter_bindings or [])
+    )
     hierarchy_by_instance = {
-        binding.instance: binding for binding in settings.hierarchy_bindings
+        binding.instance: binding for binding in resolved_hierarchy_bindings
     }
     unknown_hierarchy_instances = sorted(
         set(hierarchy_by_instance) - expected_names
@@ -11951,23 +11974,25 @@ def _parse_existing_schematic_netlist(
             + ", ".join(unknown_hierarchy_instances)
         )
 
-    wrapper_names = {item.name for item in (*settings.sources, *settings.loads)}
-    collisions = sorted(wrapper_names & expected_names)
-    if collisions:
-        raise RuntimeError(
-            "generic testbench element names collide with OA instances: "
-            + ", ".join(collisions)
-        )
+    if settings is not None:
+        wrapper_names = {item.name for item in (*settings.sources, *settings.loads)}
+        collisions = sorted(wrapper_names & expected_names)
+        if collisions:
+            raise RuntimeError(
+                "generic testbench element names collide with OA instances: "
+                + ", ".join(collisions)
+            )
 
-    oa_nets = {
-        _normalized_net_name(name) for name in (schematic.get("nets") or {}).keys()
-    }
-    unknown_nodes = sorted(settings.referenced_nodes() - oa_nets - {"0"})
-    if unknown_nodes:
-        raise RuntimeError(
-            "generic testbench references nodes absent from OA schematic: "
-            + ", ".join(unknown_nodes)
-        )
+        oa_nets = {
+            _normalized_net_name(name)
+            for name in (schematic.get("nets") or {}).keys()
+        }
+        unknown_nodes = sorted(settings.referenced_nodes() - oa_nets - {"0"})
+        if unknown_nodes:
+            raise RuntimeError(
+                "generic testbench references nodes absent from OA schematic: "
+                + ", ".join(unknown_nodes)
+            )
 
     topology_checks: list[dict[str, Any]] = []
     hierarchy_checks: list[dict[str, Any]] = []
@@ -12142,7 +12167,7 @@ def _parse_existing_schematic_netlist(
         )
 
     parameter_checks: list[dict[str, str]] = []
-    for binding in settings.netlist_parameter_bindings:
+    for binding in resolved_parameter_bindings:
         scoped = split_instance_path(binding.instance)[0] is not None
         oa_instance = (
             scoped_oa_instances.get(binding.instance)
@@ -12189,16 +12214,17 @@ def _parse_existing_schematic_netlist(
             }
         )
 
-    missing_op_instances = sorted(
-        {item.instance for item in settings.operating_point_metrics}
-        - expected_names
-    )
-    if missing_op_instances:
-        raise RuntimeError(
-            "generic operating-point metrics reference missing instances: "
-            + ", ".join(missing_op_instances)
+    if settings is not None:
+        missing_op_instances = sorted(
+            {item.instance for item in settings.operating_point_metrics}
+            - expected_names
         )
-    return {
+        if missing_op_instances:
+            raise RuntimeError(
+                "generic operating-point metrics reference missing instances: "
+                + ", ".join(missing_op_instances)
+            )
+    result = {
         "instances": topology_checks,
         "omitted_ground_symbols": omitted_ground_symbols,
         "topology_consistency": "matched",
@@ -12212,6 +12238,36 @@ def _parse_existing_schematic_netlist(
         ),
         "hierarchy_bindings": hierarchy_checks,
     }
+    if include_parameter_inventory:
+        parameter_inventory = {
+            name: {
+                "model": parsed_instances[name]["model"],
+                "nodes": list(parsed_instances[name]["nodes"]),
+                "parameters": dict(parsed_instances[name]["parameters"]),
+            }
+            for name in sorted(parsed_instances)
+        }
+        for scoped_name in sorted(scoped_parsed_instances):
+            parsed_instance = scoped_parsed_instances[scoped_name]
+            parameter_inventory[scoped_name] = {
+                "model": parsed_instance["model"],
+                "nodes": list(parsed_instance["nodes"]),
+                "parameters": dict(parsed_instance["parameters"]),
+            }
+        signature_payload = {
+            name: parameter_inventory[name]
+            for name in sorted(parameter_inventory)
+        }
+        result["parameter_inventory"] = parameter_inventory
+        result["canonical_signature_sha256"] = hashlib.sha256(
+            json.dumps(
+                signature_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+    return result
 
 
 def _parse_common_source_netlist(
@@ -12922,13 +12978,31 @@ def _generate_oa_netlist(
                 "generic OA netlist consistency requires the same schematic readback"
             )
         raw_settings = payload.get("generic_simulation")
-        if not isinstance(raw_settings, dict):
-            raise RuntimeError("generic OA netlisting requires generic_simulation")
-        settings = GenericOaSimulationSpec.model_validate(raw_settings)
+        raw_discovery = payload.get("parameter_binding_discovery")
+        settings = (
+            GenericOaSimulationSpec.model_validate(raw_settings)
+            if isinstance(raw_settings, dict)
+            else None
+        )
+        discovery = (
+            ParameterBindingDiscoverySpec.model_validate(raw_discovery)
+            if isinstance(raw_discovery, dict)
+            else None
+        )
+        if (settings is None) == (discovery is None):
+            raise RuntimeError(
+                "generic OA netlisting requires exactly one simulation or "
+                "parameter-binding discovery contract"
+            )
+        hierarchy_bindings = (
+            list(settings.hierarchy_bindings)
+            if settings is not None
+            else list(discovery.hierarchy_bindings)
+        )
         hierarchy_schematics: dict[tuple[str, str], dict[str, Any]] = {}
         hierarchy_summaries: dict[tuple[str, str], dict[str, Any]] = {}
         target_library, target_cell = _target(payload)
-        for binding in settings.hierarchy_bindings:
+        for binding in hierarchy_bindings:
             child_key = (binding.library, binding.cell)
             if child_key == (target_library, target_cell):
                 raise RuntimeError(
@@ -12959,9 +13033,11 @@ def _generate_oa_netlist(
                 settings,
                 hierarchy_schematics,
                 hierarchy_summaries,
+                hierarchy_bindings=hierarchy_bindings,
+                include_parameter_inventory=discovery is not None,
             )
             hierarchy_binding_by_instance = {
-                binding.instance: binding for binding in settings.hierarchy_bindings
+                binding.instance: binding for binding in hierarchy_bindings
             }
             parameter_scope_checks: list[dict[str, Any]] = []
             for scope in _hierarchy_parameter_scope_specs(payload):
@@ -13063,6 +13139,473 @@ def _generate_oa_netlist(
         "spectre_netlist_transform": spectre_netlist_transform,
         "parsed": parsed,
         "si_log_tail": log_text.splitlines()[-12:],
+    }
+
+
+def _binding_discovery_state(
+    client,
+    payload: dict[str, Any],
+    discovery: ParameterBindingDiscoverySpec,
+) -> dict[str, Any]:
+    library, cell = _target(payload)
+    schematic = _read_schematic(client, library, cell)
+    pin_geometry, placement = _schematic_geometry_bundle(client, library, cell)
+    summary = _existing_schematic_summary(
+        schematic,
+        pin_geometry=pin_geometry,
+        placement=placement,
+    )
+    summary = _attach_hierarchy_parameter_scope_state(
+        client,
+        library,
+        cell,
+        schematic,
+        payload,
+        summary,
+    )
+    raw_context = payload.get("design_context")
+    if not isinstance(raw_context, dict):
+        raise RuntimeError("binding discovery design context is missing")
+    context_audit = audit_design_context(
+        summary,
+        DesignContext.model_validate(raw_context),
+    )
+    raw_parameters = (summary.get("instance_parameters") or {}).get(
+        discovery.instance
+    )
+    if not isinstance(raw_parameters, dict):
+        raise RuntimeError(
+            "binding discovery target instance is absent from OA readback: "
+            f"{discovery.instance}"
+        )
+    parameters = {
+        str(name): str(value) for name, value in sorted(raw_parameters.items())
+    }
+    return {
+        "schematic": schematic,
+        "summary": summary,
+        "instance_parameters": parameters,
+        "instance_parameters_sha256": canonical_parameter_table_sha256(parameters),
+        "topology_sha256": context_audit.topology_sha256,
+        "design_context_sha256": context_audit.context_sha256,
+    }
+
+
+def _binding_discovery_write(
+    client,
+    payload: dict[str, Any],
+    discovery: ParameterBindingDiscoverySpec,
+    value: str,
+) -> dict[str, Any]:
+    library, cell = _target(payload)
+    write_payload = dict(payload)
+    requested = {
+        discovery.instance: {discovery.oa_parameter: str(value)}
+    }
+    write_payload["instance_parameter_updates"] = [
+        {
+            "instance": discovery.instance,
+            "parameters": {discovery.oa_parameter: str(value)},
+        }
+    ]
+    result = _apply_explicit_instance_parameters(
+        client,
+        library,
+        cell,
+        write_payload,
+    )
+    for key in (
+        "requested_instance_parameters",
+        "applied_instance_parameters",
+        "confirmed_instance_parameters",
+    ):
+        if result.get(key) != requested:
+            raise RuntimeError(
+                f"binding discovery write did not confirm exact {key}: "
+                f"expected={requested!r}, actual={result.get(key)!r}"
+            )
+    return result
+
+
+def _persist_binding_netlist_artifacts(
+    work_dir: Path,
+    output_root: Path,
+    stage: str,
+) -> dict[str, Any]:
+    stage_dir = output_root / stage
+    stage_dir.mkdir(parents=True, exist_ok=False)
+    entries: list[dict[str, Any]] = []
+    for name in ("oa_netlist.scs", "si_batch_stdout.log"):
+        source = work_dir / name
+        if not source.is_file() or source.stat().st_size <= 0:
+            raise RuntimeError(
+                f"binding discovery local {stage} artifact is missing or empty: {name}"
+            )
+        target = stage_dir / name
+        shutil.copy2(source, target)
+        content = target.read_bytes()
+        entries.append(
+            {
+                "path": str(target),
+                "relative_path": f"{stage}/{name}",
+                "size_bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+        )
+    manifest_payload = {
+        "schema_version": 1,
+        "stage": stage,
+        "files": entries,
+    }
+    manifest_text = json.dumps(
+        manifest_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    manifest_path = stage_dir / "manifest.json"
+    manifest_path.write_text(manifest_text, encoding="utf-8")
+    return {
+        "source": "eda_result",
+        "directory": str(stage_dir),
+        "files": entries,
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": hashlib.sha256(
+            manifest_text.encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def _cleanup_binding_netlist_scratch(client, remote_run_dir: str) -> dict[str, Any]:
+    normalized = posixpath.normpath(str(remote_run_dir).rstrip("/"))
+    leaf = posixpath.basename(normalized)
+    if not normalized.startswith("/data/xum/") or not leaf.startswith("vda_"):
+        raise RuntimeError(
+            "binding discovery refused to clean an unexpected remote path: "
+            f"{remote_run_dir!r}"
+        )
+    removed = client.run_shell_command(
+        f"rm -rf -- {shlex.quote(normalized)}",
+        timeout=60,
+    )
+    _require_bridge_result(removed, "clean binding-discovery si scratch")
+    checked = client.run_shell_command(
+        f"test ! -e {shlex.quote(normalized)}",
+        timeout=30,
+    )
+    _require_bridge_result(checked, "verify binding-discovery si scratch cleanup")
+    return {
+        "remote_path": normalized,
+        "removed": True,
+        "source": "system_event",
+    }
+
+
+def _binding_discovery_netlist_stage(
+    client,
+    payload: dict[str, Any],
+    discovery: ParameterBindingDiscoverySpec,
+    state: dict[str, Any],
+    *,
+    stage: str,
+    output_root: Path,
+    timeout: int,
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(
+        prefix=f"vda_binding_discovery_{stage}_"
+    ) as temp_dir:
+        work_dir = Path(temp_dir)
+        evidence = _generate_oa_netlist(
+            client,
+            payload,
+            work_dir,
+            timeout=timeout,
+            schematic=state["schematic"],
+        )
+        parsed = evidence.get("parsed") or {}
+        inventory = parsed.get("parameter_inventory") or {}
+        target = inventory.get(discovery.instance)
+        if not isinstance(target, dict) or not isinstance(
+            target.get("parameters"), dict
+        ):
+            raise RuntimeError(
+                "si parameter inventory is missing the binding discovery target "
+                f"{discovery.instance!r}"
+            )
+        artifact_bundle = _persist_binding_netlist_artifacts(
+            work_dir,
+            output_root,
+            stage,
+        )
+        cleanup = _cleanup_binding_netlist_scratch(
+            client,
+            str(evidence["remote_run_dir"]),
+        )
+        return {
+            "instance": discovery.instance,
+            "instance_model": str(target.get("model")),
+            "instance_nodes": list(target.get("nodes") or []),
+            "instance_parameters": {
+                str(name): str(value)
+                for name, value in sorted(target["parameters"].items())
+            },
+            "parameter_inventory": {
+                str(instance): {
+                    "model": str(item.get("model")),
+                    "nodes": list(item.get("nodes") or []),
+                    "parameters": {
+                        str(name): str(value)
+                        for name, value in sorted(
+                            (item.get("parameters") or {}).items()
+                        )
+                    },
+                }
+                for instance, item in sorted(inventory.items())
+            },
+            "canonical_netlist_signature_sha256": str(
+                parsed["canonical_signature_sha256"]
+            ),
+            "raw_netlist": {
+                "source": "eda_result",
+                "generator": "Cadence si -batch",
+                "remote_path": evidence["remote_netlist_path"],
+                "sha256": evidence["netlist_sha256"],
+                "remote_retained": False,
+                "si_log_tail": evidence["si_log_tail"],
+            },
+            "artifact_bundle": artifact_bundle,
+            "remote_cleanup": cleanup,
+            "source": "eda_result",
+        }
+
+
+def discover_existing_schematic_parameter_binding(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Discover one direct OA-CDF to ``si`` binding and restore exact OA state."""
+
+    raw_discovery = payload.get("parameter_binding_discovery")
+    if not isinstance(raw_discovery, dict):
+        raise RuntimeError("parameter binding discovery contract is missing")
+    discovery = ParameterBindingDiscoverySpec.model_validate(raw_discovery)
+    raw_output_root = payload.get("binding_discovery_output_root")
+    if not isinstance(raw_output_root, str) or not raw_output_root:
+        raise RuntimeError("binding discovery local artifact root is missing")
+    output_root = Path(raw_output_root)
+    output_root.mkdir(parents=True, exist_ok=False)
+    client = _client()
+    timeout = int(payload.get("timeout_seconds", 600))
+    expected = {
+        str(name): str(value)
+        for name, value in sorted(
+            discovery.expected_instance_parameters.items()
+        )
+    }
+    original_value = expected[discovery.oa_parameter]
+    state = _binding_discovery_state(client, payload, discovery)
+    interrupted_recovery = {
+        "performed": False,
+        "source": "system_event",
+    }
+    if state["instance_parameters"] != expected:
+        current_value = state["instance_parameters"].get(discovery.oa_parameter)
+        if current_value is None or not spectre_values_equal(
+            current_value,
+            discovery.probe_value,
+        ):
+            raise RuntimeError(
+                "binding discovery CAS mismatch: current CDF table is neither the "
+                "declared baseline nor the declared interrupted probe state"
+            )
+        _binding_discovery_write(
+            client,
+            payload,
+            discovery,
+            original_value,
+        )
+        state = _binding_discovery_state(client, payload, discovery)
+        if state["instance_parameters"] != expected:
+            raise RuntimeError(
+                "binding discovery restored the declared field after an interrupted "
+                "probe, but the complete CDF table did not return to its CAS baseline"
+            )
+        interrupted_recovery = {
+            "performed": True,
+            "recovered_from": "declared_probe_value",
+            "complete_cdf_table_match": True,
+            "source": "system_event",
+        }
+    elif not spectre_values_equal(
+        state["instance_parameters"][discovery.oa_parameter],
+        original_value,
+    ):
+        raise RuntimeError(
+            "binding discovery CDF table matched but the target field did not match "
+            "its declared original value"
+        )
+
+    baseline_state = state
+    baseline_netlist = _binding_discovery_netlist_stage(
+        client,
+        payload,
+        discovery,
+        baseline_state,
+        stage="baseline",
+        output_root=output_root,
+        timeout=timeout,
+    )
+    probe_state: dict[str, Any] | None = None
+    probe_netlist: dict[str, Any] | None = None
+    restored_state: dict[str, Any] | None = None
+    primary_error: BaseException | None = None
+    restoration_error: BaseException | None = None
+    restore_required = True
+    try:
+        _binding_discovery_write(
+            client,
+            payload,
+            discovery,
+            discovery.probe_value,
+        )
+        probe_state = _binding_discovery_state(client, payload, discovery)
+        actual_probe = probe_state["instance_parameters"].get(
+            discovery.oa_parameter
+        )
+        if actual_probe is None or not spectre_values_equal(
+            actual_probe,
+            discovery.probe_value,
+        ):
+            raise RuntimeError(
+                "binding discovery OA readback did not confirm the declared probe value"
+            )
+        probe_netlist = _binding_discovery_netlist_stage(
+            client,
+            payload,
+            discovery,
+            probe_state,
+            stage="probe",
+            output_root=output_root,
+            timeout=timeout,
+        )
+    except BaseException as exc:
+        primary_error = exc
+    finally:
+        if restore_required:
+            try:
+                _binding_discovery_write(
+                    client,
+                    payload,
+                    discovery,
+                    original_value,
+                )
+                restored_state = _binding_discovery_state(
+                    client,
+                    payload,
+                    discovery,
+                )
+                if restored_state["instance_parameters"] != expected:
+                    raise RuntimeError(
+                        "complete OA CDF table did not match the CAS baseline after "
+                        "binding discovery restoration"
+                    )
+            except BaseException as exc:
+                restoration_error = exc
+    if restoration_error is not None:
+        primary_text = (
+            f"; original probe error={type(primary_error).__name__}: {primary_error}"
+            if primary_error is not None
+            else ""
+        )
+        raise RuntimeError(
+            "binding discovery automatic OA restoration failed; fresh readback is "
+            f"required before retry: {type(restoration_error).__name__}: "
+            f"{restoration_error}{primary_text}"
+        ) from restoration_error
+    if primary_error is not None:
+        raise primary_error
+    if probe_state is None or probe_netlist is None or restored_state is None:
+        raise RuntimeError("binding discovery did not complete its three OA states")
+
+    restored_netlist = _binding_discovery_netlist_stage(
+        client,
+        payload,
+        discovery,
+        restored_state,
+        stage="restored",
+        output_root=output_root,
+        timeout=timeout,
+    )
+    canonical_restored = (
+        baseline_netlist["canonical_netlist_signature_sha256"]
+        == restored_netlist["canonical_netlist_signature_sha256"]
+    )
+    if not canonical_restored:
+        raise RuntimeError(
+            "binding discovery OA CDF restored, but the canonical si instance "
+            "signature did not return to baseline"
+        )
+    classification = classify_parameter_binding_probe(
+        discovery,
+        baseline_oa_parameters=baseline_state["instance_parameters"],
+        probe_oa_parameters=probe_state["instance_parameters"],
+        baseline_netlist_inventory=baseline_netlist["parameter_inventory"],
+        probe_netlist_inventory=probe_netlist["parameter_inventory"],
+    )
+    return {
+        "contract": discovery.model_dump(mode="json"),
+        "target": payload["target"],
+        "spectre_simulation_performed": False,
+        "oa_write_performed": True,
+        "remote_compute_performed": True,
+        "baseline": {
+            "oa_instance_parameters": baseline_state["instance_parameters"],
+            "oa_instance_parameters_sha256": baseline_state[
+                "instance_parameters_sha256"
+            ],
+            "oa_topology_sha256": baseline_state["topology_sha256"],
+            "oa_source": "bridge_readback",
+            "netlist_instance_parameters": baseline_netlist[
+                "instance_parameters"
+            ],
+            **baseline_netlist,
+        },
+        "probe": {
+            "oa_instance_parameters": probe_state["instance_parameters"],
+            "oa_instance_parameters_sha256": probe_state[
+                "instance_parameters_sha256"
+            ],
+            "oa_topology_sha256": probe_state["topology_sha256"],
+            "oa_source": "bridge_readback",
+            "netlist_instance_parameters": probe_netlist["instance_parameters"],
+            **probe_netlist,
+        },
+        "restored": {
+            "oa_instance_parameters": restored_state["instance_parameters"],
+            "oa_instance_parameters_sha256": restored_state[
+                "instance_parameters_sha256"
+            ],
+            "oa_topology_sha256": restored_state["topology_sha256"],
+            "oa_source": "bridge_readback",
+            "netlist_instance_parameters": restored_netlist[
+                "instance_parameters"
+            ],
+            **restored_netlist,
+        },
+        "restoration": {
+            "oa_exact": restored_state["instance_parameters"] == expected,
+            "canonical_netlist_signature_exact": canonical_restored,
+            "verified": True,
+        },
+        "classification": classification,
+        "interrupted_probe_recovery": interrupted_recovery,
+        "local_artifact_root": str(output_root),
+        "evidence_sources": {
+            "oa_states": "bridge_readback",
+            "si_netlists": "eda_result",
+            "classification": "software_inference",
+            "recovery_and_cleanup": "system_event",
+            "probe_contract": "user_input",
+        },
     }
 
 
@@ -18383,6 +18926,9 @@ _ACTIONS = {
         transform_existing_schematic_topology_delta
     ),
     "apply_existing_schematic_parameters": apply_existing_schematic_parameters,
+    "discover_existing_schematic_parameter_binding": (
+        discover_existing_schematic_parameter_binding
+    ),
     "simulate_existing_schematic": simulate_existing_schematic,
     "simulate_existing_schematic_stages": simulate_existing_schematic_stages,
     "create_inverter": create_inverter,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from typing import Any
 
@@ -24,6 +26,7 @@ from ..models import (
     SchematicTransformAction,
     TaskSpec,
 )
+from ..parameter_binding import classify_parameter_binding_probe
 from ..profiles import load_pdk_profile
 from ..topology_delta import (
     apply_topology_delta_execution,
@@ -1277,6 +1280,129 @@ class DeterministicDemoAdapter:
             )
         return AdapterResult(
             data=result_data,
+            evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
+        )
+
+    def discover_parameter_binding(self, task: TaskSpec) -> AdapterResult:
+        """Exercise orchestration only; this is never EDA binding evidence."""
+
+        discovery = task.parameter_binding_discovery
+        if discovery is None:
+            raise RuntimeError("demo binding discovery contract is missing")
+        if "/" in discovery.instance:
+            raise RuntimeError(
+                "demo binding discovery does not emulate hierarchy; use Bridge "
+                "for scoped si evidence"
+            )
+        schematic = self._schematics.get(self._key(task))
+        if schematic is None:
+            raise RuntimeError("demo schematic does not exist")
+        actual = dict(
+            schematic.get("instance_parameters", {}).get(discovery.instance, {})
+        )
+        expected = dict(discovery.expected_instance_parameters)
+        if actual != expected:
+            raise RuntimeError(
+                "demo binding discovery CDF table does not match its CAS baseline"
+            )
+        original = expected[discovery.oa_parameter]
+        netlist_parameter = {
+            "Wfg": "w",
+            "fingers": "nf",
+            "m": "multi",
+        }.get(discovery.oa_parameter, discovery.oa_parameter)
+        model = expected.get("model", "demo_model")
+        baseline_netlist_parameters = {netlist_parameter: original}
+        probe_netlist_parameters = {
+            netlist_parameter: discovery.probe_value,
+        }
+        baseline_inventory = {
+            discovery.instance: {
+                "model": model,
+                "nodes": [],
+                "parameters": baseline_netlist_parameters,
+            }
+        }
+        probe_inventory = {
+            discovery.instance: {
+                "model": model,
+                "nodes": [],
+                "parameters": probe_netlist_parameters,
+            }
+        }
+        canonical = hashlib.sha256(
+            json.dumps(
+                baseline_inventory,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        probe_canonical = hashlib.sha256(
+            json.dumps(
+                probe_inventory,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        probe_oa_parameters = {
+            **expected,
+            discovery.oa_parameter: discovery.probe_value,
+        }
+        classification = classify_parameter_binding_probe(
+            discovery,
+            baseline_oa_parameters=expected,
+            probe_oa_parameters=probe_oa_parameters,
+            baseline_netlist_inventory=baseline_inventory,
+            probe_netlist_inventory=probe_inventory,
+        )
+        try:
+            schematic["instance_parameters"][discovery.instance][
+                discovery.oa_parameter
+            ] = discovery.probe_value
+        finally:
+            schematic["instance_parameters"][discovery.instance] = dict(expected)
+        return AdapterResult(
+            data={
+                "contract": discovery.model_dump(mode="json"),
+                "target": task.target.model_dump(mode="json"),
+                "spectre_simulation_performed": False,
+                "oa_write_performed": True,
+                "remote_compute_performed": False,
+                "baseline": {
+                    "oa_instance_parameters": expected,
+                    "oa_source": "software_inference",
+                    "netlist_instance_parameters": baseline_netlist_parameters,
+                    "parameter_inventory": baseline_inventory,
+                    "netlist_source": "software_inference",
+                    "canonical_netlist_signature_sha256": canonical,
+                },
+                "probe": {
+                    "oa_instance_parameters": probe_oa_parameters,
+                    "oa_source": "software_inference",
+                    "netlist_instance_parameters": probe_netlist_parameters,
+                    "parameter_inventory": probe_inventory,
+                    "netlist_source": "software_inference",
+                    "canonical_netlist_signature_sha256": probe_canonical,
+                },
+                "restored": {
+                    "oa_instance_parameters": expected,
+                    "oa_source": "software_inference",
+                    "netlist_instance_parameters": baseline_netlist_parameters,
+                    "parameter_inventory": baseline_inventory,
+                    "netlist_source": "software_inference",
+                    "canonical_netlist_signature_sha256": canonical,
+                },
+                "restoration": {
+                    "oa_exact": True,
+                    "canonical_netlist_signature_exact": True,
+                    "verified": True,
+                },
+                "classification": classification,
+                "interrupted_probe_recovery": {
+                    "performed": False,
+                    "source": "system_event",
+                },
+            },
             evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
         )
 

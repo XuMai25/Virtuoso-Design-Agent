@@ -33,6 +33,7 @@ _WORKER_ACTIONS = {
         "inspect_symbol": "inspect_existing_schematic_symbol",
         "transform": "transform_existing_schematic_topology_delta",
         "apply": "apply_existing_schematic_parameters",
+        "discover_binding": "discover_existing_schematic_parameter_binding",
         "simulate": "simulate_existing_schematic",
     },
     CircuitKind.INVERTER: {
@@ -409,6 +410,10 @@ class SubprocessBridgeAdapter:
             )
         if task.netlist_preview is not None:
             payload["netlist_preview"] = task.netlist_preview.model_dump(mode="json")
+        if task.parameter_binding_discovery is not None:
+            payload["parameter_binding_discovery"] = (
+                task.parameter_binding_discovery.model_dump(mode="json")
+            )
         if task.operation not in {
             Operation.DEVICE_CHARACTERIZE,
             Operation.ADE_PREPARE,
@@ -418,6 +423,7 @@ class SubprocessBridgeAdapter:
             Operation.ADE_CORNERS_APPLY,
             Operation.ADE_SETUP_APPLY,
             Operation.SCHEMATIC_SYMBOL_GENERATE,
+            Operation.PARAMETERS_BINDING_DISCOVER,
         }:
             payload["analysis"] = task.resolved_analysis().value
             payload["analysis_source"] = (
@@ -578,6 +584,18 @@ class SubprocessBridgeAdapter:
             timeout=min(task.limits.timeout_seconds, 180),
         )
         return AdapterResult(data=data, evidence_source=EvidenceSource.BRIDGE_READBACK)
+
+    def discover_parameter_binding(self, task: TaskSpec) -> AdapterResult:
+        payload = self._task_payload(task)
+        payload["binding_discovery_output_root"] = str(
+            self.artifact_root / task.id / uuid.uuid4().hex
+        )
+        data = self._request(
+            _WORKER_ACTIONS[task.circuit]["discover_binding"],
+            payload,
+            timeout=task.limits.timeout_seconds * 3 + 300,
+        )
+        return AdapterResult(data=data, evidence_source=EvidenceSource.EDA_RESULT)
 
     def capture_ade(self, task: TaskSpec) -> AdapterResult:
         payload = self._task_payload(task)
