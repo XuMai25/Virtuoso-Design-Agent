@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from virtuoso_design_agent.models import EvidenceSource, RunStatus, TaskSpec
 from virtuoso_design_agent.parameter_binding import (
     canonical_parameter_table_sha256,
     classify_parameter_binding_probe,
+    reclassify_parameter_binding_run,
     validate_parameter_binding_eda_stage,
 )
 from virtuoso_design_agent.planner import build_plan
@@ -329,6 +331,74 @@ def test_binding_classification_checks_the_full_netlist_inventory() -> None:
     assert changed_structure["promoted_binding"] is None
 
 
+def test_binding_classification_promotes_one_literal_with_mirrored_callbacks() -> None:
+    spec = ParameterBindingDiscoverySpec.model_validate(
+        {
+            **_task_payload()["parameter_binding_discovery"],
+            "expected_instance_parameters": {
+                **EXPECTED_CDF,
+                "w": "1u",
+                "ad": "5e-14",
+                "as": "5e-14",
+                "display_width": "1u/30n",
+            },
+        }
+    )
+    classified = classify_parameter_binding_probe(
+        spec,
+        baseline_oa_parameters=spec.expected_instance_parameters,
+        probe_oa_parameters={
+            **spec.expected_instance_parameters,
+            "Wfg": "2u",
+            "w": "2u",
+            "ad": "1e-13",
+            "as": "1e-13",
+            "display_width": "2u/30n",
+        },
+        baseline_netlist_inventory={
+            "MN0": {
+                "model": "nch_lvt_mac",
+                "nodes": ["OUT", "IN", "VSS", "VSS"],
+                "parameters": {
+                    "w": "1u",
+                    "l": "30n",
+                    "ad": "5e-14",
+                    "as": "5e-14",
+                },
+            }
+        },
+        probe_netlist_inventory={
+            "MN0": {
+                "model": "nch_lvt_mac",
+                "nodes": ["OUT", "IN", "VSS", "VSS"],
+                "parameters": {
+                    "w": "2u",
+                    "l": "30n",
+                    "ad": "1e-13",
+                    "as": "1e-13",
+                },
+            }
+        },
+    )
+
+    assert classified["status"] == (
+        "direct_literal_binding_with_derived_callbacks"
+    )
+    assert classified["promoted_binding"] == {
+        "instance": "MN0",
+        "oa_parameter": "Wfg",
+        "netlist_parameter": "w",
+    }
+    assert classified["callback_effects_verified"] is True
+    assert [
+        item["netlist_parameter"]
+        for item in classified["derived_callback_evidence"]
+    ] == ["ad", "as"]
+    assert {
+        item["parameter"] for item in classified["dependent_oa_changes"]
+    } == {"ad", "as", "display_width", "w"}
+
+
 def _fake_worker_state(current: dict[str, str]) -> dict:
     return {
         "schematic": {},
@@ -521,6 +591,160 @@ def test_binding_remote_cleanup_rejects_paths_outside_exact_vda_scratch(
             ClientThatMustNotRun(),
             unsafe_path,
         )
+
+
+def test_binding_remote_cleanup_uses_ssh_exit_status_for_silent_commands() -> None:
+    class Result:
+        returncode = 0
+        stderr = ""
+
+    class Runner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int]] = []
+
+        def run_command(self, command: str, *, timeout: int):
+            self.calls.append((command, timeout))
+            return Result()
+
+    class Client:
+        def __init__(self) -> None:
+            self.ssh_runner = Runner()
+
+        def run_shell_command(self, *_args, **_kwargs):
+            raise AssertionError("cleanup must not use Virtuoso csh over SSH")
+
+    client = Client()
+    remote_path = "/data/xum/virtuoso_bridge_smoke/vda_binding_probe_123"
+
+    cleanup = bridge_worker._cleanup_binding_netlist_scratch(  # noqa: SLF001
+        client,
+        remote_path,
+    )
+
+    assert client.ssh_runner.calls == [
+        (f"rm -rf -- {remote_path}", 60),
+        (f"test ! -e {remote_path}", 30),
+    ]
+    assert cleanup == {
+        "remote_path": remote_path,
+        "removed": True,
+        "transport": "bridge_ssh_runner",
+        "source": "system_event",
+    }
+
+
+def test_binding_remote_cleanup_propagates_ssh_failure() -> None:
+    class Result:
+        returncode = 1
+        stderr = "permission denied"
+
+    class Runner:
+        def run_command(self, _command: str, *, timeout: int):
+            assert timeout == 60
+            return Result()
+
+    class Client:
+        ssh_runner = Runner()
+
+    with pytest.raises(RuntimeError, match="permission denied"):
+        bridge_worker._cleanup_binding_netlist_scratch(  # noqa: SLF001
+            Client(),
+            "/data/xum/virtuoso_bridge_smoke/vda_binding_probe_123",
+        )
+
+
+def test_si_init_scopes_foreground_log_away_from_remote_nfs_scratch() -> None:
+    skill = bridge_worker._si_init_environment_skill(  # noqa: SLF001
+        "/data/xum/virtuoso_bridge_smoke/vda_binding_probe_123",
+        "vda_test",
+        "vda_binding_probe_001",
+        "schematic",
+    )
+
+    assert skill == (
+        'let((simForeGndLogFile) simForeGndLogFile="/dev/null" '
+        'simInitEnvWithArgs('
+        '"/data/xum/virtuoso_bridge_smoke/vda_binding_probe_123" '
+        '"vda_test" "vda_binding_probe_001" "schematic" "spectre" nil))'
+    )
+
+
+def test_binding_reclassification_reuses_persisted_eda_bytes(tmp_path: Path) -> None:
+    task = _task()
+    plan = build_plan(task)
+    adapter = DeterministicDemoAdapter()
+    adapter._schematics[(task.target.library, task.target.cell)] = _demo_schematic()  # noqa: SLF001
+    run = TaskExecutor(adapter).execute(
+        task,
+        plan,
+        token=plan.confirmation_token,
+    ).model_dump(mode="json")
+    run["adapter"] = "virtuoso-bridge-subprocess"
+    run["status"] = "partial"
+    action = next(
+        item
+        for item in run["actions"]
+        if item["action"] == "parameters.binding.discover"
+    )
+    action["evidence_source"] = "eda_result"
+    details = action["details"]
+    details["remote_compute_performed"] = True
+    for stage_name in ("baseline", "probe", "restored"):
+        stage = details[stage_name]
+        work_dir = tmp_path / f"{stage_name}-work"
+        work_dir.mkdir()
+        netlist = (
+            "MN0 (OUT IN VSS VSS) nch_lvt_mac "
+            f"w={stage['netlist_instance_parameters']['w']}\n"
+        )
+        (work_dir / "oa_netlist.scs").write_text(netlist, encoding="utf-8")
+        (work_dir / "si_batch_stdout.log").write_text(
+            "End netlisting\n",
+            encoding="utf-8",
+        )
+        bundle = bridge_worker._persist_binding_netlist_artifacts(  # noqa: SLF001
+            work_dir,
+            tmp_path / "evidence",
+            stage_name,
+        )
+        netlist_sha256 = next(
+            item["sha256"]
+            for item in bundle["files"]
+            if item["relative_path"] == f"{stage_name}/oa_netlist.scs"
+        )
+        remote_dir = f"/data/xum/virtuoso_bridge_smoke/vda_{stage_name}_probe"
+        stage.update(
+            oa_source="bridge_readback",
+            source="eda_result",
+            raw_netlist={
+                "source": "eda_result",
+                "remote_path": f"{remote_dir}/netlist",
+                "remote_retained": False,
+                "sha256": netlist_sha256,
+            },
+            artifact_bundle=bundle,
+            remote_cleanup={
+                "source": "system_event",
+                "remote_path": remote_dir,
+                "removed": True,
+            },
+        )
+    source = tmp_path / "source-run.json"
+    source.write_text(json.dumps(run), encoding="utf-8")
+
+    result = reclassify_parameter_binding_run(source)
+
+    assert result["classification"]["status"] == "direct_literal_binding"
+    assert result["classification"]["promoted_binding"] == {
+        "instance": "MN0",
+        "oa_parameter": "Wfg",
+        "netlist_parameter": "w",
+    }
+    assert result["local_artifacts_revalidated"] is True
+    assert result["recorded_remote_cleanup_claims_validated"] is True
+    assert result["remote_paths_rechecked"] is False
+    assert result["remote_execution_performed"] is False
+    assert result["oa_write_performed"] is False
 
 
 def test_executor_records_derived_binding_separately_and_leaves_oa_restored() -> None:

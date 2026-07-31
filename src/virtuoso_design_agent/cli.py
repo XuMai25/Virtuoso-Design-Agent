@@ -55,6 +55,7 @@ from .op_relinearization import (
     relinearize_operating_point,
     validate_relinearization_run,
 )
+from .parameter_binding import reclassify_parameter_binding_run
 from .planner import build_plan
 from .preview_compile import build_preview_task_from_candidates
 from .preview_oa_handoff import build_oa_task_from_preview_shortlist
@@ -516,6 +517,21 @@ def _cmd_binding_discovery_task(args: argparse.Namespace) -> int:
         path.write_text(payload + "\n", encoding="utf-8")
     print(outputs[0][1])
     print(outputs[1][1])
+    return 0
+
+
+def _cmd_binding_reclassify(args: argparse.Namespace) -> int:
+    result = reclassify_parameter_binding_run(args.run_record)
+    payload = json.dumps(
+        result,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(payload + "\n", encoding="utf-8")
+    print(payload)
     return 0
 
 
@@ -1116,6 +1132,17 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
     )
     binding_discovery_task.set_defaults(handler=_cmd_binding_discovery_task)
+
+    binding_reclassify = subparsers.add_parser(
+        "binding-reclassify",
+        help=(
+            "re-evaluate preserved OA/si binding evidence locally without another "
+            "remote probe"
+        ),
+    )
+    binding_reclassify.add_argument("run_record", type=Path)
+    binding_reclassify.add_argument("--output", type=Path)
+    binding_reclassify.set_defaults(handler=_cmd_binding_reclassify)
 
     onboarding_resolve = subparsers.add_parser(
         "onboarding-resolve",

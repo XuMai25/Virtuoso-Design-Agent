@@ -6387,6 +6387,7 @@ class TaskExecutor:
                 classification = data.get("classification")
                 allowed_statuses = {
                     "direct_literal_binding",
+                    "direct_literal_binding_with_derived_callbacks",
                     "single_netlist_parameter_nonliteral",
                     "callback_coupled",
                     "ambiguous_netlist_change",
@@ -6429,7 +6430,11 @@ class TaskExecutor:
                         "the parent executor's independent evidence evaluation"
                     )
                 promoted = classification.get("promoted_binding")
-                if classification["status"] == "direct_literal_binding":
+                promotable_statuses = {
+                    "direct_literal_binding",
+                    "direct_literal_binding_with_derived_callbacks",
+                }
+                if classification["status"] in promotable_statuses:
                     if (
                         not isinstance(promoted, dict)
                         or promoted.get("instance") != discovery.instance
@@ -6443,10 +6448,34 @@ class TaskExecutor:
                             "direct binding classification lacks one exact promoted "
                             "OA-to-si mapping"
                         )
-                    notes.append(
-                        "one direct literal OA-CDF to si binding was discovered; "
-                        "the probe value was not retained in OA"
-                    )
+                    if (
+                        classification["status"]
+                        == "direct_literal_binding_with_derived_callbacks"
+                    ):
+                        if (
+                            classification.get("callback_effects_verified") is not True
+                            or not classification.get("dependent_netlist_changes")
+                            or len(
+                                classification.get(
+                                    "derived_callback_evidence", []
+                                )
+                            )
+                            != len(classification["dependent_netlist_changes"])
+                        ):
+                            raise RuntimeError(
+                                "derived-callback binding lacks complete same-instance "
+                                "OA-to-si side-effect evidence"
+                            )
+                        notes.append(
+                            "one direct literal OA-CDF to si binding was discovered "
+                            "with fully mirrored same-instance derived callback "
+                            "effects; the probe value was not retained in OA"
+                        )
+                    else:
+                        notes.append(
+                            "one direct literal OA-CDF to si binding was discovered; "
+                            "the probe value was not retained in OA"
+                        )
                 else:
                     if promoted is not None:
                         raise RuntimeError(

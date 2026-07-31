@@ -90,17 +90,35 @@ CDF 表重新等于任务基线，其他漂移一律不写。
 
 恢复后第三次 netlisting 的 canonical instance/model/node/parameter signature 必须与 baseline
 一致。差分覆盖完整 top/scoped instance inventory，而不只看目标实例；任何其他实例参数、model、
-node 或 instance set 变化都会阻止提升。只有 OA 变化集合恰为目标字段、全 inventory 的 `si` 变化
-集合恰为目标实例的一个字段，且 baseline/probe 两端都与 CDF 值按 Spectre 工程单位语义相等时，
-才输出可直接放入 `GenericNetlistParameterBinding` 的 `direct_literal_binding`。零变化记为
-`inert`，多参数或跨实例变化记为 `ambiguous_netlist_change`，instance/model/node 变化记为
-`netlist_structure_changed`，CDF callback 联动记为 `callback_coupled`，单字段非字面映射记为
-`single_netlist_parameter_nonliteral`；这些状态均不会 promotion。worker 返回原始差分后，父
-executor 还会用共享纯函数独立复判，结论不一致即硬失败。三份 raw netlist/log 先复制到本地 hash
-manifest，再按 `_generate_oa_netlist` 返回且经 POSIX 规范化的精确 `/data/xum/.../vda_*` 路径
-清理远端 scratch；不修改 Bridge，也不运行 Spectre。OA 状态是 `bridge_readback`，raw `si` 是
-`eda_result`，分类是 `software_inference`，恢复/清理是 `system_event`。当前仅完成本地契约、
-解析器与故障注入 Gate，尚无新的真实 OA smoke。
+node 或 instance set 变化都会阻止提升。最简单的可提升结果仍是：OA 只改变目标字段、`si` 只改变
+目标实例的一个字段，且 baseline/probe 两端都与 CDF 值按 Spectre 工程单位语义相等，对应
+`direct_literal_binding`。
+
+真实 foundry PDK 的宽度 callback 还可能同时重算面积、周长和方块电阻。为避免把合法 PDK 行为
+永久误判成 ambiguity，分类器增加一个更严格的
+`direct_literal_binding_with_derived_callbacks`：所有 netlist 变化必须仍在同一目标实例；只有一个
+字段同时与目标 CDF 的原值/probe 值两端等价，作为 primary binding；每个额外 netlist 字段都必须
+存在同名 OA callback 字段，且 before/after 两端逐值等价。OA-only display/aggregate callback 继续
+完整记录但不冒充 netlist binding。多个 literal 主候选、未镜像的额外 netlist 字段、跨实例变化或
+结构变化仍拒绝。零变化记为 `inert`，其他多参数变化记为 `ambiguous_netlist_change`，
+instance/model/node 变化记为 `netlist_structure_changed`，只有 OA callback 而 netlist 单字段时记为
+`callback_coupled`，单字段非字面映射记为 `single_netlist_parameter_nonliteral`。
+
+worker 返回原始差分后，父 executor 用共享纯函数独立复判，结论不一致即硬失败。三份 raw
+netlist/log 先复制到本地 hash manifest，再按 `_generate_oa_netlist` 返回且经 POSIX 规范化的精确
+`/data/xum/.../vda_*` 路径清理远端 scratch。清理复用 Bridge 的 `ssh_runner` 并按真实 return code
+判定，不用会把 silent csh 结果当成 `nil` 的高层 shell API。自动 `simInitEnvWithArgs` 只在动态
+SKILL `let` 作用域内把 `simForeGndLogFile` 指向 `/dev/null`，避免长期 CIW 在 NFS scratch 中留下
+打开的 `si.foregnd.log/.nfs*`；退出即恢复人工会话的全局值。这里不修改 Bridge，也不运行 Spectre。
+
+`vda binding-reclassify` 可对已保存的 partial/succeeded real-Bridge discovery run 做纯本地复判。
+它重新验证三阶段原始 bytes、manifest、完整 OA 表和恢复签名，不连接远端、不写 OA；旧 run record
+保持不可变，新结论单独标为 `software_inference`，并明确 `remote_paths_rechecked=false`。2026-08-01
+已在 flat TSMC N28 `MNCAS.Wfg` 完成真实 probe：主绑定是 `Wfg -> w`，`ad/as/nrd/nrs/pd/ps`
+作为逐值镜像的 derived callback 证据，完整 CDF/topology/placement 和 baseline netlist 均恢复。
+OA 状态是 `bridge_readback`，raw `si` 是 `eda_result`，分类是 `software_inference`，恢复/清理是
+`system_event`。详见
+[`validation/2026-08-01-existing-schematic-parameter-binding-discovery-live.md`](validation/2026-08-01-existing-schematic-parameter-binding-discovery-live.md)。
 
 `vda binding-discovery-task` 把一对成功的 real-Bridge read-only inspect task/run 与一个很小的
 `user_input` intent 编译成上述完整 TaskSpec。它复用 onboarding 的 task/run/token/target/PDK/
@@ -333,7 +351,7 @@ VDA 保留两种用途不同的参数表示：
 - `parameters` / `parameter_space` 是电路模板已定义的 canonical semantic parameters，例如 `device_width_um`、`load_resistance_ohm`、`bias_v` 和 AC `load_ff`。它们可参与仿真、规格判定和有限搜索，但并非都写 OA：W/L/RD/RS 是设计参数，bias/VDD/外部负载是 testbench 条件。当前 MOS width semantic 指单指宽 `Wfg`；多指 OA/`si` 一致性另外核对 `finger_width`、`fingers/nf`、`m/multi` 和总有效宽度，不能把网表 `w` 无条件当成 `Wfg`。
 - `instance_parameter_updates` 是人工明确指定的实例级 CDF/OA 写入，例如 `MN0.fingers="2"`、`MN0.m="1"` 或 `RD0.r="22k"`。参数名和值按 Bridge 字符串契约原样传递，不做单位、别名或枚举推断。
 
-`existing_schematic` 是不依赖固定拓扑模板的通用 circuit kind，开放 `schematic.inspect`、`schematic.symbol.generate`、预声明 `schematic.transform`、`parameters.apply`、`parameters.binding.discover`、typed `simulation.run`、有限 raw-instance `design.tune`、受控单-delta `design.close_loop`、`ade.prepare`、`ade.capture`、`ade.run`、`ade.corners.apply`、`ade.variables.apply` 与 `ade.setup.apply`：inspect 保留 Bridge reader 的完整结构对象、geometry、notes、nets/pins 细节和所有可回读 CDF 参数；symbol generation 只从精确绑定且不存在 symbol 的 schematic 建立人工/层级复用入口；transform 只执行上述 exact topology-delta 子集；参数操作允许人工指定任意已有实例；binding discovery 用可恢复的单字段差分 netlisting 证明陌生 CDF 的直接 `si` 映射；通用 simulation/tune/close-loop 使用 design context 与 typed testbench/metric/netlist binding；ADE 操作则为已有 design 准备新的 Maestro 人工入口、读取人工状态、后台运行一个已保存 setup，或用显式旧状态前置条件增量修改 corner、变量/selection、analysis 和新增 output/spec，不要求 VDA 理解 DUT 拓扑。反相器和共源模板也能使用相同原始参数与 ADE 交接路径，并可在一个参数任务中组合 semantic parameters 与原始实例参数；semantic 写入先执行，原始 CDF callback 后执行，最终 OA 必须同时满足所有已声明 semantic 值和原始字段值。
+`existing_schematic` 是不依赖固定拓扑模板的通用 circuit kind，开放 `schematic.inspect`、`schematic.symbol.generate`、预声明 `schematic.transform`、`parameters.apply`、`parameters.binding.discover`、typed `simulation.run`、有限 raw-instance `design.tune`、受控单-delta `design.close_loop`、`ade.prepare`、`ade.capture`、`ade.run`、`ade.corners.apply`、`ade.variables.apply` 与 `ade.setup.apply`：inspect 保留 Bridge reader 的完整结构对象、geometry、notes、nets/pins 细节和所有可回读 CDF 参数；symbol generation 只从精确绑定且不存在 symbol 的 schematic 建立人工/层级复用入口；transform 只执行上述 exact topology-delta 子集；参数操作允许人工指定任意已有实例；binding discovery 用可恢复的单字段差分 netlisting 证明陌生 CDF 的主 `si` 映射并显式保留可验证的 derived callback；通用 simulation/tune/close-loop 使用 design context 与 typed testbench/metric/netlist binding；ADE 操作则为已有 design 准备新的 Maestro 人工入口、读取人工状态、后台运行一个已保存 setup，或用显式旧状态前置条件增量修改 corner、变量/selection、analysis 和新增 output/spec，不要求 VDA 理解 DUT 拓扑。反相器和共源模板也能使用相同原始参数与 ADE 交接路径，并可在一个参数任务中组合 semantic parameters 与原始实例参数；semantic 写入先执行，原始 CDF callback 后执行，最终 OA 必须同时满足所有已声明 semantic 值和原始字段值。
 
 执行路径先结构化回读目标 schematic 并确认实例存在，再复用 Bridge 的 `set_instance_params(..., param_filters=None)` 触发 CDF callback、`schCheck` 和 `dbSave`。通用 reader 为控制输出会省略空值和超长值，因此 VDA 不用摘要缺失来限制 Bridge：写入后另发只读 SKILL，直接打开目标 OA、定位实例 CDF，并逐字段比较真实 `p~>value` 与请求字符串；executor 的 `schematic.inspect.after` 再独立执行一次同样的定向读取。首次值不一致时，worker 至多按任务声明顺序逐字段重放一次；计划必须披露该副作用，最终仍不一致则整个 run 失败。
 

@@ -55,7 +55,7 @@ def classify_parameter_binding_probe(
     baseline_netlist_inventory: dict[str, dict[str, Any]],
     probe_netlist_inventory: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    """Promote only one globally unique, direct literal parameter change."""
+    """Promote one unique literal binding and retain verified callback effects."""
 
     oa_changes = _changed_parameter_values(
         baseline_oa_parameters,
@@ -119,14 +119,78 @@ def classify_parameter_binding_probe(
     ]
     promoted_binding: dict[str, str] | None = None
     literal_identity_verified = False
+    primary_netlist_change: dict[str, Any] | None = None
+    dependent_netlist_changes: list[dict[str, Any]] = []
+    derived_callback_evidence: list[dict[str, Any]] = []
+    callback_effects_verified = False
+    oa_changes_by_name = {
+        str(item["parameter"]): item for item in oa_changes
+    }
+    original = discovery.expected_instance_parameters[discovery.oa_parameter]
+    literal_candidates = [
+        item
+        for item in netlist_changes
+        if item["instance"] == discovery.instance
+        and item.get("before") is not None
+        and item.get("after") is not None
+        and spectre_values_equal(str(item["before"]), original)
+        and spectre_values_equal(str(item["after"]), discovery.probe_value)
+    ]
+    if len(literal_candidates) == 1:
+        primary_netlist_change = literal_candidates[0]
+        dependent_netlist_changes = [
+            item for item in netlist_changes if item is not primary_netlist_change
+        ]
+        for item in dependent_netlist_changes:
+            oa_change = oa_changes_by_name.get(str(item["parameter"]))
+            if (
+                oa_change is None
+                or oa_change.get("before") is None
+                or oa_change.get("after") is None
+                or item.get("before") is None
+                or item.get("after") is None
+                or not spectre_values_equal(
+                    str(oa_change["before"]), str(item["before"])
+                )
+                or not spectre_values_equal(
+                    str(oa_change["after"]), str(item["after"])
+                )
+            ):
+                derived_callback_evidence = []
+                break
+            derived_callback_evidence.append(
+                {
+                    "oa_parameter": str(oa_change["parameter"]),
+                    "netlist_instance": str(item["instance"]),
+                    "netlist_parameter": str(item["parameter"]),
+                    "before": str(item["before"]),
+                    "after": str(item["after"]),
+                }
+            )
+        callback_effects_verified = bool(dependent_netlist_changes) and (
+            len(derived_callback_evidence) == len(dependent_netlist_changes)
+        )
     if netlist_structure_changes:
         status = "netlist_structure_changed"
     elif not netlist_changes:
         status = "inert"
+    elif any(
+        item["instance"] != discovery.instance for item in netlist_changes
+    ):
+        status = "ambiguous_netlist_change"
     elif (
         len(netlist_changes) > 1
-        or netlist_changes[0]["instance"] != discovery.instance
+        and len(literal_candidates) == 1
+        and callback_effects_verified
     ):
+        status = "direct_literal_binding_with_derived_callbacks"
+        literal_identity_verified = True
+        promoted_binding = {
+            "instance": discovery.instance,
+            "oa_parameter": discovery.oa_parameter,
+            "netlist_parameter": str(primary_netlist_change["parameter"]),
+        }
+    elif len(netlist_changes) > 1:
         status = "ambiguous_netlist_change"
     elif changed_oa != [discovery.oa_parameter]:
         status = "callback_coupled"
@@ -134,7 +198,6 @@ def classify_parameter_binding_probe(
         netlist_parameter = str(netlist_changes[0]["parameter"])
         before_value = netlist_changes[0].get("before")
         after_value = netlist_changes[0].get("after")
-        original = discovery.expected_instance_parameters[discovery.oa_parameter]
         literal_identity_verified = (
             before_value is not None
             and after_value is not None
@@ -159,6 +222,15 @@ def classify_parameter_binding_probe(
         "netlist_structure_changes": netlist_structure_changes,
         "literal_identity_verified": literal_identity_verified,
         "promoted_binding": promoted_binding,
+        "primary_netlist_change": primary_netlist_change,
+        "dependent_oa_changes": [
+            item
+            for item in oa_changes
+            if item["parameter"] != discovery.oa_parameter
+        ],
+        "dependent_netlist_changes": dependent_netlist_changes,
+        "derived_callback_evidence": derived_callback_evidence,
+        "callback_effects_verified": callback_effects_verified,
         "same_name_assumption_used": False,
         "source": "software_inference",
     }
@@ -312,3 +384,122 @@ def validate_parameter_binding_eda_stage(
         raise RuntimeError(
             f"binding discovery {stage_name} raw si hash is not bound to local bytes"
         )
+
+
+def reclassify_parameter_binding_run(run_record_path: Path) -> dict[str, Any]:
+    """Re-evaluate preserved binding evidence without another OA write or si run."""
+
+    from .models import EvidenceSource, RunRecord, RunStatus
+
+    source_path = Path(run_record_path).resolve()
+    source_bytes = source_path.read_bytes()
+    record = RunRecord.model_validate_json(source_bytes)
+    if record.adapter != "virtuoso-bridge-subprocess":
+        raise ValueError(
+            "binding reclassification requires a real Bridge run record"
+        )
+    if record.status not in {RunStatus.PARTIAL, RunStatus.SUCCEEDED}:
+        raise ValueError(
+            "binding reclassification requires a partial or successful source run"
+        )
+    actions = [
+        item
+        for item in record.actions
+        if item.action == "parameters.binding.discover"
+    ]
+    if len(actions) != 1:
+        raise ValueError(
+            "binding reclassification requires exactly one discovery action"
+        )
+    action = actions[0]
+    if (
+        action.status != "succeeded"
+        or action.evidence_source is not EvidenceSource.EDA_RESULT
+    ):
+        raise ValueError(
+            "binding reclassification source action is not successful EDA evidence"
+        )
+    details = action.details
+    try:
+        discovery = ParameterBindingDiscoverySpec.model_validate(
+            details.get("contract")
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "binding reclassification source contract is invalid"
+        ) from exc
+    if details.get("spectre_simulation_performed") is not False:
+        raise ValueError(
+            "binding reclassification source does not prove a netlist-only probe"
+        )
+    stages: dict[str, dict[str, Any]] = {}
+    for stage_name in ("baseline", "probe", "restored"):
+        stage = details.get(stage_name)
+        if not isinstance(stage, dict) or stage.get("oa_source") != "bridge_readback":
+            raise ValueError(
+                f"binding reclassification {stage_name} lacks OA readback"
+            )
+        try:
+            validate_parameter_binding_eda_stage(stage_name, stage)
+        except RuntimeError as exc:
+            raise ValueError(str(exc)) from exc
+        stages[stage_name] = stage
+    expected = {
+        str(name): str(value)
+        for name, value in discovery.expected_instance_parameters.items()
+    }
+    if stages["baseline"].get("oa_instance_parameters") != expected:
+        raise ValueError("binding reclassification baseline CDF table drifted")
+    if stages["restored"].get("oa_instance_parameters") != expected:
+        raise ValueError("binding reclassification restored CDF table drifted")
+    probe_parameters = stages["probe"].get("oa_instance_parameters")
+    if not isinstance(probe_parameters, dict):
+        raise ValueError("binding reclassification probe CDF table is missing")
+    actual_probe = probe_parameters.get(discovery.oa_parameter)
+    if actual_probe is None or not spectre_values_equal(
+        str(actual_probe), discovery.probe_value
+    ):
+        raise ValueError("binding reclassification probe value is inconsistent")
+    if (
+        stages["baseline"].get("canonical_netlist_signature_sha256")
+        != stages["restored"].get("canonical_netlist_signature_sha256")
+    ):
+        raise ValueError(
+            "binding reclassification source netlist did not restore"
+        )
+    restoration = details.get("restoration")
+    if not isinstance(restoration, dict) or restoration.get("verified") is not True:
+        raise ValueError(
+            "binding reclassification source lacks verified restoration"
+        )
+    classification = classify_parameter_binding_probe(
+        discovery,
+        baseline_oa_parameters={
+            str(name): str(value)
+            for name, value in stages["baseline"]["oa_instance_parameters"].items()
+        },
+        probe_oa_parameters={
+            str(name): str(value)
+            for name, value in probe_parameters.items()
+        },
+        baseline_netlist_inventory=stages["baseline"]["parameter_inventory"],
+        probe_netlist_inventory=stages["probe"]["parameter_inventory"],
+    )
+    return {
+        "schema_version": 1,
+        "source_run_path": str(source_path),
+        "source_run_sha256": hashlib.sha256(source_bytes).hexdigest(),
+        "source_task_id": record.task_id,
+        "source_plan_token": record.plan_token,
+        "source_run_status": record.status.value,
+        "source_action_evidence_source": action.evidence_source.value,
+        "previous_classification": details.get("classification"),
+        "classification": classification,
+        "promotable": classification.get("promoted_binding") is not None,
+        "local_artifacts_revalidated": True,
+        "recorded_remote_cleanup_claims_validated": True,
+        "remote_paths_rechecked": False,
+        "remote_execution_performed": False,
+        "oa_write_performed": False,
+        "source": "software_inference",
+    }

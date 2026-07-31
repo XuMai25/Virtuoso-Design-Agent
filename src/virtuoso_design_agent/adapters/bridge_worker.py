@@ -12888,6 +12888,32 @@ def _create_spectre_simulator(
     )
 
 
+def _si_init_environment_skill(
+    run_dir: str,
+    library: str,
+    cell: str,
+    view: str,
+) -> str:
+    """Build a scoped si initializer without an NFS-held foreground log."""
+
+    init = "simInitEnvWithArgs({} {} {} {} \"spectre\" nil)".format(
+        json.dumps(run_dir),
+        json.dumps(library),
+        json.dumps(cell),
+        json.dumps(view),
+    )
+    # simInitEnvWithArgs keeps si.foregnd.log open in the long-lived
+    # Virtuoso process.  Deleting an otherwise-complete NFS run directory
+    # then leaves a .nfs tombstone until another initialization replaces the
+    # handle.  The batch si stdout log is captured independently, so bind the
+    # foreground log to /dev/null only for this call.  SKILL's dynamic let
+    # scope restores the user's global value as soon as initialization exits.
+    return (
+        'let((simForeGndLogFile) simForeGndLogFile="/dev/null" '
+        f"{init})"
+    )
+
+
 def _generate_oa_netlist(
     client,
     payload: dict[str, Any],
@@ -12904,11 +12930,11 @@ def _generate_oa_netlist(
     task_slug = re.sub(r"[^A-Za-z0-9_.-]", "_", str(payload.get("task_id", "task")))
     run_dir = f"{run_root}/vda_{task_slug}_{uuid.uuid4().hex[:12]}"
 
-    init_skill = "simInitEnvWithArgs({} {} {} {} \"spectre\" nil)".format(
-        json.dumps(run_dir),
-        json.dumps(library),
-        json.dumps(cell),
-        json.dumps(str(payload["target"].get("view", "schematic"))),
+    init_skill = _si_init_environment_skill(
+        run_dir,
+        library,
+        cell,
+        str(payload["target"].get("view", "schematic")),
     )
     init_result = client.execute_skill(init_skill, timeout=min(timeout, 90))
     _require_bridge_result(init_result, "initialize si environment")
@@ -13284,19 +13310,49 @@ def _cleanup_binding_netlist_scratch(client, remote_run_dir: str) -> dict[str, A
             "binding discovery refused to clean an unexpected remote path: "
             f"{remote_run_dir!r}"
         )
-    removed = client.run_shell_command(
-        f"rm -rf -- {shlex.quote(normalized)}",
-        timeout=60,
-    )
-    _require_bridge_result(removed, "clean binding-discovery si scratch")
-    checked = client.run_shell_command(
-        f"test ! -e {shlex.quote(normalized)}",
-        timeout=30,
-    )
-    _require_bridge_result(checked, "verify binding-discovery si scratch cleanup")
+    remote_q = shlex.quote(normalized)
+    runner = getattr(client, "ssh_runner", None)
+    if runner is not None:
+        # VirtuosoClient.run_shell_command() deliberately treats a nil csh
+        # return as failure.  Successful, silent filesystem commands such as
+        # rm(1) and test(1) therefore cannot be judged through that API.  Use
+        # Bridge's existing transport runner and its real exit status instead.
+        removed = runner.run_command(
+            f"rm -rf -- {remote_q}",
+            timeout=60,
+        )
+        _require_transport_result(removed, "clean binding-discovery si scratch")
+        checked = runner.run_command(
+            f"test ! -e {remote_q}",
+            timeout=30,
+        )
+        _require_transport_result(
+            checked,
+            "verify binding-discovery si scratch cleanup",
+        )
+        transport = "bridge_ssh_runner"
+    else:
+        # Local-mode Bridge clients do not expose an SSH runner.  Emit a
+        # marker so Bridge's csh wrapper has a non-nil success value while
+        # still preserving the command's failure status.
+        removed = client.run_shell_command(
+            f"rm -rf -- {remote_q} && echo VDA_BINDING_CLEANUP_REMOVED",
+            timeout=60,
+        )
+        _require_bridge_result(removed, "clean binding-discovery si scratch")
+        checked = client.run_shell_command(
+            f"test ! -e {remote_q} && echo VDA_BINDING_CLEANUP_VERIFIED",
+            timeout=30,
+        )
+        _require_bridge_result(
+            checked,
+            "verify binding-discovery si scratch cleanup",
+        )
+        transport = "bridge_csh_marker_fallback"
     return {
         "remote_path": normalized,
         "removed": True,
+        "transport": transport,
         "source": "system_event",
     }
 

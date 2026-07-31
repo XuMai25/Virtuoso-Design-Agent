@@ -147,3 +147,12 @@ CLI 双 artifact 输出。合并后完整回归为 `890 passed`。
 不运行 Spectre、不创建/替换 cellview，并只在成功证据已落本地后清理各自精确 `/data/xum/.../vda_*`
 scratch。还需用户对该 token 和临时 OA 写入明确确认。派生 CDF transformation、多字段 callback、
 深层 hierarchy 和并发人工 editor 保持后续独立能力，不因这次 direct-binding smoke 而宣称闭合。
+
+## 2026-08-01 follow-up
+
+上述真实 Gate 已获授权并完成。TSMC N28 `MNCAS.Wfg -> w` 是唯一 literal 主绑定；PDK callback
+同时重算 `ad/as/nrd/nrs/pd/ps`，六项均在同一实例的 OA/`si` before/after 中逐名、逐值镜像。
+因此最终能力不是忽略 callback 的 direct-only，而是显式
+`direct_literal_binding_with_derived_callbacks`。完整证据、两次 cleanup/NFS 故障修复、任务外 OA
+恢复和资源盘点见
+[`2026-08-01-existing-schematic-parameter-binding-discovery-live.md`](2026-08-01-existing-schematic-parameter-binding-discovery-live.md)。
