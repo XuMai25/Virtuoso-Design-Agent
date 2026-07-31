@@ -36,6 +36,10 @@ from .models import (
     TaskSpec,
 )
 from .onboarding import build_onboarding_draft
+from .onboarding_resolution import (
+    ExistingSchematicOnboardingResolution,
+    resolve_onboarding_draft,
+)
 from .op_small_signal import (
     OperatingPointSmallSignalPolicy,
     analyze_operating_point_small_signal_run,
@@ -467,6 +471,18 @@ def _cmd_onboarding_draft(args: argparse.Namespace) -> int:
         child_inspections=child_inspections,
     )
     payload = draft.model_dump_json(indent=2, exclude_none=True)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(payload + "\n", encoding="utf-8")
+    print(payload)
+    return 0
+
+
+def _cmd_onboarding_resolve(args: argparse.Namespace) -> int:
+    resolution = ExistingSchematicOnboardingResolution.model_validate_json(
+        args.resolution.read_text(encoding="utf-8")
+    )
+    task = resolve_onboarding_draft(args.draft, resolution)
+    payload = task.model_dump_json(indent=2, exclude_none=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(payload + "\n", encoding="utf-8")
     print(payload)
@@ -1001,6 +1017,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     onboarding_draft.add_argument("--output", type=Path, required=True)
     onboarding_draft.set_defaults(handler=_cmd_onboarding_draft)
+
+    onboarding_resolve = subparsers.add_parser(
+        "onboarding-resolve",
+        help=(
+            "compile a hash-bound onboarding draft plus confirmed intent into a "
+            "normal safe existing-schematic TaskSpec"
+        ),
+    )
+    onboarding_resolve.add_argument("draft", type=Path)
+    onboarding_resolve.add_argument("resolution", type=Path)
+    onboarding_resolve.add_argument("--output", type=Path, required=True)
+    onboarding_resolve.set_defaults(handler=_cmd_onboarding_resolve)
 
     run = subparsers.add_parser("run", help="plan or execute a task")
     run.add_argument("task", type=Path)

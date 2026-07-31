@@ -100,9 +100,9 @@ instance 的私有参数。per-instance override 需要独立契约，当前不�
 权限，也不声明 analysis/metric。`generic_simulation_draft` 则故意不是可执行 contract，不能直接传给
 `vda run`。
 
-## 从草案到执行任务
+## 从草案到普通 TaskSpec
 
-Agent 或用户需要逐项完成：
+Agent 或用户先在 resolution 文件中逐项完成：
 
 1. 确认或更正输入、输出、供电、return、bias 和器件角色；
 2. 从完整 inventory 中选择允许 fixed/search 的真实 CDF 字段；
@@ -110,7 +110,40 @@ Agent 或用户需要逐项完成：
 4. 声明 DC/OP metric、transfer、analysis 和必要 sweep；
 5. 为每个可写字段声明 OA-CDF 到 `si` 参数映射；
 6. 对 hierarchy 确认 subcircuit、terminal order 和 primitive boundary；
-7. 最后才增加 constraints、objective、candidate domain、预算和远端安全开关。
+7. 最后才增加 constraints、objective、candidate domain 和预算。
+
+然后用草案文件和 resolution 编译普通任务：
+
+```powershell
+.\.venv\Scripts\vda.exe onboarding-resolve `
+  <onboarding-draft.json> `
+  <resolution.json> `
+  --output <task.json>
+
+.\.venv\Scripts\vda.exe plan <task.json>
+```
+
+`onboarding-resolve` 不接受 target、PDK、topology hash、冻结对象或安全开关的 override。它从草案
+继承这些字段，并逐项检查：
+
+- resolution 自带的 draft SHA-256 必须与输入文件完全一致；
+- 最终 role 必须标为 `user_input`，且 instance/net/pin/terminal 必须存在于 top OA graph；
+- 每个授权 CDF 字段必须存在于完整 inventory，并且恰有一个 OA→`si` binding；
+- source、load、transfer 和 voltage metric 只能引用 top net 或 ground `0`；
+- operating-point metric 只能引用已见 top instance；
+- 每个已 inspect 的 child 都必须有 exact library/cell/view 和完整 terminal-order binding；
+- 最终对象必须能通过现有 `TaskSpec` 与 planner 的全部交叉验证。
+
+当前 resolution 只开放 `simulation.run` 与 `design.tune`。输出任务固定
+`allow_remote_compute=false`、`allow_remote_write=false`、`replace_existing=false`，并把
+`allowed_library` 固定为草案 target library；它可以直接 plan，但不能直接真实执行。需要远端动作时，
+必须在生成后的普通任务上显式修改安全开关并重新取得 plan token。
+`simulation.run` 还拒绝任何参数 update/search、objective 或 `max_iterations>1`，避免声明一个 planner
+不会执行的静默写入；需要改变参数时必须明确使用 `design.tune` 或独立 `parameters.apply`。
+`simulation.run` 还拒绝任何参数 update/search、objective 或 `max_iterations>1`，避免声明一个 planner
+不会执行的静默写入；需要改变参数时必须明确使用 `design.tune` 或独立 `parameters.apply`。
+`simulation.run` 还拒绝任何参数 update/search、objective 或 `max_iterations>1`，避免声明一个 planner
+不会执行的静默写入；需要改变参数时必须明确使用 `design.tune` 或独立 `parameters.apply`。
 
 正常 `TaskSpec`、planner、token、OA 写后回读、`si` 一致性和 checkpoint 仍是最终执行边界。
 onboarding 草案不会绕过任何一项，也不会削弱无 `design_context` 的独立 `parameters.apply` 能力。
@@ -121,4 +154,4 @@ onboarding 草案不会绕过任何一项，也不会削弱无 `design_context` 
 - 当前 object count 沿用 `design_context` 的 instance/net/pin 各 128 上限；
 - child scope 仅支持同库、唯一引用的一层 schematic；
 - 不推断深层 hierarchy、派生 CDF、per-instance override 或 `si` terminal order；
-- 当前输出是 review draft，自动把已确认 resolution 编译成完整 simulation/tuning task 仍是下一项能力。
+- resolution 当前不生成 topology refinement、winner-only PVT 或 `design.close_loop`；这些只有真实模块需要时才扩展。

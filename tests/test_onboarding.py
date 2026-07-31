@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -14,6 +16,7 @@ from virtuoso_design_agent.models import (
     TaskSpec,
 )
 from virtuoso_design_agent.onboarding import build_onboarding_draft
+from virtuoso_design_agent.onboarding_resolution import resolve_onboarding_draft
 from virtuoso_design_agent.planner import build_plan
 from virtuoso_design_agent.topology_delta import (
     snapshot_from_inspection,
@@ -428,3 +431,481 @@ def test_onboarding_cli_writes_reviewable_draft(tmp_path: Path, capsys) -> None:
     assert output.exists()
     assert '"status": "needs_user_intent"' in output.read_text(encoding="utf-8")
     assert "cli-onboarding" in capsys.readouterr().out
+
+
+def _write_onboarding_draft(
+    root: Path,
+    *,
+    hierarchy: bool = False,
+) -> Path:
+    if hierarchy:
+        top_task, top_run = _write_inspection(
+            root,
+            stem="resolution-top",
+            library="vda_test",
+            cell="vda_top",
+            topology=_hierarchical_topology(),
+            instance_parameters={"XAMP": {}},
+        )
+        child_task, child_run = _write_inspection(
+            root,
+            stem="resolution-child",
+            library="vda_test",
+            cell="vda_child",
+            topology=_flat_topology(),
+            instance_parameters={
+                "MN0": {"Wfg": "1u", "l": "30n"},
+                "RD0": {"r": "20K"},
+            },
+        )
+        draft = build_onboarding_draft(
+            top_task,
+            top_run,
+            draft_id="hierarchy-resolution-draft",
+            child_inspections=[("XAMP", child_task, child_run)],
+        )
+    else:
+        task_path, run_path = _write_inspection(
+            root,
+            stem="resolution-flat",
+            library="vda_test",
+            cell="vda_flat",
+            topology=_flat_topology(),
+            instance_parameters={
+                "MN0": {"Wfg": "1u", "l": "30n"},
+                "RD0": {"r": "20K"},
+            },
+        )
+        draft = build_onboarding_draft(
+            task_path,
+            run_path,
+            draft_id="flat-resolution-draft",
+        )
+    path = root / ("hierarchy-draft.json" if hierarchy else "flat-draft.json")
+    path.write_text(
+        draft.model_dump_json(indent=2, exclude_none=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _draft_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _flat_resolution(draft_path: Path) -> dict:
+    return {
+        "schema_version": 1,
+        "draft_sha256": _draft_sha256(draft_path),
+        "task_id": "resolved-flat-ac",
+        "context_id": "resolved-flat-ac-context",
+        "operation": "simulation.run",
+        "roles": [
+            {"role": "signal.input", "nets": ["IN"]},
+            {"role": "signal.output", "nets": ["OUT"]},
+            {"role": "supply.positive", "nets": ["VDD"]},
+            {"role": "supply.return", "nets": ["VSS"]},
+            {"role": "device.gain", "instances": ["MN0"]},
+            {"role": "load.resistive", "instances": ["RD0"]},
+            {
+                "role": "device.input_gate",
+                "terminals": [
+                    {"instance": "MN0", "terminal": "G", "net": "IN"}
+                ],
+            },
+        ],
+        "instance_parameter_permissions": [
+            {
+                "instance": "MN0",
+                "parameters": ["Wfg"],
+                "modes": ["fixed"],
+            }
+        ],
+        "required_analyses": ["ac"],
+        "metrics": [
+            "output_dc_v",
+            "low_frequency_gain_v_per_v",
+            "bandwidth_3db_hz",
+        ],
+        "generic_simulation": {
+            "schema_version": 1,
+            "sources": [
+                {
+                    "name": "VDD_SRC",
+                    "kind": "voltage",
+                    "positive_node": "VDD",
+                    "negative_node": "0",
+                    "dc_value": 0.9,
+                },
+                {
+                    "name": "VSS_SRC",
+                    "kind": "voltage",
+                    "positive_node": "VSS",
+                    "negative_node": "0",
+                    "dc_value": 0.0,
+                },
+                {
+                    "name": "VIN_SRC",
+                    "kind": "voltage",
+                    "positive_node": "IN",
+                    "negative_node": "0",
+                    "dc_value": 0.35,
+                    "ac_magnitude": 1.0,
+                },
+            ],
+            "loads": [
+                {
+                    "name": "CL0",
+                    "kind": "capacitor",
+                    "positive_node": "OUT",
+                    "negative_node": "0",
+                    "value": 2e-15,
+                }
+            ],
+            "dc_voltage_metrics": [
+                {
+                    "metric": "output_dc_v",
+                    "expression": {
+                        "positive_node": "OUT",
+                        "negative_node": "0",
+                    },
+                }
+            ],
+            "transfer": {
+                "input": {"positive_node": "IN", "negative_node": "0"},
+                "output": {"positive_node": "OUT", "negative_node": "0"},
+            },
+            "netlist_parameter_bindings": [
+                {
+                    "instance": "MN0",
+                    "oa_parameter": "Wfg",
+                    "netlist_parameter": "w",
+                }
+            ],
+        },
+        "analysis": "ac",
+        "ac_sweep": {
+            "start_hz": 1e3,
+            "stop_hz": 1e12,
+            "points_per_decade": 30,
+        },
+        "constraints": [
+            {"metric": "output_dc_v", "relation": ">=", "value": 0.1},
+            {
+                "metric": "low_frequency_gain_v_per_v",
+                "relation": ">=",
+                "value": 1.0,
+            },
+            {
+                "metric": "bandwidth_3db_hz",
+                "relation": ">=",
+                "value": 1e8,
+            },
+        ],
+        "limits": {"max_iterations": 1, "timeout_seconds": 600},
+        "evidence_source": "user_input",
+    }
+
+
+def _hierarchy_resolution(draft_path: Path) -> dict:
+    resolution = _flat_resolution(draft_path)
+    resolution.update(
+        {
+            "task_id": "resolved-hierarchy-tune",
+            "context_id": "resolved-hierarchy-tune-context",
+            "operation": "design.tune",
+            "roles": [
+                {"role": "signal.input", "nets": ["IN"]},
+                {"role": "signal.output", "nets": ["OUT"]},
+                {"role": "supply.positive", "nets": ["VDD"]},
+                {"role": "supply.return", "nets": ["VSS"]},
+                {"role": "block.amplifier", "instances": ["XAMP"]},
+            ],
+            "instance_parameter_permissions": [
+                {
+                    "instance": "XAMP/MN0",
+                    "parameters": ["Wfg"],
+                    "modes": ["search"],
+                },
+                {
+                    "instance": "XAMP/RD0",
+                    "parameters": ["r"],
+                    "modes": ["search"],
+                },
+            ],
+            "required_analyses": ["dc", "ac"],
+            "metrics": [
+                "output_dc_v",
+                "low_frequency_gain_v_per_v",
+                "bandwidth_3db_hz",
+                "gain_bandwidth_product_hz",
+            ],
+            "analysis": None,
+            "analysis_stage_execution": "shared_netlist",
+            "analysis_stages": [
+                {
+                    "id": "bias",
+                    "analysis": "dc",
+                    "constraint_metrics": ["output_dc_v"],
+                },
+                {
+                    "id": "gain-bandwidth",
+                    "analysis": "ac",
+                    "constraint_metrics": [
+                        "low_frequency_gain_v_per_v",
+                        "bandwidth_3db_hz",
+                    ],
+                },
+            ],
+            "candidate_set": {
+                "source": {
+                    "generator": "user_declared",
+                    "id": "resolved-hierarchy-two-point",
+                    "evidence_source": "user_input",
+                },
+                "candidates": [
+                    {
+                        "id": "compact",
+                        "instance_parameter_updates": [
+                            {
+                                "instance": "XAMP/MN0",
+                                "parameters": {"Wfg": "1u"},
+                            },
+                            {
+                                "instance": "XAMP/RD0",
+                                "parameters": {"r": "5K"},
+                            },
+                        ],
+                    },
+                    {
+                        "id": "gain",
+                        "instance_parameter_updates": [
+                            {
+                                "instance": "XAMP/MN0",
+                                "parameters": {"Wfg": "1.1u"},
+                            },
+                            {
+                                "instance": "XAMP/RD0",
+                                "parameters": {"r": "18.5K"},
+                            },
+                        ],
+                    },
+                ],
+            },
+            "objective": {
+                "metric": "gain_bandwidth_product_hz",
+                "goal": "maximize",
+            },
+            "limits": {"max_iterations": 2, "timeout_seconds": 600},
+        }
+    )
+    simulation = resolution["generic_simulation"]
+    simulation["netlist_parameter_bindings"] = [
+        {
+            "instance": "XAMP/MN0",
+            "oa_parameter": "Wfg",
+            "netlist_parameter": "w",
+        },
+        {
+            "instance": "XAMP/RD0",
+            "oa_parameter": "r",
+            "netlist_parameter": "r",
+        },
+    ]
+    simulation["hierarchy_bindings"] = [
+        {
+            "instance": "XAMP",
+            "library": "vda_test",
+            "cell": "vda_child",
+            "view": "schematic",
+            "subcircuit": "vda_child",
+            "terminal_order": ["IN", "OUT", "VDD", "VSS"],
+        }
+    ]
+    return resolution
+
+
+def test_onboarding_resolution_compiles_flat_safe_taskspec(tmp_path: Path) -> None:
+    draft_path = _write_onboarding_draft(tmp_path)
+    resolution = _flat_resolution(draft_path)
+
+    task = resolve_onboarding_draft(draft_path, resolution)
+
+    assert task.operation.value == "simulation.run"
+    assert task.circuit.value == "existing_schematic"
+    assert task.target is not None
+    assert task.target.model_dump() == {
+        "library": "vda_test",
+        "cell": "vda_flat",
+        "view": "schematic",
+    }
+    assert task.design_context is not None
+    assert task.design_context.expected_topology_sha256 is not None
+    assert task.design_context.frozen_instances == ["MN0", "RD0"]
+    assert task.design_context.topology_edits.allowed_operations == []
+    assert task.safety.allow_remote_compute is False
+    assert task.safety.allow_remote_write is False
+    assert task.safety.allowed_library == "vda_test"
+    assert task.safety.replace_existing is False
+    assert build_plan(task).confirmation_token
+
+
+def test_onboarding_resolution_compiles_scoped_hierarchy_tuning(
+    tmp_path: Path,
+) -> None:
+    draft_path = _write_onboarding_draft(tmp_path, hierarchy=True)
+    resolution = _hierarchy_resolution(draft_path)
+
+    task = resolve_onboarding_draft(draft_path, resolution)
+
+    assert task.operation.value == "design.tune"
+    assert task.design_context is not None
+    assert [
+        scope.top_instance for scope in task.design_context.hierarchy_parameter_scopes
+    ] == ["XAMP"]
+    assert task.generic_simulation is not None
+    assert task.generic_simulation.hierarchy_bindings[0].terminal_order == [
+        "IN",
+        "OUT",
+        "VDD",
+        "VSS",
+    ]
+    assert task.candidate_set is not None
+    assert len(task.candidate_set.candidates) == 2
+    assert task.limits.max_iterations == 2
+    assert task.safety.allow_remote_write is False
+    assert build_plan(task).confirmation_token
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda value: value.__setitem__("draft_sha256", "0" * 64),
+            "draft SHA-256",
+        ),
+        (
+            lambda value: value["generic_simulation"]["sources"][0].__setitem__(
+                "positive_node", "MISSING"
+            ),
+            "unknown top-level nodes",
+        ),
+        (
+            lambda value: (
+                value["instance_parameter_permissions"][0].__setitem__(
+                    "parameters", ["not_a_cdf_field"]
+                ),
+                value["generic_simulation"]["netlist_parameter_bindings"][0].__setitem__(
+                    "oa_parameter", "not_a_cdf_field"
+                ),
+            ),
+            "outside the onboarding parameter inventory",
+        ),
+        (
+            lambda value: value["roles"][0].__setitem__(
+                "evidence_source", "software_inference"
+            ),
+            "final role bindings require user_input",
+        ),
+        (
+            lambda value: value["roles"][0].__setitem__("nets", ["MISSING"]),
+            "outside the onboarding topology",
+        ),
+        (
+            lambda value: value["roles"][-1]["terminals"][0].__setitem__(
+                "net", "OUT"
+            ),
+            "terminal binding does not match",
+        ),
+        (
+            lambda value: value.__setitem__("operation", "design.close_loop"),
+            "operation",
+        ),
+        (
+            lambda value: value.__setitem__(
+                "safety", {"allow_remote_compute": True}
+            ),
+            "safety",
+        ),
+        (
+            lambda value: value.__setitem__(
+                "instance_parameter_updates",
+                [{"instance": "MN0", "parameters": {"Wfg": "1.1u"}}],
+            ),
+            "cannot request parameter writes",
+        ),
+    ],
+)
+def test_onboarding_resolution_rejects_unbound_intent(
+    tmp_path: Path,
+    mutation,
+    message: str,
+) -> None:
+    draft_path = _write_onboarding_draft(tmp_path)
+    resolution = _flat_resolution(draft_path)
+    mutation(resolution)
+
+    with pytest.raises(ValueError, match=message):
+        resolve_onboarding_draft(draft_path, resolution)
+
+
+@pytest.mark.parametrize("mutation", ["terminal_order", "child_target"])
+def test_onboarding_resolution_rejects_inconsistent_hierarchy_binding(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    draft_path = _write_onboarding_draft(tmp_path, hierarchy=True)
+    resolution = _hierarchy_resolution(draft_path)
+    binding = resolution["generic_simulation"]["hierarchy_bindings"][0]
+    if mutation == "terminal_order":
+        binding["terminal_order"] = ["IN", "OUT", "VDD", "BIAS"]
+        message = "terminal order does not match"
+    else:
+        binding["cell"] = "vda_other_child"
+        message = "does not match onboarding child"
+
+    with pytest.raises(ValueError, match=message):
+        resolve_onboarding_draft(draft_path, resolution)
+
+
+def test_onboarding_resolution_requires_exact_permission_binding_surface(
+    tmp_path: Path,
+) -> None:
+    draft_path = _write_onboarding_draft(tmp_path)
+    resolution = _flat_resolution(draft_path)
+    resolution["generic_simulation"]["netlist_parameter_bindings"] = []
+
+    with pytest.raises(ValueError, match="permission/binding surface differs"):
+        resolve_onboarding_draft(draft_path, resolution)
+
+
+def test_onboarding_resolve_cli_writes_normal_taskspec(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    draft_path = _write_onboarding_draft(tmp_path)
+    resolution = _flat_resolution(draft_path)
+    resolution_path = tmp_path / "resolution.json"
+    resolution_path.write_text(
+        json.dumps(resolution, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "task.json"
+
+    assert (
+        main(
+            [
+                "onboarding-resolve",
+                str(draft_path),
+                str(resolution_path),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    task = TaskSpec.model_validate_json(output.read_text(encoding="utf-8"))
+    assert task.id == "resolved-flat-ac"
+    assert task.safety.allow_remote_compute is False
+    assert task.safety.allow_remote_write is False
+    assert "resolved-flat-ac" in capsys.readouterr().out

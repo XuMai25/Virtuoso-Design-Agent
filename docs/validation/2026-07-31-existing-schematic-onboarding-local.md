@@ -101,7 +101,7 @@ top task ID 为 `hierarchy-top-inspect-live`，plan token 为 `a7615c7e6b03fda6`
 - 它没有证明深层 hierarchy、派生 CDF、shared-child per-instance override、自动 terminal order、
   executable task generation 或 L5B 规格闭环。
 
-下一道有用的 Gate 是实现显式 onboarding resolution：输入这份 hash-bound draft 和用户/Agent 确认的
-角色、参数权限、sources/loads、metrics、analysis 与 OA→`si` binding；编译器必须逐项证明选择来自
-inventory，生成可通过 `TaskSpec`/planner 的正常任务，并拒绝未解决 placeholder。随后再对首个用户实际
-模块运行一次最小只读 DC/AC；只有需要写参数或改 topology 时才进入正常远端授权与 token 边界。
+后续的显式 onboarding resolution 已在
+[`2026-07-31-existing-schematic-onboarding-resolution-local.md`](2026-07-31-existing-schematic-onboarding-resolution-local.md)
+闭合：它把 hash-bound draft 与确认后的角色、权限、testbench 和 analysis 编译为普通 safe
+TaskSpec。下一道 Gate 转为首个用户实际、非 fixture 模块的最小只读 DC/AC 接入。

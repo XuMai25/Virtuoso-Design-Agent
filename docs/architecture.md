@@ -90,6 +90,16 @@ OA→`si` 参数绑定，也不会把网络名启发式包装成电路真源。�
 `bridge_readback`，规范化、候选和 hash binding 是 `software_inference`。详见
 [`existing-schematic-onboarding.md`](existing-schematic-onboarding.md)。
 
+`vda onboarding-resolve` 是紧随其后的 intent boundary，而不是新 executor。resolution 必须以
+SHA-256 精确绑定 draft，并把最终 role 标为 `user_input`。编译器证明 role 的
+instance/net/pin/terminal 来自 top topology，授权字段来自完整 parameter inventory，且授权字段集合
+与 OA→`si` binding 集合完全相同；typed source/load/transfer 只能使用已见 top net 或 ground。
+一层 hierarchy 必须覆盖全部已 inspect child，并精确匹配 library/cell/view 与 terminal set，但
+terminal order 仍由 resolution 显式给出。target、PDK、topology hash、冻结对象和 child scope 从
+draft 继承，最终交给现有 `TaskSpec` 再做 analysis/metric/candidate/budget 交叉验证。当前只开放
+`simulation.run` 与 `design.tune`；输出安全开关固定关闭，所以编译成功只证明计划契约完整，不产生
+`eda_result` 或新的 `bridge_readback`。
+
 第二个本地纵切为 `existing_schematic simulation.run` 增加了 `generic_simulation`。它只接受
 结构化独立电压/电流源、R/C 负载、单端或差分电压表达式、命名 DC/source-current/MOS OP
 标量，以及显式 OA-CDF→`si` 参数映射；不接受 raw Spectre、SKILL 或 shell 文本。worker

@@ -315,6 +315,7 @@ gain 和 bandwidth。该 policy 是事后校准，下一拓扑不得直接外推
 - `schematic.symbol.generate` 要求精确 source topology/pin 绑定、目标 symbol 不存在、session 设置成功/失败都恢复，并在保存后由独立 worker 重开核对 terminals 与非空 bBox；不提供覆盖或 refresh。
 - 一层 hierarchy 只接受任务显式声明的 top instance、child、subckt 与 terminal order；child 必须是 primitive-only，完整 child topology/placement 与 `si` body 同源。严格 `TOP/CHILD` 路径已能进入原有有限 candidate/checkpoint/winner 状态机，但 shared-child per-instance override、nested hierarchy 与派生 CDF 尚未闭合。
 - 只读 onboarding 编译器把 inspect task/run/plan token/target/PDK 与 topology/placement hash 绑定，保留完整 CDF inventory，但默认冻结结构、授予零参数权限并输出不可执行 testbench。保留的 flat 与一层 hierarchy 真实记录各本地重放 235 个字段；它只生成待确认草案，不代表用户意图或仿真契约已经闭合。
+- onboarding resolution 编译器现能把精确 draft hash 与最终 `user_input` 角色、参数权限、typed testbench、analysis/metric 和有限候选合成为普通 `simulation.run`/`design.tune` TaskSpec。所有对象必须来自草案 inventory，权限与 OA→`si` binding 必须一一相等；输出安全开关仍关闭。flat AC 与一层 child 两点 tuning 的真实历史草案均已生成有效计划，但本轮没有新 OA/Spectre 结果。
 - Bridge 仓库没有修改。正常 master/CDF forward/inverse 已在新 `vda_master_migration_001` 真实验证；下一步若验证自动恢复，必须在另一个 disposable `vda_` cellview 做受控 post-save 失败注入，不能破坏该基线。
 
 详见
@@ -331,6 +332,9 @@ gain 和 bandwidth。该 policy 是事后校准，下一拓扑不得直接外推
 
 只读自动接入的 flat/hierarchy 历史证据重放见
 [`2026-07-31-existing-schematic-onboarding-local.md`](validation/2026-07-31-existing-schematic-onboarding-local.md)。
+
+草案 resolution 到普通 TaskSpec 的本地 Gate 见
+[`2026-07-31-existing-schematic-onboarding-resolution-local.md`](validation/2026-07-31-existing-schematic-onboarding-resolution-local.md)。
 
 ## 升级原则
 
