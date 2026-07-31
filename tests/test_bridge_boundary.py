@@ -7322,6 +7322,236 @@ def test_explicit_parameter_worker_repairs_callback_order_once(monkeypatch) -> N
         )
 
 
+def _hierarchy_parameter_worker_fixture() -> tuple[dict, dict, dict, dict]:
+    from virtuoso_design_agent.topology_delta import (
+        snapshot_from_inspection,
+        topology_fingerprint,
+    )
+
+    top = {
+        "instances": [
+            {
+                "name": "XAMP",
+                "lib": "vda_test",
+                "cell": "vda_child",
+                "view": "symbol",
+                "params": {},
+                "terms": {
+                    "IN": "IN",
+                    "OUT": "OUT",
+                    "VDD": "VDD",
+                    "VSS": "VSS",
+                },
+            }
+        ],
+        "nets": {name: {} for name in ("IN", "OUT", "VDD", "VSS")},
+        "pins": {name: {} for name in ("IN", "OUT", "VDD", "VSS")},
+    }
+    child = {
+        "instances": [
+            {
+                "name": "MN0",
+                "lib": "tsmcN28",
+                "cell": "nch_lvt_mac",
+                "view": "symbol",
+                "params": {"Wfg": "1u", "l": "30n"},
+                "terms": {"D": "OUT", "G": "IN", "S": "VSS", "B": "VSS"},
+            },
+            {
+                "name": "RD0",
+                "lib": "analogLib",
+                "cell": "res",
+                "view": "symbol",
+                "params": {"r": "20K"},
+                "terms": {"PLUS": "VDD", "MINUS": "OUT"},
+            },
+        ],
+        "nets": {name: {} for name in ("IN", "OUT", "VDD", "VSS")},
+        "pins": {name: {} for name in ("IN", "OUT", "VDD", "VSS")},
+    }
+    child_placement = {
+        "sha256": "2" * 64,
+        "counts": {"instances": 2, "pins": 4, "labels": 0, "wires": 0},
+        "label_texts": [],
+        "canonical_geometry": {
+            "instances": [],
+            "pins": [],
+            "labels": [],
+            "wires": [],
+        },
+    }
+    child_summary = bridge_worker._existing_schematic_summary(
+        child,
+        placement=child_placement,
+    )
+    child_topology_sha256 = topology_fingerprint(
+        snapshot_from_inspection(child_summary)
+    )
+    payload = {
+        "circuit": "existing_schematic",
+        "design_context": {
+            "hierarchy_parameter_scopes": [
+                {
+                    "top_instance": "XAMP",
+                    "library": "vda_test",
+                    "cell": "vda_child",
+                    "view": "schematic",
+                    "expected_child_topology_sha256": child_topology_sha256,
+                    "expected_child_placement_sha256": child_placement["sha256"],
+                }
+            ]
+        },
+    }
+    return top, child, child_placement, payload
+
+
+def test_hierarchy_parameter_scope_reads_exact_child_and_rejects_drift(
+    monkeypatch,
+) -> None:
+    top, child, child_placement, payload = _hierarchy_parameter_worker_fixture()
+    monkeypatch.setattr(
+        bridge_worker,
+        "_try_read_schematic",
+        lambda *_args: deepcopy(child),
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_schematic_geometry_bundle",
+        lambda *_args: (None, deepcopy(child_placement)),
+    )
+
+    parameters, scopes = bridge_worker._read_hierarchy_parameter_scope_state(
+        object(),
+        "vda_test",
+        "vda_top",
+        top,
+        payload,
+    )
+
+    assert parameters == {
+        "XAMP/MN0": {"Wfg": "1u", "l": "30n"},
+        "XAMP/RD0": {"r": "20K"},
+    }
+    assert scopes["XAMP"]["state_source"] == "bridge_readback"
+    assert scopes["XAMP"]["binding_source"] == "software_inference"
+
+    drifted_child = deepcopy(child)
+    drifted_child["instances"][0]["terms"]["G"] = "VDD"
+    monkeypatch.setattr(
+        bridge_worker,
+        "_try_read_schematic",
+        lambda *_args: deepcopy(drifted_child),
+    )
+    with pytest.raises(RuntimeError, match="child topology mismatch"):
+        bridge_worker._read_hierarchy_parameter_scope_state(
+            object(),
+            "vda_test",
+            "vda_top",
+            top,
+            payload,
+        )
+
+
+def test_hierarchy_parameter_scope_rejects_shared_child_alias(monkeypatch) -> None:
+    top, child, child_placement, payload = _hierarchy_parameter_worker_fixture()
+    alias = deepcopy(top["instances"][0])
+    alias["name"] = "XAMP2"
+    top["instances"].append(alias)
+    monkeypatch.setattr(
+        bridge_worker,
+        "_try_read_schematic",
+        lambda *_args: deepcopy(child),
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_schematic_geometry_bundle",
+        lambda *_args: (None, deepcopy(child_placement)),
+    )
+
+    with pytest.raises(RuntimeError, match="would affect every alias"):
+        bridge_worker._read_hierarchy_parameter_scope_state(
+            object(),
+            "vda_test",
+            "vda_top",
+            top,
+            payload,
+        )
+
+
+def test_explicit_hierarchy_parameter_write_targets_child_and_rebinds_readback(
+    monkeypatch,
+) -> None:
+    top, child, child_placement, payload = _hierarchy_parameter_worker_fixture()
+    payload["instance_parameter_updates"] = [
+        {"instance": "XAMP/MN0", "parameters": {"Wfg": "1.1u"}},
+        {"instance": "XAMP/RD0", "parameters": {"r": "18.5K"}},
+    ]
+    writes: list[tuple[str, str, str, dict[str, str]]] = []
+    top_placement = deepcopy(child_placement)
+    top_placement["sha256"] = "3" * 64
+
+    monkeypatch.setattr(
+        bridge_worker,
+        "_read_schematic",
+        lambda *_args: deepcopy(top),
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_try_read_schematic",
+        lambda *_args: deepcopy(child),
+    )
+
+    def geometry(_client, _library, cell):
+        placement = child_placement if cell == "vda_child" else top_placement
+        return None, deepcopy(placement)
+
+    monkeypatch.setattr(bridge_worker, "_schematic_geometry_bundle", geometry)
+
+    def set_parameters(_client, library, cell, instance, **parameters):
+        parameters.pop("param_filters")
+        writes.append((library, cell, instance, dict(parameters)))
+        target = next(item for item in child["instances"] if item["name"] == instance)
+        target["params"].update(parameters)
+        return dict(parameters)
+
+    monkeypatch.setattr(
+        bridge_worker,
+        "_set_target_instance_params",
+        set_parameters,
+    )
+    monkeypatch.setattr(
+        bridge_worker,
+        "_verify_instance_parameter_values",
+        lambda _client, _library, _cell, expected: deepcopy(expected),
+    )
+
+    result = _apply_explicit_instance_parameters(
+        object(),
+        "vda_test",
+        "vda_top",
+        payload,
+    )
+
+    assert writes == [
+        ("vda_test", "vda_child", "MN0", {"Wfg": "1.1u"}),
+        ("vda_test", "vda_child", "RD0", {"r": "18.5K"}),
+    ]
+    assert result["before_instance_parameters"] == {
+        "XAMP/MN0": {"Wfg": "1u"},
+        "XAMP/RD0": {"r": "20K"},
+    }
+    assert result["confirmed_instance_parameters"] == {
+        "XAMP/MN0": {"Wfg": "1.1u"},
+        "XAMP/RD0": {"r": "18.5K"},
+    }
+    assert result["readback"]["instance_parameters"]["XAMP/MN0"]["Wfg"] == (
+        "1.1u"
+    )
+    assert result["readback"]["hierarchy_parameter_scopes"]["XAMP"][
+        "state_source"
+    ] == "bridge_readback"
+
+
 def test_targeted_cdf_verification_does_not_use_reader_length_or_empty_filters(
     monkeypatch,
 ) -> None:

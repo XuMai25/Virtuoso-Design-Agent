@@ -289,12 +289,18 @@ flat/hierarchical 两条 OA→`si`→Spectre DC/AC 的 output DC、供电电流�
 相对差 `4.09e-15`。raw `si` netlist 保留为 `eda_result`，为无扩展名 include 增加 Spectre language
 header 的 `.scs` envelope 单独标为 `software_inference`。
 
-这仍不是 L5B closure。派生 CDF、深层 hierarchy、跨层 child 参数寻址/写回、并发人工 editor、
-mismatch/Monte Carlo 仍是边界；本次 PVT 也只是 winner 的两个声明条件，不是 foundry signoff
-corner set。下一项优先工作不是再换拓扑重复证明层级仿真，而是让用户给定层级模块中的 child 实例
-参数可以通过显式路径进入现有 candidate/checkpoint/winner-verification 状态机，并在一个小域里证明
-跨层参数 OA 回读、`si` 绑定、不可行恢复和最终写回。之后应在用户首次提供的实际单模块拓扑上按
-规格选择最小必要 analysis/PVT；不再为已知域增加随机候选。
+显式一层 child 参数路径随后也已接入既有 candidate/checkpoint 状态机。`XAMP/MN0.Wfg` 和
+`XAMP/RD0.r` 的 scope 同时绑定 child target、topology 与 placement；三点 live Gate 逐点完成 child
+CDF 写回/回读、`si` subckt 的 `Wfg→w`/`r→r` 一致性、shared-netlist DC/AC 和最终 winner 写回。
+最高 GBW 候选因 gain 门失败而未被选中，两个可行点中写回 `1.1u/18.5K`。本地故障注入另覆盖
+全不可行恢复和 child 写后 checkpoint resume。详见
+[`validation/2026-07-31-existing-schematic-hierarchical-parameter-tuning-live.md`](validation/2026-07-31-existing-schematic-hierarchical-parameter-tuning-live.md)。
+
+这仍不是 L5B closure。派生 CDF、深层 hierarchy、shared-child per-instance override、并发人工 editor、
+mismatch/Monte Carlo 仍是边界；本次 PVT 也只是 winner 的两个声明条件，不是 foundry signoff corner
+set。下一项优先工作是在用户首次提供的非夹具单模块上复用已闭合的 topology/parameter/hierarchy
+控制器，按真实规格选择最小必要 analysis 与可选 PVT。只有真实模块需要时，才新增多个唯一 child
+scope、output/OP metric 映射、per-instance override 或派生 CDF；不再为已知三点域增加随机候选。
 
 ## L5C：物理实现闭环
 
@@ -342,7 +348,7 @@ corner set。下一项优先工作不是再换拓扑重复证明层级仿真，�
   -> 用户拓扑 design_context（角色/冻结边界/参数权限/analysis/metric/topology-delta scope 本地 Gate 已通过）
   -> existing_schematic 通用 OA→si DC/AC testbench/结果契约（本地 + nominal 共栅级联 live Gate 已通过；未增加电路专用 executor）
   -> 通用 instance-parameter candidate/checkpoint/writeback（本地可行/不可行/预算/中断恢复、单字段 OA-write 与多字段 objective live 已通过）
-  -> 理论诊断 + topology/parameter refinement controller（单-delta nominal flat AC、staged DC/AC/transient/noise 与 shared-netlist live；winner-only 两条件 PVT live；三个 independent alternative 的 OA round-trip/checkpoint/winner writeback live；最多七个 alternative 本地通过；一层 primitive-child symbol/OA/si/DC/AC live 已通过；跨层 child 参数调优待做）
+  -> 理论诊断 + topology/parameter refinement controller（单-delta nominal flat AC、staged DC/AC/transient/noise 与 shared-netlist live；winner-only 两条件 PVT live；三个 independent alternative 的 OA round-trip/checkpoint/winner writeback live；最多七个 alternative 本地通过；一层 primitive-child symbol/OA/si/DC/AC 与 scoped child 参数调优 live 已通过）
   -> L5B 单模块闭环
   -> layout/DRC/LVS/PEX Gate
 ```

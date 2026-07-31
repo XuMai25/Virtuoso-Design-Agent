@@ -19,6 +19,11 @@ from pydantic import (
 
 from .design_context import DesignContext, validate_topology_delta_scope
 from .generic_simulation import GenericOaSimulationSpec
+from .instance_path import (
+    INSTANCE_PATH_PATTERN,
+    is_scoped_instance_path,
+    split_instance_path,
+)
 from .netlist_preview import NetlistPreviewSpec
 from .topology_delta import TopologyDeltaExecutionSpec
 
@@ -194,7 +199,7 @@ class SchematicSymbolGenerationSpec(StrictModel):
 class InstanceParameterUpdate(StrictModel):
     """Exact CDF/OA parameter strings requested for one existing instance."""
 
-    instance: StrictStr = Field(min_length=1)
+    instance: StrictStr = Field(pattern=INSTANCE_PATH_PATTERN)
     parameters: dict[StrictStr, StrictStr]
 
     @field_validator("parameters")
@@ -210,7 +215,7 @@ class InstanceParameterUpdate(StrictModel):
 class InstanceParameterSweep(StrictModel):
     """One finite raw CDF/OA string dimension for bounded tuning."""
 
-    instance: StrictStr = Field(min_length=1)
+    instance: StrictStr = Field(pattern=INSTANCE_PATH_PATTERN)
     parameter: StrictStr = Field(min_length=1)
     values: list[StrictStr] = Field(min_length=1, max_length=32)
 
@@ -2584,6 +2589,41 @@ class TaskSpec(StrictModel):
                 (binding.instance, binding.oa_parameter)
                 for binding in self.generic_simulation.netlist_parameter_bindings
             }
+            hierarchy_scopes = {
+                scope.top_instance: scope
+                for scope in self.design_context.hierarchy_parameter_scopes
+            }
+            hierarchy_bindings = {
+                binding.instance: binding
+                for binding in self.generic_simulation.hierarchy_bindings
+            }
+            for top_instance, scope in hierarchy_scopes.items():
+                binding = hierarchy_bindings.get(top_instance)
+                if binding is None:
+                    raise ValueError(
+                        "generic simulation hierarchy parameter scope requires a "
+                        f"matching hierarchy binding for {top_instance!r}"
+                    )
+                if (binding.library, binding.cell, binding.view) != (
+                    scope.library,
+                    scope.cell,
+                    scope.view,
+                ):
+                    raise ValueError(
+                        "generic simulation hierarchy binding disagrees with the "
+                        f"parameter scope for {top_instance!r}"
+                    )
+            scoped_bound_instances = sorted(
+                instance
+                for instance, _parameter in bound_fields
+                if is_scoped_instance_path(instance)
+                and split_instance_path(instance)[0] not in hierarchy_scopes
+            )
+            if scoped_bound_instances:
+                raise ValueError(
+                    "scoped generic netlist bindings require matching design-context "
+                    "hierarchy parameter scopes: " + ", ".join(scoped_bound_instances)
+                )
             unpermitted_bindings = sorted(bound_fields - permitted_fields)
             if unpermitted_bindings:
                 raise ValueError(
@@ -3375,6 +3415,46 @@ class TaskSpec(StrictModel):
                 raise ValueError(
                     "instance_parameter_updates cannot repeat an instance"
                 )
+        scoped_parameter_instances = {
+            update.instance
+            for update in self.instance_parameter_updates
+            if is_scoped_instance_path(update.instance)
+        }
+        scoped_parameter_instances.update(
+            sweep.instance
+            for sweep in self.instance_parameter_space
+            if is_scoped_instance_path(sweep.instance)
+        )
+        if self.candidate_set is not None:
+            scoped_parameter_instances.update(
+                update.instance
+                for update in self.candidate_set.candidates[0].instance_parameter_updates
+                if is_scoped_instance_path(update.instance)
+            )
+        if scoped_parameter_instances:
+            if self.circuit is not CircuitKind.EXISTING_SCHEMATIC:
+                raise ValueError(
+                    "one-level scoped instance parameters require "
+                    "circuit='existing_schematic'"
+                )
+            if self.design_context is None:
+                raise ValueError(
+                    "one-level scoped instance parameters require design_context"
+                )
+            scope_names = {
+                scope.top_instance
+                for scope in self.design_context.hierarchy_parameter_scopes
+            }
+            missing_scopes = sorted(
+                instance
+                for instance in scoped_parameter_instances
+                if split_instance_path(instance)[0] not in scope_names
+            )
+            if missing_scopes:
+                raise ValueError(
+                    "scoped instance parameters require matching hierarchy parameter "
+                    "scopes: " + ", ".join(missing_scopes)
+                )
         if self.instance_parameter_space:
             if self.operation not in _TUNING_OPERATIONS:
                 raise ValueError(
@@ -3638,6 +3718,37 @@ class TaskSpec(StrictModel):
                     "design_context supports inspect, transform, parameter, simulation, "
                     "or tuning operations"
                 )
+            if (
+                self.design_context.hierarchy_parameter_scopes
+                and self.circuit is not CircuitKind.EXISTING_SCHEMATIC
+            ):
+                raise ValueError(
+                    "hierarchy parameter scopes require circuit='existing_schematic'"
+                )
+            if self.design_context.hierarchy_parameter_scopes:
+                assert self.target is not None
+                cross_library_scopes = sorted(
+                    scope.top_instance
+                    for scope in self.design_context.hierarchy_parameter_scopes
+                    if scope.library != self.target.library
+                )
+                if cross_library_scopes:
+                    raise ValueError(
+                        "one-level hierarchy parameter scopes currently require the "
+                        "child to use the target design library: "
+                        + ", ".join(cross_library_scopes)
+                    )
+                recursive_scopes = sorted(
+                    scope.top_instance
+                    for scope in self.design_context.hierarchy_parameter_scopes
+                    if (scope.library, scope.cell)
+                    == (self.target.library, self.target.cell)
+                )
+                if recursive_scopes:
+                    raise ValueError(
+                        "hierarchy parameter scopes cannot recursively target the top "
+                        "cell: " + ", ".join(recursive_scopes)
+                    )
             if (
                 self.operation is Operation.DESIGN_CLOSE_LOOP
                 and self.create_if_missing

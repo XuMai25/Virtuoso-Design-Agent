@@ -1,0 +1,214 @@
+{
+  "schema_version": 1,
+  "id": "hierarchy-child-parameter-tune-live",
+  "operation": "design.tune",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_l5b_hier_top_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis_stage_execution": "shared_netlist",
+  "analysis_stages": [
+    {
+      "id": "bias",
+      "analysis": "dc",
+      "constraint_metrics": ["output_dc_v"]
+    },
+    {
+      "id": "gain-bandwidth",
+      "analysis": "ac",
+      "constraint_metrics": [
+        "low_frequency_gain_v_per_v",
+        "bandwidth_3db_hz"
+      ]
+    }
+  ],
+  "ac_sweep": {
+    "start_hz": 1000.0,
+    "stop_hz": 1000000000000.0,
+    "points_per_decade": 30,
+    "reference_points": 5,
+    "max_reference_variation_db": 0.5
+  },
+  "design_context": {
+    "schema_version": 1,
+    "id": "hierarchy-one-level-child-parameter-tuning",
+    "topology_origin": "existing_oa",
+    "expected_topology_sha256": "d558b41830cfe50cb7c344bde426346c5236e3a89c5af3a77ed0a863d9d5fd6a",
+    "roles": [
+      {"role": "signal.input", "nets": ["IN"]},
+      {"role": "signal.output", "nets": ["OUT"]},
+      {"role": "supply.positive", "nets": ["VDD"]},
+      {"role": "supply.return", "nets": ["VSS"]},
+      {"role": "block.amplifier", "instances": ["XAMP"]}
+    ],
+    "hierarchy_parameter_scopes": [
+      {
+        "top_instance": "XAMP",
+        "library": "vb_pdk_smoke",
+        "cell": "vda_l5b_hier_child_001",
+        "view": "schematic",
+        "expected_child_topology_sha256": "a0bb019a7c81a0d4422e90dca0b5ade814d265cd41544ef245104cb3c7856a41",
+        "expected_child_placement_sha256": "b59661b2047674c4a7da81b56fe745a76bac56082e08bdd92d0e7d2f6433ea35"
+      }
+    ],
+    "instance_parameter_permissions": [
+      {
+        "instance": "XAMP/MN0",
+        "parameters": ["Wfg"],
+        "modes": ["search"]
+      },
+      {
+        "instance": "XAMP/RD0",
+        "parameters": ["r"],
+        "modes": ["search"]
+      }
+    ],
+    "frozen_instances": ["XAMP"],
+    "frozen_nets": ["IN", "OUT", "VDD", "VSS"],
+    "frozen_pins": ["IN", "OUT", "VDD", "VSS"],
+    "required_analyses": ["dc", "ac"],
+    "metrics": [
+      "output_dc_v",
+      "supply_current_a",
+      "low_frequency_gain_v_per_v",
+      "low_frequency_gain_db",
+      "bandwidth_3db_hz",
+      "gain_bandwidth_product_hz",
+      "unity_gain_frequency_hz"
+    ]
+  },
+  "generic_simulation": {
+    "schema_version": 1,
+    "sources": [
+      {
+        "name": "VDD_SRC",
+        "kind": "voltage",
+        "positive_node": "VDD",
+        "negative_node": "0",
+        "dc_value": 0.9
+      },
+      {
+        "name": "VSS_SRC",
+        "kind": "voltage",
+        "positive_node": "VSS",
+        "negative_node": "0",
+        "dc_value": 0.0
+      },
+      {
+        "name": "VIN_SRC",
+        "kind": "voltage",
+        "positive_node": "IN",
+        "negative_node": "0",
+        "dc_value": 0.35,
+        "ac_magnitude": 1.0,
+        "ac_phase_deg": 0.0
+      }
+    ],
+    "loads": [
+      {
+        "name": "CL0",
+        "kind": "capacitor",
+        "positive_node": "OUT",
+        "negative_node": "0",
+        "value": 2e-15
+      }
+    ],
+    "dc_voltage_metrics": [
+      {
+        "metric": "output_dc_v",
+        "expression": {"positive_node": "OUT", "negative_node": "0"}
+      }
+    ],
+    "dc_current_metrics": [
+      {"metric": "supply_current_a", "source": "VDD_SRC"}
+    ],
+    "transfer": {
+      "input": {"positive_node": "IN", "negative_node": "0"},
+      "output": {"positive_node": "OUT", "negative_node": "0"}
+    },
+    "netlist_parameter_bindings": [
+      {
+        "instance": "XAMP/MN0",
+        "oa_parameter": "Wfg",
+        "netlist_parameter": "w"
+      },
+      {
+        "instance": "XAMP/RD0",
+        "oa_parameter": "r",
+        "netlist_parameter": "r"
+      }
+    ],
+    "hierarchy_bindings": [
+      {
+        "instance": "XAMP",
+        "library": "vb_pdk_smoke",
+        "cell": "vda_l5b_hier_child_001",
+        "view": "schematic",
+        "subcircuit": "vda_l5b_hier_child_001",
+        "terminal_order": ["IN", "OUT", "VDD", "VSS"]
+      }
+    ]
+  },
+  "candidate_set": {
+    "source": {
+      "generator": "user_declared",
+      "id": "hierarchy-child-w-rd-three-point",
+      "evidence_source": "user_input"
+    },
+    "candidates": [
+      {
+        "id": "compact-load",
+        "instance_parameter_updates": [
+          {"instance": "XAMP/MN0", "parameters": {"Wfg": "1u"}},
+          {"instance": "XAMP/RD0", "parameters": {"r": "5K"}}
+        ]
+      },
+      {
+        "id": "reference-load",
+        "instance_parameter_updates": [
+          {"instance": "XAMP/MN0", "parameters": {"Wfg": "1u"}},
+          {"instance": "XAMP/RD0", "parameters": {"r": "20K"}}
+        ]
+      },
+      {
+        "id": "gbw-load",
+        "instance_parameter_updates": [
+          {"instance": "XAMP/MN0", "parameters": {"Wfg": "1.1u"}},
+          {"instance": "XAMP/RD0", "parameters": {"r": "18.5K"}}
+        ]
+      }
+    ]
+  },
+  "constraints": [
+    {"metric": "output_dc_v", "relation": ">=", "value": 0.1},
+    {"metric": "output_dc_v", "relation": "<=", "value": 0.8},
+    {
+      "metric": "low_frequency_gain_v_per_v",
+      "relation": ">=",
+      "value": 4.0
+    },
+    {
+      "metric": "bandwidth_3db_hz",
+      "relation": ">=",
+      "value": 1000000000.0
+    }
+  ],
+  "objective": {
+    "metric": "gain_bandwidth_product_hz",
+    "goal": "maximize"
+  },
+  "limits": {
+    "max_iterations": 3,
+    "timeout_seconds": 600
+  },
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  }
+}

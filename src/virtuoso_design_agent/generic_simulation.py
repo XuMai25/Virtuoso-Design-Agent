@@ -13,6 +13,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 
+from .instance_path import INSTANCE_PATH_PATTERN
+
 
 _IDENTIFIER_PATTERN = r"^[A-Za-z_][A-Za-z0-9_$]*$"
 _NODE_PATTERN = r"^(?:0|[A-Za-z_][A-Za-z0-9_$!.]*)$"
@@ -147,7 +149,7 @@ class GenericOperatingPointMetric(_StrictModel):
 
 
 class GenericNetlistParameterBinding(_StrictModel):
-    instance: StrictStr = Field(pattern=_IDENTIFIER_PATTERN)
+    instance: StrictStr = Field(pattern=INSTANCE_PATH_PATTERN)
     oa_parameter: StrictStr = Field(pattern=_IDENTIFIER_PATTERN)
     netlist_parameter: StrictStr = Field(pattern=_IDENTIFIER_PATTERN)
 

@@ -30,12 +30,17 @@ from virtuoso_design_agent.characterization import (
     MOS_CHARGE_DERIVATIVE_NAMES,
     enumerate_mos_characterization_points,
 )
-from virtuoso_design_agent.design_context import DesignContext, audit_design_context
+from virtuoso_design_agent.design_context import (
+    DesignContext,
+    HierarchyParameterScope,
+    audit_design_context,
+)
 from virtuoso_design_agent.generic_simulation import (
     GenericOaSimulationSpec,
     GenericVoltageExpression,
     render_generic_oa_testbench,
 )
+from virtuoso_design_agent.instance_path import split_instance_path
 from virtuoso_design_agent.models import (
     AnalysisStageSpec,
     DeviceCharacterizationSpec,
@@ -2306,6 +2311,14 @@ def _apply_explicit_instance_parameters(
         )
 
     current_parameters = _instance_parameters_from_schematic(current)
+    scoped_parameters, _scope_readbacks = _read_hierarchy_parameter_scope_state(
+        client,
+        library,
+        cell,
+        current,
+        payload,
+    )
+    current_parameters.update(scoped_parameters)
     missing_instances = sorted(set(requested) - set(current_parameters))
     if missing_instances:
         raise RuntimeError(
@@ -2314,11 +2327,17 @@ def _apply_explicit_instance_parameters(
         )
     applied_parameters: dict[str, dict[str, str]] = {}
     for instance, parameters in requested.items():
-        applied = _set_target_instance_params(
-            client,
+        target_library, target_cell, target_instance = _parameter_target_location(
+            payload,
             library,
             cell,
             instance,
+        )
+        applied = _set_target_instance_params(
+            client,
+            target_library,
+            target_cell,
+            target_instance,
             param_filters=None,
             **parameters,
         )
@@ -2348,19 +2367,29 @@ def _apply_explicit_instance_parameters(
     repair_applied_parameters: dict[str, dict[str, str]] = {}
     repair_reason: str | None = None
     try:
-        confirmed = _verify_instance_parameter_values(
-            client, library, cell, applied_parameters
+        confirmed = _verify_scoped_instance_parameter_values(
+            client,
+            library,
+            cell,
+            payload,
+            applied_parameters,
         )
     except ParameterReadbackMismatch as error:
         repair_reason = str(error)
         for instance, parameters in requested.items():
+            target_library, target_cell, target_instance = _parameter_target_location(
+                payload,
+                library,
+                cell,
+                instance,
+            )
             repaired: dict[str, str] = {}
             for name, value in parameters.items():
                 applied = _set_target_instance_params(
                     client,
-                    library,
-                    cell,
-                    instance,
+                    target_library,
+                    target_cell,
+                    target_instance,
                     param_filters=None,
                     **{name: value},
                 )
@@ -2378,8 +2407,12 @@ def _apply_explicit_instance_parameters(
                 "Bridge ordered repair changed the applied CDF parameter mapping"
             )
         try:
-            confirmed = _verify_instance_parameter_values(
-                client, library, cell, applied_parameters
+            confirmed = _verify_scoped_instance_parameter_values(
+                client,
+                library,
+                cell,
+                payload,
+                applied_parameters,
             )
         except ParameterReadbackMismatch as replay_error:
             raise ParameterReadbackMismatch(
@@ -2393,6 +2426,22 @@ def _apply_explicit_instance_parameters(
             _assert_common_source(updated, payload["profile"])
         elif payload["circuit"] == "differential_pair":
             _assert_differential_pair(updated, payload["profile"])
+    readback = summarize(updated)
+    if payload["circuit"] == "existing_schematic":
+        pin_geometry, placement = _schematic_geometry_bundle(client, library, cell)
+        readback = _existing_schematic_summary(
+            updated,
+            pin_geometry=pin_geometry,
+            placement=placement,
+        )
+        readback = _attach_hierarchy_parameter_scope_state(
+            client,
+            library,
+            cell,
+            updated,
+            payload,
+            readback,
+        )
     return {
         "requested_instance_parameters": requested,
         "requested_evidence_source": "user_input",
@@ -2408,7 +2457,7 @@ def _apply_explicit_instance_parameters(
         ),
         "ordered_replay_reason": repair_reason,
         "ordered_replay_applied_instance_parameters": repair_applied_parameters,
-        "readback": summarize(updated),
+        "readback": readback,
     }
 
 
@@ -2422,8 +2471,14 @@ def _attach_targeted_parameter_verification(
     if not payload.get("verify_instance_parameters"):
         return summary
     expected = _expected_instance_parameters(payload)
-    summary["confirmed_instance_parameters"] = _verify_instance_parameter_values(
-        client, library, cell, expected
+    summary["confirmed_instance_parameters"] = (
+        _verify_scoped_instance_parameter_values(
+            client,
+            library,
+            cell,
+            payload,
+            expected,
+        )
     )
     summary["confirmed_evidence_source"] = "bridge_readback"
     summary["confirmation_method"] = "independent_targeted_cdf_equality"
@@ -8382,6 +8437,230 @@ def _fresh_existing_schematic_summary(
     )
 
 
+def _hierarchy_parameter_scope_specs(
+    payload: dict[str, Any],
+) -> list[HierarchyParameterScope]:
+    raw_context = payload.get("design_context")
+    if not isinstance(raw_context, dict):
+        return []
+    raw_scopes = raw_context.get("hierarchy_parameter_scopes", [])
+    if not isinstance(raw_scopes, list):
+        raise RuntimeError("hierarchy parameter scopes are not structured")
+    return [HierarchyParameterScope.model_validate(item) for item in raw_scopes]
+
+
+def _read_hierarchy_parameter_scope_state(
+    client,
+    top_library: str,
+    top_cell: str,
+    top_schematic: dict[str, Any],
+    payload: dict[str, Any],
+) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, Any]]]:
+    """Bind exact one-level child graphs and expose scoped CDF readback."""
+
+    specs = _hierarchy_parameter_scope_specs(payload)
+    if not specs:
+        return {}, {}
+    top_instances = {
+        str(item.get("name")): item for item in top_schematic.get("instances", [])
+    }
+    scoped_parameters: dict[str, dict[str, str]] = {}
+    scope_readbacks: dict[str, dict[str, Any]] = {}
+    for spec in specs:
+        top_instance = top_instances.get(spec.top_instance)
+        if top_instance is None:
+            raise RuntimeError(
+                "hierarchy parameter scope references missing top instance "
+                f"{spec.top_instance!r}"
+            )
+        if (
+            str(top_instance.get("lib")) != spec.library
+            or str(top_instance.get("cell")) != spec.cell
+        ):
+            raise RuntimeError(
+                "hierarchy parameter scope master mismatch for "
+                f"{spec.top_instance}: OA={top_instance.get('lib')}/"
+                f"{top_instance.get('cell')}, declared={spec.library}/{spec.cell}"
+            )
+        aliased_instances = sorted(
+            name
+            for name, item in top_instances.items()
+            if str(item.get("lib")) == spec.library
+            and str(item.get("cell")) == spec.cell
+        )
+        if aliased_instances != [spec.top_instance]:
+            raise RuntimeError(
+                "hierarchy parameter child schematic is shared by top instances "
+                f"{aliased_instances}; a scoped child OA write would affect every "
+                "alias"
+            )
+        child = _try_read_schematic(client, spec.library, spec.cell)
+        if child is None:
+            raise RuntimeError(
+                "hierarchy parameter child schematic does not exist: "
+                f"{spec.library}/{spec.cell}/schematic"
+            )
+        pin_geometry, placement = _schematic_geometry_bundle(
+            client,
+            spec.library,
+            spec.cell,
+        )
+        child_summary = _existing_schematic_summary(
+            child,
+            pin_geometry=pin_geometry,
+            placement=placement,
+        )
+        topology_sha256 = topology_fingerprint(
+            snapshot_from_inspection(child_summary)
+        )
+        placement_sha256 = child_summary.get("placement", {}).get("sha256")
+        if topology_sha256 != spec.expected_child_topology_sha256:
+            raise RuntimeError(
+                "hierarchy parameter child topology mismatch for "
+                f"{spec.top_instance}: expected={spec.expected_child_topology_sha256}, "
+                f"actual={topology_sha256}"
+            )
+        if placement_sha256 != spec.expected_child_placement_sha256:
+            raise RuntimeError(
+                "hierarchy parameter child placement mismatch for "
+                f"{spec.top_instance}: expected={spec.expected_child_placement_sha256}, "
+                f"actual={placement_sha256}"
+            )
+        child_parameters = _instance_parameters_from_schematic(child)
+        scoped_names: list[str] = []
+        for local_instance, parameters in child_parameters.items():
+            scoped_name = f"{spec.top_instance}/{local_instance}"
+            if scoped_name in scoped_parameters:
+                raise RuntimeError(
+                    f"duplicate hierarchy parameter path {scoped_name!r}"
+                )
+            scoped_parameters[scoped_name] = parameters
+            scoped_names.append(scoped_name)
+        scope_readbacks[spec.top_instance] = {
+            "top_instance": spec.top_instance,
+            "top_target": {
+                "library": top_library,
+                "cell": top_cell,
+                "view": "schematic",
+            },
+            "child_target": {
+                "library": spec.library,
+                "cell": spec.cell,
+                "view": spec.view,
+            },
+            "child_topology_sha256": topology_sha256,
+            "child_placement_sha256": placement_sha256,
+            "scoped_instances": sorted(scoped_names),
+            "state_source": "bridge_readback",
+            "binding_source": "software_inference",
+        }
+    return scoped_parameters, scope_readbacks
+
+
+def _attach_hierarchy_parameter_scope_state(
+    client,
+    library: str,
+    cell: str,
+    schematic: dict[str, Any],
+    payload: dict[str, Any],
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    scoped_parameters, scope_readbacks = _read_hierarchy_parameter_scope_state(
+        client,
+        library,
+        cell,
+        schematic,
+        payload,
+    )
+    if not scope_readbacks:
+        return summary
+    instance_parameters = dict(summary.get("instance_parameters") or {})
+    collisions = sorted(set(instance_parameters) & set(scoped_parameters))
+    if collisions:
+        raise RuntimeError(
+            "hierarchy parameter paths collide with top-level instance names: "
+            + ", ".join(collisions)
+        )
+    instance_parameters.update(scoped_parameters)
+    summary["instance_parameters"] = instance_parameters
+    summary["hierarchy_parameter_scopes"] = scope_readbacks
+    return summary
+
+
+def _hierarchy_parameter_scope_by_top_instance(
+    payload: dict[str, Any],
+) -> dict[str, HierarchyParameterScope]:
+    return {
+        spec.top_instance: spec
+        for spec in _hierarchy_parameter_scope_specs(payload)
+    }
+
+
+def _parameter_target_location(
+    payload: dict[str, Any],
+    top_library: str,
+    top_cell: str,
+    instance_path: str,
+) -> tuple[str, str, str]:
+    top_instance, local_instance = split_instance_path(instance_path)
+    if top_instance is None:
+        return top_library, top_cell, local_instance
+    scope = _hierarchy_parameter_scope_by_top_instance(payload).get(top_instance)
+    if scope is None:
+        raise RuntimeError(
+            f"no hierarchy parameter scope declared for {instance_path!r}"
+        )
+    return scope.library, scope.cell, local_instance
+
+
+def _verify_scoped_instance_parameter_values(
+    client,
+    library: str,
+    cell: str,
+    payload: dict[str, Any],
+    expected: dict[str, dict[str, str]],
+) -> dict[str, dict[str, str]]:
+    if not _hierarchy_parameter_scope_specs(payload) and all(
+        split_instance_path(instance_path)[0] is None
+        for instance_path in expected
+    ):
+        return _verify_instance_parameter_values(
+            client,
+            library,
+            cell,
+            expected,
+        )
+    top = _read_schematic(client, library, cell)
+    _read_hierarchy_parameter_scope_state(client, library, cell, top, payload)
+    grouped: dict[tuple[str, str], dict[str, dict[str, str]]] = {}
+    scoped_names: dict[tuple[str, str, str], str] = {}
+    for instance_path, parameters in expected.items():
+        target_library, target_cell, local_instance = _parameter_target_location(
+            payload,
+            library,
+            cell,
+            instance_path,
+        )
+        grouped.setdefault((target_library, target_cell), {})[
+            local_instance
+        ] = parameters
+        scoped_names[(target_library, target_cell, local_instance)] = instance_path
+    confirmed: dict[str, dict[str, str]] = {}
+    for (target_library, target_cell), local_expected in grouped.items():
+        local_confirmed = _verify_instance_parameter_values(
+            client,
+            target_library,
+            target_cell,
+            local_expected,
+        )
+        for local_instance, parameters in local_confirmed.items():
+            instance_path = scoped_names[
+                (target_library, target_cell, local_instance)
+            ]
+            confirmed[instance_path] = parameters
+    return confirmed
+
+
 def generate_existing_schematic_symbol(payload: dict[str, Any]) -> dict[str, Any]:
     settings = payload.get("symbol_generation")
     if not isinstance(settings, dict):
@@ -8623,6 +8902,14 @@ def inspect_existing_schematic(payload: dict[str, Any]) -> dict[str, Any]:
                 }
     if partial_prefix_state is not None:
         summary["partial_prefix_state"] = partial_prefix_state
+    summary = _attach_hierarchy_parameter_scope_state(
+        client,
+        library,
+        cell,
+        summary_data,
+        payload,
+        summary,
+    )
     raw_symbol_generation = payload.get("symbol_generation")
     if isinstance(raw_symbol_generation, dict):
         summary["symbol_source_contract"] = _symbol_source_contract(
@@ -11684,6 +11971,8 @@ def _parse_existing_schematic_netlist(
 
     topology_checks: list[dict[str, Any]] = []
     hierarchy_checks: list[dict[str, Any]] = []
+    scoped_oa_instances: dict[str, dict[str, Any]] = {}
+    scoped_parsed_instances: dict[str, dict[str, Any]] = {}
     for name in sorted(expected_names):
         oa_instance = oa_instances[name]
         hierarchy_binding = hierarchy_by_instance.get(name)
@@ -11765,6 +12054,18 @@ def _parse_existing_schematic_netlist(
                 child_parsed,
                 scope=hierarchy_binding.subcircuit,
             )
+            for child_instance_name in sorted(set(child_instances) & set(child_parsed)):
+                scoped_name = f"{name}/{child_instance_name}"
+                if scoped_name in scoped_oa_instances:
+                    raise RuntimeError(
+                        f"duplicate scoped si instance identity {scoped_name!r}"
+                    )
+                scoped_oa_instances[scoped_name] = child_instances[
+                    child_instance_name
+                ]
+                scoped_parsed_instances[scoped_name] = child_parsed[
+                    child_instance_name
+                ]
             child_summary = (hierarchy_summaries or {}).get(child_key)
             if child_summary is None:
                 child_summary = _existing_schematic_summary(child)
@@ -11842,14 +12143,24 @@ def _parse_existing_schematic_netlist(
 
     parameter_checks: list[dict[str, str]] = []
     for binding in settings.netlist_parameter_bindings:
-        oa_instance = oa_instances.get(binding.instance)
-        if oa_instance is None or binding.instance not in parsed_instances:
+        scoped = split_instance_path(binding.instance)[0] is not None
+        oa_instance = (
+            scoped_oa_instances.get(binding.instance)
+            if scoped
+            else oa_instances.get(binding.instance)
+        )
+        parsed_instance = (
+            scoped_parsed_instances.get(binding.instance)
+            if scoped
+            else parsed_instances.get(binding.instance)
+        )
+        if oa_instance is None or parsed_instance is None:
             raise RuntimeError(
                 "generic netlist parameter binding references missing instance "
                 f"{binding.instance!r}"
             )
         oa_parameters = oa_instance.get("params") or {}
-        netlist_parameters = parsed_instances[binding.instance]["parameters"]
+        netlist_parameters = parsed_instance["parameters"]
         if binding.oa_parameter not in oa_parameters:
             raise RuntimeError(
                 "OA readback is missing bound parameter "
@@ -12649,6 +12960,64 @@ def _generate_oa_netlist(
                 hierarchy_schematics,
                 hierarchy_summaries,
             )
+            hierarchy_binding_by_instance = {
+                binding.instance: binding for binding in settings.hierarchy_bindings
+            }
+            parameter_scope_checks: list[dict[str, Any]] = []
+            for scope in _hierarchy_parameter_scope_specs(payload):
+                binding = hierarchy_binding_by_instance.get(scope.top_instance)
+                if binding is None:
+                    raise RuntimeError(
+                        "hierarchy parameter scope has no matching si binding for "
+                        f"{scope.top_instance!r}"
+                    )
+                if (binding.library, binding.cell, binding.view) != (
+                    scope.library,
+                    scope.cell,
+                    scope.view,
+                ):
+                    raise RuntimeError(
+                        "hierarchy parameter scope disagrees with si binding for "
+                        f"{scope.top_instance!r}"
+                    )
+                child_summary = hierarchy_summaries.get(
+                    (scope.library, scope.cell)
+                )
+                if child_summary is None:
+                    raise RuntimeError(
+                        "hierarchy parameter child readback is missing after si for "
+                        f"{scope.top_instance!r}"
+                    )
+                topology_sha256 = topology_fingerprint(
+                    snapshot_from_inspection(child_summary)
+                )
+                placement_sha256 = child_summary.get("placement", {}).get("sha256")
+                if topology_sha256 != scope.expected_child_topology_sha256:
+                    raise RuntimeError(
+                        "hierarchy parameter child topology drifted before si binding: "
+                        f"{scope.top_instance}"
+                    )
+                if placement_sha256 != scope.expected_child_placement_sha256:
+                    raise RuntimeError(
+                        "hierarchy parameter child placement drifted before si binding: "
+                        f"{scope.top_instance}"
+                    )
+                parameter_scope_checks.append(
+                    {
+                        "top_instance": scope.top_instance,
+                        "child": {
+                            "library": scope.library,
+                            "cell": scope.cell,
+                            "view": scope.view,
+                        },
+                        "child_topology_sha256": topology_sha256,
+                        "child_placement_sha256": placement_sha256,
+                        "state_source": "bridge_readback",
+                        "si_binding_source": "eda_result",
+                        "consistency_source": "software_inference",
+                    }
+                )
+            parsed["hierarchy_parameter_scopes"] = parameter_scope_checks
         except Exception as exc:
             raise RuntimeError(
                 f"{exc}; si netlist retained at {remote_netlist} "
@@ -15576,12 +15945,21 @@ def simulate_existing_schematic(
         pin_geometry, placement = _schematic_geometry_bundle(
             client, library, cell
         )
+        inspection_summary = _existing_schematic_summary(
+            schematic,
+            pin_geometry=pin_geometry,
+            placement=placement,
+        )
+        inspection_summary = _attach_hierarchy_parameter_scope_state(
+            client,
+            library,
+            cell,
+            schematic,
+            payload,
+            inspection_summary,
+        )
         context_audit = audit_design_context(
-            _existing_schematic_summary(
-                schematic,
-                pin_geometry=pin_geometry,
-                placement=placement,
-            ),
+            inspection_summary,
             context,
         )
         if _bundle_cache is not None:

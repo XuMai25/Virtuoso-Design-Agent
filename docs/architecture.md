@@ -200,9 +200,22 @@ OA→`si`→Spectre DC/AC 与 flat reference 的六项核心标量最坏相对�
 产生的无扩展名 raw netlist 被原样保留并标为 `eda_result`；为避免 Spectre 把被 include 文件按 SPICE
 解析，VDA 只生成一个确定性的 `.scs` envelope，在首行加入 `simulator lang=spectre`。raw/envelope
 路径、大小、SHA-256 和变换名分开记录，envelope 生成属于 `software_inference`，不会把包装后的文件
-冒充原始 `si` 输出。CDF 派生关系（例如 fingers/multiplicity 的总宽度）、跨层 child 参数写回、
-更深 hierarchy、并发人工 editor、mismatch/Monte Carlo 仍未闭合。现有反相器、共源和差分对 worker
-继续作为真实执行后端和回归基线，而不是未来能力边界。
+冒充原始 `si` 输出。
+
+同一 hierarchy binding 现已扩展出显式 `HierarchyParameterScope`。`TOP/CHILD` 参数路径必须先把
+top instance、child library/cell/schematic 以及 child topology/placement SHA 全部绑定；context permission、
+candidate update 与 OA-CDF→`si` parameter binding 还必须落在同一 scope。worker 把路径解析为 child
+target/local instance，写前、写后和恢复时都直接读取 child CDF；generic parser 则把 subckt primitive
+重新映射到 scoped path。每次 `si` 后再次回读 child topology/placement，防止 netlisting 期间漂移。
+同一个可写 child 被 top 多次实例化时硬拒绝，因为修改 child OA 会影响全部引用，不能包装成单个 top
+instance 的 override。2026-07-31 三点 live Gate 已证明 `XAMP/MN0.Wfg` 与 `XAMP/RD0.r` 逐点写回、
+定向 OA 回读、`Wfg→w`/`r→r` 网表一致性、DC/AC 规格判定与 winner child 写回；最高 GBW 的
+`1u/5K` 因 gain 不足被拒绝，最终选择 `1.1u/18.5K`。详见
+[`validation/2026-07-31-existing-schematic-hierarchical-parameter-tuning-live.md`](validation/2026-07-31-existing-schematic-hierarchical-parameter-tuning-live.md)。
+
+CDF 派生关系（例如 fingers/multiplicity 的总宽度）、更深 hierarchy、shared-child per-instance override、
+并发人工 editor、mismatch/Monte Carlo 仍未闭合。现有反相器、共源和差分对 worker 继续作为真实执行
+后端和回归基线，而不是未来能力边界。
 
 `analysis` 与电路参数分离。反相器省略时解析为 `transient`，共源级和差分对省略时解析为 `dc`；AC 必须显式声明 `analysis: "ac"` 以及 `ac_sweep.start_hz/stop_hz`。差分对电源抑制使用独立的 `analysis: "psrr"`，复用 AC sweep 契约但运行差模、VDD 注入和 VSS 注入三条路径；只有该 analysis 可选声明位于 sweep 内的 `evaluation_stop_hz`，用于计算从 start 到该频率的带限最差 PSRR。固定多 analysis 质量门使用 `analysis: "quality"`，并要求 `ac_sweep`、`linearity_sweep`、`noise_sweep` 同时存在。扫频点密度、低频参考点数、参考窗变化、PSRR 评估频带、线性度窗口和噪声频带都属于任务与 plan token。这样换 analysis 或改变指标定义不会复用旧 token，也不会把默认设置伪装成 `user_input`。
 

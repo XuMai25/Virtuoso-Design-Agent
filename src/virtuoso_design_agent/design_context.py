@@ -23,6 +23,7 @@ from pydantic import (
     model_validator,
 )
 
+from .instance_path import INSTANCE_PATH_PATTERN, split_instance_path
 from .topology_delta import (
     AddInstanceOperation,
     AddNetOperation,
@@ -104,7 +105,7 @@ class DesignRoleBinding(_StrictModel):
 
 
 class InstanceParameterPermission(_StrictModel):
-    instance: StrictStr = Field(min_length=1)
+    instance: StrictStr = Field(pattern=INSTANCE_PATH_PATTERN)
     parameters: list[StrictStr] = Field(min_length=1, max_length=64)
     modes: list[ParameterMode] = Field(
         default_factory=lambda: ["fixed", "search"],
@@ -118,6 +119,17 @@ class InstanceParameterPermission(_StrictModel):
         if any(not item for item in value) or len(value) != len(set(value)):
             raise ValueError(f"{info.field_name} must contain unique nonempty values")
         return sorted(value)
+
+
+class HierarchyParameterScope(_StrictModel):
+    """One exact top-instance to child-schematic boundary allowed for CDF access."""
+
+    top_instance: StrictStr = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$")
+    library: StrictStr = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$")
+    cell: StrictStr = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$")
+    view: Literal["schematic"] = "schematic"
+    expected_child_topology_sha256: StrictStr = Field(pattern=_SHA256_PATTERN)
+    expected_child_placement_sha256: StrictStr = Field(pattern=_SHA256_PATTERN)
 
 
 class SemanticParameterPermission(_StrictModel):
@@ -187,6 +199,10 @@ class DesignContext(_StrictModel):
         default_factory=list,
         max_length=64,
     )
+    hierarchy_parameter_scopes: list[HierarchyParameterScope] = Field(
+        default_factory=list,
+        max_length=32,
+    )
     semantic_parameter_permissions: list[SemanticParameterPermission] = Field(
         default_factory=list,
         max_length=64,
@@ -232,6 +248,33 @@ class DesignContext(_StrictModel):
         if len(instance_permissions) != len(set(instance_permissions)):
             raise ValueError(
                 "design context cannot repeat an instance parameter permission"
+            )
+        scope_instances = [
+            scope.top_instance for scope in self.hierarchy_parameter_scopes
+        ]
+        if len(scope_instances) != len(set(scope_instances)):
+            raise ValueError(
+                "design context cannot repeat a hierarchy parameter scope"
+            )
+        scope_targets = [
+            (scope.library, scope.cell) for scope in self.hierarchy_parameter_scopes
+        ]
+        if len(scope_targets) != len(set(scope_targets)):
+            raise ValueError(
+                "design context hierarchy parameter scopes cannot alias the same "
+                "child schematic through multiple top instances"
+            )
+        scope_names = set(scope_instances)
+        unknown_scoped_permissions = sorted(
+            permission.instance
+            for permission in self.instance_parameter_permissions
+            if (top_instance := split_instance_path(permission.instance)[0]) is not None
+            and top_instance not in scope_names
+        )
+        if unknown_scoped_permissions:
+            raise ValueError(
+                "design context scoped parameter permissions require matching "
+                "hierarchy_parameter_scopes: " + ", ".join(unknown_scoped_permissions)
             )
         semantic_permissions = [
             permission.parameter
@@ -343,6 +386,7 @@ class DesignContextAudit(_StrictModel):
     topology_sha256: str = Field(pattern=_SHA256_PATTERN)
     resolved_roles: dict[str, list[str]]
     verified_instance_parameter_fields: list[str]
+    verified_hierarchy_parameter_scopes: list[str] = Field(default_factory=list)
     frozen_object_counts: dict[str, int]
     evidence_source: Literal["software_inference"] = "software_inference"
 
@@ -357,6 +401,21 @@ def _instance_parameters_from_readback(
         nested = readback.get(key)
         if isinstance(nested, Mapping):
             result = _instance_parameters_from_readback(nested)
+            if result:
+                return result
+    return {}
+
+
+def _hierarchy_parameter_scopes_from_readback(
+    readback: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    raw = readback.get("hierarchy_parameter_scopes")
+    if isinstance(raw, Mapping):
+        return raw
+    for key in ("readback", "bridge_schematic"):
+        nested = readback.get(key)
+        if isinstance(nested, Mapping):
+            result = _hierarchy_parameter_scopes_from_readback(nested)
             if result:
                 return result
     return {}
@@ -429,12 +488,60 @@ def audit_design_context(
             )
 
     readback_parameters = _instance_parameters_from_readback(readback)
+    hierarchy_scope_readbacks = _hierarchy_parameter_scopes_from_readback(readback)
+    verified_hierarchy_scopes: list[str] = []
+    for scope in context.hierarchy_parameter_scopes:
+        raw_scope = hierarchy_scope_readbacks.get(scope.top_instance)
+        if not isinstance(raw_scope, Mapping):
+            raise DesignContextError(
+                "design context lacks verified hierarchy scope "
+                f"{scope.top_instance!r}"
+            )
+        child_target = raw_scope.get("child_target")
+        if not isinstance(child_target, Mapping) or (
+            child_target.get("library"),
+            child_target.get("cell"),
+            child_target.get("view"),
+        ) != (scope.library, scope.cell, scope.view):
+            raise DesignContextError(
+                "design context hierarchy scope child target mismatch for "
+                f"{scope.top_instance!r}"
+            )
+        if (
+            raw_scope.get("child_topology_sha256")
+            != scope.expected_child_topology_sha256
+        ):
+            raise DesignContextError(
+                "design context hierarchy scope child topology mismatch for "
+                f"{scope.top_instance!r}"
+            )
+        if (
+            raw_scope.get("child_placement_sha256")
+            != scope.expected_child_placement_sha256
+        ):
+            raise DesignContextError(
+                "design context hierarchy scope child placement mismatch for "
+                f"{scope.top_instance!r}"
+            )
+        if raw_scope.get("state_source") != "bridge_readback":
+            raise DesignContextError(
+                "design context hierarchy scope lacks bridge_readback state for "
+                f"{scope.top_instance!r}"
+            )
+        verified_hierarchy_scopes.append(scope.top_instance)
     verified_fields: list[str] = []
     for permission in context.instance_parameter_permissions:
-        if permission.instance not in instances:
+        top_instance, _local_instance = split_instance_path(permission.instance)
+        if top_instance is None:
+            if permission.instance not in instances:
+                raise DesignContextError(
+                    "design context parameter permission references missing instance "
+                    f"{permission.instance!r}"
+                )
+        elif top_instance not in hierarchy_scope_readbacks:
             raise DesignContextError(
-                "design context parameter permission references missing instance "
-                f"{permission.instance!r}"
+                "design context parameter permission lacks verified hierarchy scope "
+                f"{top_instance!r}"
             )
         raw_fields = readback_parameters.get(permission.instance)
         if not isinstance(raw_fields, Mapping):
@@ -458,6 +565,7 @@ def audit_design_context(
         topology_sha256=fingerprint,
         resolved_roles=dict(sorted(resolved_roles.items())),
         verified_instance_parameter_fields=sorted(verified_fields),
+        verified_hierarchy_parameter_scopes=sorted(verified_hierarchy_scopes),
         frozen_object_counts={
             "instances": len(context.frozen_instances),
             "nets": len(context.frozen_nets),

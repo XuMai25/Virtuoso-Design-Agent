@@ -1311,7 +1311,12 @@ def test_generic_si_parser_proves_explicit_one_level_hierarchy() -> None:
             "instance": "XAMP",
             "oa_parameter": "scale",
             "netlist_parameter": "scale",
-        }
+        },
+        {
+            "instance": "XAMP/MN0",
+            "oa_parameter": "w",
+            "netlist_parameter": "w",
+        },
     ]
     raw_settings["hierarchy_bindings"] = [
         {
@@ -1373,6 +1378,21 @@ XAMP (IN OUT VDD VSS) vda_child scale=2
     )
     assert parsed["hierarchy_bindings"][0]["child_placement_sha256"] == "1" * 64
     assert parsed["parameter_bindings"][0]["oa_value"] == "2"
+    assert parsed["parameter_bindings"][1] == {
+        "instance": "XAMP/MN0",
+        "oa_parameter": "w",
+        "netlist_parameter": "w",
+        "oa_value": "1u",
+        "netlist_value": "1u",
+    }
+
+    with pytest.raises(RuntimeError, match="OA/si parameter mismatch"):
+        bridge_worker._parse_existing_schematic_netlist(
+            netlist.replace("w=1u", "w=2u"),
+            top,
+            GenericOaSimulationSpec.model_validate(raw_settings),
+            {("vda_test", "vda_child"): child},
+        )
 
     with pytest.raises(RuntimeError, match="node mismatch"):
         bridge_worker._parse_existing_schematic_netlist(
