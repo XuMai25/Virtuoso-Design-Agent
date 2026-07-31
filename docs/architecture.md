@@ -96,9 +96,20 @@ instance/net/pin/terminal 来自 top topology，授权字段来自完整 paramet
 与 OA→`si` binding 集合完全相同；typed source/load/transfer 只能使用已见 top net 或 ground。
 一层 hierarchy 必须覆盖全部已 inspect child，并精确匹配 library/cell/view 与 terminal set，但
 terminal order 仍由 resolution 显式给出。target、PDK、topology hash、冻结对象和 child scope 从
-draft 继承，最终交给现有 `TaskSpec` 再做 analysis/metric/candidate/budget 交叉验证。当前只开放
-`simulation.run` 与 `design.tune`；输出安全开关固定关闭，所以编译成功只证明计划契约完整，不产生
-`eda_result` 或新的 `bridge_readback`。
+draft 继承，最终交给现有 `TaskSpec` 再做 analysis/metric/candidate/budget 交叉验证。现在还可编译
+`design.close_loop`：resolution 提供最多三个 user-confirmed 局部 alternative、一个显式
+`TopologyEditPolicy` 和可选 winner-only verification。编译器把每个 forward delta 真正应用到 draft
+snapshot，再执行声明 inverse 并要求精确恢复；baseline/alternative 的 frozen 集合由各自 topology
+减去 mutable scope 派生。新增实例只接受 fixed CDF update，且 permission/update/binding surface
+必须相等。alternative 默认继承 baseline testbench 并只追加新增实例 binding；端口、激励或 transfer
+改变时才接受完整替代 `generic_simulation`。输出安全开关固定关闭，所以编译成功只证明计划契约完整，
+不产生 `eda_result` 或新的 `bridge_readback`。
+
+winner-only analysis/metric 必须已出现在 resolution 的 required/optional intent 中；现有
+`TaskSpec` 再检查 sweep、供电绑定、PVT condition、candidate OA write 和完整 topology×parameter
+预算。底层直接 TaskSpec 仍允许最多七个 alternative；onboarding convenience layer 保守限制为三个，
+不收窄已有低层能力。该编译纵切没有新增 controller 或 worker，详见
+[`validation/2026-07-31-onboarding-refinement-resolution-local.md`](validation/2026-07-31-onboarding-refinement-resolution-local.md)。
 
 获得任务级远端授权后，编译结果仍须作为普通任务显式打开 compute/write 并重新 plan，不能沿用
 resolution 阶段的 token。2026-07-31 首个全新拓扑 live Gate 在非覆盖创建的 PMOS 有源负载共源级上

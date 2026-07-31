@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from virtuoso_design_agent.onboarding import build_onboarding_draft
 from virtuoso_design_agent.onboarding_resolution import resolve_onboarding_draft
 from virtuoso_design_agent.planner import build_plan
 from virtuoso_design_agent.topology_delta import (
+    compile_topology_delta,
     snapshot_from_inspection,
     topology_fingerprint,
 )
@@ -725,6 +727,215 @@ def _hierarchy_resolution(draft_path: Path) -> dict:
     return resolution
 
 
+def _close_loop_resolution(draft_path: Path) -> dict:
+    resolution = _flat_resolution(draft_path)
+    contract = compile_topology_delta(
+        "onboarding-source-degeneration",
+        snapshot_from_inspection(_flat_topology()),
+        [
+            {"operation": "add_net", "net": {"name": "NSRC"}},
+            {
+                "operation": "reconnect_terminal",
+                "instance": "MN0",
+                "terminal": "S",
+                "expected_net": "VSS",
+                "net": "NSRC",
+            },
+            {
+                "operation": "add_instance",
+                "instance": {
+                    "name": "RS0",
+                    "master": {
+                        "library": "analogLib",
+                        "cell": "res",
+                        "view": "symbol",
+                    },
+                    "terminals": {"PLUS": "NSRC", "MINUS": "VSS"},
+                },
+            },
+        ],
+    )
+    baseline_simulation = resolution["generic_simulation"]
+    baseline_simulation["dynamic_analysis"] = {
+        "stimulus_source": "VIN_SRC",
+        "power_source": "VDD_SRC",
+    }
+    resolution.update(
+        {
+            "task_id": "resolved-flat-refinement",
+            "context_id": "resolved-flat-refinement-baseline",
+            "operation": "design.close_loop",
+            "instance_parameter_permissions": [
+                {
+                    "instance": "MN0",
+                    "parameters": ["Wfg"],
+                    "modes": ["search"],
+                }
+            ],
+            "required_analyses": ["dc", "ac"],
+            "optional_analyses": ["transient", "noise"],
+            "metrics": [
+                "output_dc_v",
+                "low_frequency_gain_v_per_v",
+                "bandwidth_3db_hz",
+                "gain_bandwidth_product_hz",
+                "max_thd_percent",
+                "integrated_input_referred_noise_uv_rms",
+            ],
+            "analysis": None,
+            "analysis_stage_execution": "shared_netlist",
+            "analysis_stages": [
+                {
+                    "id": "bias",
+                    "analysis": "dc",
+                    "constraint_metrics": ["output_dc_v"],
+                },
+                {
+                    "id": "gain-bandwidth",
+                    "analysis": "ac",
+                    "constraint_metrics": [
+                        "low_frequency_gain_v_per_v",
+                        "bandwidth_3db_hz",
+                    ],
+                },
+            ],
+            "candidate_set": {
+                "source": {
+                    "generator": "user_declared",
+                    "id": "onboarding-two-point",
+                    "evidence_source": "user_input",
+                },
+                "candidates": [
+                    {
+                        "id": "nominal",
+                        "instance_parameter_updates": [
+                            {"instance": "MN0", "parameters": {"Wfg": "1u"}}
+                        ],
+                        "testbench_overrides": {
+                            "sources": {"VIN_SRC": {"dc_value": 0.35}},
+                            "loads": {"CL0": 2e-15},
+                        },
+                    },
+                    {
+                        "id": "wider",
+                        "instance_parameter_updates": [
+                            {"instance": "MN0", "parameters": {"Wfg": "1.1u"}}
+                        ],
+                        "testbench_overrides": {
+                            "sources": {"VIN_SRC": {"dc_value": 0.37}},
+                            "loads": {"CL0": 2e-15},
+                        },
+                    },
+                ],
+            },
+            "objective": {
+                "metric": "gain_bandwidth_product_hz",
+                "goal": "maximize",
+            },
+            "topology_edits": {
+                "allowed_operations": [
+                    "add_instance",
+                    "remove_instance",
+                    "add_net",
+                    "remove_net",
+                    "reconnect_terminal",
+                ],
+                "mutable_instances": ["MN0", "RS0"],
+                "mutable_nets": ["NSRC"],
+                "mutable_pins": [],
+                "max_operations_per_delta": 3,
+            },
+            "topology_alternatives": [
+                {
+                    "id": "source-degenerated",
+                    "context_id": "resolved-flat-refinement-degenerated",
+                    "topology_delta": {
+                        "direction": "forward",
+                        "contract": contract.model_dump(mode="json"),
+                    },
+                    "roles": [
+                        *resolution["roles"],
+                        {"role": "device.degeneration", "instances": ["RS0"]},
+                    ],
+                    "added_instance_parameter_permissions": [
+                        {
+                            "instance": "RS0",
+                            "parameters": ["r"],
+                            "modes": ["fixed"],
+                        }
+                    ],
+                    "added_netlist_parameter_bindings": [
+                        {
+                            "instance": "RS0",
+                            "oa_parameter": "r",
+                            "netlist_parameter": "r",
+                        }
+                    ],
+                    "instance_parameter_updates": [
+                        {"instance": "RS0", "parameters": {"r": "1K"}}
+                    ],
+                    "evidence_source": "user_input",
+                }
+            ],
+            "winner_verification": {
+                "analysis_stages": [
+                    {
+                        "id": "winner-linearity",
+                        "analysis": "transient",
+                        "constraint_metrics": ["max_thd_percent"],
+                    },
+                    {
+                        "id": "winner-noise",
+                        "analysis": "noise",
+                        "constraint_metrics": [
+                            "integrated_input_referred_noise_uv_rms"
+                        ],
+                    },
+                ],
+                "constraints": [
+                    {
+                        "metric": "max_thd_percent",
+                        "relation": "<=",
+                        "value": 5.0,
+                    },
+                    {
+                        "metric": "integrated_input_referred_noise_uv_rms",
+                        "relation": "<=",
+                        "value": 2000.0,
+                    },
+                ],
+                "linearity_sweep": {
+                    "frequency_hz": 1e6,
+                    "amplitudes_v": [0.005, 0.02],
+                    "points_per_cycle": 64,
+                },
+                "noise_sweep": {
+                    "start_hz": 1e3,
+                    "stop_hz": 1e9,
+                    "points_per_decade": 20,
+                },
+            },
+            "limits": {"max_iterations": 4, "timeout_seconds": 600},
+        }
+    )
+    return resolution
+
+
+def _replace_alternative_with_loadless_simulation(resolution: dict) -> None:
+    alternative = resolution["topology_alternatives"][0]
+    simulation = deepcopy(resolution["generic_simulation"])
+    simulation["loads"] = []
+    simulation["netlist_parameter_bindings"].append(
+        {
+            "instance": "RS0",
+            "oa_parameter": "r",
+            "netlist_parameter": "r",
+        }
+    )
+    alternative["generic_simulation"] = simulation
+    alternative["added_netlist_parameter_bindings"] = []
+
+
 def test_onboarding_resolution_compiles_flat_safe_taskspec(tmp_path: Path) -> None:
     draft_path = _write_onboarding_draft(tmp_path)
     resolution = _flat_resolution(draft_path)
@@ -777,6 +988,85 @@ def test_onboarding_resolution_compiles_scoped_hierarchy_tuning(
     assert build_plan(task).confirmation_token
 
 
+def test_onboarding_resolution_compiles_topology_and_winner_only_quality(
+    tmp_path: Path,
+) -> None:
+    draft_path = _write_onboarding_draft(tmp_path)
+    resolution = _close_loop_resolution(draft_path)
+
+    task = resolve_onboarding_draft(draft_path, resolution)
+
+    assert task.operation.value == "design.close_loop"
+    assert task.topology_refinement is not None
+    alternatives = task.topology_refinement.resolved_alternatives()
+    assert [item.id for item in alternatives] == ["source-degenerated"]
+    alternative = alternatives[0]
+    assert alternative.design_context.expected_topology_sha256 == (
+        alternative.topology_delta.contract.expected_after_sha256
+    )
+    assert task.design_context is not None
+    assert task.design_context.frozen_instances == ["RD0"]
+    assert alternative.design_context.frozen_instances == ["RD0"]
+    assert alternative.instance_parameter_updates[0].parameters == {"r": "1K"}
+    assert task.winner_verification is not None
+    assert [
+        stage.analysis.value for stage in task.winner_verification.analysis_stages
+    ] == ["transient", "noise"]
+    assert task.safety.allow_remote_compute is False
+    assert task.safety.allow_remote_write is False
+    assert task.limits.max_iterations == 4
+    assert build_plan(task).confirmation_token
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda value: value["topology_alternatives"][0]["topology_delta"][
+                "contract"
+            ].__setitem__("expected_after_sha256", "0" * 64),
+            "exact draft-bound round trip",
+        ),
+        (
+            lambda value: value["topology_edits"].__setitem__(
+                "mutable_instances", ["RS0"]
+            ),
+            "edit scope",
+        ),
+        (
+            lambda value: value["topology_alternatives"][0]["roles"][-1].__setitem__(
+                "instances", ["MISSING"]
+            ),
+            "outside the onboarding topology",
+        ),
+        (
+            lambda value: value["topology_alternatives"][0][
+                "instance_parameter_updates"
+            ][0]["parameters"].__setitem__("r", "2K")
+            or value["topology_alternatives"][0][
+                "instance_parameter_updates"
+            ][0]["parameters"].__setitem__("extra", "1"),
+            "permission/update surface differs",
+        ),
+        (
+            _replace_alternative_with_loadless_simulation,
+            "unknown loads",
+        ),
+    ],
+)
+def test_onboarding_resolution_rejects_unsafe_topology_or_quality_intent(
+    tmp_path: Path,
+    mutation,
+    message: str,
+) -> None:
+    draft_path = _write_onboarding_draft(tmp_path)
+    resolution = _close_loop_resolution(draft_path)
+    mutation(resolution)
+
+    with pytest.raises(ValueError, match=message):
+        resolve_onboarding_draft(draft_path, resolution)
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
@@ -819,7 +1109,7 @@ def test_onboarding_resolution_compiles_scoped_hierarchy_tuning(
         ),
         (
             lambda value: value.__setitem__("operation", "design.close_loop"),
-            "operation",
+            "requires a topology alternative",
         ),
         (
             lambda value: value.__setitem__(

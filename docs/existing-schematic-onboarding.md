@@ -133,9 +133,13 @@ Agent 或用户先在 resolution 文件中逐项完成：
 - source、load、transfer 和 voltage metric 只能引用 top net 或 ground `0`；
 - operating-point metric 只能引用已见 top instance；
 - 每个已 inspect 的 child 都必须有 exact library/cell/view 和完整 terminal-order binding；
+- `design.close_loop` 的每个 delta 必须以 draft topology 为输入并由声明 inverse 精确恢复；
+- baseline 与 alternative role/source/load/OP 对象必须分别存在于对应的本地重算 topology；
+- 新增实例 CDF 只能作为 fixed update，permission、update 与 OA→`si` binding 必须精确相等；
+- winner-only analysis/metric 必须已经进入 resolution 的 required/optional intent；
 - 最终对象必须能通过现有 `TaskSpec` 与 planner 的全部交叉验证。
 
-当前 resolution 只开放 `simulation.run` 与 `design.tune`。输出任务固定
+resolution 开放 `simulation.run`、`design.tune` 与 `design.close_loop`。输出任务固定
 `allow_remote_compute=false`、`allow_remote_write=false`、`replace_existing=false`，并把
 `allowed_library` 固定为草案 target library；它可以直接 plan，但不能直接真实执行。需要远端动作时，
 必须在生成后的普通任务上显式修改安全开关并重新取得 plan token。
@@ -144,6 +148,52 @@ Agent 或用户先在 resolution 文件中逐项完成：
 
 正常 `TaskSpec`、planner、token、OA 写后回读、`si` 一致性和 checkpoint 仍是最终执行边界。
 onboarding 草案不会绕过任何一项，也不会削弱无 `design_context` 的独立 `parameters.apply` 能力。
+
+## 局部拓扑与 winner-only quality
+
+`design.close_loop` resolution 只需在普通参数/analysis intent 之外增加紧凑字段：
+
+```json
+{
+  "operation": "design.close_loop",
+  "topology_edits": {
+    "allowed_operations": ["add_instance", "remove_instance", "reconnect_terminal"],
+    "mutable_instances": ["MN0", "RS0"]
+  },
+  "topology_alternatives": [
+    {
+      "id": "source-degenerated",
+      "context_id": "module-source-degenerated",
+      "topology_delta": {"direction": "forward", "contract": "<compiled contract>"},
+      "roles": ["<roles bound to the after topology>"],
+      "added_instance_parameter_permissions": [
+        {"instance": "RS0", "parameters": ["r"], "modes": ["fixed"]}
+      ],
+      "added_netlist_parameter_bindings": [
+        {"instance": "RS0", "oa_parameter": "r", "netlist_parameter": "r"}
+      ],
+      "instance_parameter_updates": [
+        {"instance": "RS0", "parameters": {"r": "1K"}}
+      ]
+    }
+  ],
+  "winner_verification": {
+    "analysis_stages": ["<transient/noise or required quality stages>"],
+    "constraints": ["<winner-only constraints>"]
+  }
+}
+```
+
+示例中的字符串占位只说明字段形状，不是可执行 JSON。实际 contract 必须由
+`vda topology-compile` 绑定 draft snapshot；roles 仍是完整 typed objects。如果 alternative 没有改变
+测试端口、激励、load、transfer 或 OP metric，它自动继承 baseline `generic_simulation`，这里只追加
+新增实例 binding。若这些语义确实变化，则改为提供完整 alternative `generic_simulation`，不能同时
+使用追加 binding。onboarding layer 最多接受三个 alternative；直接手写普通 TaskSpec 的原七项上限
+和 Bridge 低层能力保持不变。
+
+所有 topology×candidate 点只执行 resolution 声明的 nominal stages。`winner_verification` 消费
+nominal 真实 winner，才运行 linearity/noise 或显式 operating conditions；失败时沿用现有恢复与
+withhold 语义。编译动作本身不运行 EDA，也不自动打开 PVT。
 
 ## 候选级 testbench 微调
 
@@ -168,4 +218,6 @@ W/L 写回。任务与完整边界见
 - 当前 object count 沿用 `design_context` 的 instance/net/pin 各 128 上限；
 - child scope 仅支持同库、唯一引用的一层 schematic；
 - 不推断深层 hierarchy、派生 CDF、per-instance override 或 `si` terminal order；
-- resolution 当前不生成 topology refinement、winner-only PVT 或 `design.close_loop`；这些只有真实模块需要时才扩展。
+- topology refinement 不能删除或替换已绑定的一层 child；新增 hierarchy 与 child-scope 改写尚未开放；
+- 新增实例 CDF 名在本地来自 `user_input`，必须在真实 delta 写后由 Bridge readback 再确认；
+- 编译器已生成 topology refinement 与 winner-only quality/PVT 契约，但尚未为该新入口单独执行 live EDA；首次 live integration 留给真实用户模块，而不是再造一个测试电路。

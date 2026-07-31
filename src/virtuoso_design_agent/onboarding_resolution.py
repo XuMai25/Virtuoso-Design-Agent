@@ -14,8 +14,12 @@ from .design_context import (
     DesignContext,
     DesignRoleBinding,
     InstanceParameterPermission,
+    TopologyEditPolicy,
 )
-from .generic_simulation import GenericOaSimulationSpec
+from .generic_simulation import (
+    GenericNetlistParameterBinding,
+    GenericOaSimulationSpec,
+)
 from .models import (
     AcSweep,
     AnalysisKind,
@@ -24,6 +28,9 @@ from .models import (
     AtomicCandidateSet,
     CircuitKind,
     ExecutionLimits,
+    ExistingSchematicTopologyAlternativeSpec,
+    ExistingSchematicTopologyRefinementSpec,
+    ExistingSchematicWinnerVerificationSpec,
     InstanceParameterSweep,
     InstanceParameterUpdate,
     LinearitySweep,
@@ -34,11 +41,52 @@ from .models import (
     TaskSpec,
 )
 from .onboarding import ExistingSchematicOnboardingDraft
-from .topology_delta import topology_fingerprint
+from .topology_delta import (
+    TopologyDeltaError,
+    TopologyDeltaExecutionSpec,
+    TopologySnapshot,
+    apply_topology_delta_execution,
+    topology_fingerprint,
+)
 
 
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+
+class OnboardingTopologyAlternative(_StrictModel):
+    """One compact, user-confirmed local alternative derived from the draft."""
+
+    schema_version: Literal[1] = 1
+    id: StrictStr = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    context_id: StrictStr = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    topology_delta: TopologyDeltaExecutionSpec
+    roles: list[DesignRoleBinding] = Field(min_length=1, max_length=64)
+    added_instance_parameter_permissions: list[InstanceParameterPermission] = Field(
+        default_factory=list,
+        max_length=32,
+    )
+    generic_simulation: GenericOaSimulationSpec | None = None
+    added_netlist_parameter_bindings: list[GenericNetlistParameterBinding] = Field(
+        default_factory=list,
+        max_length=32,
+    )
+    instance_parameter_updates: list[InstanceParameterUpdate] = Field(
+        default_factory=list,
+        max_length=32,
+    )
+    evidence_source: Literal["user_input"] = "user_input"
+
+    @model_validator(mode="after")
+    def require_forward_delta(self) -> "OnboardingTopologyAlternative":
+        if self.topology_delta.direction != "forward":
+            raise ValueError("onboarding topology alternative requires a forward delta")
+        if self.generic_simulation is not None and self.added_netlist_parameter_bindings:
+            raise ValueError(
+                "onboarding topology alternative must use either a complete generic "
+                "simulation or inherited simulation bindings, not both"
+            )
+        return self
 
 
 class ExistingSchematicOnboardingResolution(_StrictModel):
@@ -48,7 +96,7 @@ class ExistingSchematicOnboardingResolution(_StrictModel):
     draft_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     task_id: StrictStr = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
     context_id: StrictStr = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-    operation: Literal["simulation.run", "design.tune"]
+    operation: Literal["simulation.run", "design.tune", "design.close_loop"]
     roles: list[DesignRoleBinding] = Field(min_length=1, max_length=64)
     instance_parameter_permissions: list[InstanceParameterPermission] = Field(
         default_factory=list,
@@ -79,6 +127,12 @@ class ExistingSchematicOnboardingResolution(_StrictModel):
     candidate_set: AtomicCandidateSet | None = None
     constraints: list[MetricConstraint] = Field(default_factory=list)
     objective: Objective | None = None
+    topology_edits: TopologyEditPolicy = Field(default_factory=TopologyEditPolicy)
+    topology_alternatives: list[OnboardingTopologyAlternative] = Field(
+        default_factory=list,
+        max_length=3,
+    )
+    winner_verification: ExistingSchematicWinnerVerificationSpec | None = None
     limits: ExecutionLimits = Field(default_factory=ExecutionLimits)
     evidence_source: Literal["user_input"] = "user_input"
 
@@ -86,27 +140,68 @@ class ExistingSchematicOnboardingResolution(_StrictModel):
     def reject_inert_simulation_tuning_fields(
         self,
     ) -> "ExistingSchematicOnboardingResolution":
-        if self.operation != "simulation.run":
-            return self
-        if (
-            self.instance_parameter_updates
-            or self.instance_parameter_space
-            or self.candidate_set is not None
-        ):
+        has_topology_authority = bool(
+            self.topology_edits.allowed_operations or self.topology_alternatives
+        )
+        if self.operation == "simulation.run":
+            if (
+                self.instance_parameter_updates
+                or self.instance_parameter_space
+                or self.candidate_set is not None
+            ):
+                raise ValueError(
+                    "simulation.run resolution cannot request parameter writes or search"
+                )
+            if self.objective is not None:
+                raise ValueError("simulation.run resolution cannot declare an objective")
+            if any(
+                "search" in permission.modes
+                for permission in self.instance_parameter_permissions
+            ):
+                raise ValueError(
+                    "simulation.run parameter permissions must use fixed mode only"
+                )
+            if self.limits.max_iterations != 1:
+                raise ValueError("simulation.run resolution requires max_iterations=1")
+            if self.winner_verification is not None:
+                raise ValueError("simulation.run resolution cannot verify a winner")
+        if self.operation != "design.close_loop" and has_topology_authority:
             raise ValueError(
-                "simulation.run resolution cannot request parameter writes or search"
+                "onboarding topology alternatives require design.close_loop"
             )
-        if self.objective is not None:
-            raise ValueError("simulation.run resolution cannot declare an objective")
-        if any(
-            "search" in permission.modes
-            for permission in self.instance_parameter_permissions
-        ):
-            raise ValueError(
-                "simulation.run parameter permissions must use fixed mode only"
+        if self.operation == "design.close_loop":
+            if not self.topology_alternatives:
+                raise ValueError(
+                    "design.close_loop resolution requires a topology alternative"
+                )
+            if not self.topology_edits.allowed_operations:
+                raise ValueError(
+                    "design.close_loop resolution requires explicit topology edit authority"
+                )
+        if self.winner_verification is not None:
+            declared_analyses = set(self.required_analyses) | set(
+                self.optional_analyses
             )
-        if self.limits.max_iterations != 1:
-            raise ValueError("simulation.run resolution requires max_iterations=1")
+            winner_analyses = {
+                stage.analysis.value
+                for stage in self.winner_verification.analysis_stages
+            }
+            unknown_analyses = sorted(winner_analyses - declared_analyses)
+            if unknown_analyses:
+                raise ValueError(
+                    "winner-verification analyses are outside onboarding intent: "
+                    + ", ".join(unknown_analyses)
+                )
+            winner_metrics = {
+                constraint.metric
+                for constraint in self.winner_verification.constraints
+            }
+            unknown_metrics = sorted(winner_metrics - set(self.metrics))
+            if unknown_metrics:
+                raise ValueError(
+                    "winner-verification metrics are outside onboarding intent: "
+                    + ", ".join(unknown_metrics)
+                )
         return self
 
 
@@ -147,32 +242,35 @@ def _load_draft(
 
 
 def _validate_role_bindings(
-    draft: ExistingSchematicOnboardingDraft,
-    resolution: ExistingSchematicOnboardingResolution,
+    topology: TopologySnapshot,
+    roles: list[DesignRoleBinding],
+    *,
+    scope: str,
 ) -> None:
-    instances = {item.name: item for item in draft.topology.instances}
-    nets = {item.name for item in draft.topology.nets}
-    pins = {item.name for item in draft.topology.pins}
-    for role in resolution.roles:
+    instances = {item.name: item for item in topology.instances}
+    nets = {item.name for item in topology.nets}
+    pins = {item.name for item in topology.pins}
+    for role in roles:
         if role.evidence_source != "user_input":
-            raise ValueError("final role bindings require user_input evidence")
+            raise ValueError(f"{scope} role bindings require user_input evidence")
         unknown_instances = sorted(set(role.instances) - set(instances))
         unknown_nets = sorted(set(role.nets) - nets)
         unknown_pins = sorted(set(role.pins) - pins)
         if unknown_instances or unknown_nets or unknown_pins:
             raise ValueError(
-                f"role {role.role!r} references objects outside the onboarding topology"
+                f"{scope} role {role.role!r} references objects outside the "
+                "onboarding topology"
             )
         for terminal in role.terminals:
             instance = instances.get(terminal.instance)
             if instance is None:
                 raise ValueError(
-                    f"role {role.role!r} references an unknown terminal instance"
+                    f"{scope} role {role.role!r} references an unknown terminal instance"
                 )
             actual_net = instance.terminals.get(terminal.terminal)
             if actual_net != terminal.net:
                 raise ValueError(
-                    f"role {role.role!r} terminal binding does not match onboarding topology"
+                    f"{scope} role {role.role!r} terminal binding does not match topology"
                 )
 
 
@@ -214,42 +312,107 @@ def _validate_parameter_surface(
         )
 
 
-def _validate_simulation_objects(
-    draft: ExistingSchematicOnboardingDraft,
+def _validate_alternative_parameter_surface(
     resolution: ExistingSchematicOnboardingResolution,
+    alternative: OnboardingTopologyAlternative,
+    simulation: GenericOaSimulationSpec,
 ) -> None:
-    top_nodes = {item.name for item in draft.topology.nets} | {"0"}
-    unknown_nodes = sorted(
-        resolution.generic_simulation.referenced_nodes() - top_nodes
+    added_instances = {
+        operation.instance.name
+        for operation in alternative.topology_delta.contract.operations
+        if operation.operation == "add_instance"
+    }
+    permission_fields = {
+        (permission.instance, parameter)
+        for permission in alternative.added_instance_parameter_permissions
+        for parameter in permission.parameters
+    }
+    invalid_permissions = sorted(
+        instance
+        for instance, _parameter in permission_fields
+        if instance not in added_instances
     )
+    if invalid_permissions:
+        raise ValueError(
+            f"alternative {alternative.id!r} added-instance permissions require "
+            "instances added by its topology delta: "
+            + ", ".join(invalid_permissions)
+        )
+    nonfixed_permissions = sorted(
+        permission.instance
+        for permission in alternative.added_instance_parameter_permissions
+        if set(permission.modes) != {"fixed"}
+    )
+    if nonfixed_permissions:
+        raise ValueError(
+            f"alternative {alternative.id!r} added-instance permissions must be fixed: "
+            + ", ".join(nonfixed_permissions)
+        )
+    update_fields = {
+        (update.instance, parameter)
+        for update in alternative.instance_parameter_updates
+        for parameter in update.parameters
+    }
+    if update_fields != permission_fields:
+        raise ValueError(
+            f"alternative {alternative.id!r} added-instance permission/update "
+            "surface differs"
+        )
+    baseline_fields = {
+        (permission.instance, parameter)
+        for permission in resolution.instance_parameter_permissions
+        for parameter in permission.parameters
+    }
+    binding_fields = {
+        (binding.instance, binding.oa_parameter)
+        for binding in simulation.netlist_parameter_bindings
+    }
+    if binding_fields != baseline_fields | permission_fields:
+        raise ValueError(
+            f"alternative {alternative.id!r} parameter permission/binding surface "
+            "differs"
+        )
+
+
+def _validate_simulation_objects(
+    topology: TopologySnapshot,
+    simulation: GenericOaSimulationSpec,
+    *,
+    scope: str,
+) -> None:
+    top_nodes = {item.name for item in topology.nets} | {"0"}
+    unknown_nodes = sorted(simulation.referenced_nodes() - top_nodes)
     if unknown_nodes:
         raise ValueError(
-            "generic simulation references unknown top-level nodes: "
+            "generic simulation references unknown top-level nodes in "
+            f"{scope}: "
             + ", ".join(unknown_nodes)
         )
-    top_instances = {item.name for item in draft.topology.instances}
+    top_instances = {item.name for item in topology.instances}
     unknown_op_instances = sorted(
         {
             item.instance
-            for item in resolution.generic_simulation.operating_point_metrics
+            for item in simulation.operating_point_metrics
         }
         - top_instances
     )
     if unknown_op_instances:
         raise ValueError(
-            "generic operating-point metrics reference unknown top-level instances: "
+            "generic operating-point metrics reference unknown top-level instances "
+            f"in {scope}: "
             + ", ".join(unknown_op_instances)
         )
 
 
 def _validate_hierarchy_bindings(
     draft: ExistingSchematicOnboardingDraft,
-    resolution: ExistingSchematicOnboardingResolution,
+    topology: TopologySnapshot,
+    simulation: GenericOaSimulationSpec,
 ) -> None:
     candidates = {item.top_instance: item for item in draft.hierarchy_candidates}
     bindings = {
         item.instance: item
-        for item in resolution.generic_simulation.hierarchy_bindings
+        for item in simulation.hierarchy_bindings
     }
     scope_instances = {
         item.top_instance
@@ -259,6 +422,13 @@ def _validate_hierarchy_bindings(
         raise ValueError(
             "resolution must bind every inspected hierarchy candidate and cannot bind "
             "an uninspected child"
+        )
+    topology_instances = {item.name for item in topology.instances}
+    missing_instances = sorted(set(candidates) - topology_instances)
+    if missing_instances:
+        raise ValueError(
+            "onboarding topology refinement cannot remove an inspected hierarchy "
+            "instance: " + ", ".join(missing_instances)
         )
     for instance, candidate in candidates.items():
         if candidate.status != "child_inspection_bound":
@@ -298,10 +468,29 @@ def resolve_onboarding_draft(
     draft, actual_draft_sha256 = _load_draft(draft_path)
     if intent.draft_sha256 != actual_draft_sha256:
         raise ValueError("resolution draft SHA-256 does not match the onboarding draft")
-    _validate_role_bindings(draft, intent)
+    _validate_role_bindings(
+        draft.topology,
+        intent.roles,
+        scope="final",
+    )
     _validate_parameter_surface(draft, intent)
-    _validate_simulation_objects(draft, intent)
-    _validate_hierarchy_bindings(draft, intent)
+    _validate_simulation_objects(
+        draft.topology,
+        intent.generic_simulation,
+        scope="baseline",
+    )
+    _validate_hierarchy_bindings(
+        draft,
+        draft.topology,
+        intent.generic_simulation,
+    )
+
+    baseline_instances = {item.name for item in draft.topology.instances}
+    baseline_nets = {item.name for item in draft.topology.nets}
+    baseline_pins = {item.name for item in draft.topology.pins}
+    mutable_instances = set(intent.topology_edits.mutable_instances)
+    mutable_nets = set(intent.topology_edits.mutable_nets)
+    mutable_pins = set(intent.topology_edits.mutable_pins)
 
     context = DesignContext(
         id=intent.context_id,
@@ -312,12 +501,107 @@ def resolve_onboarding_draft(
         hierarchy_parameter_scopes=(
             draft.design_context_draft.hierarchy_parameter_scopes
         ),
-        frozen_instances=draft.design_context_draft.frozen_instances,
-        frozen_nets=draft.design_context_draft.frozen_nets,
-        frozen_pins=draft.design_context_draft.frozen_pins,
+        frozen_instances=sorted(baseline_instances - mutable_instances),
+        frozen_nets=sorted(baseline_nets - mutable_nets),
+        frozen_pins=sorted(baseline_pins - mutable_pins),
+        topology_edits=intent.topology_edits,
         required_analyses=intent.required_analyses,
         optional_analyses=intent.optional_analyses,
         metrics=intent.metrics,
+    )
+
+    topology_alternatives: list[ExistingSchematicTopologyAlternativeSpec] = []
+    for alternative in intent.topology_alternatives:
+        try:
+            after = apply_topology_delta_execution(
+                draft.topology,
+                alternative.topology_delta,
+            )
+            restored = apply_topology_delta_execution(
+                after,
+                alternative.topology_delta.model_copy(
+                    update={"direction": "inverse"}
+                ),
+            )
+        except TopologyDeltaError as exc:
+            raise ValueError(
+                f"alternative {alternative.id!r} topology contract is not an exact "
+                "draft-bound round trip"
+            ) from exc
+        if topology_fingerprint(restored) != draft.topology_sha256:
+            raise ValueError(
+                f"alternative {alternative.id!r} inverse does not restore the draft"
+            )
+        _validate_role_bindings(
+            after,
+            alternative.roles,
+            scope=f"alternative {alternative.id!r}",
+        )
+        if alternative.generic_simulation is None:
+            simulation_payload = intent.generic_simulation.model_dump(mode="json")
+            simulation_payload["netlist_parameter_bindings"].extend(
+                binding.model_dump(mode="json")
+                for binding in alternative.added_netlist_parameter_bindings
+            )
+            alternative_simulation = GenericOaSimulationSpec.model_validate(
+                simulation_payload
+            )
+        else:
+            alternative_simulation = alternative.generic_simulation
+        _validate_alternative_parameter_surface(
+            intent,
+            alternative,
+            alternative_simulation,
+        )
+        _validate_simulation_objects(
+            after,
+            alternative_simulation,
+            scope=f"alternative {alternative.id!r}",
+        )
+        _validate_hierarchy_bindings(
+            draft,
+            after,
+            alternative_simulation,
+        )
+        alternative_instances = {item.name for item in after.instances}
+        alternative_nets = {item.name for item in after.nets}
+        alternative_pins = {item.name for item in after.pins}
+        alternative_context = DesignContext(
+            id=alternative.context_id,
+            topology_origin="existing_oa",
+            expected_topology_sha256=topology_fingerprint(after),
+            roles=alternative.roles,
+            instance_parameter_permissions=[
+                *intent.instance_parameter_permissions,
+                *alternative.added_instance_parameter_permissions,
+            ],
+            hierarchy_parameter_scopes=(
+                draft.design_context_draft.hierarchy_parameter_scopes
+            ),
+            frozen_instances=sorted(alternative_instances - mutable_instances),
+            frozen_nets=sorted(alternative_nets - mutable_nets),
+            frozen_pins=sorted(alternative_pins - mutable_pins),
+            topology_edits=intent.topology_edits,
+            required_analyses=intent.required_analyses,
+            optional_analyses=intent.optional_analyses,
+            metrics=intent.metrics,
+        )
+        topology_alternatives.append(
+            ExistingSchematicTopologyAlternativeSpec(
+                id=alternative.id,
+                topology_delta=alternative.topology_delta,
+                design_context=alternative_context,
+                generic_simulation=alternative_simulation,
+                instance_parameter_updates=alternative.instance_parameter_updates,
+            )
+        )
+
+    topology_refinement = (
+        ExistingSchematicTopologyRefinementSpec(
+            alternatives=topology_alternatives,
+        )
+        if topology_alternatives
+        else None
     )
     return TaskSpec(
         id=intent.task_id,
@@ -333,6 +617,8 @@ def resolve_onboarding_draft(
         noise_sweep=intent.noise_sweep,
         design_context=context,
         generic_simulation=intent.generic_simulation,
+        topology_refinement=topology_refinement,
+        winner_verification=intent.winner_verification,
         instance_parameter_updates=intent.instance_parameter_updates,
         instance_parameter_space=intent.instance_parameter_space,
         candidate_set=intent.candidate_set,
@@ -352,5 +638,6 @@ def resolve_onboarding_draft(
 
 __all__ = [
     "ExistingSchematicOnboardingResolution",
+    "OnboardingTopologyAlternative",
     "resolve_onboarding_draft",
 ]

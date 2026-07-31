@@ -203,3 +203,11 @@ git diff --check
 权限和 winner-only quality intent 纳入 onboarding resolution：先对既有用户拓扑做最小可逆结构微调，
 再只对真实 winner 运行任务所需的 transient/noise 与可选 PVT，并保留 ADE 人工交接。这样推进的是
 跨电路 L5B 工作流，而不是继续为本次共源级写专用逻辑。
+
+## 后续状态
+
+同日已完成上述 resolution 编译纵切，见
+[`2026-07-31-onboarding-refinement-resolution-local.md`](2026-07-31-onboarding-refinement-resolution-local.md)。
+它没有重新运行本页遗漏候选，也没有新增测试电路或远端 EDA；当前结论是本地契约已经能把用户确认的
+可逆 topology alternative 与 winner-only quality/PVT 编译到既有 `design.close_loop`，首次真实集成仍
+留给下一次用户模块。

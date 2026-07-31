@@ -224,8 +224,12 @@ hierarchy 草案已生成两点 shared-netlist tuning 计划；两个输出的 r
 条件作为原子 tuple 执行同源 DC/AC。三点均可行，离散域 winner 的 gain/BW/GBW 为
 `3.23223 V/V / 5.72128 GHz / 18.4925 GHz`，最终 W/L 写回与独立 OA 回读一致；VBP/CL 不写 OA。
 这证明首次接入可到达真实选择与恢复，不证明遗漏三点的 OA winner retention、连续最优或 L5B
-质量闭环。下一项有产品价值的纵切是让 resolution 编译用户确认的可逆 topology envelope 和
-winner-only quality intent，而不是继续扩大这个已知三点域。
+质量闭环。随后本地纵切已让 resolution 编译用户确认的可逆 topology envelope 和 winner-only
+quality intent：最多三个 alternative 必须从 draft topology 完整 forward/inverse，新增实例只开放
+声明的 fixed CDF/binding；所有候选仍只跑 nominal DC/AC，transient/noise 与可选 PVT 只交给真实
+winner。alternative 未改变接口时继承 baseline testbench，不再复制整份契约。输出仍禁止远端
+compute/write，复用原 `design.close_loop` executor。该能力先以本地 contract Gate 闭合；不为它再造
+一个测试电路，首次 live integration 留给下一次真实用户模块使用。
 
 同日第二个本地纵切开放 `existing_schematic simulation.run` 的受限通用 DC/AC 路径。任务以
 typed `generic_simulation` 声明 voltage/current sources、R/C loads、single-ended 或

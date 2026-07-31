@@ -2839,6 +2839,24 @@ class TaskSpec(StrictModel):
                     alternative_simulation.validate_analysis(
                         requested_analysis.value
                     )
+                if self.candidate_set is not None:
+                    for candidate in self.candidate_set.candidates:
+                        if candidate.testbench_overrides is None:
+                            continue
+                        effective_alternative_simulation = (
+                            candidate.testbench_overrides.apply_to(
+                                alternative_simulation
+                            )
+                        )
+                        for requested_analysis in self.resolved_analyses():
+                            effective_alternative_simulation.validate_analysis(
+                                requested_analysis.value
+                            )
+                        if self.winner_verification is not None:
+                            for stage in self.winner_verification.analysis_stages:
+                                effective_alternative_simulation.validate_analysis(
+                                    stage.analysis.value
+                                )
                 for stage in self.analysis_stages:
                     unavailable = sorted(
                         set(stage.constraint_metrics)
