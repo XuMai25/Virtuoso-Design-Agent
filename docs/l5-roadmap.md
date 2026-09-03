@@ -440,3 +440,12 @@ per-instance override 或派生 CDF。不再在已知 fixture 上增加随机候
 - 功能验收暴露并闭合了 Windows OpenSSH half-close 丢回复：Bridge 私有分支在备份 `codex/backup-vda-framing-afd7346` 后提交 `b1194ca`，只对 Windows 远程 tunnel 使用完整 JSON framing；本地/非 Windows 保留旧 half-close，daemon 同时兼容 EOF。最终 Bridge `106 passed`、VDA `910 passed`。
 - loopback 后同机用户认证与原生 Cadence listeners 是独立管理员/协议 Gate，不伪装成 L5B 电路能力缺口，也不默认扩展为新网络服务。
 - 本项目现在回到 L5B 主线：首个由用户给出大致拓扑的真实单模块 onboarding → 最小 DC/AC → 有界参数/局部 topology refinement → winner 规格复核；不因本次安全修复增加随机电路或重复 sweep。
+
+## 2026-09-04 Bridge 上游 0.8 升级 Gate
+
+- 已从 GitHub 获取最新上游 main `c64461c` 与 `v0.8.0`，并在修改前建立 `codex/backup-pre-upstream-20260904-ebf7e50`。私有两父 merge 为 `106c61e`，说明 tip 为 `731b67f`；未推送第三方 origin。
+- 已接入上游 scoped Spectre pools、split-host、Paramiko/SOCKS5、strict PSF、schematic netlist/planner 与 Maestro 修复，同时保留回环、Windows 隐藏/framing、stale recovery、有限退避、pre-send-only recovery、身份/bind guard 和清理行为。
+- 合并额外修复了短 timeout 被 recovery 等待超越、纯 split-host 被 legacy host 前置检查挡住、手工 forward 提示缺少显式回环，以及 Windows status 假阴性/错误健康码。
+- 最终 Bridge 核心集 `132 passed`；完整集 `915 passed, 33 failed, 11 skipped`，剩余均是未修改上游文件中的 Windows/Unix fixture 边界。VDA `910 passed`，catalog/plan 通过。
+- 真实只读 Gate 同时得到 Bridge `0.8.0`、daemon/tunnel user `xum`、`127.0.0.1:65346`、SKILL `3`、Virtuoso 6.1.8、Spectre 21.1.0；停止后本地 listener 为 0。没有 OA 访问/写入或 Spectre analysis。
+- 这是一道执行底座兼容 Gate，不把 GDS/docs/local-netlist 等未验收上游能力计入 L5B。下一步仍回到用户给定大致拓扑的真实单模块 onboarding、最小 DC/AC、局部参数/拓扑 refinement 与 winner 复核；只有真实模块需要时才为某个上游 0.8 API增加 VDA contract。

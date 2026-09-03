@@ -882,3 +882,13 @@ VDA 层实行更严格策略：`bridge_worker._client()` 建立任何 OA/远端 
 2026-09-04 的功能验收又发现当前 Windows OpenSSH local forward 会把客户端 `shutdown(SHUT_WR)` 传播为整条 channel 关闭，导致远端已安全回环但回复丢失。Bridge 私有补丁因此只在 `Windows + managed SSH tunnel` 上保持写侧打开；本地 Windows 与非 Windows 客户端仍使用旧 half-close。配套 Python 3/2.7 daemon 不改变 JSON schema，而是在收到一个完整 JSON value 后立即派发，并继续接受 EOF 结束的旧客户端。该边界属于 Bridge transport framing，VDA 没有复制 socket/SSH 实现。修改前备份、逐文件差异、`106` 项 Bridge 回归、`910` 项 VDA 回归和 live `1+2`/doctor 证据见[第三方补丁记录](third-party/virtuoso-bridge-local-patch.md)与[回环验证](validation/2026-09-03-bridge-loopback-security.md)。
 
 这条边界解决远程网卡暴露，不等价于 RAMIC 协议已认证。同机其他 Unix 用户、原生 Cadence listener、SSH host-key 策略属于不同威胁面；若服务器策略要求进程级隔离，下一版应单独评估带权限的 Unix-domain socket 或认证 token，不能把请求边界修复包装成认证机制。
+
+## Bridge 0.8 集成边界（2026-09-04）
+
+VDA 的 adapter 边界没有改成复制 Bridge：主环境仍不直接安装 `virtuoso_bridge`，而是由 `SubprocessBridgeAdapter` 调用 `C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\python.exe`，在 Bridge 自己的 Python 环境中运行 VDA worker。当前受测 checkout 是私有分支 `codex/vda-upstream-main-20260904`，Bridge 文档 tip `731b67f`；底层由上游 main `c64461c`（包含 0.8.0）与既有私有加固 merge 得到。
+
+因此，上游 scoped Spectre pools/并行隔离、split-host roles、Paramiko/SOCKS5、strict PSF、schematic netlist/planner 与 Maestro 修复已成为可复用的 Bridge 能力；现有 VDA 对 `SSHClient`、`SpectreSimulator`、PSF parser、Maestro 和 OA/SKILL API 的调用会获得兼容修复。但新 API 只有经过相应 task contract、证据分类和 live Gate 后，才能称为 VDA 功能，不能仅凭升级存在就进入 L5B 声明。
+
+私有网络与 Windows 行为继续由 Bridge 单点实现：daemon 与本地 SSH forward 默认回环；VDA worker 在 RAMIC-backed action 前 fail closed；Windows tunnel 不弹新控制台、不依赖不兼容的 `DETACHED_PROCESS`；complete-JSON framing 保留；只有发送前连接拒绝可自动恢复；身份与 bind 查询是可重复的只读操作。`status` 与 doctor 现在同时使用 managed-tunnel 语义，daemon 无响应或安全证据不可核实时不会再返回健康。
+
+该升级没有改变 VDA 的 `--execute`、plan token、`allow_remote_compute`、`allow_remote_write`、library/cell allowlist、`vda_` 前缀或 `replace_existing=false` 规则。Bridge 0.8 的功能范围也不授权 VDA 绕过这些控制。完整 provenance、测试基线与 33 项上游 Windows 边界见[第三方补丁记录](third-party/virtuoso-bridge-local-patch.md)和[升级验证](validation/2026-09-04-bridge-upstream-0.8-upgrade.md)。
