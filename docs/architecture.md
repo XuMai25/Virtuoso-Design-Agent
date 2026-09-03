@@ -870,3 +870,13 @@ worker 内部把本次创建的 `VirtuosoClient`/`SSHClient` 注册为资源，a
 timing、过冲/欠冲、`supply_energy_per_cycle_fj`、`average_supply_power_uw`、共源与差分对的 DC/供电/KCL 连续指标，以及从 AC、相干 transient、noise PSF 或 PSRR 三次 AC 中读取的原始波形/OP 标为 `eda_result`；OA 结构和参数（包括 MNTAIL W/L、RS0/RS1 与 NSP/NSN 连接、MP0/MP1 W/L 与电流镜连接）标为 `bridge_readback`；任务显式给出的 VDD、负载、偏置、尾电流或尾管 BIAS、有限尾源输出电阻、对称源电阻值、PMOS 负载 W/L、analysis 或 sweep 字段标为 `user_input`；默认 analysis/sweep 字段、`gate_area_proxy_um2=(Wn+Wp)L`、电阻或 PMOS 电流与 KCL 重算、镜像误差、饱和区分类、CMRR/PSRR 比值、交点/压缩点规则和指标完整性判断是 `software_inference`。供电能量或功耗保留积分窗口和源电流方向，不能称为纯动态开关能量；AC、linearity、noise 和 PSRR 指标也必须保存提取公式、范围、输出模式和 unresolved 诊断，不能只保存一个无来源标量。后续 Maestro、Calibre 和 PEX 沿用同一证据模型。
 
 PVT 中的角名、温度和逐角 VDD 是 `user_input`；profile include 映射来自 `pdk_profile`，映射选择及 manifest 组合标为 `software_inference`；每角 Spectre 标量/波形指标仍是 `eda_result`；跨角保守 constraint/objective 值全部标为 `software_inference`。因此聚合最坏值不能被误读为某个单独 Spectre analysis 直接输出的标量。
+
+## RAMIC 网络安全边界（2026-09-03）
+
+RAMIC-backed 路径现在明确为：VDA worker → Windows `127.0.0.1:<local>` SSH forward → 远端 `127.0.0.1:<remote>` RAMIC → Virtuoso IPC。两个 TCP 端都不再依赖 OpenSSH/daemon 的隐式默认值。standalone Spectre 仍直接走 Bridge SSH runner，不启动 RAMIC；它不因这项守卫被强迫经过 Virtuoso。
+
+Bridge 层负责安全默认与可诊断性：上传的 `ramic_bridge.il` 默认 `RBLocal=t`，SSH `-L` 带显式本地 bind，status 查询 daemon 启动 banner 保留的 `RBLastBind`。Bridge monitor 的人工非回环选择仍存在，以免私有补丁降低第三方能力上限；但 status 会明确标红并失败。
+
+VDA 层实行更严格策略：`bridge_worker._client()` 建立任何 OA/远端 SKILL action 前必须获得可解析且为 loopback 的实际 bind；未加载、旧脚本不报告、空响应和 `0.0.0.0` 都在设计动作前失败。通过的 bind 随 `bridge.probe` 作为 `bridge_readback` 保存，不能归类成 `eda_result`，也不能单凭它宣称设计或仿真完成。
+
+这条边界解决远程网卡暴露，不等价于 RAMIC 协议已认证。同机其他 Unix 用户、原生 Cadence listener、SSH host-key 策略属于不同威胁面；若服务器策略要求进程级隔离，下一版应单独评估带权限的 Unix-domain socket 或认证 token，不能在兼容补丁中静默改变 JSON/SKILL 协议。

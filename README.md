@@ -101,6 +101,12 @@ Bridge 的公开 CLI，不复制 SSH、daemon 或 state 逻辑。正常启动后
 语义继续存在；中断时只回收本次仍受控的启动进程树。`status` 会探测 daemon 并查询
 Spectre 版本，但不会访问 OA、运行设计仿真或形成 `eda_result`。
 
+安全加固后的 RAMIC daemon 和 Windows SSH 本地转发都默认显式绑定 `127.0.0.1`。
+每个 VDA RAMIC worker 在 OA/计算前还会回读实际 `RBLastBind`；非回环、空值或无法核实都
+fail closed，成功 probe 把 bind 记为 `bridge_readback`。这满足当前服务器禁止
+`0.0.0.0` 的要求，但 localhost 不是多用户主机的应用层认证；更强隔离需要独立协议 Gate。
+详见[回环监听安全验证记录](docs/validation/2026-09-03-bridge-loopback-security.md)。
+
 首次接入用户已有 schematic 时，可以把一次成功的只读 inspect 任务及其 run record 编译成
 待确认草案，而不手抄实例、网络、pin 和 CDF 字段：
 

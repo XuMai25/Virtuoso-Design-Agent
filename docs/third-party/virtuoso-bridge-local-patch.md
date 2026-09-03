@@ -12,7 +12,10 @@
 - 瞬态 SSH 有界退避：`f8fdb9ed7e91c3194675876dcc4b16a06b77a7eb`
 - SKILL 发送前 tunnel 恢复：`2f41293aa8c4f297470298e27ccd7747046b3913`
 - Windows tunnel 隐藏修复：`cd9aa97b631aa6b9d5db5927cc0e1953124ec658`
-- Bridge 内最新自说明文档：`e1f248d`
+- Bridge 内最新自说明文档：`afd7346`
+- 回环安全加固前备份：`codex/backup-vda-loopback-e1f248d` → `e1f248dab69aa0e3504d8249613a096e4030673d`
+- 回环安全加固分支：`codex/vda-loopback-only`
+- 回环安全代码提交：`48b44e6`
 
 这些提交没有推送到第三方 `origin`。VDA 默认 Bridge Python 指向该本地 checkout 的 `.venv`；真实任务前应核对当前分支/提交，不能假设路径相同就代表补丁仍在。
 
@@ -47,3 +50,28 @@
 ## 上游升级
 
 先检查上游是否已有 stale-state、`from_env().warm()`、重试退避、pre-send-only 恢复和 Windows tunnel 隐藏的等价实现；已有则优先采用上游并丢弃相应本地提交。否则从新上游提交建立新的 `codex/` 分支，依次 cherry-pick `9e52844`、`f8fdb9e`、`2f41293`、`cd9aa97`。随后重跑 Bridge/VDA 测试、强制 stale-state inspect、同-client pre-send smoke 和隐藏 start/status/stop smoke；全部通过前保留原始备份引用。Bridge checkout 内的 `LOCAL_VDA_PATCH.md` 是逐文件主记录。
+
+## 2026-09-03 回环监听安全加固
+
+### 精确改动
+
+1. Bridge `ramic_bridge.il` 把新 daemon 的默认 `RBLocal` 从 `nil` 改为 `t`，即默认只监听 `127.0.0.1`；原 monitor 中的人工切换能力保留，不删除第三方库能力。
+2. Bridge `SSHRunner.start_port_forward` 把本地转发明确写成 `127.0.0.1:<local>:127.0.0.1:<remote>`，并加入 `GatewayPorts=no`；jump host、隐藏窗口、重试、state 和清理语义不变。
+3. Bridge `daemon_guard.py` 新增实际 `RBLastBind` 回读；`bridge status` 对响应中的非回环、空值或无法核实状态明确失败。没有修改 SKILL JSON 协议或执行能力。
+4. VDA `bridge_worker._client()` 在任何 RAMIC 支持的 OA/远端动作前调用 Bridge 的同一 bind guard，并实行没有非回环 bypass 的 fail-closed 策略。成功的 `bridge.probe` 把 bind 写入 `bridge_readback`。
+
+### 本地与真实验证
+
+- Bridge 共收集 100 项：排除两项既有且已记录的 Windows legacy-`HOME`/真实 profile scratch-root 基线后 `98 passed`；全跑只出现这两项旧失败。
+- VDA 新增 6 项守卫/证据测试并通过；完整 VDA 回归无失败。
+- 远端旧进程被精确核实为当前用户 PID 114251、命令尾部 `0.0.0.0 65346`，且只读 `1+2` 已无响应。核对脚本、地址、端口和 UID 后仅向该子进程发送 SIGTERM；没有终止父 Virtuoso、没有访问或写 OA。随后 `:65346` 无 listener。
+- 安全版只上传到 `/data/xum/virtuoso_bridge_xum/Aurora_s_Echo/virtuoso_bridge`；远端 `ramic_bridge.il` SHA-256 为 `ce446a0886fc4c5a8e16ac284767a17d0768bc5c7325dafd1a337e5291cba7df`。
+- 独立临时 daemon 在 `65490` 实际报告并由 `ss` 确认 `127.0.0.1:65490`；命令结束后该进程、socket 和日志均为零。
+- 重启后的 Windows tunnel 只监听 `127.0.0.1:65347`；持有者为 PID 91348 的 `ssh.exe`，`MainWindowHandle=0`，未生成 Windows Terminal/OpenConsole。
+- 在现有交互式 CIW 尚未重载 setup 时，真实 `vda doctor` 被新守卫拦在 `Empty response from daemon`，没有进入 OA 或 Spectre。最终 CIW-attached `1+2` 仍需加载生成的 setup 后复核。
+
+### 安全声明与升级
+
+该补丁闭合管理员通知中的公网/任意网卡监听问题，但不把“localhost”夸大为多用户主机上的应用层认证：同机 Unix 用户隔离仍需管理员策略，若要密码/token 或权限化 Unix socket，必须另立协议升级 Gate。Virtuoso 自身的 Cadence listener 也不属于 VDA/Bridge 部署，未经管理员或厂商判断不能宣称已审计安全。
+
+Bridge 上游更新时，先检查是否已有等价的安全默认、显式本地转发和实际 bind 回读；有则采用上游。否则在新上游备份分支上依次迁移既有四个 transport 提交和 `48b44e6`，重跑 Bridge/VDA 测试、远端 `ss`、CIW `1+2` 与退出清理，再撤销旧备份引用。不得把这一私有分支直接推送到 Arcadia 第三方 origin。

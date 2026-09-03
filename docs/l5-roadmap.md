@@ -433,3 +433,10 @@ per-instance override 或派生 CDF。不再在已知 fixture 上增加随机候
 每一级只有在真实 Bridge smoke、结构回读、指标解析和失败注入均通过后才升级状态。
 
 反相器可靠性 Gate 1R、共源 nominal/源退化/quality/PVT、显式实例字段，以及差分对 nominal、真实尾管、对称源退化和 PMOS 电流镜有源负载均已有 live 证据。Gate 7A–7D 又把独立 TSMC N28 器件表、通用 MOS/R/C 矩阵和 exact-signature held-out 验证接到共源及三表差分对；Gate 8 证明 theory seed 能进入正常同源 Spectre 搜索，但其逐点预测仍为 partial。通用 `candidate_set` 与 real-EDA OP 重线性化随后把共源局部 27 组合压缩为 6 个原子 tuple，并真实完成 6/6 quality、transport resume、EDA 最佳写回和自动事后预测审计：推荐一致且 GBW 提升 `13.561%`，但 output swing 的 `22.479%` 误差保留为 partial。新 anchor 刷新进一步拒绝没有 RS 留出覆盖的假三维校准，并在固定 RS 后把 W/RD 两维最坏历史留出误差降到 `0.568%`；该新六点现已同源执行，预测与 EDA 同选 `1.1 µm/18.5 kΩ/750 Ω`，60/60 比较通过且最坏新点误差为 `0.354%`。差分对六点也已同源执行，预测与 EDA 同选最小功耗点 `1.215/1.080/0.555 µm`，90/90 比较通过且最坏新点误差为 `2.5693%`；三次 transport 失败均安全恢复并完成最佳 OA 写回。通用 topology-delta 已在共源、“PMOS 电流镜负载 + 对称源极退化”和“共源 + 共栅管”三个新 cellview 完成增量写入、同源仿真和精确 inverse 恢复；新增共栅 Gate 还真实覆盖 pin/placement、post-save recovery、同一 9 点 DC→AC 和基线身份检查。2026-07-27 的只读本地复盘进一步证明，同一通用矩阵仅用已保存 `gm/gds` 就能在 `0.646%` 内解释共栅低频增益；故默认 Gate 改为“PDK 理论 seed → 必要 DC → OP 导数矩阵预筛 → 最小 Spectre residual validation”，不再把完整 A/B sweep 当作第一反应。旧 run 缺少 `gmb/dQi/dVj/cjd/cjs`，所以共栅 BW/GBW/noise/linearity 仍未由该路径闭合；只有当设计 objective 可能因这些残差改变拓扑选择时才值得追加对应仿真。组合 Gate 的 P1dB 仍未包围、PSRR 仍低，因此这里只升级能力面，不升级设计质量。继续共源 RS 必须补独立探针，不能从二维结果外推。公开的低层 stamping/MNA 接口继续允许 Agent 为具体电路增加局部方程而不复制求解器。PSRR 临时 `20 dB` 门、slew/settling、P1dB 包围、输出驱动、可选差分对 PVT、mismatch/Monte Carlo、ADE 真实 PVT/multi-test、人工打开/修改/重跑和旧 ADE L 迁移仍是独立 Gate。跨 PVT 不默认附加；这些完成前仍不能升级为可重复的 L5B 单模块规格闭环。
+
+## 2026-09-03 传输安全 Gate
+
+- 已完成：修改前 Bridge 备份引用与独立分支；RAMIC 默认回环；SSH 本地端显式回环；实际 bind 状态检查；VDA 设计动作前 fail-closed；Bridge/VDA 本地回归；远端旧 `0.0.0.0:65346` 精确清除；远端临时回环 bind 与本地隐藏 tunnel/清理实测。
+- 尚待一次很小但必要的功能验收：在当前交互式 Virtuoso CIW 加载已上传的 `virtuoso_setup.il`，确认真实 daemon 为 `127.0.0.1:65346`，再跑只读 `1+2`/VDA doctor。旧 daemon 已失去响应，无法通过自身通道热加载；不得为省一次人工 load 而注入 X11 键盘或重启 Virtuoso。
+- loopback 后同机用户认证与原生 Cadence listeners 是独立管理员/协议 Gate，不伪装成 L5B 电路能力缺口，也不默认扩展为新网络服务。
+- 完成 CIW read-only smoke 后，本项目回到 L5B 主线：首个由用户给出大致拓扑的真实单模块 onboarding → 最小 DC/AC → 有界参数/局部 topology refinement → winner 规格复核；不因本次安全修复增加随机电路或重复 sweep。
