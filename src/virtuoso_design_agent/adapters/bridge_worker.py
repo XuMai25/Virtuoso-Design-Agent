@@ -227,6 +227,42 @@ def _start_worker_parent_watchdog() -> tuple[threading.Event, threading.Thread] 
     return stopped, watcher
 
 
+def _require_loopback_bridge_daemon(client: Any, *, timeout: int = 5) -> str:
+    """Fail closed unless RAMIC reports an actual loopback bind address."""
+
+    result = client.execute_skill(
+        "if(boundp('RBLastBind) RBLastBind \"\")",
+        timeout=timeout,
+    )
+    errors = [str(error) for error in (getattr(result, "errors", None) or [])]
+    if errors:
+        raise RuntimeError(
+            "VDA could not verify the RAMIC daemon bind address: " + "; ".join(errors)
+        )
+    daemon_bind = str(getattr(result, "output", "") or "").strip()
+    if daemon_bind.lower() == "nil":
+        daemon_bind = ""
+    if len(daemon_bind) >= 2 and daemon_bind[0] == '"' and daemon_bind[-1] == '"':
+        daemon_bind = daemon_bind[1:-1]
+    if not daemon_bind:
+        raise RuntimeError(
+            "VDA refuses remote OA/compute because the RAMIC daemon did not "
+            "report its actual bind address"
+        )
+    host = daemon_bind.rsplit(":", 1)[0].strip("[]")
+    try:
+        is_loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        is_loopback = host.lower() == "localhost"
+    if not is_loopback:
+        raise RuntimeError(
+            "VDA refuses remote OA/compute because the RAMIC daemon is listening "
+            f"on non-loopback address {daemon_bind!r}; stop it and reload the "
+            "generated virtuoso_setup.il"
+        )
+    return daemon_bind
+
+
 def _client():
     from virtuoso_bridge import VirtuosoClient
 
@@ -235,6 +271,8 @@ def _client():
     if ssh_runner is not None:
         # Required by the verified Windows + nics4304 setup.
         ssh_runner._persistent_shell_enabled = False
+    daemon_bind = _require_loopback_bridge_daemon(client)
+    setattr(client, "_vda_daemon_bind", daemon_bind)
     return client
 
 
@@ -6244,6 +6282,7 @@ def probe(payload: dict[str, Any]) -> dict[str, Any]:
         "connected": True,
         "bridge_version": virtuoso_bridge.__version__,
         "skill_probe": str(getattr(result, "output", "")).strip().strip('"'),
+        "daemon_bind": getattr(client, "_vda_daemon_bind"),
         "profile": payload["profile"]["name"],
     }
 
