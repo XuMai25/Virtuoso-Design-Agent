@@ -106,7 +106,8 @@ Bridge 上游更新时，先检查是否已有等价的安全默认、显式本�
 - 升级目标：上游 main `c64461c0bdc44330c143d386a8aaf3342088a59e`；仓库同时取得 `v0.8.0` annotated tag。
 - 私有集成分支：`codex/vda-upstream-main-20260904`。
 - 两父 merge：`106c61ee0d65bae1b1d20c86a7c4151ffe95c3e0`，父提交依次为 `c64461c` 与 `ebf7e50`。
-- Bridge 内最终说明提交：`731b67f`。
+- managed daemon restart 修正：`40ff8919b8d79aff3b58aa2167ad28be9a395a92`。
+- Bridge 内最终说明提交：`01565791fb261c73552e3e80590a389d2a6b7003`。
 - 以上均未推送第三方 origin。VDA 继续通过该 checkout 自己的 `.venv` 启动独立 worker。
 
 ### 接入的上游能力
@@ -121,22 +122,23 @@ Bridge 上游更新时，先检查是否已有等价的安全默认、显式本�
 
 ### 保留并新增的私有差异
 
-原有 stale-state、auto-warm、1 s/3 s 瞬态退避、发送前一次恢复、Windows 无窗口启动、RAMIC/SSH loopback、实际 bind/user 核验和 Windows complete-JSON framing 均保留。合并时另外闭合四个兼容点：
+原有 stale-state、auto-warm、1 s/3 s 瞬态退避、发送前一次恢复、Windows 无窗口启动、RAMIC/SSH loopback、实际 bind/user 核验和 Windows complete-JSON framing 均保留。合并及现场 reload 时另外闭合五个兼容点：
 
 1. recovery warm 与 sleep 受调用者总 deadline 限制，短 timeout 不再被固定等待超越；只允许 payload 发送前重试。
 2. `VirtuosoClient.from_env()` 接受纯 split-host 配置，不再先强制旧 `VB_REMOTE_HOST`。
 3. 自动和 CLI 打印的手工 SSH forward 都使用 `GatewayPorts=no` 与显式本地 `127.0.0.1`。
 4. Windows `status` 复用 tunnel 上下文，避免 half-close 假阴性；daemon 无响应、安全证据缺失或错误 endpoint 返回非零。USER/bind 两个幂等读查询可立即重试一次，空 USER 仍拒绝。
+5. Windows `restart` 也把 managed tunnel context 交给 daemon client，并在 `finally` 中关闭 SSH runner；不会重现裸 client half-close，也不会在一次命令退出后遗留 runner 资源。跨用户 daemon 仍拒绝，旧 daemon 重启时的预期断线仍可识别。
 
 Bridge checkout 内 `LOCAL_VDA_PATCH.md` 是逐文件主记录；本文件只维护 VDA 的依赖与验收视角。将来再次升级时，从新的上游 tip 建新 `codex/` 分支，保留本次 backup 与 merge，不在原分支强行 rebase，也不向 Arcadia origin 推送私有历史。
 
 ### 最终验证
 
 - 未合并私有补丁的上游 Windows 基线：`883 passed, 35 failed, 11 skipped`。
-- 最终核心 transport/security/split-host/Paramiko：`132 passed`。
-- 最终完整 Bridge，固定短 basetemp `C:\vbt\f`：`915 passed, 33 failed, 11 skipped`（959 项）。33 项均位于未修改的上游测试文件，集中于 Unix docs/GDS shell、Windows symlink 权限、远端 POSIX 路径被本地 Windows fixture 表示，以及刻意跨 260 字符的路径；没有把它们伪装成通过。
+- 相对上游的全部私有测试文件：`122 passed`；加入 10 项 Spectre runtime/split-role 路径测试后的核心 transport/security/split-host/Paramiko 集：`132 passed`。
+- 最终完整 Bridge，固定短 basetemp `C:\vbt\full-final-20260904`：`914 passed, 34 failed, 11 skipped`（959 项）。34 项均位于未修改的上游测试文件，集中于 Unix docs/GDS shell、Windows remote-index cache 断言、symlink 权限、远端 POSIX 路径被本地 Windows fixture 表示，以及刻意跨 260 字符的路径；新增的一项 docs 失败已单独复现，没有把它们伪装成通过或为提高数字修改无关模块。
 - VDA：`910 passed`；catalog 与 inverter close-loop demo plan 通过。
-- 真实只读 smoke：Bridge `0.8.0`；daemon/tunnel user 均为 `xum`；daemon `127.0.0.1:65346`；Virtuoso 6.1.8；Spectre 21.1.0；SKILL `1+2 -> 3`。没有访问或写 OA，没有 Spectre analysis。
-- `vda bridge stop` 后本地 `65347` listener 为 0；没有保留本轮 managed tunnel。
+- 真实只读 smoke：已从当前 `0.8.0` checkout 执行 `restart`，runtime 仅上传并加载到 `/data/xum/virtuoso_bridge_xum/Aurora_s_Echo/virtuoso_bridge`；daemon/tunnel user 均为 `xum`；daemon `127.0.0.1:65346`；Virtuoso 6.1.8；Spectre 21.1.0；SKILL `1+2 -> 3`。没有访问或写 OA，没有 Spectre analysis。
+- `vda bridge stop` 后本地 `65347` listener 与匹配的 managed `ssh.exe` 均为 0。
 
 这次升级证明当前 VDA 正交 operation 与既有真实工作流可运行在 Bridge 0.8 底座上；没有证明上游新增 GDS、docs、local netlist 或全部 Maestro/PVT 功能已被 VDA 逐项 live 验收。

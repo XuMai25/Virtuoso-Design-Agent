@@ -885,10 +885,10 @@ VDA 层实行更严格策略：`bridge_worker._client()` 建立任何 OA/远端 
 
 ## Bridge 0.8 集成边界（2026-09-04）
 
-VDA 的 adapter 边界没有改成复制 Bridge：主环境仍不直接安装 `virtuoso_bridge`，而是由 `SubprocessBridgeAdapter` 调用 `C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\python.exe`，在 Bridge 自己的 Python 环境中运行 VDA worker。当前受测 checkout 是私有分支 `codex/vda-upstream-main-20260904`，Bridge 文档 tip `731b67f`；底层由上游 main `c64461c`（包含 0.8.0）与既有私有加固 merge 得到。
+VDA 的 adapter 边界没有改成复制 Bridge：主环境仍不直接安装 `virtuoso_bridge`，而是由 `SubprocessBridgeAdapter` 调用 `C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\python.exe`，在 Bridge 自己的 Python 环境中运行 VDA worker。当前受测 checkout 是私有分支 `codex/vda-upstream-main-20260904`，Bridge 文档 tip `0156579`；底层由上游 main `c64461c`（包含 0.8.0）、既有私有加固 merge `106c61e` 和 managed restart 修正 `40ff891` 得到。
 
 因此，上游 scoped Spectre pools/并行隔离、split-host roles、Paramiko/SOCKS5、strict PSF、schematic netlist/planner 与 Maestro 修复已成为可复用的 Bridge 能力；现有 VDA 对 `SSHClient`、`SpectreSimulator`、PSF parser、Maestro 和 OA/SKILL API 的调用会获得兼容修复。但新 API 只有经过相应 task contract、证据分类和 live Gate 后，才能称为 VDA 功能，不能仅凭升级存在就进入 L5B 声明。
 
-私有网络与 Windows 行为继续由 Bridge 单点实现：daemon 与本地 SSH forward 默认回环；VDA worker 在 RAMIC-backed action 前 fail closed；Windows tunnel 不弹新控制台、不依赖不兼容的 `DETACHED_PROCESS`；complete-JSON framing 保留；只有发送前连接拒绝可自动恢复；身份与 bind 查询是可重复的只读操作。`status` 与 doctor 现在同时使用 managed-tunnel 语义，daemon 无响应或安全证据不可核实时不会再返回健康。
+私有网络与 Windows 行为继续由 Bridge 单点实现：daemon 与本地 SSH forward 默认回环；VDA worker 在 RAMIC-backed action 前 fail closed；Windows tunnel 不弹新控制台、不依赖不兼容的 `DETACHED_PROCESS`；complete-JSON framing 保留；只有发送前连接拒绝可自动恢复；身份与 bind 查询是可重复的只读操作。`status`、doctor 与 daemon `restart` 现在都使用 managed-tunnel 语义；restart 的 runner 在 `finally` 中关闭但不终止持久 forward，daemon 无响应或安全证据不可核实时不会返回健康。
 
-该升级没有改变 VDA 的 `--execute`、plan token、`allow_remote_compute`、`allow_remote_write`、library/cell allowlist、`vda_` 前缀或 `replace_existing=false` 规则。Bridge 0.8 的功能范围也不授权 VDA 绕过这些控制。完整 provenance、测试基线与 33 项上游 Windows 边界见[第三方补丁记录](third-party/virtuoso-bridge-local-patch.md)和[升级验证](validation/2026-09-04-bridge-upstream-0.8-upgrade.md)。
+该升级没有改变 VDA 的 `--execute`、plan token、`allow_remote_compute`、`allow_remote_write`、library/cell allowlist、`vda_` 前缀或 `replace_existing=false` 规则。Bridge 0.8 的功能范围也不授权 VDA 绕过这些控制。完整 provenance、测试基线与 34 项未修改上游测试中的 Windows 边界见[第三方补丁记录](third-party/virtuoso-bridge-local-patch.md)和[升级验证](validation/2026-09-04-bridge-upstream-0.8-upgrade.md)。

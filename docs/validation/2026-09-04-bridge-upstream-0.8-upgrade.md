@@ -15,7 +15,8 @@
 - 源码改动前先建立备份：`codex/backup-pre-upstream-20260904-ebf7e50`。
 - 集成分支：`codex/vda-upstream-main-20260904`。
 - 两父 merge：`106c61ee0d65bae1b1d20c86a7c4151ffe95c3e0`，父提交为上游 `c64461c` 和私有 `ebf7e50`。
-- Bridge 内说明提交：`731b67f`。
+- managed daemon restart 修正：`40ff8919b8d79aff3b58aa2167ad28be9a395a92`。
+- Bridge 内说明提交：`01565791fb261c73552e3e80590a389d2a6b7003`。
 - 没有向第三方 origin 推送任何私有分支或提交。
 
 ## 采用的上游变化
@@ -39,6 +40,7 @@
 - stale state、auto-warm、1 s/3 s 瞬态退避和仅限发送前连接拒绝的一次恢复保留；恢复等待现受总 deadline 限制。
 - user/bind guard 保留；只读查询允许一次立即 retry，空 USER、缺少 bind、非回环、wrong endpoint 或 daemon 无响应均不会被 status 标为健康。
 - `VirtuosoClient.from_env()` 支持只设置新式 split-host roles 的 cold start。
+- `restart` 与 `status` 一样把 managed tunnel context 交给 Windows daemon client，并在所有退出路径关闭 runner；不重现裸 client half-close，也不因一次 CLI 调用遗留 SSH runner。
 - VDA 自身的远端写入/计算授权、安全 token、library/cell 约束和证据分类没有改变。
 
 Bridge checkout 中 `LOCAL_VDA_PATCH.md` 记录 19 个差异文件和升级方法；VDA 的聚合清单见 `docs/third-party/virtuoso-bridge-local-patch.md`。
@@ -57,26 +59,26 @@ Bridge checkout 中 `LOCAL_VDA_PATCH.md` 记录 19 个差异文件和升级方�
 
 ### 最终升级分支
 
-- transport/security/split-host/Paramiko 集：`132 passed in 24.13s`。
-- VDA：`910 passed in 5.95s`。
+- 相对上游的全部私有测试文件：`122 passed in 23.77s`。加入 10 项 Spectre runtime/split-role 路径测试后的 transport/security/split-host/Paramiko 集：`132 passed in 23.84s`。
+- VDA：`910 passed in 6.00s`。
 - `vda catalog`：成功。
 - `vda plan examples\tasks\inverter-close-loop.demo.json`：成功，生成正常只规划 token。
 - Python `compileall` 与 `git diff --check`：成功。
 
-Bridge 最终完整集使用固定短目录 `C:\vbt\f`：
+Bridge 最终完整集使用固定短目录 `C:\vbt\full-final-20260904`：
 
 - collected：959
-- passed：915
-- failed：33
+- passed：914
+- failed：34
 - skipped：11
 
-33 项失败只出现在未修改的上游测试文件：`test_docs_search.py`、`test_layout_streamout.py`、`test_schematic_netlist.py`、`test_spectre_psf.py`、`test_ssh_control_master.py`。其中一项 symlink 需要 Windows 特权；一项刻意构造的 250 字符目录在再读取子文件时跨过传统 `MAX_PATH`；GDS/docs 项依赖 Unix 命令；两个 schematic netlist fixture 把远端 POSIX 路径表示成 Windows `Path`。这些边界没有被 deselect，也没有为提高通过数而修改无关产品代码。
+34 项失败只出现在相对上游 main 未修改的测试文件：`test_docs_search.py`、`test_layout_streamout.py`、`test_schematic_netlist.py`、`test_spectre_psf.py`、`test_ssh_control_master.py`。其中 symlink 需要 Windows 特权；一项刻意构造的 250 字符目录在再读取子文件时跨过传统 `MAX_PATH`；GDS/docs 项依赖 Unix 命令或 POSIX 路径；两个 schematic netlist fixture 把远端 POSIX 路径表示成 Windows `Path`。比前一轮多出的一项 remote docs cache reuse 断言已在新 basetemp 单独稳定复现。这些边界没有被 deselect，也没有为提高通过数而修改无关产品代码。
 
 ## 真实只读验收
 
 授权范围只包含 `/data/xum` 内既有 VDA Bridge runtime 更新和读连接；没有 OA target、OA read/write 或 Spectre analysis。
 
-最终 `vda bridge start -> status -> doctor -> stop` 得到：
+最终从当前 checkout 执行 `virtuoso-bridge restart -> vda bridge status -> vda doctor -> vda bridge stop`。restart 只把生成 runtime 上传并加载到 `/data/xum/virtuoso_bridge_xum/Aurora_s_Echo/virtuoso_bridge`；旧 daemon 关闭连接被按预期重启确认处理，没有 OA 或 Spectre payload。随后得到：
 
 - Bridge：`0.8.0`
 - daemon host/tunnel target：`nics4304-cad1`，实际 CIW/SSH hostname `cad52`
@@ -88,12 +90,13 @@ Bridge 最终完整集使用固定短目录 `C:\vbt\f`：
 - Spectre binary probe：`21.1.0`
 - VDA doctor evidence：`connected=true`、`skill_probe=3`、`daemon_bind=127.0.0.1:65346`
 - stop 后 local port 65347 listener：0
+- stop 后匹配 `127.0.0.1:65347:127.0.0.1:65346` 的 `ssh.exe`：0
 
-第一次合并态 status 曾因用裸 client 对 Windows managed tunnel 执行 half-close而假报 `NO RESPONSE`，但紧接着 doctor 成功。修正 status 复用 tunnel context 后，status 与 doctor 一致。身份查询又暴露一次 5 s 瞬态超时；只对 USER/bind 两个幂等读查询增加一次立即 retry 后，真实 status 得到 user 一致证据。这些异常与修复均被保留，没有用单独 return code 0 取代结构化结果。
+第一次合并态 status 曾因用裸 client 对 Windows managed tunnel 执行 half-close而假报 `NO RESPONSE`，但紧接着 doctor 成功。修正 status 复用 tunnel context 后，status 与 doctor 一致。身份查询又暴露一次 5 s 瞬态超时；只对 USER/bind 两个幂等读查询增加一次立即 retry 后，真实 status 得到 user 一致证据。最终清理审计发现 restart 尚有相同裸 client 风险，故增加 `40ff891`，两条 restart 回归与真实 reload 均通过。这些异常与修复均被保留，没有用单独 return code 0 取代结构化结果。
 
 ## 仍未验证的边界
 
-- 33 项上游 Windows portability 测试未闭合；当前 VDA 不依赖其中的 docs search、GDS local streamout 或本地 spiceIn fixture。
+- 34 项上游 Windows portability 测试未闭合；当前 VDA 不依赖其中的 docs search、GDS local streamout 或本地 spiceIn fixture。
 - 上游新增 schematic planner/netlist、GDS、library/category 和全部 Maestro 变化只完成本地回归，未逐项形成新的远端 OA live Gate。
 - Paramiko/SOCKS5 和真正 split-host 部署完成单测，没有在 nics4304 真实环境启用；当前 live profile 仍是 OpenSSH 单 host。
 - loopback 不等于多用户服务器上的应用层认证；原生 Cadence listener 也不属于本 Gate。

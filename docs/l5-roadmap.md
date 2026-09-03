@@ -443,9 +443,9 @@ per-instance override 或派生 CDF。不再在已知 fixture 上增加随机候
 
 ## 2026-09-04 Bridge 上游 0.8 升级 Gate
 
-- 已从 GitHub 获取最新上游 main `c64461c` 与 `v0.8.0`，并在修改前建立 `codex/backup-pre-upstream-20260904-ebf7e50`。私有两父 merge 为 `106c61e`，说明 tip 为 `731b67f`；未推送第三方 origin。
+- 已从 GitHub 获取最新上游 main `c64461c` 与 `v0.8.0`，并在修改前建立 `codex/backup-pre-upstream-20260904-ebf7e50`。私有两父 merge 为 `106c61e`，managed restart 修正为 `40ff891`，说明 tip 为 `0156579`；未推送第三方 origin。
 - 已接入上游 scoped Spectre pools、split-host、Paramiko/SOCKS5、strict PSF、schematic netlist/planner 与 Maestro 修复，同时保留回环、Windows 隐藏/framing、stale recovery、有限退避、pre-send-only recovery、身份/bind guard 和清理行为。
-- 合并额外修复了短 timeout 被 recovery 等待超越、纯 split-host 被 legacy host 前置检查挡住、手工 forward 提示缺少显式回环，以及 Windows status 假阴性/错误健康码。
-- 最终 Bridge 核心集 `132 passed`；完整集 `915 passed, 33 failed, 11 skipped`，剩余均是未修改上游文件中的 Windows/Unix fixture 边界。VDA `910 passed`，catalog/plan 通过。
-- 真实只读 Gate 同时得到 Bridge `0.8.0`、daemon/tunnel user `xum`、`127.0.0.1:65346`、SKILL `3`、Virtuoso 6.1.8、Spectre 21.1.0；停止后本地 listener 为 0。没有 OA 访问/写入或 Spectre analysis。
+- 合并额外修复了短 timeout 被 recovery 等待超越、纯 split-host 被 legacy host 前置检查挡住、手工 forward 提示缺少显式回环，以及 Windows status/restart 裸 client 的 half-close 假阴性。status 返回码、幂等身份查询和 restart runner 清理均 fail closed。
+- 最终 Bridge 私有差异文件集 `122 passed`；再加入 10 项 Spectre runtime/split-role 路径测试后的核心兼容集为 `132 passed`。完整集 `914 passed, 34 failed, 11 skipped`，剩余均是未修改上游文件中的 Windows/Unix fixture 边界，新增的一项 docs cache 断言已单独复现。VDA `910 passed`，catalog/plan 通过。
+- 真实只读 Gate 已用 `restart` 把 0.8 runtime 限定部署并加载到 `/data/xum/virtuoso_bridge_xum/Aurora_s_Echo/virtuoso_bridge`，随后得到 daemon/tunnel user `xum`、`127.0.0.1:65346`、SKILL `3`、Virtuoso 6.1.8、Spectre 21.1.0；停止后本地 listener 与匹配 `ssh.exe` 均为 0。没有 OA 访问/写入或 Spectre analysis。
 - 这是一道执行底座兼容 Gate，不把 GDS/docs/local-netlist 等未验收上游能力计入 L5B。下一步仍回到用户给定大致拓扑的真实单模块 onboarding、最小 DC/AC、局部参数/拓扑 refinement 与 winner 复核；只有真实模块需要时才为某个上游 0.8 API增加 VDA contract。
