@@ -436,7 +436,7 @@ per-instance override 或派生 CDF。不再在已知 fixture 上增加随机候
 
 ## 2026-09-03 传输安全 Gate
 
-- 已完成：修改前 Bridge 备份引用与独立分支；RAMIC 默认回环；SSH 本地端显式回环；实际 bind 状态检查；VDA 设计动作前 fail-closed；Bridge/VDA 本地回归；远端旧 `0.0.0.0:65346` 精确清除；远端临时回环 bind 与本地隐藏 tunnel/清理实测。
-- 尚待一次很小但必要的功能验收：在当前交互式 Virtuoso CIW 加载已上传的 `virtuoso_setup.il`，确认真实 daemon 为 `127.0.0.1:65346`，再跑只读 `1+2`/VDA doctor。旧 daemon 已失去响应，无法通过自身通道热加载；不得为省一次人工 load 而注入 X11 键盘或重启 Virtuoso。
+- 已完成：修改前 Bridge 备份引用与独立分支；RAMIC 默认回环；SSH 本地端显式回环；实际 bind 状态检查；VDA 设计动作前 fail-closed；远端旧 `0.0.0.0:65346` 精确清除；用户授权后把两个 7 月遗留 headless Virtuoso 正常替换为一个自动加载 setup 的会话；真实 `127.0.0.1:65346`、Windows tunnel `1+2=3` 和 VDA doctor 均通过。
+- 功能验收暴露并闭合了 Windows OpenSSH half-close 丢回复：Bridge 私有分支在备份 `codex/backup-vda-framing-afd7346` 后提交 `b1194ca`，只对 Windows 远程 tunnel 使用完整 JSON framing；本地/非 Windows 保留旧 half-close，daemon 同时兼容 EOF。最终 Bridge `106 passed`、VDA `910 passed`。
 - loopback 后同机用户认证与原生 Cadence listeners 是独立管理员/协议 Gate，不伪装成 L5B 电路能力缺口，也不默认扩展为新网络服务。
-- 完成 CIW read-only smoke 后，本项目回到 L5B 主线：首个由用户给出大致拓扑的真实单模块 onboarding → 最小 DC/AC → 有界参数/局部 topology refinement → winner 规格复核；不因本次安全修复增加随机电路或重复 sweep。
+- 本项目现在回到 L5B 主线：首个由用户给出大致拓扑的真实单模块 onboarding → 最小 DC/AC → 有界参数/局部 topology refinement → winner 规格复核；不因本次安全修复增加随机电路或重复 sweep。

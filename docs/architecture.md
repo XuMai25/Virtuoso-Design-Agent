@@ -879,4 +879,6 @@ Bridge 层负责安全默认与可诊断性：上传的 `ramic_bridge.il` 默认
 
 VDA 层实行更严格策略：`bridge_worker._client()` 建立任何 OA/远端 SKILL action 前必须获得可解析且为 loopback 的实际 bind；未加载、旧脚本不报告、空响应和 `0.0.0.0` 都在设计动作前失败。通过的 bind 随 `bridge.probe` 作为 `bridge_readback` 保存，不能归类成 `eda_result`，也不能单凭它宣称设计或仿真完成。
 
-这条边界解决远程网卡暴露，不等价于 RAMIC 协议已认证。同机其他 Unix 用户、原生 Cadence listener、SSH host-key 策略属于不同威胁面；若服务器策略要求进程级隔离，下一版应单独评估带权限的 Unix-domain socket 或认证 token，不能在兼容补丁中静默改变 JSON/SKILL 协议。
+2026-09-04 的功能验收又发现当前 Windows OpenSSH local forward 会把客户端 `shutdown(SHUT_WR)` 传播为整条 channel 关闭，导致远端已安全回环但回复丢失。Bridge 私有补丁因此只在 `Windows + managed SSH tunnel` 上保持写侧打开；本地 Windows 与非 Windows 客户端仍使用旧 half-close。配套 Python 3/2.7 daemon 不改变 JSON schema，而是在收到一个完整 JSON value 后立即派发，并继续接受 EOF 结束的旧客户端。该边界属于 Bridge transport framing，VDA 没有复制 socket/SSH 实现。修改前备份、逐文件差异、`106` 项 Bridge 回归、`910` 项 VDA 回归和 live `1+2`/doctor 证据见[第三方补丁记录](third-party/virtuoso-bridge-local-patch.md)与[回环验证](validation/2026-09-03-bridge-loopback-security.md)。
+
+这条边界解决远程网卡暴露，不等价于 RAMIC 协议已认证。同机其他 Unix 用户、原生 Cadence listener、SSH host-key 策略属于不同威胁面；若服务器策略要求进程级隔离，下一版应单独评估带权限的 Unix-domain socket 或认证 token，不能把请求边界修复包装成认证机制。

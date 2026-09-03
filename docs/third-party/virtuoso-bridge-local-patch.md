@@ -12,10 +12,13 @@
 - 瞬态 SSH 有界退避：`f8fdb9ed7e91c3194675876dcc4b16a06b77a7eb`
 - SKILL 发送前 tunnel 恢复：`2f41293aa8c4f297470298e27ccd7747046b3913`
 - Windows tunnel 隐藏修复：`cd9aa97b631aa6b9d5db5927cc0e1953124ec658`
-- Bridge 内最新自说明文档：`afd7346`
+- Bridge 内回环自说明文档：`afd7346`
 - 回环安全加固前备份：`codex/backup-vda-loopback-e1f248d` → `e1f248dab69aa0e3504d8249613a096e4030673d`
 - 回环安全加固分支：`codex/vda-loopback-only`
 - 回环安全代码提交：`48b44e6`
+- framing 修复前备份：`codex/backup-vda-framing-afd7346` → `afd7346`
+- Windows request-framing 代码与测试：`b1194ca`
+- Bridge 内 framing 自说明文档：`ebf7e50`
 
 这些提交没有推送到第三方 `origin`。VDA 默认 Bridge Python 指向该本地 checkout 的 `.venv`；真实任务前应核对当前分支/提交，不能假设路径相同就代表补丁仍在。
 
@@ -75,3 +78,20 @@
 该补丁闭合管理员通知中的公网/任意网卡监听问题，但不把“localhost”夸大为多用户主机上的应用层认证：同机 Unix 用户隔离仍需管理员策略，若要密码/token 或权限化 Unix socket，必须另立协议升级 Gate。Virtuoso 自身的 Cadence listener 也不属于 VDA/Bridge 部署，未经管理员或厂商判断不能宣称已审计安全。
 
 Bridge 上游更新时，先检查是否已有等价的安全默认、显式本地转发和实际 bind 回读；有则采用上游。否则在新上游备份分支上依次迁移既有四个 transport 提交和 `48b44e6`，重跑 Bridge/VDA 测试、远端 `ss`、CIW `1+2` 与退出清理，再撤销旧备份引用。不得把这一私有分支直接推送到 Arcadia 第三方 origin。
+
+## 2026-09-04 Windows request framing 兼容修复
+
+### 原因与精确改动
+
+- 服务器本机直连安全 daemon 时，`1+2` 返回标准 `STX + 3`；经过当前 Windows OpenSSH forward 时，同一请求返回空响应。保持远端 `127.0.0.1` 和 `GatewayPorts=no`，分别测试显式/省略本地 bind 地址都失败，故问题不是回环安全策略，而是 half-close 行为。
+- `virtuoso/basic/bridge.py` 仅在 Windows 的 managed SSH tunnel 上不调用 `shutdown(SHUT_WR)`；本地 Windows 和全部非 Windows 路径保持旧 half-close。
+- `ramic_bridge_daemon_3.py` 与 `ramic_bridge_daemon_27.py` 在积累到一个完整 JSON value 后立即解析，不等待 EOF；分片 UTF-8、旧 EOF 客户端和 malformed EOF 均有测试。
+- `test_virtuoso_tunnel_recovery.py` 覆盖 Windows keep-open 与 legacy half-close；新增 `test_daemon_request_framing.py` 对两版独立 daemon 源函数做相同 framing 回归。`test_runtime_paths.py` 仅补 `USERPROFILE` 以修正 Windows 测试 fixture，不改运行时代码。
+
+### 隔离、验证与兼容边界
+
+- 修改前先建立 `codex/backup-vda-framing-afd7346`；代码提交 `b1194ca`，文档提交 `ebf7e50`，仍只位于未推送的 `codex/vda-loopback-only`。
+- targeted framing/tunnel：`11 passed`；空测试 `.env`、隔离 cwd/basetemp 下完整 Bridge：`106 passed`；完整 VDA：`910 passed in 5.77s`。
+- 用户允许关闭无工作影响的当前会话后，两个 2026-07-05 遗留 headless Virtuoso/Xvfb 树经 UID、cwd、可执行文件、restore 和父进程核对，用 SIGTERM 正常退出；没有强杀。唯一替代会话从 `/data/xum/virtuoso_bridge_smoke/vb_bridge_restore.il` 自动加载 setup。
+- 最终远端 `ss` 与会话日志均为 `127.0.0.1:65346`；Windows tunnel `1+2=3`；VDA doctor 为 `connected=true`、`daemon_bind=127.0.0.1:65346`、Bridge 0.7.0、TSMC N28 profile。未访问/写入 OA，未运行 Spectre analysis。
+- Windows 更新版 client 必须配套重新部署并加载更新版 daemon；旧 daemon 仍会等待 EOF。新 daemon 兼容仍发送 EOF 的旧 client。上游若已有等价 framing，优先采用上游并丢弃 `b1194ca`；否则在新备份分支迁移并重复两次连续 SKILL、doctor、Bridge/VDA 全回归后再启用 OA 写入。

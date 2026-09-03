@@ -105,6 +105,9 @@ Spectre 版本，但不会访问 OA、运行设计仿真或形成 `eda_result`�
 每个 VDA RAMIC worker 在 OA/计算前还会回读实际 `RBLastBind`；非回环、空值或无法核实都
 fail closed，成功 probe 把 bind 记为 `bridge_readback`。这满足当前服务器禁止
 `0.0.0.0` 的要求，但 localhost 不是多用户主机的应用层认证；更强隔离需要独立协议 Gate。
+当前 Windows OpenSSH 还要求配套 Bridge framing 补丁：远程 tunnel 不依赖 TCP half-close，
+daemon 收到完整 JSON 即派发；本地/非 Windows 旧路径和 JSON/SKILL 内容不变。真实
+`1+2=3`、`RBLastBind=127.0.0.1:65346` 与 VDA doctor 已通过。
 详见[回环监听安全验证记录](docs/validation/2026-09-03-bridge-loopback-security.md)。
 
 首次接入用户已有 schematic 时，可以把一次成功的只读 inspect 任务及其 run record 编译成

@@ -34,13 +34,14 @@
 5. VDA `bridge_worker.py`：任何 RAMIC-backed OA/SKILL action 前复用 Bridge 的 bind guard，并以无 bypass 策略 fail closed；通过值进入 `bridge.probe` 的 `bridge_readback`。
 6. Bridge/VDA 新增守卫、status、SSH 命令及证据字段测试。
 
-没有修改 Bridge JSON/SKILL wire protocol、SSH 认证、jump host、远端目录、Spectre、OA schema 或 VDA task token/授权规则。
+初始回环提交没有修改 Bridge JSON/SKILL wire protocol、SSH 认证、jump host、远端目录、Spectre、OA schema 或 VDA task token/授权规则。2026-09-04 为恢复 Windows tunnel 功能所做的最小 framing 补丁另记如下；它不改变 JSON schema 或 SKILL 内容。
 
 ## 测试结果
 
 - Bridge：收集 100 项。完整运行只有两项既有基线失败：Windows legacy `HOME` 路径和真实 profile scratch-root `/data/xum` 与测试硬编码 `/tmp` 的差异。明确 deselect 这两项后 `98 passed, 2 deselected in 4.25s`。
 - VDA：边界收敛后最终回归 `910 passed in 5.70s`，其中新安全文件 6 项全部通过。
 - `git diff --check` 通过。
+- 2026-09-04 framing 修复后，Bridge 在空测试 `.env`、隔离 cwd 和显式 basetemp 下 `106 passed`；VDA 再次 `910 passed in 5.77s`。
 
 ## 真实安全与生命周期验证
 
@@ -50,11 +51,13 @@
 4. 经 VDA 正常 stop/start 后，本地端仅监听 `127.0.0.1:65347`；持有者 PID 91348 为 `ssh.exe`，`MainWindowHandle=0`，未出现 Windows Terminal/OpenConsole。
 5. 在交互式 CIW 尚未重新加载 setup 的状态下，真实 VDA doctor 被守卫拦截为 `VDA could not verify ... Empty response from daemon`；没有继续到 OA 或 Spectre。
 6. 等待 CIW 人工加载期间执行正常 `vda bridge stop`；本地 `65347` listener 和精确 SSH PID 91348 均消失。系统中仍有 PID 89660/89128 的 Windows Terminal/OpenConsole，但二者创建于 2026-09-02，早于本轮 tunnel，未作删除或归因。
+7. 用户随后明确允许关闭当前会话。只读盘点发现并非用户正在编辑的 GUI，而是两个 2026-07-05 启动的 headless Virtuoso：PID 60558/113976，cwd 均为 `/data/xum/virtuoso_bridge_smoke`，参数均为 `-nographE -restore vb_bridge_restore.il`，DISPLAY 分别为 `:3308/:6881`。按 UID、可执行文件、cwd、restore 文件和父进程树复核后发送 SIGTERM；两棵 Virtuoso/Xvfb 树延迟约 30 秒正常退出，没有 SIGKILL、没有删除文件。
+8. 首个替代会话由同一工作区 restore 文件自动加载 setup；远端日志和 `ss` 均确认 `127.0.0.1:65346`，服务器本机 `1+2` 返回标准 `STX + 3`。但 Windows OpenSSH tunnel 返回空响应；保持远端回环和 `GatewayPorts=no`，把本地 `-L` 从显式 bind 改回默认语法的 A/B 仍返回空响应，排除了 loopback 地址本身。
+9. 根因为客户端 `shutdown(SHUT_WR)` 在当前 Windows OpenSSH forward 上可关闭整个 channel、丢掉回复。Bridge 在新备份 `codex/backup-vda-framing-afd7346` 后，于私有分支提交 `b1194ca`：仅 Windows 远程 tunnel 不再 half-close；Python 3/2.7 daemon 在收到一个完整 JSON 对象时立即解析，同时保留 EOF 客户端兼容。测试与升级说明由 Bridge 提交 `ebf7e50` 记录，均未推送第三方 origin。
+10. 重新部署并启动唯一替代 headless 会话后，远端日志再次报告 `bind=127.0.0.1:65346`。最终 Windows tunnel `1+2` 返回 `3`；正式 VDA doctor 返回 `connected=true`、Bridge `0.7.0`、`skill_probe=3`、`daemon_bind=127.0.0.1:65346`、profile `nics4304_tsmc28`。没有访问 OA，也没有运行 Spectre analysis。
 
-## 尚未完成与判定边界
+## 完成状态与判定边界
 
-安全目标已经达到：旧 wildcard RAMIC 已停止，新代码和临时 daemon 均证明回环绑定，本地 forward 也明确回环。功能代码没有回归，Bridge 的人工非回环能力没有被删除。
-
-当前交互式 Virtuoso 会话中的 RAMIC 仍需一次 CIW `load("/data/xum/virtuoso_bridge_xum/Aurora_s_Echo/virtuoso_bridge/virtuoso_setup.il")`，之后才能完成 CIW-attached `RBLastBind`、`1+2` 和 VDA doctor 的最终只读验收。旧 daemon 已经不响应，Bridge 架构又规定 setup 必须由 CIW 加载；本轮没有用不受控 X11 键盘注入或重启 Virtuoso 来绕过这一边界。
+本 Gate 已闭合：旧 wildcard RAMIC 已停止，唯一替代 Virtuoso 会话自动加载 setup，远端和本地 TCP 两端均为回环，真实 `RBLastBind`、`1+2` 和 VDA doctor 均通过。没有使用 X11 键盘注入；是用户明确允许关闭无工作影响的旧 headless 会话后，以相同 restore 机制替换。Bridge monitor 的人工非回环能力没有删除，但 VDA 仍会拒绝消费该状态。
 
 loopback 解决外部网络暴露，但不是多用户服务器上的应用层认证。同机用户隔离、原生 Cadence listeners 及未来是否采用 token/权限化 Unix socket，需要管理员规则或独立协议 Gate；不得把它们包装成已验证安全。
