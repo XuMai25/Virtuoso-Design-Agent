@@ -228,37 +228,26 @@ def _start_worker_parent_watchdog() -> tuple[threading.Event, threading.Thread] 
 
 
 def _require_loopback_bridge_daemon(client: Any, *, timeout: int = 5) -> str:
-    """Fail closed unless RAMIC reports an actual loopback bind address."""
+    """Enforce Bridge's actual-bind check without a VDA-side bypass."""
 
-    result = client.execute_skill(
-        "if(boundp('RBLastBind) RBLastBind \"\")",
-        timeout=timeout,
-    )
-    errors = [str(error) for error in (getattr(result, "errors", None) or [])]
-    if errors:
+    try:
+        from virtuoso_bridge.daemon_guard import check_daemon_bind
+
+        check = check_daemon_bind(client, timeout=timeout)
+    except Exception as exc:
         raise RuntimeError(
-            "VDA could not verify the RAMIC daemon bind address: " + "; ".join(errors)
+            f"VDA could not verify the RAMIC daemon bind address: {exc}"
+        ) from exc
+    if not check.ok:
+        detail = check.error or "daemon bind is not loopback"
+        raise RuntimeError(
+            f"VDA refuses remote OA/compute because {detail}; stop it and reload "
+            "the generated virtuoso_setup.il"
         )
-    daemon_bind = str(getattr(result, "output", "") or "").strip()
-    if daemon_bind.lower() == "nil":
-        daemon_bind = ""
-    if len(daemon_bind) >= 2 and daemon_bind[0] == '"' and daemon_bind[-1] == '"':
-        daemon_bind = daemon_bind[1:-1]
+    daemon_bind = str(check.daemon_bind or "").strip()
     if not daemon_bind:
         raise RuntimeError(
-            "VDA refuses remote OA/compute because the RAMIC daemon did not "
-            "report its actual bind address"
-        )
-    host = daemon_bind.rsplit(":", 1)[0].strip("[]")
-    try:
-        is_loopback = ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        is_loopback = host.lower() == "localhost"
-    if not is_loopback:
-        raise RuntimeError(
-            "VDA refuses remote OA/compute because the RAMIC daemon is listening "
-            f"on non-loopback address {daemon_bind!r}; stop it and reload the "
-            "generated virtuoso_setup.il"
+            "VDA refuses remote OA/compute because verified daemon bind is empty"
         )
     return daemon_bind
 

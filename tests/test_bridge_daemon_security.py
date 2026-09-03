@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -22,39 +22,76 @@ class _FakeClient:
         return SimpleNamespace(output=self.output, errors=self.errors)
 
 
-@pytest.mark.parametrize("bind", ['"127.0.0.1:65346"', '"[::1]:65346"'])
-def test_bridge_daemon_guard_accepts_loopback(bind: str) -> None:
-    client = _FakeClient(output=bind)
+def _install_bridge_guard(
+    monkeypatch,
+    *,
+    outcome: SimpleNamespace | None = None,
+    error: Exception | None = None,
+) -> list[tuple[object, int]]:
+    package = ModuleType("virtuoso_bridge")
+    package.__path__ = []
+    guard = ModuleType("virtuoso_bridge.daemon_guard")
+    calls: list[tuple[object, int]] = []
+
+    def check_daemon_bind(client, *, timeout: int):
+        calls.append((client, timeout))
+        if error is not None:
+            raise error
+        return outcome
+
+    guard.check_daemon_bind = check_daemon_bind
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge", package)
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.daemon_guard", guard)
+    return calls
+
+
+@pytest.mark.parametrize("bind", ["127.0.0.1:65346", "[::1]:65346"])
+def test_bridge_daemon_guard_accepts_loopback(monkeypatch, bind: str) -> None:
+    client = object()
+    calls = _install_bridge_guard(
+        monkeypatch,
+        outcome=SimpleNamespace(ok=True, daemon_bind=bind, error=""),
+    )
 
     actual = _require_loopback_bridge_daemon(client)
 
-    assert actual == bind.strip('"')
-    assert client.calls == [("if(boundp('RBLastBind) RBLastBind \"\")", 5)]
+    assert actual == bind
+    assert calls == [(client, 5)]
 
 
-def test_bridge_daemon_guard_rejects_all_interfaces() -> None:
-    client = _FakeClient(output='"0.0.0.0:65346"')
+def test_bridge_daemon_guard_rejects_all_interfaces(monkeypatch) -> None:
+    _install_bridge_guard(
+        monkeypatch,
+        outcome=SimpleNamespace(
+            ok=False,
+            daemon_bind="0.0.0.0:65346",
+            error="daemon is listening on non-loopback address '0.0.0.0:65346'",
+        ),
+    )
 
     with pytest.raises(RuntimeError, match="non-loopback address"):
-        _require_loopback_bridge_daemon(client)
+        _require_loopback_bridge_daemon(object())
 
 
-@pytest.mark.parametrize(
-    ("output", "errors", "message"),
-    [
-        ('""', [], "did not report"),
-        ("", ["Empty response from daemon"], "could not verify"),
-    ],
-)
-def test_bridge_daemon_guard_fails_closed_without_evidence(
-    output: str,
-    errors: list[str],
-    message: str,
-) -> None:
-    client = _FakeClient(output=output, errors=errors)
+def test_bridge_daemon_guard_rejects_missing_runtime_evidence(monkeypatch) -> None:
+    _install_bridge_guard(
+        monkeypatch,
+        outcome=SimpleNamespace(
+            ok=False,
+            daemon_bind="",
+            error="daemon did not report its actual bind address",
+        ),
+    )
 
-    with pytest.raises(RuntimeError, match=message):
-        _require_loopback_bridge_daemon(client)
+    with pytest.raises(RuntimeError, match="did not report"):
+        _require_loopback_bridge_daemon(object())
+
+
+def test_bridge_daemon_guard_wraps_query_error(monkeypatch) -> None:
+    _install_bridge_guard(monkeypatch, error=RuntimeError("Empty response from daemon"))
+
+    with pytest.raises(RuntimeError, match="could not verify.*Empty response"):
+        _require_loopback_bridge_daemon(object())
 
 
 def test_probe_records_verified_daemon_bind_as_bridge_readback(monkeypatch) -> None:
