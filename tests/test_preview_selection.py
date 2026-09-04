@@ -543,6 +543,82 @@ def test_preview_selection_verifies_integrity_and_retains_reference_winner(
     assert result.global_optimum_claim is False
 
 
+def test_preview_selection_accepts_scoped_parallel_batch_evidence(
+    tmp_path: Path,
+) -> None:
+    policy, _, task_path, preview_path, reference_path = _fixture(tmp_path)
+    raw = json.loads(preview_path.read_text(encoding="utf-8"))
+    evidence = raw["actions"][1]["details"]["evidence"]
+    variants = evidence["variants"]
+    remote_root = evidence["remote_run_root"]
+    evidence["batch_execution"] = {
+        "source": "software_inference",
+        "api": "SpectreSimulator.run_parallel",
+        "submission_count": len(variants),
+        "max_workers": 4,
+        "result_binding": "submission_order_plus_remote_deck_inventory",
+        "simulator_instance_count": 1,
+        "guard_installation_count": 1,
+        "remote_inventory_command_count": 1,
+        "executor_lifecycle": "scoped_context_manager",
+    }
+    for index, (variant_id, variant) in enumerate(variants.items(), start=1):
+        simulation_dir = f"{remote_root}/{index:08x}"
+        variant["remote_run_root"] = remote_root
+        variant["remote_simulation_dir"] = simulation_dir
+        variant["remote_deck_path"] = f"{simulation_dir}/preview_{variant_id}.scs"
+    _write_model(preview_path, RunRecord.model_validate(raw))
+    rebound_policy = policy.model_copy(
+        update={"expected_preview_run_sha256": _file_sha256(preview_path)}
+    )
+
+    result = validate_preview_selection(
+        rebound_policy,
+        task_path,
+        preview_path,
+        reference_path,
+    )
+
+    assert result.status is RunStatus.SUCCEEDED
+
+    invalid_count = json.loads(preview_path.read_text(encoding="utf-8"))
+    invalid_count["actions"][1]["details"]["evidence"]["batch_execution"][
+        "simulator_instance_count"
+    ] = True
+    _write_model(preview_path, RunRecord.model_validate(invalid_count))
+    invalid_count_policy = policy.model_copy(
+        update={"expected_preview_run_sha256": _file_sha256(preview_path)}
+    )
+    with pytest.raises(ValueError, match="batch execution evidence is invalid"):
+        validate_preview_selection(
+            invalid_count_policy,
+            task_path,
+            preview_path,
+            reference_path,
+        )
+
+    _write_model(preview_path, RunRecord.model_validate(raw))
+    tampered = json.loads(preview_path.read_text(encoding="utf-8"))
+    tampered_variants = tampered["actions"][1]["details"]["evidence"]["variants"]
+    first_id, second_id = list(tampered_variants)[:2]
+    duplicate_dir = tampered_variants[first_id]["remote_simulation_dir"]
+    tampered_variants[second_id]["remote_simulation_dir"] = duplicate_dir
+    tampered_variants[second_id]["remote_deck_path"] = (
+        f"{duplicate_dir}/preview_{second_id}.scs"
+    )
+    _write_model(preview_path, RunRecord.model_validate(tampered))
+    tampered_policy = policy.model_copy(
+        update={"expected_preview_run_sha256": _file_sha256(preview_path)}
+    )
+    with pytest.raises(ValueError, match="remote path mismatch"):
+        validate_preview_selection(
+            tampered_policy,
+            task_path,
+            preview_path,
+            reference_path,
+        )
+
+
 @pytest.mark.parametrize(
     ("mutate_preview", "mutate_reference", "message"),
     [

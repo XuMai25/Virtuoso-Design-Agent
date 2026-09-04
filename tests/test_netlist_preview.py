@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import math
 import sys
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -387,21 +388,21 @@ def test_preview_worker_runs_both_decks_and_returns_eda_bound_ab(
     frequency_hz = [10.0 ** (4.0 + index / 10.0) for index in range(81)]
     captured_decks: dict[str, str] = {}
 
+    inventory_commands: list[str] = []
+
     class Runner:
         _persistent_shell_enabled = True
 
         def run_command(self, command, timeout=None):
             if command.startswith("find "):
-                variant = (
-                    "cascode_common_source"
-                    if "cascode_common_source" in command
-                    else "common_source"
-                )
+                inventory_commands.append(command)
+                remote_root = command.split()[1]
                 return SimpleNamespace(
                     returncode=0,
                     stdout=(
-                        "/data/xum/virtuoso_bridge_smoke/preview/"
-                        f"{variant}/simulator-run\n"
+                        f"{remote_root}/00000001/preview_common_source.scs\n"
+                        f"{remote_root}/00000002/"
+                        "preview_cascode_common_source.scs\n"
                     ),
                     stderr="",
                 )
@@ -424,74 +425,121 @@ def test_preview_worker_runs_both_decks_and_returns_eda_bound_ab(
         def close(self):
             return None
 
+    parallel_calls: list[dict] = []
+
     class Simulator:
-        def run_simulation(self, netlist, parameters):
-            deck = netlist.read_text(encoding="utf-8")
-            cascode = "MNCAS" in deck
-            variant = "cascode_common_source" if cascode else "common_source"
-            captured_decks[variant] = deck
-            gain = 20.0 if cascode else 10.0
-            pole_hz = 1e9 if cascode else 1e8
-            transfer = [
-                -gain / (1.0 + 1j * frequency / pole_hz)
-                for frequency in frequency_hz
-            ]
-            data = {
-                "dc_VDD": 0.9,
-                "dc_IN": 0.35,
-                "dc_VCAS": 0.545,
-                "dc_OUT": 0.62,
-                "dc_VDD_SRC:p": -14e-6,
-                "dc_VIN_SRC:p": 0.0,
-                "dc_VCAS_SRC:p": 0.0,
-                "dcOpInfo_MN0:ids": 14e-6,
-                "dcOpInfo_MN0:vgs": 0.35,
-                "dcOpInfo_MN0:vds": 0.3 if cascode else 0.62,
-                "dcOpInfo_MN0:vbs": 0.0,
-                "dcOpInfo_MN0:vdsat": 0.1,
-                "dcOpInfo_MN0:gm": 150e-6,
-                "dcOpInfo_MN0:gds": 5e-6,
-                "dcOpInfo_MN0:gmb": 20e-6,
-                "ac_freq": frequency_hz,
-                "ac_IN": [1.0 + 0.0j] * len(frequency_hz),
-                "ac_OUT": transfer,
-            }
-            if cascode:
-                data.update(
-                    {
-                        "dc_NCAS": 0.3,
-                        "dcOpInfo_MNCAS:ids": 14e-6,
-                        "dcOpInfo_MNCAS:vgs": 0.245,
-                        "dcOpInfo_MNCAS:vds": 0.32,
-                        "dcOpInfo_MNCAS:vbs": -0.3,
-                        "dcOpInfo_MNCAS:vdsat": 0.1,
-                        "dcOpInfo_MNCAS:gm": 130e-6,
-                        "dcOpInfo_MNCAS:gds": 4e-6,
-                        "dcOpInfo_MNCAS:gmb": 18e-6,
-                    }
-                )
-            return SimpleNamespace(
-                ok=True,
-                data=data,
-                metadata={},
-                tool_version="test-spectre-preview",
-                warnings=[],
+        def __init__(self, work_dir):
+            self.work_dir = Path(work_dir)
+
+        def run_parallel(self, tasks, max_workers):
+            parallel_calls.append(
+                {
+                    "task_count": len(tasks),
+                    "max_workers": max_workers,
+                }
             )
+            results = []
+            for index, (netlist, parameters) in enumerate(tasks, start=1):
+                assert parameters == {}
+                deck = netlist.read_text(encoding="utf-8")
+                cascode = "MNCAS" in deck
+                variant = "cascode_common_source" if cascode else "common_source"
+                captured_decks[variant] = deck
+                gain = 20.0 if cascode else 10.0
+                pole_hz = 1e9 if cascode else 1e8
+                transfer = [
+                    -gain / (1.0 + 1j * frequency / pole_hz)
+                    for frequency in frequency_hz
+                ]
+                data = {
+                    "dc_VDD": 0.9,
+                    "dc_IN": 0.35,
+                    "dc_VCAS": 0.545,
+                    "dc_OUT": 0.62,
+                    "dc_VDD_SRC:p": -14e-6,
+                    "dc_VIN_SRC:p": 0.0,
+                    "dc_VCAS_SRC:p": 0.0,
+                    "dcOpInfo_MN0:ids": 14e-6,
+                    "dcOpInfo_MN0:vgs": 0.35,
+                    "dcOpInfo_MN0:vds": 0.3 if cascode else 0.62,
+                    "dcOpInfo_MN0:vbs": 0.0,
+                    "dcOpInfo_MN0:vdsat": 0.1,
+                    "dcOpInfo_MN0:gm": 150e-6,
+                    "dcOpInfo_MN0:gds": 5e-6,
+                    "dcOpInfo_MN0:gmb": 20e-6,
+                    "ac_freq": frequency_hz,
+                    "ac_IN": [1.0 + 0.0j] * len(frequency_hz),
+                    "ac_OUT": transfer,
+                }
+                if cascode:
+                    data.update(
+                        {
+                            "dc_NCAS": 0.3,
+                            "dcOpInfo_MNCAS:ids": 14e-6,
+                            "dcOpInfo_MNCAS:vgs": 0.245,
+                            "dcOpInfo_MNCAS:vds": 0.32,
+                            "dcOpInfo_MNCAS:vbs": -0.3,
+                            "dcOpInfo_MNCAS:vdsat": 0.1,
+                            "dcOpInfo_MNCAS:gm": 130e-6,
+                            "dcOpInfo_MNCAS:gds": 4e-6,
+                            "dcOpInfo_MNCAS:gmb": 18e-6,
+                        }
+                    )
+                task_dir = self.work_dir / f"{netlist.stem}__{index:08x}"
+                raw_dir = task_dir / f"{netlist.stem}.raw"
+                raw_dir.mkdir(parents=True)
+                (raw_dir / "analysis.data").write_text("raw", encoding="utf-8")
+                (task_dir / "spectre.out").write_text(
+                    "Version test-spectre-preview\n",
+                    encoding="utf-8",
+                )
+                results.append(
+                    SimpleNamespace(
+                        ok=True,
+                        data=data,
+                        metadata={"output_dir": str(raw_dir)},
+                        tool_version="test-spectre-preview",
+                        warnings=[],
+                    )
+                )
+            return results
 
     runner_module.SpectreSimulator = Simulator
     tunnel_module.SSHClient = SSHClient
     monkeypatch.setitem(sys.modules, "virtuoso_bridge.spectre.runner", runner_module)
     monkeypatch.setitem(sys.modules, "virtuoso_bridge.transport.tunnel", tunnel_module)
-    monkeypatch.setattr(
-        "virtuoso_design_agent.adapters.bridge_worker._install_remote_spectre_guard",
-        lambda *args, **kwargs: (
+    guard_calls: list[dict] = []
+
+    def install_guard(client, work_dir, remote_run_dir, *, timeout):
+        (Path(work_dir) / "vda_spectre_guard.sh").write_text(
+            "#!/bin/sh\n",
+            encoding="utf-8",
+        )
+        guard_calls.append(
+            {
+                "work_dir": Path(work_dir),
+                "remote_run_dir": remote_run_dir,
+                "timeout": timeout,
+            }
+        )
+        return (
             "spectre",
             {"status": "bounded-test", "bounded_remote_process": True},
-        ),
+        )
+
+    monkeypatch.setattr(
+        "virtuoso_design_agent.adapters.bridge_worker._install_remote_spectre_guard",
+        install_guard,
     )
+    simulator_factory_calls: list[dict] = []
+
+    def create_simulator(*args, **kwargs):
+        simulator_factory_calls.append(kwargs)
+        return Simulator(kwargs["work_dir"])
+
     monkeypatch.setattr(
         "virtuoso_design_agent.adapters.bridge_worker._create_spectre_simulator",
-        lambda *args, **kwargs: Simulator(),
+        create_simulator,
     )
     monkeypatch.setattr(
         "virtuoso_design_agent.adapters.bridge_worker._common_source_dc_data_from_result",
@@ -533,6 +581,34 @@ def test_preview_worker_runs_both_decks_and_returns_eda_bound_ab(
     )
 
     assert set(captured_decks) == {"common_source", "cascode_common_source"}
+    assert len(guard_calls) == 1
+    assert len(simulator_factory_calls) == 1
+    assert parallel_calls == [{"task_count": 2, "max_workers": 2}]
+    assert len(inventory_commands) == 1
+    batch = result["evidence"]["batch_execution"]
+    assert batch == {
+        "source": "software_inference",
+        "api": "SpectreSimulator.run_parallel",
+        "submission_count": 2,
+        "max_workers": 2,
+        "result_binding": "submission_order_plus_remote_deck_inventory",
+        "simulator_instance_count": 1,
+        "guard_installation_count": 1,
+        "remote_inventory_command_count": 1,
+        "executor_lifecycle": "scoped_context_manager",
+    }
+    remote_root = result["evidence"]["remote_run_root"]
+    remote_dirs = set()
+    for variant_id, variant in result["evidence"]["variants"].items():
+        assert variant["remote_run_root"] == remote_root
+        assert variant["remote_deck_path"] == (
+            f"{variant['remote_simulation_dir']}/preview_{variant_id}.scs"
+        )
+        remote_dirs.add(variant["remote_simulation_dir"])
+        manifest_paths = {row["path"] for row in variant["artifact_manifest"]}
+        assert f"preview_{variant_id}.scs" in manifest_paths
+        assert "vda_spectre_guard.sh" in manifest_paths
+    assert len(remote_dirs) == 2
     assert result["analysis_complete"] is True
     assert result["metrics"]["common_source__bandwidth_3db_hz"] == pytest.approx(
         1e8,

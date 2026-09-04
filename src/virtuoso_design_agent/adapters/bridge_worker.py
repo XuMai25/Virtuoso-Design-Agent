@@ -13736,9 +13736,16 @@ def discover_existing_schematic_parameter_binding(
 def _signal(data: dict[str, Any], name: str) -> list[float]:
     for key, values in data.items():
         if key.lower() == name.lower():
-            result = [float(value) for value in values]
+            try:
+                result = [float(value) for value in values]
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Spectre signal {name} contains a non-real numeric value"
+                ) from exc
             if not result:
                 raise RuntimeError(f"Spectre signal {name} is empty")
+            if not all(math.isfinite(value) for value in result):
+                raise RuntimeError(f"Spectre signal {name} contains non-finite values")
             return result
     raise RuntimeError(f"Spectre result missing signal {name}; available={sorted(data)}")
 
@@ -13750,14 +13757,56 @@ def _complex_signal(data: dict[str, Any], name: str) -> list[complex]:
         if not isinstance(values, list) or not values:
             raise RuntimeError(f"Spectre complex signal {name} is empty")
         try:
-            return [complex(value) for value in values]
+            result = [complex(value) for value in values]
         except (TypeError, ValueError) as exc:
             raise RuntimeError(
                 f"Spectre complex signal {name} contains a non-numeric value"
             ) from exc
+        if not all(
+            math.isfinite(value.real) and math.isfinite(value.imag)
+            for value in result
+        ):
+            raise RuntimeError(
+                f"Spectre complex signal {name} contains non-finite values"
+            )
+        return result
     raise RuntimeError(
         f"Spectre result missing complex signal {name}; available={sorted(data)}"
     )
+
+
+def _frequency_signal(data: dict[str, Any], name: str) -> list[float]:
+    matching_keys = [
+        key
+        for key in data
+        if isinstance(key, str) and key.lower() == name.lower()
+    ]
+    if not matching_keys:
+        raise RuntimeError(
+            f"Spectre result missing frequency signal {name}; available={sorted(data)}"
+        )
+    if len(matching_keys) != 1:
+        raise RuntimeError(f"Spectre frequency signal {name} is ambiguous")
+    raw_key = matching_keys[0]
+    try:
+        from virtuoso_bridge.spectre.psf import frequency_hz
+    except ImportError:
+        # The VDA unit-test environment intentionally does not install Bridge.
+        # Production workers use Bridge 0.8's strict accessor; this fallback
+        # preserves isolated contract tests without copying PSF parsing.
+        frequencies = _signal(data, raw_key)
+        if any(
+            right <= left
+            for left, right in zip(frequencies, frequencies[1:])
+        ):
+            raise RuntimeError(
+                f"Spectre frequency signal {name} is not strictly increasing"
+            )
+        return frequencies
+    try:
+        return frequency_hz(data, raw_key)
+    except ValueError as exc:
+        raise RuntimeError(f"Spectre frequency signal {name} is invalid: {exc}") from exc
 
 
 def _scalar(data: dict[str, Any], name: str) -> float:
@@ -13770,9 +13819,12 @@ def _scalar(data: dict[str, Any], name: str) -> float:
                 raise RuntimeError(f"Spectre scalar {name} is empty")
             value = value[-1]
         try:
-            return float(value)
+            result = float(value)
         except (TypeError, ValueError) as exc:
             raise RuntimeError(f"Spectre scalar {name} is not numeric") from exc
+        if not math.isfinite(result):
+            raise RuntimeError(f"Spectre scalar {name} is non-finite")
+        return result
     raise RuntimeError(f"Spectre result missing scalar {name}; available={sorted(data)}")
 
 
@@ -13791,11 +13843,16 @@ def _operating_point_scalar(
                 continue
             value = raw_value[-1] if isinstance(raw_value, list) and raw_value else raw_value
             try:
-                return float(value)
+                result = float(value)
             except (TypeError, ValueError) as exc:
                 raise RuntimeError(
                     f"operating-point scalar {instance}:{quantity} is not numeric"
                 ) from exc
+            if not math.isfinite(result):
+                raise RuntimeError(
+                    f"operating-point scalar {instance}:{quantity} is non-finite"
+                )
+            return result
     requested = "/".join(quantities)
     raise RuntimeError(
         f"missing operating-point scalar {instance}:{requested}; "
@@ -13877,11 +13934,21 @@ def _select_shallow_psf_file(
     return selected[0]
 
 
+def _read_psf_ascii_data(path: Path, *, label: str) -> dict[str, Any]:
+    from virtuoso_bridge.spectre.psf import read_psf_ascii
+
+    try:
+        data = read_psf_ascii(path)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Spectre {label} PSF file is invalid: {exc}") from exc
+    if not isinstance(data, dict) or not data:
+        raise RuntimeError(f"Spectre {label} PSF file is empty or unparseable")
+    return data
+
+
 def _common_source_dc_data_from_result(
     result: Any,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    from virtuoso_bridge.spectre.parsers import parse_spectre_psf_ascii
-
     raw_output_dir = getattr(result, "metadata", {}).get("output_dir")
     if not raw_output_dir:
         raise RuntimeError("Spectre result is missing its downloaded PSF path")
@@ -13896,16 +13963,8 @@ def _common_source_dc_data_from_result(
         ("dcOpInfo.info",),
         label="operating-point",
     )
-    dc_result = parse_spectre_psf_ascii(dc_file)
-    op_result = parse_spectre_psf_ascii(op_file)
-    dc_data = getattr(dc_result, "data", None)
-    op_data = getattr(op_result, "data", None)
-    if not isinstance(dc_data, dict) or not dc_data:
-        raise RuntimeError("Spectre root DC PSF file is empty or unparseable")
-    if not isinstance(op_data, dict) or not op_data:
-        raise RuntimeError(
-            "Spectre root operating-point PSF file is empty or unparseable"
-        )
+    dc_data = _read_psf_ascii_data(dc_file, label="root DC")
+    op_data = _read_psf_ascii_data(op_file, label="root operating-point")
     merged = {f"dc_{key}": value for key, value in dc_data.items()}
     merged.update({f"dcOpInfo_{key}": value for key, value in op_data.items()})
 
@@ -13919,6 +13978,7 @@ def _common_source_dc_data_from_result(
         "selection": "shallowest analysis-specific PSF files",
         "dc": file_evidence(dc_file),
         "operating_point": file_evidence(op_file),
+        "parser": "virtuoso_bridge.spectre.psf.read_psf_ascii",
     }
 
 
@@ -14601,7 +14661,7 @@ def _preview_ac_metrics(
     data: dict[str, Any],
     ac_sweep: dict[str, Any],
 ) -> tuple[dict[str, float], dict[str, Any]]:
-    frequency_hz = _signal(data, "ac_freq")
+    frequency_hz = _frequency_signal(data, "ac_freq")
 
     def complex_node(node: str) -> list[complex]:
         if node == "0":
@@ -14709,6 +14769,99 @@ def _preview_comparisons(
     }
 
 
+_PREVIEW_MAX_PARALLEL_JOBS = 4
+
+
+def _preview_local_work_dir(
+    work_root: Path,
+    variant_id: str,
+    result: Any,
+) -> Path:
+    resolved_root = work_root.resolve()
+    expected_prefix = f"preview_{variant_id}__"
+    raw_output_dir = getattr(result, "metadata", {}).get("output_dir")
+    if raw_output_dir:
+        resolved_output = Path(str(raw_output_dir)).resolve()
+        if not resolved_output.is_relative_to(resolved_root):
+            raise RuntimeError(
+                f"preview variant {variant_id} output escaped its local batch root"
+            )
+        for candidate in (resolved_output, *resolved_output.parents):
+            if (
+                candidate.parent == resolved_root
+                and candidate.name.startswith(expected_prefix)
+            ):
+                return candidate
+    matches = sorted(
+        path
+        for path in resolved_root.glob(f"{expected_prefix}*")
+        if path.is_dir()
+    )
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"preview variant {variant_id} expected exactly one local parallel "
+            f"workspace; found {[str(path) for path in matches]}"
+        )
+    return matches[0]
+
+
+def _preview_remote_artifacts(
+    runner: Any,
+    remote_run_root: str,
+    variant_ids: list[str],
+) -> dict[str, dict[str, str]]:
+    remote_root = posixpath.normpath(remote_run_root)
+    inventory = _ssh_command_result(
+        runner,
+        f"find {shlex.quote(remote_root)} -mindepth 2 -maxdepth 2 -type f "
+        f"-name {shlex.quote('preview_*.scs')} -print",
+        "preview batch remote artifact discovery",
+    )
+    expected_by_name = {
+        f"preview_{variant_id}.scs": variant_id for variant_id in variant_ids
+    }
+    discovered: dict[str, list[dict[str, str]]] = {
+        variant_id: [] for variant_id in variant_ids
+    }
+    unexpected: list[str] = []
+    for line in inventory.splitlines():
+        remote_deck = posixpath.normpath(line.strip())
+        if not remote_deck:
+            continue
+        filename = posixpath.basename(remote_deck)
+        variant_id = expected_by_name.get(filename)
+        simulation_dir = posixpath.dirname(remote_deck)
+        if (
+            variant_id is None
+            or not remote_deck.startswith(f"{remote_root}/")
+            or posixpath.dirname(simulation_dir) != remote_root
+        ):
+            unexpected.append(remote_deck)
+            continue
+        discovered[variant_id].append(
+            {
+                "remote_simulation_dir": simulation_dir,
+                "remote_deck_path": remote_deck,
+            }
+        )
+    invalid = {
+        variant_id: rows
+        for variant_id, rows in discovered.items()
+        if len(rows) != 1
+    }
+    if unexpected or invalid:
+        raise RuntimeError(
+            "preview batch could not bind exactly one remote deck to every variant; "
+            f"unexpected={unexpected}, invalid={invalid}"
+        )
+    simulation_dirs = {
+        rows[0]["remote_simulation_dir"] for rows in discovered.values()
+    }
+    if len(simulation_dirs) != len(variant_ids):
+        raise RuntimeError("preview batch variants did not receive unique remote directories")
+    return {variant_id: rows[0] for variant_id, rows in discovered.items()}
+
+
 def simulate_netlist_preview(payload: dict[str, Any]) -> dict[str, Any]:
     """Run a validated standalone Spectre topology bundle without OA or si."""
 
@@ -14751,13 +14904,13 @@ def simulate_netlist_preview(payload: dict[str, Any]) -> dict[str, Any]:
     metrics_by_variant: dict[str, dict[str, float]] = {}
     tool_versions: set[str] = set()
     warnings: list[str] = []
+    max_workers = min(_PREVIEW_MAX_PARALLEL_JOBS, len(spec.variants))
     with tempfile.TemporaryDirectory(prefix="vda_netlist_preview_") as temp_dir:
         work_root = Path(temp_dir)
+        deck_by_variant: dict[str, tuple[Path, str]] = {}
+        tasks: list[tuple[Path, dict[str, Any]]] = []
         for variant in spec.variants:
-            work_dir = work_root / variant.id
-            work_dir.mkdir()
-            remote_variant_root = f"{remote_run_root}/{variant.id}"
-            deck_path = work_dir / f"preview_{variant.id}.scs"
+            deck_path = work_root / f"preview_{variant.id}.scs"
             deck = render_spectre_preview_deck(
                 spec,
                 variant.id,
@@ -14766,28 +14919,68 @@ def simulate_netlist_preview(payload: dict[str, Any]) -> dict[str, Any]:
                 ac_sweep=ac_sweep if isinstance(ac_sweep, dict) else None,
             )
             deck_path.write_text(deck, encoding="utf-8", newline="\n")
-            spectre_cmd, process_lifecycle = _install_remote_spectre_guard(
-                ssh_client,
-                work_dir,
-                remote_variant_root,
-                timeout=timeout,
+            deck_by_variant[variant.id] = (deck_path, deck)
+            tasks.append((deck_path, {}))
+
+        spectre_cmd, process_lifecycle = _install_remote_spectre_guard(
+            ssh_client,
+            work_root,
+            remote_run_root,
+            timeout=timeout,
+        )
+        local_guard_path = work_root / "vda_spectre_guard.sh"
+        if not local_guard_path.is_file():
+            raise RuntimeError("preview batch is missing its verified Spectre guard")
+        simulator = _create_spectre_simulator(
+            SpectreSimulator,
+            ssh_client,
+            spectre_cmd=spectre_cmd,
+            timeout=timeout,
+            work_dir=work_root,
+            keep_remote_files=True,
+            remote_run_dir=remote_run_root,
+        )
+        run_parallel = getattr(simulator, "run_parallel", None)
+        if not callable(run_parallel):
+            raise RuntimeError(
+                "netlist preview batching requires Bridge 0.8 "
+                "SpectreSimulator.run_parallel"
             )
-            simulator = _create_spectre_simulator(
-                SpectreSimulator,
-                ssh_client,
-                spectre_cmd=spectre_cmd,
-                timeout=timeout,
-                work_dir=work_dir,
-                keep_remote_files=True,
-                remote_run_dir=remote_variant_root,
+        results = run_parallel(tasks, max_workers=max_workers)
+        if len(results) != len(spec.variants):
+            raise RuntimeError(
+                "Bridge preview batch result count does not match submitted variants"
             )
-            result = simulator.run_simulation(deck_path, {})
+
+        local_work_dirs: dict[str, Path] = {}
+        for variant, result in zip(spec.variants, results, strict=True):
             if not result.ok:
-                detail = _spectre_failure_detail(result, work_dir)
+                try:
+                    failure_work_dir = _preview_local_work_dir(
+                        work_root, variant.id, result
+                    )
+                except RuntimeError:
+                    failure_work_dir = work_root
+                detail = _spectre_failure_detail(result, failure_work_dir)
                 raise RuntimeError(
                     f"Spectre preview variant {variant.id} failed; retained remote "
-                    f"root {remote_variant_root}: {detail}"
+                    f"root {remote_run_root}: {detail}"
                 )
+            local_work_dirs[variant.id] = _preview_local_work_dir(
+                work_root, variant.id, result
+            )
+
+        remote_artifacts = _preview_remote_artifacts(
+            runner,
+            remote_run_root,
+            [variant.id for variant in spec.variants],
+        )
+
+        for variant, result in zip(spec.variants, results, strict=True):
+            work_dir = local_work_dirs[variant.id]
+            deck_path, deck = deck_by_variant[variant.id]
+            shutil.copy2(deck_path, work_dir / deck_path.name)
+            shutil.copy2(local_guard_path, work_dir / local_guard_path.name)
             tool_version = str(result.tool_version or "").strip()
             if not tool_version:
                 tool_version = _spectre_version_from_log(work_dir)
@@ -14827,21 +15020,7 @@ def simulate_netlist_preview(payload: dict[str, Any]) -> dict[str, Any]:
                     ac_diagnostics.get("analysis_complete", False)
                 ) and not analysis_issues
             manifest, manifest_sha256 = _spectre_artifact_manifest(work_dir)
-            remote_children = [
-                line.strip()
-                for line in _ssh_command_result(
-                    runner,
-                    f"find {shlex.quote(remote_variant_root)} -mindepth 1 "
-                    "-maxdepth 1 -type d -print",
-                    f"preview variant {variant.id} remote artifact discovery",
-                ).splitlines()
-                if line.strip()
-            ]
-            if len(remote_children) != 1:
-                raise RuntimeError(
-                    f"preview variant {variant.id} expected exactly one remote "
-                    f"simulator directory; found {remote_children}"
-                )
+            remote_binding = remote_artifacts[variant.id]
             metrics_by_variant[variant.id] = metrics
             variant_results[variant.id] = {
                 "analysis_complete": analysis_complete,
@@ -14861,8 +15040,9 @@ def simulate_netlist_preview(payload: dict[str, Any]) -> dict[str, Any]:
                 "deck_sha256": hashlib.sha256(deck.encode("utf-8")).hexdigest(),
                 "artifact_manifest": manifest,
                 "manifest_sha256": manifest_sha256,
-                "remote_run_root": remote_variant_root,
-                "remote_simulation_dir": remote_children[0],
+                "remote_run_root": remote_run_root,
+                "remote_simulation_dir": remote_binding["remote_simulation_dir"],
+                "remote_deck_path": remote_binding["remote_deck_path"],
                 "process_lifecycle": process_lifecycle,
             }
 
@@ -14913,6 +15093,17 @@ def simulate_netlist_preview(payload: dict[str, Any]) -> dict[str, Any]:
             "process_corner": str(profile["model_section"]),
             "remote_run_root": remote_run_root,
             "non_overwrite_preflight": "absent",
+            "batch_execution": {
+                "source": "software_inference",
+                "api": "SpectreSimulator.run_parallel",
+                "submission_count": len(spec.variants),
+                "max_workers": max_workers,
+                "result_binding": "submission_order_plus_remote_deck_inventory",
+                "simulator_instance_count": 1,
+                "guard_installation_count": 1,
+                "remote_inventory_command_count": 1,
+                "executor_lifecycle": "scoped_context_manager",
+            },
             "variants": variant_results,
             "comparison": comparison,
             "netlist_source": "validated_structured_preview_spec",
@@ -14927,7 +15118,6 @@ def simulate_netlist_preview(payload: dict[str, Any]) -> dict[str, Any]:
             ),
         },
     }
-
 
 def _spectre_ac_file_evidence_from_result(result: Any) -> dict[str, Any]:
     raw_output_dir = getattr(result, "metadata", {}).get("output_dir")
@@ -15588,7 +15778,7 @@ def _differential_pair_metrics_from_result(
 def _common_source_ac_metrics_from_result(
     data: dict[str, Any], ac_sweep: dict[str, Any]
 ) -> tuple[dict[str, float], dict[str, Any]]:
-    frequency_hz = _signal(data, "ac_freq")
+    frequency_hz = _frequency_signal(data, "ac_freq")
     vin_v = _complex_signal(data, "ac_IN")
     vout_v = _complex_signal(data, "ac_OUT")
     metrics, diagnostics = extract_common_source_ac_metrics(
@@ -15611,7 +15801,7 @@ def _differential_pair_ac_metrics_from_result(
     ac_sweep: dict[str, Any],
     topology_variant: str = _DIFFERENTIAL_PAIR_BASE_VARIANT,
 ) -> tuple[dict[str, float], dict[str, Any]]:
-    frequency_hz = _signal(data, "ac_freq")
+    frequency_hz = _frequency_signal(data, "ac_freq")
     metrics, diagnostics = extract_differential_pair_ac_metrics(
         frequency_hz,
         _complex_signal(data, "ac_INP"),
@@ -15638,7 +15828,7 @@ def _differential_pair_common_mode_ac_metrics_from_result(
     topology_variant: str = _DIFFERENTIAL_PAIR_BASE_VARIANT,
 ) -> tuple[dict[str, float], dict[str, Any]]:
     return extract_differential_pair_common_mode_ac_metrics(
-        _signal(data, "ac_freq"),
+        _frequency_signal(data, "ac_freq"),
         _complex_signal(data, "ac_INP"),
         _complex_signal(data, "ac_INN"),
         _complex_signal(data, "ac_OUTP"),
@@ -15662,12 +15852,12 @@ def _differential_pair_cmrr_metrics_from_results(
     topology_variant: str = _DIFFERENTIAL_PAIR_BASE_VARIANT,
 ) -> tuple[dict[str, float], dict[str, Any]]:
     return extract_differential_pair_cmrr_response_metrics(
-        _signal(differential_data, "ac_freq"),
+        _frequency_signal(differential_data, "ac_freq"),
         _complex_signal(differential_data, "ac_INP"),
         _complex_signal(differential_data, "ac_INN"),
         _complex_signal(differential_data, "ac_OUTP"),
         _complex_signal(differential_data, "ac_OUTN"),
-        _signal(common_mode_data, "ac_freq"),
+        _frequency_signal(common_mode_data, "ac_freq"),
         _complex_signal(common_mode_data, "ac_INP"),
         _complex_signal(common_mode_data, "ac_INN"),
         _complex_signal(common_mode_data, "ac_OUTP"),
@@ -15692,16 +15882,16 @@ def _differential_pair_psrr_metrics_from_results(
     topology_variant: str = _DIFFERENTIAL_PAIR_BASE_VARIANT,
 ) -> tuple[dict[str, float], dict[str, Any]]:
     return extract_differential_pair_psrr_metrics(
-        _signal(differential_data, "ac_freq"),
+        _frequency_signal(differential_data, "ac_freq"),
         _complex_signal(differential_data, "ac_INP"),
         _complex_signal(differential_data, "ac_INN"),
         _complex_signal(differential_data, "ac_OUTP"),
         _complex_signal(differential_data, "ac_OUTN"),
-        _signal(positive_supply_data, "ac_freq"),
+        _frequency_signal(positive_supply_data, "ac_freq"),
         _complex_signal(positive_supply_data, "ac_VDD"),
         _complex_signal(positive_supply_data, "ac_OUTP"),
         _complex_signal(positive_supply_data, "ac_OUTN"),
-        _signal(negative_supply_data, "ac_freq"),
+        _frequency_signal(negative_supply_data, "ac_freq"),
         _complex_signal(negative_supply_data, "ac_VSS"),
         _complex_signal(negative_supply_data, "ac_OUTP"),
         _complex_signal(negative_supply_data, "ac_OUTN"),
@@ -15882,8 +16072,6 @@ def _differential_pair_linearity_metrics_from_result(
 def _common_source_noise_metrics_from_result(
     result: Any, noise_sweep: dict[str, Any]
 ) -> tuple[dict[str, float], dict[str, Any]]:
-    from virtuoso_bridge.spectre.parsers import parse_spectre_psf_ascii
-
     raw_output_dir = getattr(result, "metadata", {}).get("output_dir")
     if not raw_output_dir:
         raise RuntimeError("Spectre noise result is missing its downloaded PSF path")
@@ -15901,11 +16089,8 @@ def _common_source_noise_metrics_from_result(
             f"found {len(candidates)}"
         )
     noise_file = candidates[0]
-    parsed = parse_spectre_psf_ascii(noise_file)
-    data = getattr(parsed, "data", None)
-    if not isinstance(data, dict) or not data:
-        raise RuntimeError("Spectre ordinary noise PSF file is empty or unparseable")
-    frequency_hz = _signal(data, "freq")
+    data = _read_psf_ascii_data(noise_file, label="ordinary noise")
+    frequency_hz = _frequency_signal(data, "freq")
     metrics, diagnostics = extract_common_source_noise_metrics(
         frequency_hz,
         _signal(data, "out"),
@@ -15927,7 +16112,7 @@ def _common_source_noise_metrics_from_result(
             "signals": ["freq", "out", "in"],
             "temporary_psf_file": str(noise_file),
             "psf_sha256": hashlib.sha256(noise_file.read_bytes()).hexdigest(),
-            "parser": "virtuoso_bridge.spectre.parsers.parse_spectre_psf_ascii",
+            "parser": "virtuoso_bridge.spectre.psf.read_psf_ascii",
         }
     )
     return metrics, diagnostics
@@ -16738,7 +16923,7 @@ def simulate_existing_schematic(
         if analysis == "ac":
             assert settings.transfer is not None
             assert isinstance(ac_sweep, dict)
-            frequency_hz = _signal(result.data, "ac_freq")
+            frequency_hz = _frequency_signal(result.data, "ac_freq")
             input_voltage = _generic_ac_voltage(
                 result.data,
                 settings.transfer.input,

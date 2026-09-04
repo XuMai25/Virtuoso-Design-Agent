@@ -697,6 +697,36 @@ def _validate_preview_evidence(
     declared_variant_ids = [variant.id for variant in spec.variants]
     if set(variants_raw) != set(declared_variant_ids):
         raise ValueError("preview evidence variant set does not match the task")
+    batch_execution_raw = evidence.get("batch_execution")
+    batch_execution: dict | None = None
+    if batch_execution_raw is not None:
+        batch_execution = _require_mapping(
+            batch_execution_raw,
+            "preview batch execution",
+        )
+        submission_count = batch_execution.get("submission_count")
+        max_workers = batch_execution.get("max_workers")
+        unit_count_fields = (
+            batch_execution.get("simulator_instance_count"),
+            batch_execution.get("guard_installation_count"),
+            batch_execution.get("remote_inventory_command_count"),
+        )
+        if (
+            batch_execution.get("source") != EvidenceSource.SOFTWARE_INFERENCE.value
+            or batch_execution.get("api") != "SpectreSimulator.run_parallel"
+            or isinstance(submission_count, bool)
+            or not isinstance(submission_count, int)
+            or submission_count != len(declared_variant_ids)
+            or isinstance(max_workers, bool)
+            or not isinstance(max_workers, int)
+            or not 1 <= max_workers <= min(4, len(declared_variant_ids))
+            or batch_execution.get("result_binding")
+            != "submission_order_plus_remote_deck_inventory"
+            or any(isinstance(value, bool) or value != 1 for value in unit_count_fields)
+            or batch_execution.get("executor_lifecycle")
+            != "scoped_context_manager"
+        ):
+            raise ValueError("preview batch execution evidence is invalid")
     if not spec.variant_source_ids:
         raise ValueError("preview task has no candidate identity mapping")
     candidate_variant_ids = list(spec.variant_source_ids)
@@ -708,6 +738,7 @@ def _validate_preview_evidence(
 
     profile = load_pdk_profile(task.pdk_profile).model_dump(mode="json")
     ac_sweep = task.ac_sweep.model_dump(mode="json") if task.ac_sweep else None
+    batch_simulation_dirs: set[str] = set()
     for variant_id in declared_variant_ids:
         raw_variant = _require_mapping(
             variants_raw.get(variant_id),
@@ -740,14 +771,29 @@ def _validate_preview_evidence(
             raise ValueError(f"preview variant {variant_id} process was not bounded")
         variant_root = raw_variant.get("remote_run_root")
         simulation_dir = raw_variant.get("remote_simulation_dir")
-        expected_prefix = f"{remote_root}/{variant_id}"
-        if (
-            not isinstance(variant_root, str)
-            or variant_root != expected_prefix
-            or not isinstance(simulation_dir, str)
-            or not simulation_dir.startswith(f"{expected_prefix}/")
-        ):
-            raise ValueError(f"preview variant {variant_id} remote path mismatch")
+        if batch_execution is None:
+            expected_prefix = f"{remote_root}/{variant_id}"
+            if (
+                not isinstance(variant_root, str)
+                or variant_root != expected_prefix
+                or not isinstance(simulation_dir, str)
+                or not simulation_dir.startswith(f"{expected_prefix}/")
+            ):
+                raise ValueError(f"preview variant {variant_id} remote path mismatch")
+        else:
+            remote_deck = raw_variant.get("remote_deck_path")
+            if (
+                not isinstance(variant_root, str)
+                or variant_root != remote_root
+                or not isinstance(simulation_dir, str)
+                or PurePosixPath(simulation_dir).parent != PurePosixPath(remote_root)
+                or simulation_dir in batch_simulation_dirs
+                or remote_deck != f"{simulation_dir}/preview_{variant_id}.scs"
+            ):
+                raise ValueError(
+                    f"preview batch variant {variant_id} remote path mismatch"
+                )
+            batch_simulation_dirs.add(simulation_dir)
         rendered = render_spectre_preview_deck(
             spec,
             variant_id,

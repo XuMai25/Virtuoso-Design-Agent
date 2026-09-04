@@ -40,7 +40,10 @@ action timestamps；没有计时依据时不伪造精确收益。当前两个 li
   `811.503 s` 减少 `62.840%`；
 - 未见差分对八点域：preview + 三点 OA 按同一完整 run 的 action timestamps 估算
   `354.176 s`，相对重建的无中断八点 OA `733.694 s` 减少 `51.727%`；该数不是独立
-  三点实测。
+  三点实测；
+- Bridge 0.8 同一共栅十变体 preview：旧顺序 execution action `70.566828 s`，新的四路
+  scoped batch 为 `40.450857 s`，减少 `42.677%`；完整 run 从 `71.628403 s` 降到
+  `42.814626 s`，减少 `40.227%`。两次 893 个指标和 10 个 deck SHA-256 完全相同。
 
 ## 固定阶段
 
@@ -73,6 +76,18 @@ action timestamps；没有计时依据时不伪造精确收益。当前两个 li
 在一次获授权的 `simulation.run` 中运行全部 preview variants；不要逐候选启动 Bridge。
 preview 只需覆盖决定 shortlist 所必需的廉价 DC/AC 指标。默认不在这里增加 noise、
 transient、PVT 或 ADE。
+
+Bridge 0.8 路径先确定性渲染全部 deck，再用一次
+`SpectreSimulator.run_parallel()` 固定批次执行，`max_workers=min(4, N)`。整个批次只安装并
+哈希核对一次 Spectre timeout guard、创建一个 simulator、执行一次远端 deck inventory；
+Bridge 为每个候选分配独立本地/远端工作目录，并在 scoped context manager 退出时关闭线程池。
+VDA 以“提交顺序 + 远端唯一 deck 路径”双重绑定结果身份，共享 guard 的同一已验证本地副本
+进入每个候选 manifest，因此既有最小产物门不降级。旧的逐候选远端目录证据仍可读取；新 run
+显式保存 `batch_execution`，不得把共享根目录误作候选结果身份。
+
+这一并行只适用于本来就独立、无 OA 的 preview variants。普通 OA shortlist 继续逐候选
+checkpoint、写后回读和恢复；1–3 个候选仍默认直接走 OA/ADE，不能为使用并行接口反向扩大
+preview 适用范围。
 
 preview 的绝对值不是设计真值。粗约束只用于排除明显错误工作区；若规格边界落在最近同类
 preview 的已知误差范围内，该约束不得在 preview 阶段硬淘汰候选，应留到 OA 复核。

@@ -4647,6 +4647,15 @@ def test_common_source_ac_result_uses_complex_vout_over_vin() -> None:
 
     with pytest.raises(RuntimeError, match="complex signal ac_OUT is empty"):
         _complex_signal({"ac_OUT": []}, "ac_OUT")
+    with pytest.raises(RuntimeError, match="not strictly increasing"):
+        _common_source_ac_metrics_from_result(
+            {
+                "ac_freq": [1e4, 1e3],
+                "ac_IN": [1.0 + 0.0j, 1.0 + 0.0j],
+                "ac_OUT": [-2.0 + 0.0j, -1.0 + 0.0j],
+            },
+            {"reference_points": 2, "max_reference_variation_db": 0.5},
+        )
 
 
 def test_common_source_linearity_sweep_maps_declared_amplitudes_to_psf_points() -> None:
@@ -4708,17 +4717,13 @@ def test_common_source_noise_reads_the_downloaded_bridge_psf(
     output_dir.mkdir()
     noise_file = output_dir / "noise.noise"
     noise_file.write_text("test noise psf", encoding="utf-8")
-    parser_module = ModuleType("virtuoso_bridge.spectre.parsers")
-    parser_module.parse_spectre_psf_ascii = lambda path: SimpleNamespace(
-        data={
-            "freq": [1e3, 1.001e6],
-            "out": [10e-9, 10e-9],
-            "in": [2e-9, 2e-9],
-        }
-    )
-    monkeypatch.setitem(
-        sys.modules, "virtuoso_bridge.spectre.parsers", parser_module
-    )
+    psf_module = ModuleType("virtuoso_bridge.spectre.psf")
+    psf_module.read_psf_ascii = lambda path: {
+        "freq": [1e3, 1.001e6],
+        "out": [10e-9, 10e-9],
+        "in": [2e-9, 2e-9],
+    }
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.spectre.psf", psf_module)
 
     metrics, diagnostics = _common_source_noise_metrics_from_result(
         SimpleNamespace(metadata={"output_dir": str(output_dir)}),
@@ -4728,6 +4733,7 @@ def test_common_source_noise_reads_the_downloaded_bridge_psf(
     assert metrics["integrated_output_noise_uv_rms"] == pytest.approx(10.0)
     assert metrics["integrated_input_referred_noise_uv_rms"] == pytest.approx(2.0)
     assert diagnostics["signals"] == ["freq", "out", "in"]
+    assert diagnostics["parser"] == "virtuoso_bridge.spectre.psf.read_psf_ascii"
     assert diagnostics["psf_sha256"] == hashlib.sha256(
         noise_file.read_bytes()
     ).hexdigest()
@@ -4777,17 +4783,13 @@ def test_common_source_dc_reads_root_psf_instead_of_sweep_point(
         "sweep-op": root_op_data | {"MN0:vds": 0.379024248172},
     }
 
-    def parse_psf(path):
+    def read_psf(path):
         parsed_paths.append(path)
-        return SimpleNamespace(
-            data=data_by_marker[path.read_text(encoding="utf-8")]
-        )
+        return data_by_marker[path.read_text(encoding="utf-8")]
 
-    parser_module = ModuleType("virtuoso_bridge.spectre.parsers")
-    parser_module.parse_spectre_psf_ascii = parse_psf
-    monkeypatch.setitem(
-        sys.modules, "virtuoso_bridge.spectre.parsers", parser_module
-    )
+    psf_module = ModuleType("virtuoso_bridge.spectre.psf")
+    psf_module.read_psf_ascii = read_psf
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.spectre.psf", psf_module)
 
     dc_data, diagnostics = _common_source_dc_data_from_result(
         SimpleNamespace(metadata={"output_dir": str(output_dir)})
@@ -4807,6 +4809,7 @@ def test_common_source_dc_reads_root_psf_instead_of_sweep_point(
     assert evidence["node_device_consistency"] == "matched"
     assert diagnostics["dc"]["relative_path"] == "dcOp.dc"
     assert diagnostics["operating_point"]["relative_path"] == "dcOpInfo.info"
+    assert diagnostics["parser"] == "virtuoso_bridge.spectre.psf.read_psf_ascii"
 
 
 def test_ac_evidence_hashes_the_shallow_analysis_file(tmp_path) -> None:
@@ -7598,6 +7601,17 @@ def test_empty_netlist_and_empty_waveform_are_rejected(tmp_path) -> None:
         _read_nonempty_text(netlist, "si netlist")
     with pytest.raises(RuntimeError, match="signal time is empty"):
         _signal({"time": []}, "time")
+    with pytest.raises(RuntimeError, match="signal time contains non-finite values"):
+        _signal({"time": [0.0, math.nan]}, "time")
+    with pytest.raises(
+        RuntimeError,
+        match="complex signal ac_OUT contains non-finite values",
+    ):
+        _complex_signal({"ac_OUT": [1.0 + 0.0j, complex(math.inf, 0.0)]}, "ac_OUT")
+    with pytest.raises(RuntimeError, match="Spectre scalar gain is non-finite"):
+        bridge_worker._scalar({"gain": math.inf}, "gain")
+    with pytest.raises(RuntimeError, match="operating-point scalar MN0:gm is non-finite"):
+        bridge_worker._operating_point_scalar({"MN0:gm": math.nan}, "MN0", "gm")
 
 
 def test_si_netlisting_rejects_empty_generated_output(tmp_path) -> None:

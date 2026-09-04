@@ -889,6 +889,12 @@ VDA 的 adapter 边界没有改成复制 Bridge：主环境仍不直接安装 `v
 
 因此，上游 scoped Spectre pools/并行隔离、split-host roles、Paramiko/SOCKS5、strict PSF、schematic netlist/planner 与 Maestro 修复已成为可复用的 Bridge 能力；现有 VDA 对 `SSHClient`、`SpectreSimulator`、PSF parser、Maestro 和 OA/SKILL API 的调用会获得兼容修复。但新 API 只有经过相应 task contract、证据分类和 live Gate 后，才能称为 VDA 功能，不能仅凭升级存在就进入 L5B 声明。
 
+首批显式采用只覆盖两个有直接收益的接口。DC/operating-point 与 ordinary-noise 的唯一根 PSF 文件改由 Bridge 0.8 `read_psf_ascii()` 读取，保留 VDA 对 nested sweep 根文件的浅层选择；AC/noise 频率轴再经过 `frequency_hz()` 的有限值、实数和严格递增检查，经 VDA 信号/标量 helper 读取的实数、复数与 operating-point 值也统一拒绝 NaN/Inf。这样没有复制 PSF parser，也没有用 `result_file()` 误拒绝包含多个 sweep-point 文件的有效 raw bundle。
+
+standalone `netlist_preview` 改为一次 `SpectreSimulator.run_parallel()` 固定批次：上限为四路，只安装一次已哈希 timeout guard、创建一个 simulator、执行一次远端 deck inventory，并依赖 Bridge scoped context manager 回收 executor。每个结果同时按提交顺序和唯一远端 deck 路径绑定；共享 guard 副本进入每个候选 manifest，旧逐候选目录证据仍向后兼容。这个并行面不延伸到 OA shortlist、ADE、PVT/noise 或普通单点 operation。相同十变体、相同 deck 与 Spectre 版本的 live 对照中，simulation action 从 `70.566828 s` 降到 `40.450857 s`，893 个指标逐项一致且十个 deck SHA-256 全部相同。
+
+Bridge 新增的 schematic netlist export 没有替换当前 OA→`si` 路径。现有路径还承担 profile 固定的 `si.env`/`cds.lib`/Cadence shell、远端原地 Spectre wrapper、OA 参数对照和 netlist hash 证据；直接 export 后再上传反而会增加传输并削弱这些已验证约束。只有上游接口能保留同等来源、环境和一致性证据时才重新评估该替换。
+
 私有网络与 Windows 行为继续由 Bridge 单点实现：daemon 与本地 SSH forward 默认回环；VDA worker 在 RAMIC-backed action 前 fail closed；Windows tunnel 不弹新控制台、不依赖不兼容的 `DETACHED_PROCESS`；complete-JSON framing 保留；只有发送前连接拒绝可自动恢复；身份与 bind 查询是可重复的只读操作。`status`、doctor 与 daemon `restart` 现在都使用 managed-tunnel 语义；restart 的 runner 在 `finally` 中关闭但不终止持久 forward，daemon 无响应或安全证据不可核实时不会返回健康。
 
 该升级没有改变 VDA 的 `--execute`、plan token、`allow_remote_compute`、`allow_remote_write`、library/cell allowlist、`vda_` 前缀或 `replace_existing=false` 规则。Bridge 0.8 的功能范围也不授权 VDA 绕过这些控制。完整 provenance、测试基线与 34 项未修改上游测试中的 Windows 边界见[第三方补丁记录](third-party/virtuoso-bridge-local-patch.md)和[升级验证](validation/2026-09-04-bridge-upstream-0.8-upgrade.md)。

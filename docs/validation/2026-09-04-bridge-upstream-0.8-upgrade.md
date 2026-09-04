@@ -2,7 +2,7 @@
 
 ## 结论
 
-第三方 Bridge 已从旧 `0.7` 基线升级到 GitHub 上游 main `c64461c`（含 `v0.8.0`），并在私有分支保留 VDA 已验证的安全、Windows 和 transport 修复。当前状态可称为：**Bridge 0.8 execution substrate integrated with VDA private hardening; existing VDA workflow and read-only live connectivity verified; unrelated upstream Windows portability gaps remain**。
+第三方 Bridge 已从旧 `0.7` 基线升级到 GitHub 上游 main `c64461c`（含 `v0.8.0`），并在私有分支保留 VDA 已验证的安全、Windows 和 transport 修复。当前状态可称为：**Bridge 0.8 execution substrate integrated with VDA private hardening; existing workflow compatibility, read-only connectivity, strict PSF adoption and scoped preview batching verified; unrelated upstream Windows portability gaps remain**。
 
 这不是新的电路设计 Gate，也没有把任何上游 API 的存在包装成 L5B 设计证据。
 
@@ -100,7 +100,47 @@ Bridge 最终完整集使用固定短目录 `C:\vbt\full-final-20260904`：
 - 上游新增 schematic planner/netlist、GDS、library/category 和全部 Maestro 变化只完成本地回归，未逐项形成新的远端 OA live Gate。
 - Paramiko/SOCKS5 和真正 split-host 部署完成单测，没有在 nics4304 真实环境启用；当前 live profile 仍是 OpenSSH 单 host。
 - loopback 不等于多用户服务器上的应用层认证；原生 Cadence listener 也不属于本 Gate。
-- 本轮没有 OA 或 Spectre 结果，因此没有新增 `eda_result`，只有 Bridge/VDA 状态和 SKILL 的 `bridge_readback`。
+- 初始兼容 Gate 没有 OA 或 Spectre 结果，只有 Bridge/VDA 状态和 SKILL 的 `bridge_readback`；后续 scoped-preview 采用 Gate 单独新增 standalone Spectre `eda_result`，仍没有 OA/`si`/Maestro 访问。
+
+## 升级后的 VDA 工作流采用 Gate
+
+### 采用范围
+
+本次没有把所有新 API 接进 VDA，只处理已经存在的重复调用和证据薄弱点：
+
+1. `_common_source_dc_data_from_result` 与 ordinary-noise 单文件读取改用 Bridge 0.8 公共 `read_psf_ascii()`；VDA 继续选择 nested sweep 中相对深度最小的根 DC/OP 文件，未使用会把多个有效 sweep 文件判成歧义的通用 `result_file()`。
+2. 全部 AC 以及 ordinary-noise 频率轴经过 Bridge `frequency_hz()`；非有限实/复波形、非有限标量和非严格递增频率立即失败。
+3. `netlist_preview` 先渲染完整固定批次，再调用一次 `SpectreSimulator.run_parallel()`，并发上限为 `min(4,N)`。一次批次只安装并验证一个 timeout guard、建立一个 simulator、执行一次远端 deck inventory；每个候选仍有唯一 Bridge 本地/远端目录。
+4. 新证据同时绑定 Bridge 的 submission order 和远端 `preview_<variant>.scs` 唯一路径；共享 guard 副本进入每个候选 manifest。shortlist validator 同时接受历史逐候选布局与新 batch 布局，但拒绝重复目录、错误 deck 路径或超限并发声明。
+
+没有采用 Bridge schematic export 替换 VDA 的 OA→`si`。该公共接口适合下载网表包，但目前不能等价承担 VDA 已验证的 `si.env`/`cds.lib`/Cadence shell 固定、远端原地 wrapper、OA 参数对照和 netlist hash 链；为“少一段代码”替换会降低准确性并增加下载后重传。
+
+### 本地验证
+
+- VDA preview/selection 定向集：`30 passed`。
+- 新增/更新边界覆盖：一次 guard、一个 simulator、一次 `run_parallel`、一次 inventory、deck/manifest 双绑定、旧布局兼容、batch 重复目录拒绝、非有限实/复波形拒绝、非单调频率轴拒绝、strict parser provenance。
+- Bridge 0.8 原生 strict-PSF/scoped-pool 选择集：`7 passed`；Bridge 虚拟环境中的 VDA `_frequency_signal()` 已确认加载 `src/virtuoso_bridge/spectre/psf.py`，而不是测试 fallback。
+- VDA 完整集：`911 passed`；`git diff --check`、worker/validator/test `py_compile`、catalog 和 demo plan 均通过。
+
+### 同任务 live 对照
+
+任务为既有 `common-source-cascode-candidate-preview`，同样的 10 个 variant、TSMC N28 `top_tt`、Spectre `21.1.0.612.isr15`，无 OA target，`allow_remote_write=false`。旧顺序记录是 `artifacts/runs/common-source-cascode-candidate-preview/run-20260727T-candidate-preview-live.json`；新 batch 记录是 `artifacts/runs/common-source-cascode-candidate-preview/run-20260904T013111Z.json`。
+
+| 项目 | 旧顺序路径 | Bridge 0.8 scoped batch |
+|---|---:|---:|
+| simulation action | `70.566828 s` | `40.450857 s` |
+| 完整 run | `71.628403 s` | `42.814626 s` |
+| 最大并发 | 1 | 4 |
+| guard 安装 | 每候选一次 | 1 次 |
+| simulator 实例 | 每候选一个 | 1 个 |
+| 远端 inventory | 每候选一次 | 1 次 |
+| 每候选 manifest | 8 项 | 8 项 |
+
+simulation action 减少 `42.677%`（`1.745×`），完整 run 减少 `40.227%`（`1.673×`）。新旧 893 个 flat metric 的最大绝对/相对差均为 0，10 个 deck SHA-256 无一变化。新 run 的全部候选 analysis 完整，raw simulator 值继续是 `eda_result`，跨候选比较与 batch 配置是 `software_inference`。
+
+真实资源审计得到远端 `spectre=0`、`si=0`、VDA-managed Maestro session `=0`；远端保留一个既有交互 Virtuoso，不是本任务创建。`bridge stop` 后本地 65347 listener、匹配 tunnel `ssh.exe` 和 VDA bridge worker 均为 0。远端只新增唯一 `/data/xum/virtuoso_bridge_smoke/vda_netlist_preview_common-source-cascode-candidate-preview_*` 证据根，没有 OA、`si` 或 Maestro 访问。
+
+该 Gate 只证明无 OA preview 的调用更少、耗时更短且结果/证据不变。它不把 preview 数值升级为 schematic 真值，也不并行化需要逐候选 OA CAS、checkpoint 或人工 ADE 状态的路径。
 
 ## 下一步
 
