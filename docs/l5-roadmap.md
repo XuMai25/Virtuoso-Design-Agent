@@ -457,4 +457,4 @@ per-instance override 或派生 CDF。不再在已知 fixture 上增加随机候
 - 已完成远端只读 preflight：确认 `tsmc18` OA 库、`nmos2v_mac/pmos2v_mac`、D/G/S/B terminal order、`wf/l/fingers/simM` CDF 映射、Spectre `nch_mac/pch_mac` 和 `cor_std_mos.scs` 的 `tt/ff/ss/sf/fs` section。
 - 已把 OA master 与 Spectre model 从 profile 层显式解耦，并让 `si` parser、standalone preview、器件表征 deck 和 characterization source binding 都服从 model 字段；N28 profile 显式补齐同名映射，默认 profile 不变。
 - 已新增 `nics4304_tsmc18`、正交 create/simulate 示例；聚焦回归 `170 passed`，VDA 全量回归 `915 passed`。当前状态仅为 **TSMC18 profile and local evidence-contract integration verified**；没有把 2:1 初始反相器比例或任何 N28 指标包装成 TSMC18 校准结果。
-- 下一道必要 Gate 是在独立 `vb_tsmc18_smoke` 工作库的新 `vda_` cell 上完成 create/readback、参数 CDF 回读、自动 `si`、netlist model/W/L 一致性和单点 Spectre transient。先只证明执行链，再根据真实波形决定是否校准尺寸或增加有限搜索；不改写现有 `Analog_VLSI` cellview。
+- 下一道必要 Gate 是在已绑定 `tsmc18` 的 `Analog_VLSI` 工作库中只新建一个 `vda_` cell，完成 create/readback、参数 CDF 回读、自动 `si`、netlist model/W/L 一致性和单点 Spectre transient。先只证明执行链，再根据真实波形决定是否校准尺寸或增加有限搜索；不改写现有 `tb_f_T` 或人工 `cds.lib`。

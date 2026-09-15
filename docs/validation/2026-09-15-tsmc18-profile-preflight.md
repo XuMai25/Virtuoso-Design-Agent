@@ -25,7 +25,7 @@
 - inverter/common-source/differential-pair 的 `si` parser 改为核对 model 字段；OA 结构断言仍核对 cell 字段。
 - standalone preview 与 MOS characterization deck 改为使用 model 字段；从真实电路 run 派生 characterization task 时也核对 model 字段。
 - N28 LVT/SVT profile 显式补齐 model 字段，保持原行为和默认选择。
-- TSMC18 使用独立待建的 `cds.tsmc18.lib`、`vb_tsmc18_smoke` 和运行子目录，不修改人工 `cds.lib`。
+- TSMC18 只读复用已核实的 `/data/xum/Analog_VLSI/icfb/cds.lib` 和已绑定 `tsmc18` 的 `Analog_VLSI` work library；只把仿真产物放入独立运行子目录，不修改人工 `cds.lib`。
 
 ## 默认值边界
 
@@ -43,8 +43,8 @@ PDK CDF 直接给出 `W=2 µm`、`L=180 nm` 和 1.8 V nominal device 身份。pr
 
 ## 下一道 live Gate
 
-1. 在 `/data/xum/virtuoso_bridge_smoke` 下新建隔离的 `cds.tsmc18.lib` 和 `vb_tsmc18_smoke`，绑定 `tsmc18`；不修改现有人工 `cds.lib`。
-2. 非覆盖创建 `vb_tsmc18_smoke/vda_tsmc18_inv_001/schematic`。
+1. 只读复核 `Analog_VLSI` 仍绑定 `tsmc18`，并保存当前 `cds.lib` SHA-256；不改写 library 配置。
+2. 非覆盖创建 `Analog_VLSI/vda_tsmc18_inv_001/schematic`；若同名对象已存在则停止。
 3. 回读 OA master、D/G/S/B、pins/nets 和 `wf/l`；确认请求参数真实持久化。
 4. 自动 `si` netlist，要求实例为 `nch_mac/pch_mac` 且 W/L 与 OA 回读一致。
 5. 运行一个 nominal `tt` transient，要求有非空波形、解析指标和输入/deck/result/log manifest；无规格时只称 execution smoke，不称设计闭环。

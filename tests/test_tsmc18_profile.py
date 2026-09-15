@@ -94,7 +94,7 @@ def test_tsmc18_profile_is_explicit_and_does_not_change_the_default_pdk() -> Non
     assert set(profile.process_corners) == {"tt", "ff", "ss", "sf", "fs"}
     assert profile.default_vdd_v == pytest.approx(1.8)
     assert profile.default_length_um == pytest.approx(0.18)
-    assert profile.cds_lib_path == "/data/xum/virtuoso_bridge_smoke/cds.tsmc18.lib"
+    assert profile.cds_lib_path == "/data/xum/Analog_VLSI/icfb/cds.lib"
 
 
 def test_tsmc18_profile_can_compile_a_normal_vda_plan() -> None:
@@ -105,7 +105,7 @@ def test_tsmc18_profile_can_compile_a_normal_vda_plan() -> None:
             "circuit": "inverter",
             "pdk_profile": "nics4304_tsmc18",
             "target": {
-                "library": "vb_tsmc18_smoke",
+                "library": "Analog_VLSI",
                 "cell": "vda_tsmc18_inv",
             },
         }

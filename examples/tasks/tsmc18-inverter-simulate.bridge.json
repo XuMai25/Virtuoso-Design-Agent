@@ -4,7 +4,7 @@
   "operation": "simulation.run",
   "circuit": "inverter",
   "target": {
-    "library": "vb_tsmc18_smoke",
+    "library": "Analog_VLSI",
     "cell": "vda_tsmc18_inv_001",
     "view": "schematic"
   },
@@ -16,7 +16,7 @@
   "safety": {
     "allow_remote_compute": true,
     "allow_remote_write": false,
-    "allowed_library": "vb_tsmc18_smoke",
+    "allowed_library": "Analog_VLSI",
     "required_cell_prefix": "vda_",
     "replace_existing": false
   },
