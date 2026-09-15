@@ -4255,6 +4255,11 @@ class PdkProfile(StrictModel):
     tech_library: str
     nmos_cell: str
     pmos_cell: str
+    # OA master cell names and Spectre model/subcircuit names are not
+    # universally identical. Keep both explicit so si readback is checked
+    # against simulator truth rather than an OA naming convention.
+    nmos_model: str
+    pmos_model: str
     model_include: str
     model_section: str
     cds_lib_path: str

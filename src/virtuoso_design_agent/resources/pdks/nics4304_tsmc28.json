@@ -3,6 +3,8 @@
   "tech_library": "tsmcN28",
   "nmos_cell": "nch_lvt_mac",
   "pmos_cell": "pch_lvt_mac",
+  "nmos_model": "nch_lvt_mac",
+  "pmos_model": "pch_lvt_mac",
   "model_include": "/data/technique/tsmcn28_lo_0v9_1p10m_5X2Y2Z/models/spectre/toplevel.scs",
   "model_section": "top_tt",
   "cds_lib_path": "/data/xum/virtuoso_bridge_smoke/cds.lib",

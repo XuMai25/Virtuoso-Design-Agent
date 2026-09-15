@@ -451,3 +451,10 @@ per-instance override 或派生 CDF。不再在已知 fixture 上增加随机候
 - 这是一道执行底座兼容 Gate，不把 GDS/docs/local-netlist 等未验收上游能力计入 L5B。下一步仍回到用户给定大致拓扑的真实单模块 onboarding、最小 DC/AC、局部参数/拓扑 refinement 与 winner 复核；只有真实模块需要时才为某个上游 0.8 API增加 VDA contract。
 - 随后的工作流打磨只采用两个已有痛点能直接受益的 0.8 API：根 DC/OP/noise 单文件改用 strict PSF reader，AC/noise 频率轴要求有限、实数、严格递增；standalone preview 改用一次最多四路的 scoped `run_parallel`，并把一次 guard/一个 simulator/一次 inventory、提交顺序与远端 deck 双绑定写入证据。OA→`si` 没有改走通用 schematic export，因为该接口当前不能等价保留既有 `si.env`、远端环境和 OA/netlist 一致性证据。
 - 同一十变体 live preview 的 action 从 `70.566828 s` 降到 `40.450857 s`（减少 `42.677%`），完整 run 从 `71.628403 s` 降到 `42.814626 s`（减少 `40.227%`）；新旧 893 个指标和十个 deck hash 完全一致，每点 manifest 仍为 8 项。该 Gate 无 OA/`si`/Maestro，结束后远端 Spectre/`si`/Maestro 进程和本地 tunnel/worker 均为 0；它提升筛选执行效率，不扩大 preview 的设计真值声明。
+
+## 2026-09-15 TSMC18 profile Gate
+
+- 已完成远端只读 preflight：确认 `tsmc18` OA 库、`nmos2v_mac/pmos2v_mac`、D/G/S/B terminal order、`wf/l/fingers/simM` CDF 映射、Spectre `nch_mac/pch_mac` 和 `cor_std_mos.scs` 的 `tt/ff/ss/sf/fs` section。
+- 已把 OA master 与 Spectre model 从 profile 层显式解耦，并让 `si` parser、standalone preview、器件表征 deck 和 characterization source binding 都服从 model 字段；N28 profile 显式补齐同名映射，默认 profile 不变。
+- 已新增 `nics4304_tsmc18`、正交 create/simulate 示例；聚焦回归 `170 passed`，VDA 全量回归 `915 passed`。当前状态仅为 **TSMC18 profile and local evidence-contract integration verified**；没有把 2:1 初始反相器比例或任何 N28 指标包装成 TSMC18 校准结果。
+- 下一道必要 Gate 是在独立 `vb_tsmc18_smoke` 工作库的新 `vda_` cell 上完成 create/readback、参数 CDF 回读、自动 `si`、netlist model/W/L 一致性和单点 Spectre transient。先只证明执行链，再根据真实波形决定是否校准尺寸或增加有限搜索；不改写现有 `Analog_VLSI` cellview。

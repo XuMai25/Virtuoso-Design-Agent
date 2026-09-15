@@ -275,7 +275,7 @@ def derive_device_characterization_task(
     ):
         raise ValueError("source temperature does not match the grid template")
     model = str(instance.get("model", ""))
-    expected_model = profile.nmos_cell if polarity == "nmos" else profile.pmos_cell
+    expected_model = profile.nmos_model if polarity == "nmos" else profile.pmos_model
     if model != expected_model:
         raise ValueError(
             f"source model {model!r} does not match profile {polarity} model "

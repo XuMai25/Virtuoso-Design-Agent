@@ -34,7 +34,9 @@ VDA 不嵌入一个新的通用 LLM。Codex 负责开放式推理，VDA 负责�
 
 ## PDK 选择边界
 
-VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PDK_PROFILE=nics4304_tsmc28`，其当前工艺身份是 TSMC N28/`tsmcN28`，默认器件为 `nch_lvt_mac/pch_lvt_mac`。profile loader 支持显式单继承，避免同一工艺的 device-flavor profile 复制 model/corner/远端路径；`nics4304_tsmc28_svt` 只覆盖为 `nch_mac/pch_mac`。继承不继承性能证据：当前只对 NMOS 共源完成 LVT/SVT OA/`si`/Spectre round-trip，PMOS 与其他电路仍需独立 smoke。未来 TSMC、SMIC 等工艺各用独立 profile 绑定器件库、model、默认电压和远端路径，并单独通过 smoke；profile 之间不共享性能结论。TSV、hybrid-bonding 等封装/3D PDK 不参与默认选择或 fallback，必须由任务显式指定并使用专门 Gate。见[决策 0002](decisions/0002-foundry-cmos-pdk-default.md)。
+VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PDK_PROFILE=nics4304_tsmc28`，其当前工艺身份是 TSMC N28/`tsmcN28`，默认器件为 `nch_lvt_mac/pch_lvt_mac`。profile loader 支持显式单继承，避免同一工艺的 device-flavor profile 复制 model/corner/远端路径；`nics4304_tsmc28_svt` 同时覆盖 OA master 与 Spectre model 为 `nch_mac/pch_mac`。`PdkProfile` 分开保存 `nmos_cell/pmos_cell` 和 `nmos_model/pmos_model`：前者只用于 OA master 创建与结构回读，后者用于 standalone deck、器件表征和 `si` 网表真值检查。这样可以支持 TSMC18 的 `nmos2v_mac/pmos2v_mac -> nch_mac/pch_mac` 映射，而不放松模型一致性检查。
+
+显式 `nics4304_tsmc18` profile 绑定 `/data/xum/Analog_VLSI/PDK_TSMC18_1809`、1.8 V、180 nm、标准 2 V macro 和 `tt/ff/ss/sf/fs` section；它使用独立的 `/data/xum/virtuoso_bridge_smoke/cds.tsmc18.lib` 与 `/data/xum/virtuoso_bridge_smoke/tsmc18` 运行根，避免改写人工 `Analog_VLSI/icfb/cds.lib` 或混入 N28 工作库。继承或新增 profile 都不继承性能证据：TSMC18 当前仅完成远端只读事实核实和本地契约回归，必须再通过独立 OA→`si`→Spectre live smoke 才能升级执行状态。未来 SMIC 等工艺同样各用独立 profile 和证据。TSV、hybrid-bonding 等封装/3D PDK 不参与默认选择或 fallback。见[决策 0002](decisions/0002-foundry-cmos-pdk-default.md)和[TSMC18 接入记录](validation/2026-09-15-tsmc18-profile-preflight.md)。
 
 ## 任务与局部能力
 

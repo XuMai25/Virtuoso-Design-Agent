@@ -320,8 +320,8 @@ def render_spectre_preview_deck(
     if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", model_section) is None:
         raise ValueError("invalid preview model section")
     default_models = {
-        "nmos": str(profile.get("nmos_cell", "")),
-        "pmos": str(profile.get("pmos_cell", "")),
+        "nmos": str(profile.get("nmos_model", "")),
+        "pmos": str(profile.get("pmos_model", "")),
     }
     if any(re.fullmatch(_MODEL_PATTERN, model) is None for model in default_models.values()):
         raise ValueError("invalid preview MOS model name in PDK profile")

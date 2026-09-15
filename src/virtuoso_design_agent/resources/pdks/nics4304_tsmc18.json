@@ -1,0 +1,53 @@
+{
+  "name": "nics4304_tsmc18",
+  "tech_library": "tsmc18",
+  "nmos_cell": "nmos2v_mac",
+  "pmos_cell": "pmos2v_mac",
+  "nmos_model": "nch_mac",
+  "pmos_model": "pch_mac",
+  "model_include": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cor_std_mos.scs",
+  "model_section": "tt",
+  "cds_lib_path": "/data/xum/virtuoso_bridge_smoke/cds.tsmc18.lib",
+  "cadence_cshrc": "/data/cshrc/.cshrc.cadence",
+  "remote_run_root": "/data/xum/virtuoso_bridge_smoke/tsmc18",
+  "default_vdd_v": 1.8,
+  "default_load_ff": 10.0,
+  "default_length_um": 0.18,
+  "default_inverter_nmos_width_um": 2.0,
+  "default_inverter_pmos_to_nmos_width_ratio": 2.0,
+  "default_common_source_width_um": 2.0,
+  "default_common_source_bias_v": 0.9,
+  "default_common_source_load_resistance_ohm": 20000.0,
+  "process_corners": {
+    "tt": [
+      {
+        "path": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cor_std_mos.scs",
+        "section": "tt"
+      }
+    ],
+    "ff": [
+      {
+        "path": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cor_std_mos.scs",
+        "section": "ff"
+      }
+    ],
+    "ss": [
+      {
+        "path": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cor_std_mos.scs",
+        "section": "ss"
+      }
+    ],
+    "sf": [
+      {
+        "path": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cor_std_mos.scs",
+        "section": "sf"
+      }
+    ],
+    "fs": [
+      {
+        "path": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cor_std_mos.scs",
+        "section": "fs"
+      }
+    ]
+  }
+}

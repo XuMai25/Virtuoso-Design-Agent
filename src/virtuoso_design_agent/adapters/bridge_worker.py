@@ -11729,12 +11729,12 @@ def _parse_inverter_netlist(
     instances: dict[str, dict[str, Any]] = {}
     expected = {
         "MN0": {
-            "model": profile["nmos_cell"],
+            "model": profile["nmos_model"],
             "nodes": ["OUT", "IN", "VSS", "VSS"],
             "semantic": "nmos_width_um",
         },
         "MP0": {
-            "model": profile["pmos_cell"],
+            "model": profile["pmos_model"],
             "nodes": ["OUT", "IN", "VDD", "VDD"],
             "semantic": "pmos_width_um",
         },
@@ -12355,7 +12355,7 @@ def _parse_common_source_netlist(
         )
     expected = {
         "MN0": {
-            "model": profile["nmos_cell"],
+            "model": profile["nmos_model"],
             "nodes": [
                 "NCAS" if has_cascode else "OUT",
                 "IN",
@@ -12375,7 +12375,7 @@ def _parse_common_source_netlist(
         }
     elif has_cascode:
         expected["MNCAS"] = {
-            "model": profile["nmos_cell"],
+            "model": profile["nmos_model"],
             "nodes": ["OUT", "VCAS", "NCAS", "VSS"],
         }
     instances: dict[str, dict[str, Any]] = {}
@@ -12547,11 +12547,11 @@ def _parse_differential_pair_netlist(
     source_n = "NSN" if has_source_degeneration else "TAIL"
     expected = {
         "MN0": {
-            "model": profile["nmos_cell"],
+            "model": profile["nmos_model"],
             "nodes": ["OUTP", "INP", source_p, "VSS"],
         },
         "MN1": {
-            "model": profile["nmos_cell"],
+            "model": profile["nmos_model"],
             "nodes": ["OUTN", "INN", source_n, "VSS"],
         },
     }
@@ -12559,11 +12559,11 @@ def _parse_differential_pair_netlist(
         expected.update(
             {
                 "MP0": {
-                    "model": profile["pmos_cell"],
+                    "model": profile["pmos_model"],
                     "nodes": ["OUTP", "OUTP", "VDD", "VDD"],
                 },
                 "MP1": {
-                    "model": profile["pmos_cell"],
+                    "model": profile["pmos_model"],
                     "nodes": ["OUTN", "OUTP", "VDD", "VDD"],
                 },
             }
@@ -12577,7 +12577,7 @@ def _parse_differential_pair_netlist(
         )
     if has_tail_device:
         expected["MNTAIL"] = {
-            "model": profile["nmos_cell"],
+            "model": profile["nmos_model"],
             "nodes": ["TAIL", "BIAS", "VSS", "VSS"],
         }
     if has_source_degeneration:
@@ -13994,8 +13994,8 @@ def _mos_characterization_deck(
     ):
         raise ValueError("invalid MOS characterization model include")
     models = {
-        "nmos": str(profile["nmos_cell"]),
-        "pmos": str(profile["pmos_cell"]),
+        "nmos": str(profile["nmos_model"]),
+        "pmos": str(profile["pmos_model"]),
     }
     if any(
         re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$.-]*", model) is None
@@ -14079,8 +14079,8 @@ def _mos_characterization_points_from_result(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     merged, root_evidence = _common_source_dc_data_from_result(result)
     models = {
-        "nmos": str(profile["nmos_cell"]),
-        "pmos": str(profile["pmos_cell"]),
+        "nmos": str(profile["nmos_model"]),
+        "pmos": str(profile["pmos_model"]),
     }
     quantities: dict[str, tuple[str, ...]] = {
         "ids_a": ("ids", "id"),
