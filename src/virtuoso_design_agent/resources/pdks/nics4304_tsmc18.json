@@ -5,7 +5,8 @@
   "pmos_cell": "pmos2v_mac",
   "nmos_model": "nch_mac",
   "pmos_model": "pch_mac",
-  "model_include": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cor_std_mos.scs",
+  "mos_width_write_argument": "w",
+  "model_include": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cr018gpii_v1d0.scs",
   "model_section": "tt",
   "cds_lib_path": "/data/xum/Analog_VLSI/icfb/cds.lib",
   "cadence_cshrc": "/data/cshrc/.cshrc.cadence",
@@ -21,32 +22,52 @@
   "process_corners": {
     "tt": [
       {
-        "path": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cor_std_mos.scs",
+        "path": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cr018gpii_v1d0.scs",
         "section": "tt"
+      },
+      {
+        "path": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cr018gpii_v1d0.scs",
+        "section": "stat_noise"
       }
     ],
     "ff": [
       {
-        "path": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cor_std_mos.scs",
+        "path": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cr018gpii_v1d0.scs",
         "section": "ff"
+      },
+      {
+        "path": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cr018gpii_v1d0.scs",
+        "section": "stat_noise"
       }
     ],
     "ss": [
       {
-        "path": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cor_std_mos.scs",
+        "path": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cr018gpii_v1d0.scs",
         "section": "ss"
+      },
+      {
+        "path": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cr018gpii_v1d0.scs",
+        "section": "stat_noise"
       }
     ],
     "sf": [
       {
-        "path": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cor_std_mos.scs",
+        "path": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cr018gpii_v1d0.scs",
         "section": "sf"
+      },
+      {
+        "path": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cr018gpii_v1d0.scs",
+        "section": "stat_noise"
       }
     ],
     "fs": [
       {
-        "path": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cor_std_mos.scs",
+        "path": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cr018gpii_v1d0.scs",
         "section": "fs"
+      },
+      {
+        "path": "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/cr018gpii_v1d0.scs",
+        "section": "stat_noise"
       }
     ]
   }

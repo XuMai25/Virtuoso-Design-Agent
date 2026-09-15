@@ -77,6 +77,10 @@ from virtuoso_design_agent.metrics import (
     extract_supply_metrics,
     evaluate_constraints,
 )
+from virtuoso_design_agent.model_includes import (
+    render_spectre_model_includes,
+    resolve_spectre_model_includes,
+)
 from virtuoso_design_agent.spectre_values import spectre_values_equal
 from virtuoso_design_agent.calculator_expressions import calculator_expressions_equal
 from virtuoso_design_agent.topology_delta import (
@@ -1168,6 +1172,19 @@ def _um(value: float) -> str:
     return f"{float(value):.12g}u"
 
 
+def _mos_width_update(
+    width_um: float, profile: dict[str, Any] | None = None
+) -> dict[str, str]:
+    """Map one semantic MOS width to the PDK's supported Bridge argument."""
+
+    argument = str((profile or {}).get("mos_width_write_argument", "wf"))
+    if argument not in {"wf", "w"}:
+        raise RuntimeError(
+            "unsupported PDK mos_width_write_argument: " + repr(argument)
+        )
+    return {argument: _um(width_um)}
+
+
 def _ohm(value: float) -> str:
     return f"{float(value):.12g}"
 
@@ -2062,27 +2079,33 @@ def _apply_parameters(
     parameters: dict[str, float],
     profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    nmos_updates = {
+        **_mos_width_update(parameters["nmos_width_um"], profile),
+        "l": _um(parameters["length_um"]),
+        "nf": "1",
+        "m": "1",
+    }
     _set_target_instance_params(
         client,
         library,
         cell,
         "MN0",
-        wf=_um(parameters["nmos_width_um"]),
-        l=_um(parameters["length_um"]),
-        nf="1",
-        m="1",
         param_filters=None,
+        **nmos_updates,
     )
+    pmos_updates = {
+        **_mos_width_update(parameters["pmos_width_um"], profile),
+        "l": _um(parameters["length_um"]),
+        "nf": "1",
+        "m": "1",
+    }
     _set_target_instance_params(
         client,
         library,
         cell,
         "MP0",
-        wf=_um(parameters["pmos_width_um"]),
-        l=_um(parameters["length_um"]),
-        nf="1",
-        m="1",
         param_filters=None,
+        **pmos_updates,
     )
     data = _read_schematic(client, library, cell)
     _assert_inverter(data, profile)
@@ -2101,11 +2124,12 @@ def _apply_parameters(
 
 def _common_source_instance_parameter_updates(
     parameters: dict[str, float],
+    profile: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, str]]:
     updates: dict[str, dict[str, str]] = {}
     mos_updates: dict[str, str] = {}
     if "device_width_um" in parameters:
-        mos_updates["wf"] = _um(parameters["device_width_um"])
+        mos_updates.update(_mos_width_update(parameters["device_width_um"], profile))
     if "length_um" in parameters:
         mos_updates["l"] = _um(parameters["length_um"])
     if mos_updates:
@@ -2116,7 +2140,9 @@ def _common_source_instance_parameter_updates(
         updates["RS0"] = {"r": _ohm(parameters["source_resistance_ohm"])}
     cascode_updates: dict[str, str] = {}
     if "cascode_width_um" in parameters:
-        cascode_updates["wf"] = _um(parameters["cascode_width_um"])
+        cascode_updates.update(
+            _mos_width_update(parameters["cascode_width_um"], profile)
+        )
     if "cascode_length_um" in parameters:
         cascode_updates["l"] = _um(parameters["cascode_length_um"])
     if cascode_updates:
@@ -2160,7 +2186,9 @@ def _apply_common_source_parameters(
             "cascode geometry requires a cascode common-source topology"
         )
 
-    instance_updates = _common_source_instance_parameter_updates(persistable)
+    instance_updates = _common_source_instance_parameter_updates(
+        persistable, profile
+    )
     if "MN0" in instance_updates:
         _set_target_instance_params(
             client,
@@ -2211,11 +2239,12 @@ def _apply_common_source_parameters(
 
 def _differential_pair_instance_parameter_updates(
     parameters: dict[str, float],
+    profile: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, str]]:
     updates: dict[str, dict[str, str]] = {}
     mos_updates: dict[str, str] = {}
     if "input_width_um" in parameters:
-        mos_updates["wf"] = _um(parameters["input_width_um"])
+        mos_updates.update(_mos_width_update(parameters["input_width_um"], profile))
     if "length_um" in parameters:
         mos_updates["l"] = _um(parameters["length_um"])
     if mos_updates:
@@ -2227,7 +2256,9 @@ def _differential_pair_instance_parameter_updates(
         updates["RD1"] = dict(load)
     pmos_updates: dict[str, str] = {}
     if "pmos_load_width_um" in parameters:
-        pmos_updates["wf"] = _um(parameters["pmos_load_width_um"])
+        pmos_updates.update(
+            _mos_width_update(parameters["pmos_load_width_um"], profile)
+        )
     if "pmos_load_length_um" in parameters:
         pmos_updates["l"] = _um(parameters["pmos_load_length_um"])
     if pmos_updates:
@@ -2235,7 +2266,7 @@ def _differential_pair_instance_parameter_updates(
         updates["MP1"] = dict(pmos_updates)
     tail_updates: dict[str, str] = {}
     if "tail_width_um" in parameters:
-        tail_updates["wf"] = _um(parameters["tail_width_um"])
+        tail_updates.update(_mos_width_update(parameters["tail_width_um"], profile))
     if "tail_length_um" in parameters:
         tail_updates["l"] = _um(parameters["tail_length_um"])
     if tail_updates:
@@ -2300,7 +2331,7 @@ def _apply_differential_pair_parameters(
             "source_resistance_ohm requires the degenerated real-tail topology"
         )
     for instance, update in _differential_pair_instance_parameter_updates(
-        persistable
+        persistable, profile
     ).items():
         _set_target_instance_params(
             client,
@@ -13987,12 +14018,7 @@ def _mos_characterization_deck(
     settings: DeviceCharacterizationSpec,
     points: list[dict[str, Any]],
 ) -> str:
-    model_path = str(profile["model_include"])
-    model_section = str(profile["model_section"])
-    if '"' in model_path or not re.fullmatch(
-        r"[A-Za-z_][A-Za-z0-9_]*", model_section
-    ):
-        raise ValueError("invalid MOS characterization model include")
+    model_configuration = render_spectre_model_includes(profile)
     models = {
         "nmos": str(profile["nmos_model"]),
         "pmos": str(profile["pmos_model"]),
@@ -14054,7 +14080,7 @@ def _mos_characterization_deck(
     return "\n".join(
         (
             "simulator lang=spectre",
-            f'include "{model_path}" section={model_section}',
+            model_configuration,
             "",
             *elements,
             "",
@@ -16155,11 +16181,11 @@ def _inverter_testbench_deck(
     parameters: dict[str, float],
     remote_netlist_path: str,
 ) -> str:
-    model_path = str(profile["model_include"])
-    if '"' in model_path or '"' in remote_netlist_path:
-        raise ValueError("netlist/model path contains an unsupported quote")
+    model_configuration = render_spectre_model_includes(profile)
+    if '"' in remote_netlist_path:
+        raise ValueError("netlist path contains an unsupported quote")
     return f'''simulator lang=spectre
-include "{model_path}" section={profile["model_section"]}
+{model_configuration}
 include "{remote_netlist_path}"
 
 parameters vdd={parameters["vdd_v"]:.12g} cload={parameters["load_ff"]:.12g}f
@@ -16179,12 +16205,6 @@ def _common_source_model_manifest(
     operating_condition: dict[str, Any] | None,
 ) -> dict[str, Any]:
     if operating_condition is None:
-        model_path = str(profile["model_include"])
-        model_section = str(profile["model_section"])
-        if '"' in model_path or not re.fullmatch(
-            r"[A-Za-z_][A-Za-z0-9_]*", model_section
-        ):
-            raise ValueError("invalid default model include")
         return {
             "source": "pdk_profile",
             "profile": str(profile["name"]),
@@ -16193,33 +16213,11 @@ def _common_source_model_manifest(
             "process_corner_source": "pdk_profile",
             "temperature_c": None,
             "temperature_source": "simulator_default",
-            "includes": [{"path": model_path, "section": model_section}],
+            "includes": resolve_spectre_model_includes(profile),
         }
 
     corner = str(operating_condition["process_corner"])
-    if corner == str(profile["model_section"]):
-        raw_includes: Any = [
-            {
-                "path": str(profile["model_include"]),
-                "section": str(profile["model_section"]),
-            }
-        ]
-    else:
-        raw_corners = profile.get("process_corners", {})
-        raw_includes = raw_corners.get(corner)
-        if not isinstance(raw_includes, list) or not raw_includes:
-            raise ValueError(f"PDK profile does not map process corner {corner!r}")
-    includes: list[dict[str, str]] = []
-    for item in raw_includes:
-        if not isinstance(item, dict):
-            raise ValueError(f"invalid model include for process corner {corner!r}")
-        path = str(item.get("path") or "")
-        section = str(item.get("section") or "")
-        if not path or '"' in path or not re.fullmatch(
-            r"[A-Za-z_][A-Za-z0-9_]*", section
-        ):
-            raise ValueError(f"invalid model include for process corner {corner!r}")
-        includes.append({"path": path, "section": section})
+    includes = resolve_spectre_model_includes(profile, corner)
     temperature_c = float(operating_condition["temperature_c"])
     if not (-273.15 <= temperature_c <= 300.0):
         raise ValueError("operating-condition temperature is outside the safe range")
@@ -17371,6 +17369,9 @@ def simulate_inverter(payload: dict[str, Any]) -> dict[str, Any]:
         if not result.ok:
             detail = _spectre_failure_detail(result, work_dir)
             raise RuntimeError(f"Spectre simulation failed: {detail}")
+        tool_version = str(result.tool_version or "").strip()
+        if not tool_version:
+            tool_version = _spectre_version_from_log(work_dir)
         time_s = _signal(result.data, "time")
         vin_v = _signal(result.data, "IN")
         vout_v = _signal(result.data, "OUT")
@@ -17393,12 +17394,13 @@ def simulate_inverter(payload: dict[str, Any]) -> dict[str, Any]:
             name: "eda_result" for name in metrics if name != "gate_area_proxy_um2"
         }
         metric_sources["gate_area_proxy_um2"] = "software_inference"
+        manifest, manifest_sha256 = _spectre_artifact_manifest(work_dir)
         return {
             "parameters": parameters,
             "metrics": metrics,
             "metric_sources": metric_sources,
             "sample_count": len(time_s),
-            "tool_version": result.tool_version,
+            "tool_version": tool_version,
             "warnings": result.warnings[:20],
             "evidence": {
                 "schematic_readback": {
@@ -17419,6 +17421,14 @@ def simulate_inverter(payload: dict[str, Any]) -> dict[str, Any]:
                 "testbench": {
                     "remote_path": remote_wrapper,
                     "sha256": hashlib.sha256(deck.encode("utf-8")).hexdigest(),
+                    "model_configuration": {
+                        "source": "software_inference",
+                        "profile": str(profile.get("name") or "unspecified"),
+                        "profile_source": "user_input",
+                        "process_corner": str(profile["model_section"]),
+                        "process_corner_source": "software_inference",
+                        "includes": resolve_spectre_model_includes(profile),
+                    },
                     "values": {
                         "vdd_v": parameters["vdd_v"],
                         "load_ff": parameters["load_ff"],
@@ -17435,9 +17445,15 @@ def simulate_inverter(payload: dict[str, Any]) -> dict[str, Any]:
                 "simulation": {
                     "source": "eda_result",
                     "sample_count": len(time_s),
-                    "tool_version": result.tool_version,
+                    "tool_version": tool_version,
                     "signals": ["time", "IN", "OUT", "VDD_SRC:p"],
                     "supply_metric_window": "first two VIN 50% rising crossings",
+                    "artifact_manifest_scope": (
+                        "downloaded simulator input, raw PSF result, and run-log bundle"
+                    ),
+                    "artifact_manifest_complete": True,
+                    "artifact_manifest": manifest,
+                    "artifact_manifest_sha256": manifest_sha256,
                 },
                 "process_lifecycle": process_lifecycle,
                 "gate_area_proxy_um2": {

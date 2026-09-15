@@ -4,6 +4,10 @@ import pytest
 
 from virtuoso_design_agent.adapters.bridge_worker import (
     _assert_inverter,
+    _common_source_instance_parameter_updates,
+    _differential_pair_instance_parameter_updates,
+    _inverter_testbench_deck,
+    _mos_width_update,
     _parse_inverter_netlist,
 )
 from virtuoso_design_agent.models import DEFAULT_PDK_PROFILE, TaskSpec
@@ -90,11 +94,41 @@ def test_tsmc18_profile_is_explicit_and_does_not_change_the_default_pdk() -> Non
         "pmos2v_mac",
     )
     assert (profile.nmos_model, profile.pmos_model) == ("nch_mac", "pch_mac")
+    assert profile.mos_width_write_argument == "w"
     assert profile.model_section == "tt"
     assert set(profile.process_corners) == {"tt", "ff", "ss", "sf", "fs"}
+    assert [item.section for item in profile.process_corners["tt"]] == [
+        "tt",
+        "stat_noise",
+    ]
     assert profile.default_vdd_v == pytest.approx(1.8)
     assert profile.default_length_um == pytest.approx(0.18)
     assert profile.cds_lib_path == "/data/xum/Analog_VLSI/icfb/cds.lib"
+
+
+def test_tsmc18_semantic_width_writes_use_total_width_cdf_argument() -> None:
+    tsmc18 = load_pdk_profile("nics4304_tsmc18").model_dump(mode="json")
+    tsmc28 = load_pdk_profile("nics4304_tsmc28").model_dump(mode="json")
+
+    assert _mos_width_update(2.0, tsmc18) == {"w": "2u"}
+    assert _mos_width_update(2.0, tsmc28) == {"wf": "2u"}
+    assert _common_source_instance_parameter_updates(
+        {"device_width_um": 2.0, "cascode_width_um": 3.0}, tsmc18
+    ) == {"MN0": {"w": "2u"}, "MNCAS": {"w": "3u"}}
+    assert _differential_pair_instance_parameter_updates(
+        {
+            "input_width_um": 2.0,
+            "pmos_load_width_um": 4.0,
+            "tail_width_um": 6.0,
+        },
+        tsmc18,
+    ) == {
+        "MN0": {"w": "2u"},
+        "MN1": {"w": "2u"},
+        "MP0": {"w": "4u"},
+        "MP1": {"w": "4u"},
+        "MNTAIL": {"w": "6u"},
+    }
 
 
 def test_tsmc18_profile_can_compile_a_normal_vda_plan() -> None:
@@ -156,11 +190,28 @@ def test_tsmc18_preview_uses_spectre_models_not_oa_cell_names() -> None:
         analysis="dc",
     )
 
-    assert (
-        'include "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/'
-        'cor_std_mos.scs" section=tt'
-    ) in deck
+    main_model = (
+        "/data/xum/Analog_VLSI/PDK_TSMC18_1809/models/spectre/"
+        "cr018gpii_v1d0.scs"
+    )
+    assert f'include "{main_model}" section=tt' in deck
+    assert f'include "{main_model}" section=stat_noise' in deck
+    assert deck.index("section=tt") < deck.index("section=stat_noise")
     assert "MN0 (OUT IN 0 0) nch_mac w=2u l=0.18u" in deck
     assert "MP0 (OUT IN VDD VDD) pch_mac w=4u l=0.18u" in deck
     assert "nmos2v_mac" not in deck
     assert "pmos2v_mac" not in deck
+
+
+def test_tsmc18_inverter_oa_testbench_uses_complete_default_model_bundle() -> None:
+    profile = load_pdk_profile("nics4304_tsmc18").model_dump(mode="json")
+    deck = _inverter_testbench_deck(
+        profile,
+        {"vdd_v": 1.8, "load_ff": 10.0},
+        "/data/xum/virtuoso_bridge_smoke/tsmc18/netlist",
+    )
+
+    assert "section=tt" in deck
+    assert "section=stat_noise" in deck
+    assert deck.index("section=tt") < deck.index("section=stat_noise")
+    assert 'include "/data/xum/virtuoso_bridge_smoke/tsmc18/netlist"' in deck

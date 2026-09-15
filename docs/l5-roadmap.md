@@ -454,7 +454,9 @@ per-instance override 或派生 CDF。不再在已知 fixture 上增加随机候
 
 ## 2026-09-15 TSMC18 profile Gate
 
-- 已完成远端只读 preflight：确认 `tsmc18` OA 库、`nmos2v_mac/pmos2v_mac`、D/G/S/B terminal order、`wf/l/fingers/simM` CDF 映射、Spectre `nch_mac/pch_mac` 和 `cor_std_mos.scs` 的 `tt/ff/ss/sf/fs` section。
-- 已把 OA master 与 Spectre model 从 profile 层显式解耦，并让 `si` parser、standalone preview、器件表征 deck 和 characterization source binding 都服从 model 字段；N28 profile 显式补齐同名映射，默认 profile 不变。
-- 已新增 `nics4304_tsmc18`、正交 create/simulate 示例；聚焦回归 `170 passed`，VDA 全量回归 `915 passed`。当前状态仅为 **TSMC18 profile and local evidence-contract integration verified**；没有把 2:1 初始反相器比例或任何 N28 指标包装成 TSMC18 校准结果。
-- 下一道必要 Gate 是在已绑定 `tsmc18` 的 `Analog_VLSI` 工作库中只新建一个 `vda_` cell，完成 create/readback、参数 CDF 回读、自动 `si`、netlist model/W/L 一致性和单点 Spectre transient。先只证明执行链，再根据真实波形决定是否校准尺寸或增加有限搜索；不改写现有 `tb_f_T` 或人工 `cds.lib`。
+- 远端只读 preflight 确认了 `tsmc18` OA 库、`nmos2v_mac/pmos2v_mac`、D/G/S/B terminal order、CDF 的 `w/wf/l/fingers/simM`、Spectre `nch_mac/pch_mac` 以及现有 ADE 使用的主 corner + `stat_noise` 配置。
+- OA master 与 Spectre model 已在 profile 层显式解耦；MOS 宽度写入参数也改为 profile 选择，N28 继续使用 Bridge 的 `wf -> Wfg`，TSMC18 使用总宽度 `w` 并由 PDK callback 回填 `wf`。一个 corner 对应多个 include 的通用解析器已覆盖 preview、器件表征、反相器和通用 OA 仿真，N28 默认行为不变。
+- live Gate 在唯一新对象 `Analog_VLSI/vda_tsmc18_inv_001/schematic` 上回读到 `Wn/Wp/L=2/4/0.18 µm`；自动 `si` 得到 `nch_mac/pch_mac` 和完全相同的 W/L。加载 `tt + stat_noise` 后，Spectre 21.1.0 nominal transient 返回 786 点非空波形；delay `20.7171 ps`、VOH `1.79350 V`、VOL `17.138 µV`，结果记录含 9 项输入/PSF/log SHA-256 manifest。
+- 创建过程暴露并保留两次失败证据：错误工作目录的旧 headless CIW 看不到目标库；切换正确 work area 后结构已保存，但 Bridge 的 N28 型 `Wfg` 写法被 TSMC18 CDF 拒绝。随后用新的 profile 映射通过独立 `parameters.apply` 写回与重开回读恢复。由于 `replace_existing=false`，本轮没有删除对象再重复一次 fresh atomic create；这仍是明确的未验证边界。
+- 人工 `cds.lib` 前后 SHA-256 均为 `377ad9f53db1c9ad07683cc8cab027899569b38f55eb8f1286fe45f1867bb6ed`。结束后本地 tunnel、headless Virtuoso、si、Spectre 和一次遗留只读 shell 链均已清理，只保留用户原有可见 Virtuoso 会话；三个运行目录共约 223 kB 留在批准的 TSMC18 scratch 作为复核证据。
+- 当前状态升级为 **TSMC18 nominal OA-to-si-to-Spectre execution path verified; design-quality closure pending**。2:1 仍只是初始化值；本次没有规格门、PVT、AC、noise、参数搜索或质量选优。下一步只有在真实 TSMC18 设计需要时，才做 fresh-create 原子性复核或按给定拓扑增加最小 DC/AC/规格 Gate，不为重复证明工作流而盲目扩点。

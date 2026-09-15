@@ -11,6 +11,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator, model_validator
 
+from virtuoso_design_agent.model_includes import render_spectre_model_includes
+
 
 _ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
 _METRIC_ID_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
@@ -313,12 +315,7 @@ def render_spectre_preview_deck(
     """Render one safe, deterministic Spectre deck from the structured graph."""
 
     variant = spec.variant(variant_id)
-    model_path = str(profile.get("model_include", ""))
-    model_section = str(profile.get("model_section", ""))
-    if not model_path or '"' in model_path:
-        raise ValueError("invalid preview model include path")
-    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", model_section) is None:
-        raise ValueError("invalid preview model section")
+    model_configuration = render_spectre_model_includes(profile)
     default_models = {
         "nmos": str(profile.get("nmos_model", "")),
         "pmos": str(profile.get("pmos_model", "")),
@@ -386,7 +383,7 @@ def render_spectre_preview_deck(
     ]
     lines = [
         "simulator lang=spectre",
-        f'include "{model_path}" section={model_section}',
+        model_configuration,
         "",
         *elements,
         "",

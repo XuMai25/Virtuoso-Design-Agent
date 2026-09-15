@@ -4230,6 +4230,7 @@ def test_inverter_testbench_deck_includes_oa_netlist_without_device_topology() -
     assert "save IN OUT VDD VSS VDD_SRC:p" in deck
     assert "MN0 (" not in deck
     assert "MP0 (" not in deck
+    assert deck.count('include "') == 2
 
 
 def test_common_source_deck_uses_oa_topology_and_requests_dc_op() -> None:
@@ -7830,6 +7831,9 @@ def test_inverter_simulation_worker_returns_structured_evidence(
 
     assert result["tool_version"] == "test-spectre"
     assert result["evidence"]["netlist"]["parameter_consistency"] == "matched"
+    assert result["evidence"]["simulation"]["artifact_manifest_complete"] is True
+    assert result["evidence"]["simulation"]["artifact_manifest"]
+    assert len(result["evidence"]["simulation"]["artifact_manifest_sha256"]) == 64
     assert result["metric_sources"]["delay_ps"] == "eda_result"
     assert result["metric_sources"]["gate_area_proxy_um2"] == "software_inference"
 

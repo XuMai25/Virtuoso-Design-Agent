@@ -4260,6 +4260,11 @@ class PdkProfile(StrictModel):
     # against simulator truth rather than an OA naming convention.
     nmos_model: str
     pmos_model: str
+    # Bridge exposes two stable MOS width arguments: ``wf`` maps to the
+    # N28-style ``Wfg`` CDF parameter, while ``w`` writes total width and lets
+    # older PDK callbacks (including the supported TSMC18 kit) derive ``wf``.
+    # Keep this explicit per profile instead of assuming one foundry CDF.
+    mos_width_write_argument: Literal["wf", "w"] = "wf"
     model_include: str
     model_section: str
     cds_lib_path: str
