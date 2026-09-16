@@ -199,7 +199,7 @@ def test_device_characterization_contract_has_no_fake_oa_target() -> None:
     assert plan.requires_remote_compute
     assert not plan.requires_remote_write
     assert [step.capability for step in plan.steps] == [
-        "bridge.probe",
+        "bridge.spectre.probe",
         "device.characterize",
         "device.characterize.validate",
         "evidence.persist",
@@ -483,6 +483,15 @@ def test_executor_marks_failed_holdout_partial_without_discarding_raw_eda() -> N
     holdout["raw"]["gm_s"] *= 10.0
 
     class CharacterizingAdapter(DeterministicDemoAdapter):
+        def probe(self, _pdk_profile: str) -> AdapterResult:
+            raise AssertionError("device characterization must not probe CIW")
+
+        def probe_simulator(self, pdk_profile: str) -> AdapterResult:
+            return AdapterResult(
+                data={"profile": pdk_profile, "oa_access_performed": False},
+                evidence_source=EvidenceSource.BRIDGE_READBACK,
+            )
+
         def characterize_devices(self, _task: TaskSpec) -> AdapterResult:
             return AdapterResult(
                 data=deepcopy(raw),

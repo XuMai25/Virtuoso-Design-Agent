@@ -5922,7 +5922,10 @@ class TaskExecutor:
             )
 
         try:
-            if task.circuit is CircuitKind.NETLIST_PREVIEW:
+            if (
+                task.circuit is CircuitKind.NETLIST_PREVIEW
+                or task.operation is Operation.DEVICE_CHARACTERIZE
+            ):
                 self._action(
                     "bridge.spectre.probe",
                     lambda: self.adapter.probe_simulator(task.pdk_profile),

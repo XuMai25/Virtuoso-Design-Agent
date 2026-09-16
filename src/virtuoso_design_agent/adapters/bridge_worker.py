@@ -6329,10 +6329,10 @@ def probe_spectre_environment(payload: dict[str, Any]) -> dict[str, Any]:
     cadence_cshrc = str(profile.get("cadence_cshrc", ""))
     if re.fullmatch(r"/[A-Za-z0-9_./-]+", cadence_cshrc) is None:
         raise RuntimeError("invalid Cadence environment path in PDK profile")
-    if not SSHClient.is_running():
-        raise RuntimeError("no default virtuoso-bridge connection is running")
     ssh_client = _register_worker_resource(SSHClient.from_env(keep_remote_files=True))
-    runner = ssh_client.ssh_runner
+    runner = _spectre_transport_runner(ssh_client)
+    if runner is None:
+        raise RuntimeError("standalone Spectre SSH transport is unavailable")
     runner._persistent_shell_enabled = False
     command = f"source {cadence_cshrc}; which spectre"
     result = runner.run_command(f"csh -fc {shlex.quote(command)}", timeout=25)
@@ -6350,6 +6350,9 @@ def probe_spectre_environment(payload: dict[str, Any]) -> dict[str, Any]:
         "profile": str(profile["name"]),
         "spectre_path": spectre_path,
         "spectre_version_source": "guarded_simulation_log",
+        "transport_scope": "standalone_spectre_ssh_only",
+        "virtuoso_daemon_required": False,
+        "spectre_host": str(getattr(ssh_client, "spectre_host", "")),
         "virtuoso_started": False,
         "oa_access_performed": False,
         "oa_write_performed": False,
@@ -12895,7 +12898,7 @@ def _install_remote_spectre_guard(
 ) -> tuple[str, dict[str, Any]]:
     """Install a bounded remote Spectre launcher without changing Bridge."""
 
-    runner = getattr(client, "ssh_runner", None)
+    runner = _spectre_transport_runner(client)
     if runner is None:
         return "spectre", {
             "source": "software_inference",
@@ -12915,18 +12918,11 @@ def _install_remote_spectre_guard(
     local_path = work_dir / "vda_spectre_guard.sh"
     local_path.write_text(script, encoding="utf-8", newline="\n")
     upload_timeout = min(max(int(timeout), 1), 60)
-    if hasattr(client, "upload_file"):
-        upload_result = client.upload_file(
-            local_path,
-            remote_path,
-            timeout=upload_timeout,
-        )
-    else:
-        upload_result = runner.upload(
-            local_path,
-            remote_path,
-            timeout=upload_timeout,
-        )
+    upload_result = runner.upload(
+        local_path,
+        remote_path,
+        timeout=upload_timeout,
+    )
     _require_transport_result(upload_result, "upload remote Spectre guard")
     remote_q = shlex.quote(remote_path)
     verify_result = runner.run_command(
@@ -12967,7 +12963,7 @@ def _create_spectre_simulator(
     remote_run_dir: str,
     keep_remote_files: bool,
 ) -> Any:
-    runner = getattr(client, "ssh_runner", None)
+    runner = _spectre_transport_runner(client)
     common = {
         "spectre_cmd": spectre_cmd,
         "timeout": timeout,
@@ -12985,6 +12981,15 @@ def _create_spectre_simulator(
         ssh_runner=runner,
         remote_work_dir=remote_run_dir,
     )
+
+
+def _spectre_transport_runner(client: Any) -> Any | None:
+    """Resolve Bridge's standalone-Spectre role without requiring a tunnel."""
+
+    runner = getattr(client, "spectre_runner", None)
+    if runner is not None:
+        return runner
+    return getattr(client, "ssh_runner", None)
 
 
 def _si_init_environment_skill(
@@ -14431,16 +14436,17 @@ def characterize_mos_devices(payload: dict[str, Any]) -> dict[str, Any]:
         f"{run_root}/vda_mos_characterization_{task_slug}_{uuid.uuid4().hex[:12]}"
     )
     # The VDA PDK profile selects foundry models.  It is intentionally not
-    # treated as a Bridge tunnel-profile name; all established VDA adapters
-    # reuse the already-running default Bridge connection.
-    if not SSHClient.is_running():
-        raise RuntimeError("no default virtuoso-bridge connection is running")
+    # treated as a Bridge connection-profile name.  Standalone Spectre needs
+    # only Bridge's resolved SSH role; it does not need a Virtuoso daemon or
+    # its localhost tunnel.
     ssh_client = _register_worker_resource(
         SSHClient.from_env(
             keep_remote_files=True,
         )
     )
-    runner = ssh_client.ssh_runner
+    runner = _spectre_transport_runner(ssh_client)
+    if runner is None:
+        raise RuntimeError("standalone Spectre SSH transport is unavailable")
     runner._persistent_shell_enabled = False
     remote_q = shlex.quote(remote_run_root)
     _ssh_command_result(
@@ -14518,6 +14524,9 @@ def characterize_mos_devices(payload: dict[str, Any]) -> dict[str, Any]:
             "evidence": {
                 "source": "eda_result",
                 "bridge_connection_profile": "default",
+                "transport_scope": "standalone_spectre_ssh_only",
+                "virtuoso_daemon_required": False,
+                "spectre_host": str(getattr(ssh_client, "spectre_host", "")),
                 "pdk_profile": str(profile["name"]),
                 "remote_run_root": remote_run_root,
                 "remote_simulation_dir": remote_children[0],
@@ -14914,10 +14923,10 @@ def simulate_netlist_preview(payload: dict[str, Any]) -> dict[str, Any]:
     remote_run_root = (
         f"{run_root}/vda_netlist_preview_{task_slug}_{uuid.uuid4().hex[:12]}"
     )
-    if not SSHClient.is_running():
-        raise RuntimeError("no default virtuoso-bridge connection is running")
     ssh_client = _register_worker_resource(SSHClient.from_env(keep_remote_files=True))
-    runner = ssh_client.ssh_runner
+    runner = _spectre_transport_runner(ssh_client)
+    if runner is None:
+        raise RuntimeError("standalone Spectre SSH transport is unavailable")
     runner._persistent_shell_enabled = False
     remote_root_q = shlex.quote(remote_run_root)
     _ssh_command_result(
@@ -15117,6 +15126,9 @@ def simulate_netlist_preview(payload: dict[str, Any]) -> dict[str, Any]:
             "analysis_source": str(payload.get("analysis_source", "user_input")),
             "pdk_profile": str(profile["name"]),
             "process_corner": str(profile["model_section"]),
+            "transport_scope": "standalone_spectre_ssh_only",
+            "virtuoso_daemon_required": False,
+            "spectre_host": str(getattr(ssh_client, "spectre_host", "")),
             "remote_run_root": remote_run_root,
             "non_overwrite_preflight": "absent",
             "batch_execution": {

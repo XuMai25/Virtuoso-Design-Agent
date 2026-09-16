@@ -101,8 +101,8 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
         return [
             _step(
                 "01-probe",
-                "bridge.probe",
-                "只读核对 Bridge、Spectre 与声明的 foundry PDK profile；不打开或写入 OA",
+                "bridge.spectre.probe",
+                "只读核对 SSH、Spectre 与声明的 foundry PDK profile；不启动 Virtuoso 或访问 OA",
                 SideEffect.READ_ONLY,
             ),
             _step(

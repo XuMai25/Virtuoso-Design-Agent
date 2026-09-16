@@ -1,0 +1,171 @@
+{
+  "schema_version": 1,
+  "id": "tsmc18-common-source-dc-seeded-ac",
+  "operation": "simulation.run",
+  "circuit": "netlist_preview",
+  "pdk_profile": "nics4304_tsmc18",
+  "analysis": "ac",
+  "ac_sweep": {
+    "start_hz": 1000.0,
+    "stop_hz": 100000000000.0,
+    "points_per_decade": 30,
+    "reference_points": 5,
+    "max_reference_variation_db": 0.5
+  },
+  "netlist_preview": {
+    "schema_version": 1,
+    "id": "tsmc18-common-source-dc-seeded-load-length-ab",
+    "temperature_c": 27.0,
+    "input_source": "VIN_SRC",
+    "supply_sources": [
+      "VDD_SRC"
+    ],
+    "voltage_sources": [
+      {
+        "name": "VDD_SRC",
+        "positive": "VDD",
+        "negative": "0",
+        "dc_v": 1.8
+      },
+      {
+        "name": "VIN_SRC",
+        "positive": "IN",
+        "negative": "0",
+        "dc_v": 0.6,
+        "ac_magnitude_v": 1.0
+      }
+    ],
+    "variants": [
+      {
+        "id": "l018_cl10",
+        "output_positive": "OUT",
+        "output_negative": "0",
+        "mosfets": [
+          {
+            "name": "MN0",
+            "polarity": "nmos",
+            "drain": "OUT",
+            "gate": "IN",
+            "source": "0",
+            "bulk": "0",
+            "width_um": 2.0,
+            "length_um": 0.18
+          }
+        ],
+        "resistors": [
+          {
+            "name": "RLOAD",
+            "positive": "VDD",
+            "negative": "OUT",
+            "resistance_ohm": 26300.0
+          }
+        ],
+        "capacitors": [
+          {
+            "name": "CLOAD",
+            "positive": "OUT",
+            "negative": "0",
+            "capacitance_f": 1e-14
+          }
+        ]
+      },
+      {
+        "id": "l018_cl100",
+        "output_positive": "OUT",
+        "output_negative": "0",
+        "mosfets": [
+          {
+            "name": "MN0",
+            "polarity": "nmos",
+            "drain": "OUT",
+            "gate": "IN",
+            "source": "0",
+            "bulk": "0",
+            "width_um": 2.0,
+            "length_um": 0.18
+          }
+        ],
+        "resistors": [
+          {
+            "name": "RLOAD",
+            "positive": "VDD",
+            "negative": "OUT",
+            "resistance_ohm": 26300.0
+          }
+        ],
+        "capacitors": [
+          {
+            "name": "CLOAD",
+            "positive": "OUT",
+            "negative": "0",
+            "capacitance_f": 1e-13
+          }
+        ]
+      },
+      {
+        "id": "l036_cl10",
+        "output_positive": "OUT",
+        "output_negative": "0",
+        "mosfets": [
+          {
+            "name": "MN0",
+            "polarity": "nmos",
+            "drain": "OUT",
+            "gate": "IN",
+            "source": "0",
+            "bulk": "0",
+            "width_um": 2.0,
+            "length_um": 0.36
+          }
+        ],
+        "resistors": [
+          {
+            "name": "RLOAD",
+            "positive": "VDD",
+            "negative": "OUT",
+            "resistance_ohm": 66100.0
+          }
+        ],
+        "capacitors": [
+          {
+            "name": "CLOAD",
+            "positive": "OUT",
+            "negative": "0",
+            "capacitance_f": 1e-14
+          }
+        ]
+      }
+    ],
+    "source_bindings": {
+      "tsmc18-device-characterization-manifest": "cf566159ecc6f2779cb007ea3ffd939b0c6e020b11a67b71921899a532f998cc",
+      "tsmc18-device-characterization-task": "7f8cb11fb2426516910473d5b2c46291ab8c75c149b07659ac4410fad186cf94"
+    },
+    "source_bindings_evidence_source": "software_inference"
+  },
+  "constraints": [
+    {
+      "metric": "l018_cl10__all_mos_saturation_region",
+      "relation": ">=",
+      "value": 1.0
+    },
+    {
+      "metric": "l018_cl100__all_mos_saturation_region",
+      "relation": ">=",
+      "value": 1.0
+    },
+    {
+      "metric": "l036_cl10__all_mos_saturation_region",
+      "relation": ">=",
+      "value": 1.0
+    }
+  ],
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "replace_existing": false
+  },
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 600
+  }
+}

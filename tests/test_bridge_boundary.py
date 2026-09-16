@@ -9154,7 +9154,14 @@ def test_remote_spectre_guard_is_uploaded_executable_and_hash_verified(
                 stdout=f"{digest}  {uploaded['remote_path']}\n",
             )
 
-    client = SimpleNamespace(ssh_runner=Runner())
+    def wrong_host_upload(*_args, **_kwargs):
+        raise AssertionError("Spectre guard must not use the deployment role")
+
+    client = SimpleNamespace(
+        ssh_runner=SimpleNamespace(),
+        spectre_runner=Runner(),
+        upload_file=wrong_host_upload,
+    )
     remote_path, evidence = bridge_worker._install_remote_spectre_guard(
         client,
         tmp_path,
@@ -9170,6 +9177,25 @@ def test_remote_spectre_guard_is_uploaded_executable_and_hash_verified(
     assert evidence["status"] == "installed_and_hash_matched"
     assert evidence["bounded_remote_process"] is True
     assert evidence["bridge_wait_timeout_seconds"] == 75
+
+
+def test_spectre_transport_prefers_explicit_spectre_role() -> None:
+    daemon_runner = SimpleNamespace(name="daemon")
+    spectre_runner = SimpleNamespace(name="spectre")
+    client = SimpleNamespace(
+        ssh_runner=daemon_runner,
+        spectre_runner=spectre_runner,
+    )
+
+    assert bridge_worker._spectre_transport_runner(client) is spectre_runner
+
+
+def test_spectre_transport_falls_back_to_legacy_ssh_runner() -> None:
+    runner = SimpleNamespace(name="legacy")
+
+    assert bridge_worker._spectre_transport_runner(
+        SimpleNamespace(ssh_runner=runner)
+    ) is runner
 
 
 def test_remote_spectre_guard_rejects_non_data_xum_root(tmp_path: Path) -> None:

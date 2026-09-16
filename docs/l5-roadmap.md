@@ -460,3 +460,11 @@ per-instance override 或派生 CDF。不再在已知 fixture 上增加随机候
 - 创建过程暴露并保留两次失败证据：错误工作目录的旧 headless CIW 看不到目标库；切换正确 work area 后结构已保存，但 Bridge 的 N28 型 `Wfg` 写法被 TSMC18 CDF 拒绝。随后用新的 profile 映射通过独立 `parameters.apply` 写回与重开回读恢复。由于 `replace_existing=false`，本轮没有删除对象再重复一次 fresh atomic create；这仍是明确的未验证边界。
 - 人工 `cds.lib` 前后 SHA-256 均为 `377ad9f53db1c9ad07683cc8cab027899569b38f55eb8f1286fe45f1867bb6ed`。结束后本地 tunnel、headless Virtuoso、si、Spectre 和一次遗留只读 shell 链均已清理，只保留用户原有可见 Virtuoso 会话；三个运行目录共约 223 kB 留在批准的 TSMC18 scratch 作为复核证据。
 - 当前状态升级为 **TSMC18 nominal OA-to-si-to-Spectre execution path verified; design-quality closure pending**。2:1 仍只是初始化值；本次没有规格门、PVT、AC、noise、参数搜索或质量选优。下一步只有在真实 TSMC18 设计需要时，才做 fresh-create 原子性复核或按给定拓扑增加最小 DC/AC/规格 Gate，不为重复证明工作流而盲目扩点。
+
+## 2026-09-16 TSMC18 preliminary DC/AC Gate
+
+- `device.characterize` 和 `netlist_preview` 直接使用 Bridge 的 standalone Spectre SSH role，不再要求 Virtuoso tunnel。split-host 时 guard/deck/计算跟随 Spectre host；timeout、非覆盖 scratch、manifest 和清理边界不变，Bridge 本身未修改。
+- `tt/27 °C` 下完成 60 个器件网格点和 4 个留出点。raw OP 是 `eda_result`；归一化和插值审计是 `software_inference`。留出点只有 2/4 通过 35% 门，故不抬高阈值，也不把稀疏线性插值器称为已校准。
+- 从实测 `VGS=0.60 V, VDS≈0.90 V` 反推负载，只运行三个共源 AC 条件。`L=0.18 µm, CL=10 fF` 为 `18.109 dB / 640.240 MHz / 5.150 GHz GBW / 61.622 µW`；`CL=100 fF` 带宽降至 `76.276 MHz`；`L=0.36 µm, CL=10 fF` 为 `19.946 dB / 215.793 MHz / 2.144 GHz GBW / 24.507 µW`。三点均饱和且输出约 `0.9 V`。
+- 一阶 `gm(RD||ro)` 增益误差约 1.9%/0.9%；只计 10 fF 显式负载时带宽高估约 22%，反推有效输出电容约 12.2 fF。理论适合首值和方向，寄生及最终指标仍服从 PDK AC。
+- 结束后远端 `spectre=0`、`si=0`，本地 `65347` 无 listener；没有 OA/`si`/Maestro 访问。当前状态为 **TSMC18 nominal execution plus preliminary DC/AC characterization verified; reusable interpolation and design-quality closure pending**。下一步是在用户给定的 TSMC18 实际拓扑上做最小 OA→`si` DC/AC；不继续扩随机网格。

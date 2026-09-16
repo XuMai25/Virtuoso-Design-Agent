@@ -413,10 +413,12 @@ def test_preview_worker_runs_both_decks_and_returns_eda_bound_ab(
     class SSHClient:
         def __init__(self):
             self.ssh_runner = runner
+            self.spectre_runner = runner
+            self.spectre_host = "spectre-test-host"
 
         @classmethod
         def is_running(cls):
-            return True
+            raise AssertionError("standalone Spectre must not require a tunnel")
 
         @classmethod
         def from_env(cls, **kwargs):
@@ -626,6 +628,9 @@ def test_preview_worker_runs_both_decks_and_returns_eda_bound_ab(
     ] == "software_inference"
     assert result["evidence"]["oa_access_performed"] is False
     assert result["evidence"]["si_netlisting_performed"] is False
+    assert result["evidence"]["transport_scope"] == "standalone_spectre_ssh_only"
+    assert result["evidence"]["virtuoso_daemon_required"] is False
+    assert result["evidence"]["spectre_host"] == "spectre-test-host"
     assert result["evidence"]["comparison"]["source"] == "software_inference"
     assert result["evidence"]["variant_source_ids"] == {
         "cascode_common_source": "cascode-seed-001"
