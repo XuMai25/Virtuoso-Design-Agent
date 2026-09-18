@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from virtuoso_design_agent.adapters.bridge_worker import (
@@ -8,6 +10,7 @@ from virtuoso_design_agent.adapters.bridge_worker import (
     _differential_pair_instance_parameter_updates,
     _inverter_testbench_deck,
     _mos_width_update,
+    _parse_common_source_netlist,
     _parse_inverter_netlist,
 )
 from virtuoso_design_agent.models import DEFAULT_PDK_PROFILE, TaskSpec
@@ -215,3 +218,69 @@ def test_tsmc18_inverter_oa_testbench_uses_complete_default_model_bundle() -> No
     assert "section=stat_noise" in deck
     assert deck.index("section=tt") < deck.index("section=stat_noise")
     assert 'include "/data/xum/virtuoso_bridge_smoke/tsmc18/netlist"' in deck
+
+
+def test_tsmc18_common_source_si_preserves_theory_seeded_geometry() -> None:
+    profile = load_pdk_profile("nics4304_tsmc18").model_dump(mode="json")
+    parsed = _parse_common_source_netlist(
+        "MN0 (OUT IN VSS VSS) nch_mac l=360n w=8u nf=1 multi=1\n"
+        "RD0 (VDD OUT) resistor r=21.2k\n",
+        profile,
+    )
+
+    assert parsed["semantic_parameters"] == {
+        "device_width_um": pytest.approx(8.0),
+        "length_um": pytest.approx(0.36),
+        "load_resistance_ohm": pytest.approx(21200.0),
+    }
+
+
+@pytest.mark.parametrize("stage", ["create", "dc", "ac", "refine", "final-ac"])
+def test_tsmc18_common_source_spec_tasks_keep_scopes_and_fixed_goals(stage) -> None:
+    path = Path(__file__).resolve().parents[1] / "examples" / "tasks" / (
+        f"tsmc18-common-source-spec-{stage}.bridge.json"
+    )
+    task = TaskSpec.model_validate_json(path.read_text(encoding="utf-8"))
+    plan = build_plan(task)
+
+    assert task.pdk_profile == "nics4304_tsmc18"
+    assert task.target.library == task.safety.allowed_library == "Analog_VLSI"
+    assert task.target.cell == "vda_tsmc18_cs_spec_001"
+    assert task.safety.replace_existing is False
+    assert plan.requires_remote_write is (stage in {"create", "refine"})
+    assert plan.requires_remote_compute is (stage not in {"create", "refine"})
+    if stage == "refine":
+        assert task.parameters == {"load_resistance_ohm": 23500.0}
+        return
+    assert task.parameters["device_width_um"] == 8.0
+    assert task.parameters["length_um"] == 0.36
+    assert task.parameters["load_resistance_ohm"] == (
+        23500.0 if stage == "final-ac" else 21200.0
+    )
+    if stage != "create":
+        assert task.parameters["bias_v"] == 0.58
+        assert task.operating_conditions[0].vdd_v == 1.8
+        assert task.operating_conditions[0].temperature_c == 27.0
+        assert any(
+            item.metric == "dc_supply_power_uw" and item.value == 100.0
+            for item in task.constraints
+        )
+    if stage in {"ac", "final-ac"}:
+        assert task.parameters["load_ff"] == 50.0
+        assert any(
+            item.metric == "low_frequency_gain_db" and item.value == 20.0
+            for item in task.constraints
+        )
+        assert any(
+            item.metric == "bandwidth_3db_hz" and item.value == 100_000_000.0
+            for item in task.constraints
+        )
+        if stage == "final-ac":
+            original = TaskSpec.model_validate_json(
+                path.with_name("tsmc18-common-source-spec-ac.bridge.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            assert task.constraints == original.constraints
+            assert task.ac_sweep == original.ac_sweep
+            assert task.operating_conditions == original.operating_conditions

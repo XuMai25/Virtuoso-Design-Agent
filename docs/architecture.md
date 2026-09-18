@@ -42,6 +42,12 @@ Standalone Spectre 是 Bridge 的独立能力，不依赖 Virtuoso daemon。`dev
 
 ## 任务与局部能力
 
+TSMC18 已在新共源 OA 上复用建图、独立回读、单字段 RD 应用及 OA→si DC/AC，
+完成一个仿真前固定的20 dB/100 MHz/100 µW nominal 规格尝试；没有增加新模板公式、
+搜索框架或 Bridge 实现。理论只确定首值与修改方向，最终规格仍由真实 OP/复数 AC 判定。
+尺寸、偏置、负载和TT工况都显式绑定，N28默认和其他正交 operation 不变。
+完整波形归档、PVT/noise/transient和人工ADE不是本次声明通过的范围。
+
 任务不是固定的“全流程按钮”。`operation` 决定实际范围：
 
 | operation | 作用 | 远端副作用 |
@@ -705,6 +711,14 @@ corner membership 使用正交的 `ade.corners.apply`，不塞进 variable patch
   -> 非空 time/IN/OUT/VDD_SRC:p 波形检查
   -> timing + 周期供电能量/平均功率提取、规格判断
 ```
+
+2026-09-18 起，所有复用 `_generate_oa_netlist` 的外部 `si -batch` 由 Bridge 已有
+OA-host `ssh_runner` 运行，不再由 `VirtuosoClient.run_shell_command` 的 CIW `csh()`
+同步等待。`simInitEnvWithArgs` 仍在目标 CIW；SSH 命令显式加载 profile 的 Cadence cshrc，
+用 TERM/10 s kill-after 限时，Bridge 等待多15 s。必须同时满足退出成功、日志完成/无错误、
+非空网表和实际 OA 一致性；即使已有 End netlisting，失败退出或传输超时仍拒绝。
+run record 保存 `si_execution` 的实际退出码、OA-host SSH路径及限时配置，
+本地回归覆盖N28解析，真实 smoke 本轮仅覆盖TSMC18。split-host行为没有新增live证明。
 
 这里的 wrapper 是 testbench 契约，不再重复 MOS 拓扑。显式给出的 `VDD/CL` 标为 `user_input`，省略时采用 profile 默认值并标为 `software_inference`；MOS 拓扑与尺寸来自 OA/`si`。`simulation.run` 只读 OA，省略器件尺寸时采用回读值，显式给出时必须匹配。调优任务则在已经授权 OA 写入时逐候选暂存并回读，最后提交最佳可行点；无可行点或可恢复中断时恢复初始尺寸。
 

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "tsmc18-common-source-spec-refine",
+  "operation": "parameters.apply",
+  "circuit": "common_source",
+  "target": {"library": "Analog_VLSI", "cell": "vda_tsmc18_cs_spec_001", "view": "schematic"},
+  "pdk_profile": "nics4304_tsmc18",
+  "parameters": {"load_resistance_ohm": 23500.0},
+  "safety": {"allow_remote_compute": false, "allow_remote_write": true, "allowed_library": "Analog_VLSI", "required_cell_prefix": "vda_", "replace_existing": false},
+  "limits": {"max_iterations": 1, "timeout_seconds": 180}
+}

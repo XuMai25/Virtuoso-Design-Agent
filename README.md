@@ -1,5 +1,12 @@
 # Virtuoso Design Agent
 
+2026-09-18 新增 TSMC18 固定规格共源级设计尝试：先用 PDK 实测 OP/KCL 定首值，只做一次
+RD 局部修正，在同一新 OA cell 中得到 **20.827 dB / 125.834 MHz / 68.322 µW**，
+输出0.908 V，全部通过仿真前固定的 DC/AC 约束。外部 `si` 改由 Bridge 已有 OA-host SSH
+runner 执行，避免通过 CIW 等待批处理；安全与网表一致性门不变，未修改 Bridge。
+这只验证 TT/27°C/1.8 V、50 fF、理想输入/电阻负载下的 nominal DC/AC 规格，
+不是通用校准、全局最优或完整 L5B。见[本次设计与失败记录](docs/validation/2026-09-18-tsmc18-common-source-spec-attempt.md)。
+
 Virtuoso Design Agent 是 `virtuoso-bridge-lite` 之上的受控设计编排层。它把“建原理图、读回、应用参数、跑仿真、判定规格、有限调优”组织成可单独执行、可组合、可审计的任务，而不是再造一套 Bridge。
 
 当前受测 Bridge 执行底座为上游 `0.8.0`/main `c64461c` 加 VDA 私有安全与稳定性 merge `106c61e`，以及 Windows managed-daemon restart 修正 `40ff891`（文档 tip `0156579`）。升级保留 RAMIC/SSH 回环、Windows 隐藏 tunnel、完整 JSON framing、有限重试、pre-send 恢复、用户/绑定核验与退出清理，同时接入上游 split-host、Paramiko/SOCKS5、scoped Spectre pools、严格 PSF、schematic netlist/planner 和 Maestro 修复。逐文件差异、备份、测试与未验证边界见[第三方补丁记录](docs/third-party/virtuoso-bridge-local-patch.md)和[升级验证](docs/validation/2026-09-04-bridge-upstream-0.8-upgrade.md)。

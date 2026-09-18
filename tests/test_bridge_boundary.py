@@ -7618,7 +7618,16 @@ def test_empty_netlist_and_empty_waveform_are_rejected(tmp_path) -> None:
 def test_si_netlisting_rejects_empty_generated_output(tmp_path) -> None:
     success = SimpleNamespace(ok=True, errors=[])
 
+    class Runner:
+        def run_command(self, command, *, timeout):
+            assert command.startswith("csh -fc ")
+            assert "timeout --signal=TERM --kill-after=10s 60s si -batch" in command
+            assert timeout == 75
+            return SimpleNamespace(returncode=0, stderr="")
+
     class FakeClient:
+        ssh_runner = Runner()
+
         def execute_skill(self, *args, **kwargs):
             return success
 
@@ -7626,7 +7635,7 @@ def test_si_netlisting_rejects_empty_generated_output(tmp_path) -> None:
             return success
 
         def run_shell_command(self, *args, **kwargs):
-            return success
+            raise AssertionError("si must not block the CIW csh channel")
 
         def download_file(self, remote_path, local_path, **kwargs):
             if str(remote_path).endswith("/si.env"):
@@ -7656,15 +7665,26 @@ def test_si_netlisting_rejects_empty_generated_output(tmp_path) -> None:
         )
 
 
-def test_si_command_failure_reports_the_retained_remote_run(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "failure",
+    [
+        SimpleNamespace(returncode=1, stderr="Socket error: WinError 10054"),
+        SimpleNamespace(returncode=124, stderr="remote timeout"),
+        TimeoutError("SSH command wait timed out"),
+    ],
+)
+def test_si_command_failure_reports_the_retained_remote_run(tmp_path, failure) -> None:
     success = SimpleNamespace(ok=True, errors=[])
-    failure = SimpleNamespace(
-        ok=False,
-        errors=["Socket error: WinError 10054"],
-        output="",
-    )
+
+    class Runner:
+        def run_command(self, command, *, timeout):
+            if isinstance(failure, Exception):
+                raise failure
+            return failure
 
     class FakeClient:
+        ssh_runner = Runner()
+
         def execute_skill(self, *args, **kwargs):
             return success
 
@@ -7672,13 +7692,13 @@ def test_si_command_failure_reports_the_retained_remote_run(tmp_path) -> None:
             return success
 
         def run_shell_command(self, *args, **kwargs):
-            return failure
+            raise AssertionError("si must use the OA-host SSH runner")
 
         def download_file(self, remote_path, local_path, **kwargs):
             text = (
                 'simLibName = "vb_pdk_smoke"\n'
                 if str(remote_path).endswith("/si.env")
-                else ""
+                else "End netlisting\n"
             )
             local_path.write_text(text, encoding="utf-8")
             return success
@@ -7687,7 +7707,7 @@ def test_si_command_failure_reports_the_retained_remote_run(tmp_path) -> None:
     with pytest.raises(
         RuntimeError,
         match=(
-            r"si batch command failed: Socket error: WinError 10054.*"
+            r"si batch command failed: .*"
             r"remote si run retained at /data/xum/virtuoso_bridge_smoke/"
             r"vda_netlist-failure_"
         ),
@@ -7706,6 +7726,70 @@ def test_si_command_failure_reports_the_retained_remote_run(tmp_path) -> None:
             tmp_path,
             timeout=60,
         )
+
+
+def test_si_netlisting_requires_oa_host_ssh_transport(tmp_path) -> None:
+    with pytest.raises(RuntimeError, match="OA-host SSH transport"):
+        _generate_oa_netlist(
+            SimpleNamespace(),
+            {
+                "target": {"library": "vb_pdk_smoke", "cell": "vda_inv"},
+                "profile": load_pdk_profile("nics4304_tsmc28").model_dump(),
+            },
+            tmp_path,
+            timeout=60,
+        )
+
+
+def test_si_success_records_ssh_exit_and_timeout_without_ciwwait(tmp_path) -> None:
+    success = SimpleNamespace(ok=True, errors=[])
+    calls = []
+
+    class Runner:
+        def run_command(self, command, *, timeout):
+            calls.append((command, timeout))
+            return SimpleNamespace(returncode=0, stderr="")
+
+    class Client:
+        ssh_runner = Runner()
+
+        def execute_skill(self, *args, **kwargs):
+            return success
+
+        def upload_file(self, *args, **kwargs):
+            return success
+
+        def run_shell_command(self, *args, **kwargs):
+            raise AssertionError("no CIW shell wait")
+
+        def download_file(self, remote_path, local_path, **kwargs):
+            if str(remote_path).endswith("/si.env"):
+                text = 'simLibName = "vb_pdk_smoke"\n'
+            elif str(remote_path).endswith("si_batch_stdout.log"):
+                text = "End netlisting\n"
+            else:
+                text = (
+                    "MN0 (OUT IN VSS VSS) nch_lvt_mac l=30n w=1u nf=1 multi=1\n"
+                    "MP0 (OUT IN VDD VDD) pch_lvt_mac l=30n w=2u nf=1 multi=1\n"
+                )
+            local_path.write_text(text, encoding="utf-8")
+            return success
+
+    result = _generate_oa_netlist(
+        Client(),
+        {
+            "target": {"library": "vb_pdk_smoke", "cell": "vda_inv"},
+            "profile": load_pdk_profile("nics4304_tsmc28").model_dump(),
+        },
+        tmp_path,
+        timeout=600,
+    )
+    assert len(calls) == 1
+    assert calls[0][1] == 195
+    assert "180s si -batch" in calls[0][0]
+    assert result["si_execution"]["transport"] == "bridge_oa_host_ssh_runner"
+    assert result["si_execution"]["returncode"] == 0
+    assert result["parsed"]["semantic_parameters"]["pmos_width_um"] == 2.0
 
 
 def test_si_log_requires_a_real_completion_marker() -> None:

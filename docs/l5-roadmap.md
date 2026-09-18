@@ -468,3 +468,21 @@ per-instance override 或派生 CDF。不再在已知 fixture 上增加随机候
 - 从实测 `VGS=0.60 V, VDS≈0.90 V` 反推负载，只运行三个共源 AC 条件。`L=0.18 µm, CL=10 fF` 为 `18.109 dB / 640.240 MHz / 5.150 GHz GBW / 61.622 µW`；`CL=100 fF` 带宽降至 `76.276 MHz`；`L=0.36 µm, CL=10 fF` 为 `19.946 dB / 215.793 MHz / 2.144 GHz GBW / 24.507 µW`。三点均饱和且输出约 `0.9 V`。
 - 一阶 `gm(RD||ro)` 增益误差约 1.9%/0.9%；只计 10 fF 显式负载时带宽高估约 22%，反推有效输出电容约 12.2 fF。理论适合首值和方向，寄生及最终指标仍服从 PDK AC。
 - 结束后远端 `spectre=0`、`si=0`，本地 `65347` 无 listener；没有 OA/`si`/Maestro 访问。当前状态为 **TSMC18 nominal execution plus preliminary DC/AC characterization verified; reusable interpolation and design-quality closure pending**。下一步是在用户给定的 TSMC18 实际拓扑上做最小 OA→`si` DC/AC；不继续扩随机网格。
+
+## 2026-09-18 TSMC18 固定 DC/AC 规格尝试
+
+- agent在仿真前提出练习门限：TT/27°C/1.8 V、CL=50 fF，gain≥20 dB、BW≥100 MHz、
+  核心静态功耗≤100 µW、OUT=0.8–1.0 V及饱和/KCL护栏；不是用户真实应用需求。
+- 从已测PDK OP和局部KCL确定W/L=8/0.36 µm、VGS=0.58 V、RD=21.2 kΩ；首值真实
+  OA→si DC/AC全部合格。为增加薄增益余量，只改RD至23.5 kΩ，同一OA重新netlist得到
+  20.8267 dB、125.8336 MHz、68.3224 µW、OUT=0.908013 V，九项原定约束全部通过。
+- 外部si改为Bridge已有OA-host SSH runner执行，保留CIW环境初始化及严格exit/log/
+  非空网表/实际参数一致性门，新增TERM/10 s kill-after限时及执行证据。Bridge本身未修改。
+  完整本地回归929项通过；本轮live只覆盖TSMC18，不扩张为split-host或任意PDK证明。
+- 创建后的独立读超时、CIW等待si超时和RD修改时的读超时均保留failed记录；重建本地隐藏
+  tunnel并独立确认未写后才重试RD。没有盲目重放写入或把returncode/对象存在当作规格通过。
+  本次全部自有后台进程/tunnel清理，原可见Virtuoso及cds.lib保留不变。
+- 当前只升级为nominal共源固定DC/AC规格通过。common-source完整原始波形归档仍缺；
+  稀疏插值器仍partial，fresh-create整体原子性和间歇transport超时未被包装成完全修复。
+  实际设计下一门是在同一可行点按需求补noise/大信号和人工ADE交接；PVT显式可选，
+  不默认加随机点、网格全域或新拓扑。详见[设计验证记录](validation/2026-09-18-tsmc18-common-source-spec-attempt.md)。

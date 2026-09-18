@@ -13031,6 +13031,10 @@ def _generate_oa_netlist(
     run_root = str(profile["remote_run_root"]).rstrip("/")
     if not run_root.startswith("/data/xum/"):
         raise RuntimeError("remote netlist run root must stay under /data/xum")
+    runner = getattr(client, "ssh_runner", None)
+    if runner is None:
+        raise RuntimeError("si netlisting requires Bridge's OA-host SSH transport")
+    runner._persistent_shell_enabled = False
     task_slug = re.sub(r"[^A-Za-z0-9_.-]", "_", str(payload.get("task_id", "task")))
     run_dir = f"{run_root}/vda_{task_slug}_{uuid.uuid4().hex[:12]}"
 
@@ -13055,13 +13059,26 @@ def _generate_oa_netlist(
     local_si_env.write_text(_complete_si_env(generated_env), encoding="utf-8")
     _upload_file(client, local_si_env, remote_si_env, timeout=min(timeout, 60))
 
+    si_timeout = min(max(int(timeout), 1), 180)
     command = (
-        f"source {shlex.quote(str(profile['cadence_cshrc']))} ; "
-        f"cd {shlex.quote(run_dir)} ; "
-        f"si -batch -cdslib {shlex.quote(str(profile['cds_lib_path']))} "
+        f"source {shlex.quote(str(profile['cadence_cshrc']))} && "
+        f"cd {shlex.quote(run_dir)} && "
+        "timeout --signal=TERM --kill-after=10s "
+        f"{si_timeout}s si -batch -cdslib {shlex.quote(str(profile['cds_lib_path']))} "
         "-command nl >& si_batch_stdout.log"
     )
-    shell_result = client.run_shell_command(command, timeout=min(timeout, 180))
+    # si is an external batch process, not a CIW operation. Waiting on
+    # csh() through SKILL can time out even after si has produced a netlist.
+    # Keep OA initialization in CIW, but use Bridge's existing SSH runner
+    # on the OA host and retain strict exit/log/netlist validation.
+    shell_failure = None
+    try:
+        shell_result = runner.run_command(
+            f"csh -fc {shlex.quote(command)}", timeout=si_timeout + 15
+        )
+        _require_transport_result(shell_result, "execute si via Bridge SSH")
+    except Exception as exc:
+        shell_failure = str(exc)
     local_log = work_dir / "si_batch_stdout.log"
     try:
         log_text = _download_text(
@@ -13073,10 +13090,10 @@ def _generate_oa_netlist(
         )
     except RuntimeError:
         log_text = ""
-    if not bool(getattr(shell_result, "ok", False)):
+    if shell_failure is not None:
         tail = "\n".join(log_text.splitlines()[-12:])
         raise RuntimeError(
-            f"si batch command failed: {_bridge_result_error(shell_result)}"
+            f"si batch command failed: {shell_failure}"
             + (f"; log tail: {tail}" if tail else "")
             + f"; remote si run retained at {run_dir}"
         )
@@ -13269,6 +13286,15 @@ def _generate_oa_netlist(
         "spectre_netlist_transform": spectre_netlist_transform,
         "parsed": parsed,
         "si_log_tail": log_text.splitlines()[-12:],
+        "si_execution": {
+            "source": "bridge_readback",
+            "transport": "bridge_oa_host_ssh_runner",
+            "returncode": int(shell_result.returncode),
+            "configuration_source": "software_inference",
+            "timeout_seconds": si_timeout,
+            "kill_after_seconds": 10,
+            "bridge_wait_timeout_seconds": si_timeout + 15,
+        },
     }
 
 
@@ -17063,6 +17089,7 @@ def simulate_existing_schematic(
                         "raw_si_netlist_preserved": True,
                     },
                     "si_log_tail": netlist_evidence["si_log_tail"],
+                    "si_execution": netlist_evidence.get("si_execution"),
                     **netlist_evidence["parsed"],
                     "consistency_source": "software_inference",
                 },
@@ -17429,6 +17456,7 @@ def simulate_inverter(payload: dict[str, Any]) -> dict[str, Any]:
                     "parameter_consistency": "matched",
                     "instances": netlist_evidence["parsed"]["instances"],
                     "si_log_tail": netlist_evidence["si_log_tail"],
+                    "si_execution": netlist_evidence.get("si_execution"),
                 },
                 "testbench": {
                     "remote_path": remote_wrapper,
@@ -18146,6 +18174,7 @@ def simulate_common_source(
                     "parameter_consistency": "matched",
                     "instances": netlist_evidence["parsed"]["instances"],
                     "si_log_tail": netlist_evidence["si_log_tail"],
+                    "si_execution": netlist_evidence.get("si_execution"),
                 },
                 "testbench": {
                     "remote_path": remote_wrapper,
@@ -19066,6 +19095,7 @@ def simulate_differential_pair(
                     "parameter_consistency": "matched",
                     "instances": netlist_evidence["parsed"]["instances"],
                     "si_log_tail": netlist_evidence["si_log_tail"],
+                    "si_execution": netlist_evidence.get("si_execution"),
                 },
                 "testbench": {
                     "source": "software_inference",
