@@ -1402,6 +1402,11 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
             persist.model_copy(update={"id": "04-persist"}),
         ]
     if task.operation is Operation.SCHEMATIC_INSPECT:
+        if task.include_param_evidence:
+            inspect = inspect.model_copy(update={
+                "description": inspect.description
+                + "；同一次读取保留未过滤 stored/CDF 参数证据（不是最终网表值）"
+            })
         return [
             probe,
             inspect.model_copy(update={"id": "02-inspect"}),

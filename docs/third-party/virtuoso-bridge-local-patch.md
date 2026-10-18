@@ -203,3 +203,28 @@ Busy 和 durable receipts 采用上游实现，不机械叠加旧补丁。原 US
 精确备份 SHA、测试环境失败、一次性旧协议迁移与未验证边界见
 [升级验收](../validation/2026-10-18-bridge-main-upgrade.md)。本次不改变 VDA 授权、正交操作
 或 ADE L 优先策略，不自动把 shared-CIW/Maestro/SOS 新 API 计入 L5B 电气闭环能力。
+
+## 2026-10-18 新功能验收后的 Windows direct 修正
+
+- 备份 ref `codex/backup-pre-feature-validation-20261018` 指向 `e214d3a6`；补丁提交
+  `3688192f438833d8da7565b69a311547177128ac`，仍在独立私有分支，未推第三方 origin。
+  新完整 bundle 已验证；路径、SHA 和 live 证据见
+  [新功能验收](../validation/2026-10-18-bridge-feature-workflow.md)。
+- `virtuoso/basic/bridge.py` 将 Windows no-`SHUT_WR` 扩展到 direct/receipt-only client，
+  不再限于挂有 tunnel 对象的 client。原生 Windows socketpair 也复现 half-close 空回复，
+  因而不是回环安全策略问题；POSIX 旧行为保留。
+- `tools/skill_exec.py` 同样采用 Windows complete-JSON 请求、完整 nonce/HMAC 响应结束
+  与接收总 deadline；不关闭认证、不增加发送后 retry。
+- auth/recoverable-daemon 测试 fixture 改为匹配真实 complete-JSON dispatch，Windows
+  不再依赖 half-close；私有测试新增 direct/standalone 分片、篡改与 POSIX 行为矩阵。
+  pending-receipt 测试只增加失败诊断，不放宽安全断言。
+- final Windows private set 96 passed；Linux focused 281 passed / 2 skipped，最终私有
+  matrix 29 passed。更广 Windows TCP 集 271 passed / 3 failed / 6 skipped，连接重置
+  诊断仍未完全解决；不能以 focused pass 宣传全量全绿。VDA 最终 937 项通过。
+- 丢回执/超时 live 在自有隔离会话完成，未重复执行；参数 probe 只写新测试 cell，
+  三份 si 确认 8→9→8 µm 和恢复一致。原会话、人工状态、配置保留，自有进程/tunnel 已清理。
+- 手动 `ensure_tunnel()` 后须 `save_state()`，以供跨进程接管/停止；验收 harness 漏存
+  状态造成的一次精确自有 forward 遗留已定位清理，不改写生产 warm 生命周期语义。
+
+后续合并上游时先检查是否已有这些等价修复；只保留必要差异，并重复认证/分片/不重放/
+退出清理测试。VDA rich inspection 是对公开 Bridge reader 的薄适配，不复制 reader。

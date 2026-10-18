@@ -329,10 +329,12 @@ class GenericHierarchyBinding(_StrictModel):
 class ParameterBindingDiscoverySpec(_StrictModel):
     """One reversible OA-CDF probe used to discover an ``si`` parameter binding.
 
-    The complete target-instance CDF table is part of the compare-and-swap
+    The declared compact target-instance parameter table is part of the compare-and-swap
     precondition.  This lets a later retry distinguish a clean baseline from a
     probe value left behind by an interrupted worker, and prevents callback
-    side effects from silently becoming the new baseline.
+    side effects on those fields from silently becoming the new baseline. This
+    compact table is not the lossless stored/CDF evidence returned by an opted-in
+    schematic inspection; omitted nil, empty or long fields are not covered.
     """
 
     schema_version: Literal[1] = 1

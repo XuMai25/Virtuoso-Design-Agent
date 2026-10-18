@@ -391,6 +391,11 @@ class DeterministicDemoAdapter:
         )
 
     def inspect_schematic(self, task: TaskSpec) -> AdapterResult:
+        if task.include_param_evidence:
+            raise RuntimeError(
+                "stored/CDF parameter evidence requires the Bridge adapter; "
+                "demo cannot supply real OA evidence"
+            )
         schematic = self._schematics.get(self._key(task))
         if schematic is None:
             raise RuntimeError("demo schematic does not exist")

@@ -943,3 +943,19 @@ stdout、Maestro job/history/session locks、CDF 配置打包等修复随依赖�
 本轮真实验证包括现有 TSMC18 共源 OA→`si` DC/AC（网表 SHA 与 28 个原始指标精确一致）、
 TSMC N28 两变体 standalone preview，以及保留原 CIW PID 的认证重载和两 profile doctor。
 未做 OA 写入、人工 ADE state 迁移、新 PVT 或新拓扑搜索；这些结果不扩大 L5B 完成声明。
+
+### Bridge 1.0 新功能工作流验收
+
+后续聚焦验收新增可选 `TaskSpec.include_param_evidence`，仅 `schematic.inspect` 可声明。
+四条实际读图路径通过同一 helper 一次获取 compact + typed stored/CDF，原始证据进入
+`bridge_schematic`，不合并、不求值、不改变既有拓扑/CAS 字段。旧任务 hash 保持不变，
+缺证据或 demo 请求此能力时明确失败；搜索热路径不默认搬运完整 CDF。
+
+Windows direct/receipt-only client 与 standalone 工具补齐 no-half-close/签名响应 framing；
+无 post-send 自动重放。真实丢回执和预算耗尽通过原 handle 取回完成结果、执行计数各为一。
+此能力仍在 Bridge 层，未伪装成所有 VDA operation 的自动 request-handle/checkpoint 集成。
+
+独立 TSMC18 新 cell 的 W→si 绑定、六个派生参数与恢复态原始网表 hash 已验证。声明的
+compact CAS 不覆盖省略的 nil/空值/长字段；rich evidence 不自动改变写入范围。本轮只运行
+三次 netlisting、不重复电气扫描。VDA 937 项通过；Windows 更广 TCP 测试仍有三项 reset，
+详见[验收与耗时](validation/2026-10-18-bridge-feature-workflow.md)。

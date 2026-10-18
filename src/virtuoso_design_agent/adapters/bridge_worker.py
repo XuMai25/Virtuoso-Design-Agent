@@ -274,9 +274,12 @@ def _target(payload: dict[str, Any]) -> tuple[str, str]:
     return str(target["library"]), str(target["cell"])
 
 
-def _read_schematic(client, library: str, cell: str) -> dict[str, Any]:
+def _read_schematic(
+    client, library: str, cell: str, *, include_param_evidence: bool = False,
+) -> dict[str, Any]:
     from virtuoso_bridge.virtuoso.schematic.reader import read_schematic
 
+    options = {"include_param_evidence": True} if include_param_evidence else {}
     return read_schematic(
         client,
         library,
@@ -284,7 +287,23 @@ def _read_schematic(client, library: str, cell: str) -> dict[str, Any]:
         include_positions=True,
         param_filters=None,
         timeout=90,
+        **options,
     )
+
+
+def _read_inspection_schematic(
+    client, library: str, cell: str, payload: dict[str, Any],
+) -> dict[str, Any]:
+    # Opt-in on inspection only; search hot paths keep the smaller payload.
+    # No fallback: an older Bridge must fail rather than omit requested evidence.
+    if payload.get("include_param_evidence"):
+        data = _read_schematic(client, library, cell, include_param_evidence=True)
+        for instance in data.get("instances", []):
+            evidence = instance.get("param_evidence")
+            if not isinstance(evidence, dict) or not {"stored", "cdf"} <= evidence.keys():
+                raise RuntimeError("Bridge omitted requested stored/CDF parameter evidence")
+        return data
+    return _read_schematic(client, library, cell)
 
 
 def _placement_snapshot_from_readback(
@@ -6438,7 +6457,7 @@ def create_inverter(payload: dict[str, Any]) -> dict[str, Any]:
 def inspect_inverter(payload: dict[str, Any]) -> dict[str, Any]:
     client = _client()
     library, cell = _target(payload)
-    data = _read_schematic(client, library, cell)
+    data = _read_inspection_schematic(client, library, cell, payload)
     _assert_inverter(data, payload["profile"])
     return _attach_targeted_parameter_verification(
         client, library, cell, payload, _summary(data)
@@ -8326,7 +8345,7 @@ def create_common_source(payload: dict[str, Any]) -> dict[str, Any]:
 def inspect_common_source(payload: dict[str, Any]) -> dict[str, Any]:
     client = _client()
     library, cell = _target(payload)
-    data = _read_schematic(client, library, cell)
+    data = _read_inspection_schematic(client, library, cell, payload)
     _assert_common_source(data, payload["profile"])
     return _attach_targeted_parameter_verification(
         client, library, cell, payload, _common_source_summary(data)
@@ -8852,7 +8871,7 @@ def inspect_existing_schematic(payload: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(
             f"target schematic does not exist: {library}/{cell}/schematic"
         )
-    data = _read_schematic(client, library, cell)
+    data = _read_inspection_schematic(client, library, cell, payload)
     partial_prefix_state: dict[str, Any] | None = None
     try:
         pin_geometry, placement = _schematic_geometry_bundle(
@@ -10425,7 +10444,7 @@ def transform_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
 def inspect_differential_pair(payload: dict[str, Any]) -> dict[str, Any]:
     client = _client()
     library, cell = _target(payload)
-    data = _read_schematic(client, library, cell)
+    data = _read_inspection_schematic(client, library, cell, payload)
     _assert_differential_pair(data, payload["profile"])
     return _attach_targeted_parameter_verification(
         client, library, cell, payload, _differential_pair_summary(data)

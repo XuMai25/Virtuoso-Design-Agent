@@ -505,3 +505,16 @@ per-instance override 或派生 CDF。不再在已知 fixture 上增加随机候
   按现有 onboarding→理论初值→最小 DC/AC→局部 refinement→真实 winner 复核工作流推进。
   shared-CIW receipts、丰富参数 evidence 或 Maestro job API 仅在具体任务需要时接入现有
   operation 并补契约/恢复测试；ADE L 仍保持可人工调整，PVT 仍是按需可选。
+
+## 2026-10-18 Bridge 新功能与工作流 Gate
+
+- 已将 stored/CDF 参数证据以显式选项接入 `schematic.inspect`，不扩大权限或改变旧 token；
+  默认 compact/search 热路径保留。VDA 完整回归 937 项通过。
+- 真实验证一次丢回执、一次等待预算耗尽，均仅查询原 receipt，原请求计数为一。Windows
+  direct/standalone framing 已补齐，但更广本地 TCP 的三项 reset 仍是已记录的未闭合边界。
+- 新 TSMC18 测试 cell 的 8→9→8 µm 可逆探针，三次 OA→si 确认主参数及六个派生字段，
+  恢复态网表与基线 SHA 相同；没有重复 DC/AC 或新增性能结论。
+- 同一 client 热读图约 0.13 s、完整 evidence 约 0.19 s；这是一次工具耗时，不是 agent
+  思考或端到端提速声明。日常采用会话复用、首次按需取全、后续差异摘要和最小仿真；
+  不为重复证明工作流再造拓扑测试。验收、失败与清理见
+  [验证记录](validation/2026-10-18-bridge-feature-workflow.md)。

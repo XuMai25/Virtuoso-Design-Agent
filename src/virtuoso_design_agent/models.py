@@ -12,6 +12,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StrictStr,
     field_validator,
     model_validator,
@@ -2193,6 +2194,7 @@ class TaskSpec(StrictModel):
     schema_version: int = Field(default=1, ge=1, le=1)
     id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
     operation: Operation
+    include_param_evidence: StrictBool | None = None
     circuit: CircuitKind
     target: DesignTarget | None = None
     expected_target_topology_variant: StrictStr | None = Field(
@@ -2273,6 +2275,11 @@ class TaskSpec(StrictModel):
 
     @model_validator(mode="after")
     def validate_operation_inputs(self) -> "TaskSpec":
+        if (
+            self.include_param_evidence is not None
+            and self.operation is not Operation.SCHEMATIC_INSPECT
+        ):
+            raise ValueError("include_param_evidence is only supported by schematic.inspect")
         if self.analysis_stages and self.circuit is not CircuitKind.EXISTING_SCHEMATIC:
             raise ValueError(
                 "analysis_stages currently require circuit='existing_schematic'"

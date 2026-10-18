@@ -75,8 +75,27 @@ data = read_schematic(
 每个实例的 `param_evidence.stored` 与 `.cdf` 分开保存，覆盖 compact `params` 中省略的
 nil、空值和长值。它们是 `bridge_readback`，不是最终网表参数；CDF 值也不证明 callback
 已按预期运行。VDA 现有路径继续使用 `param_filters=None`，但这只关闭名称过滤，不能把
-compact `params` 表述为所有参数的无损快照。新 evidence 尚未自动扩展 VDA task schema。
+compact `params` 表述为所有参数的无损快照。后续验收的显式 task 接入见下文。
 参数生效仍需 callback 后回读及实际 OA→`si` 网表对照。
+
+2026-10-18 后续验收已把该选项接入正式 `schematic.inspect` task：
+
+```json
+{"operation": "schematic.inspect", "include_param_evidence": true}
+```
+
+此处只展示新增字段，仍须提供正常任务的 id、circuit、target 与 profile。
+四种现有 schematic circuit 路径共用同一读取 helper；结果位于
+`bridge_schematic.instances[].param_evidence`，沿用 action 的 `bridge_readback` 来源。
+不把 stored 与 CDF 合并，不将 nil/空串改成缺失，不求值参数表达式，也不改变既有 compact
+`instance_parameters` 或拓扑指纹。只读任务的 plan token 会绑定这个选项；未声明时旧任务
+token 不变。该字段仅用于 `schematic.inspect`，其他 operation 拒绝，避免声明后被静默忽略。
+旧 Bridge 不支持时明确失败；不会回退为缺证据的成功结果。demo adapter 也明确拒绝此
+选项，不伪造 stored/CDF 或静默忽略；普通 demo inspection 不受影响。
+
+按需在 onboarding、查找遗漏参数或诊断 callback 时读取一次。搜索循环仍用 compact
+读取和既有定向写后校验，不在每个候选上重复传输整份 CDF。一次读取已包含三类表，
+不需要随后逐实例补发同类查询。与 OA 参数的最终绑定仍由实际网表验证。
 
 ## 4. Shell、netlist、Maestro 与人工 ADE
 
@@ -95,3 +114,25 @@ compact `params` 表述为所有参数的无损快照。新 evidence 尚未自�
   新增这些正式能力，更不等于通过相应工艺或电气 Gate。
 
 本次是执行底座升级，不新增电路搜索域、不扩大 L5B 完成声明，不取消任何原正交 operation。
+
+## 5. 经过验收的省时与恢复用法
+
+- 同一批任务复用已初始化的 CIW 与 managed tunnel。不要逐候选 start/stop 或创建新的
+  Virtuoso；首次 PDK 加载可能出现提示，fresh session 不是零成本的连接替代品。
+- 正常读图用一次 `read_schematic`，需要完整参数时显式开启 evidence。返回完整数据存
+  run record，给 agent 的日常摘要只列目标参数、差异、SHA 和失败原因。
+- 只有可能阻塞/产生副作用、且确实需要共享 CIW 保护的调用才显式开启
+  `dialogs.enable_guard(protect_inflight=True)`。guard 每次都有 X11/认证 preflight 成本；
+  纯 `-nographE` 无映射 CIW 会返回 indeterminate，不得伪造 clear 或关闭认证绕过。
+- 请求不确定时先持久化 `result.metadata.request_handle`，后续调用
+  `client.requests.receipt(handle)`。它查询原结果，不启动第二次操作；不要自动重跑整个
+  VDA task。现有 VDA 所有高层 operation 尚未自动持久化这些 handles，不能宣称全面接入。
+- 若确需更换 tunnel，保留相同 daemon，重新建立 forward 后必须保存其管理状态。
+  手动使用 Bridge `tunnel.ensure_tunnel()` 时配套 `tunnel.save_state()`；否则下一进程
+  无法可靠接管/清理该 forward。receipt-only client 使用已认证 endpoint/token，
+  不在 pending CIW 上运行 factory 的 SKILL 身份探测。token 只在内存中传递，不进入记录。
+- Windows direct/receipt-only client 现在也避开 `SHUT_WR`；不再只有带 tunnel 对象的
+  client 享有该修正。`tools/skill_exec.py` 同样支持完整签名响应完成，保持总等待 budget。
+  发送后 reset/timeout 不新增自动重试。
+
+实测、失败记录和测试边界见[新功能验收](validation/2026-10-18-bridge-feature-workflow.md)。

@@ -404,6 +404,8 @@ class SubprocessBridgeAdapter:
         }
         if task.target is not None:
             payload["target"] = task.target.model_dump(mode="json")
+        if task.include_param_evidence is not None:
+            payload["include_param_evidence"] = task.include_param_evidence
         if task.device_characterization is not None:
             payload["device_characterization"] = (
                 task.device_characterization.model_dump(mode="json")
