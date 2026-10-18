@@ -1,5 +1,10 @@
 # virtuoso-bridge-lite 本地兼容补丁
 
+当前集成更新于 **2026-10-18**：Bridge `1.0.0`，上游 main `ecaf5a5c`，集成提交 `e214d3a`，本地独立分支
+`codex/vda-upstream-main-20261018`。下文旧分支和结果均是历史记录，不代表当前 tip。
+当前逐项差异见本文件末节；操作影响见[1.0 操作说明](../bridge-1.0-operation-notes.md)，
+备份和实际验证见[升级验收](../validation/2026-10-18-bridge-main-upgrade.md)。
+
 ## 隔离与备份
 
 - 第三方仓库：`https://github.com/Arcadia-1/virtuoso-bridge-lite`
@@ -142,3 +147,59 @@ Bridge checkout 内 `LOCAL_VDA_PATCH.md` 是逐文件主记录；本文件只维
 - `vda bridge stop` 后本地 `65347` listener 与匹配的 managed `ssh.exe` 均为 0。
 
 这次升级证明当前 VDA 正交 operation 与既有真实工作流可运行在 Bridge 0.8 底座上；没有证明上游新增 GDS、docs、local netlist 或全部 Maestro/PVT 功能已被 VDA 逐项 live 验收。
+
+## 2026-10-18：认证 1.0 main 集成（当前）
+
+### 备份与版本
+
+- 上游仍为 `Arcadia-1/virtuoso-bridge-lite`；结束前再次 `ls-remote` 确认 main 为
+  `ecaf5a5c5499051ea4c4796a480e278a3e9c0da8`，不是只选 release tag。
+- 修改前干净私有 tip `0156579`，备份分支 `codex/backup-pre-main-20261018-0156579`。
+  独立工作分支 `codex/vda-upstream-main-20261018`，最终两父 merge
+  `e214d3a6e153a036d422b5453412365b8172cd06`；parents 为旧私有 tip 与该上游 main。
+- 修改前/后完整 bundles、原源码 zip、原完整 venv、配置和 runtime 备份均保留。
+  Bridge 工作树干净；没有把私有分支推到第三方 origin。
+- VDA 也从 `dfc981a` 建立 `codex/backup-pre-bridge-upgrade-20261018-dfc981a` 与
+  `codex/bridge-main-upgrade-20261018`；原未提交文档六个文件的 SHA 与备份一致，未混入升级提交。
+
+### 相对上游的源文件差异
+
+| 文件 | 当前私有差异 |
+| --- | --- |
+| `transport/ssh.py` | loopback/`GatewayPorts=no`，Windows 无窗口且无 `DETACHED_PROCESS`，stale PID `SystemError`，总 budget 内 1/3 s 退避。 |
+| `transport/tunnel.py` | 可选 `VB_REMOTE_TOKEN_PATH[_profile]`、工作区 token 初始化与生成 setup 中的 `RB_TOKEN_PATH`。保留上游默认路径，不强制所有用户迁移。 |
+| `daemon_guard.py` | VDA 需要的实际 `RBLastBind` 回读、合法端口与回环 fail-closed；保留上游签名 PID owner 守卫。 |
+| `virtuoso/basic/bridge.py` | 明确 pre-send 连接拒绝才能恢复；保留上游有界 jump-host grace；实际请求懒获取 token；Windows no-half-close；完整响应通过 nonce/HMAC 后结束接收。 |
+| `ramic_bridge_daemon_3.py`、`_27.py` | complete-JSON 请求，不等待 EOF；保留新版认证、owner、resync/receipt、deadline 和大小限制。 |
+| `cli.py` | 手工 forward 提示安全一致；status/restart 的 managed context/cleanup；无响应或安全证据不明返回失败。 |
+| `resources/.env_template` | 工作区 token 选项的注释说明，无秘密值。 |
+| `examples/_pdk.py` | 仅删除上游一个 EOF 空行，使整个 merge 的 whitespace check 通过。 |
+
+原生 Windows liveness、默认 RAMIC 回环、target/state cache、signed owner、IPC resync、
+Busy 和 durable receipts 采用上游实现，不机械叠加旧补丁。原 USER/bind 的额外只读重试被更强
+身份机制与原有 VDA checkpoint 语义取代。factory 保持 lazy，仅真正 EDA 请求时必要 warm，
+既不为 docs 查找启动 EDA，也不允许 shared guard 绕过 no-replay 规则。
+
+测试迁移覆盖原 framing/retry/tunnel/Windows flags 文件，并新增
+`test_vda_upgrade_compatibility.py`。fixture 修正隔离真实 env/owner，适配 complete-JSON
+派发与 upstream lazy factory，不放宽 OA、HMAC 或不确定结果判定。
+
+### 验证与操作影响
+
+- Linux：纯上游 `2286 passed, 89 skipped`；集成 `2325 passed, 89 skipped`。
+- Windows：纯上游 `2148 passed, 76 failed, 2 errors, 149 skipped`；集成
+  `2192 passed, 71 failed, 2 errors, 149 skipped`。逐项集合没有新增失败/错误；剩余是已复现
+  的平台/fixture 边界，不宣传为“所有 Windows 功能通过”。私有核心集 `165 passed, 2 skipped`。
+- wheel/source distribution 独立构建后，全部 package `.py/.il/.yaml/.env_template` 字节与
+  两种分发包逐项比较，`2 passed`，包含 CDF filter；主完整集默认跳过这两项，不能重复计数。
+- VDA `929 passed`；既有 TSMC18 OA→`si` DC/AC 的网表 SHA 与 28 个 raw metrics 精确一致；
+  N28 两点 standalone AC preview 的 125 个输出也精确一致。两者不同 profile，不相互借性能证据。
+- 原 PID 94710 的 CIW 在同一窗口保留，RAMIC 已升级为认证 daemon；新签名 owner、实际
+  `127.0.0.1:65346`、`1+2`、两 profile doctor 与 status 均通过。没有 OA 写入或 ADE state 覆盖。
+- 原有第二个 Virtuoso PID 126060 保留；自有 headless/计算/tunnel 已清理。
+  正常 tunnel `MainWindowHandle=0`，停止后本地监听与匹配 SSH 进程均为 0。
+
+操作行为变化、兼容调用和明确未接入的 API 见[操作说明](../bridge-1.0-operation-notes.md)；
+精确备份 SHA、测试环境失败、一次性旧协议迁移与未验证边界见
+[升级验收](../validation/2026-10-18-bridge-main-upgrade.md)。本次不改变 VDA 授权、正交操作
+或 ADE L 优先策略，不自动把 shared-CIW/Maestro/SOS 新 API 计入 L5B 电气闭环能力。

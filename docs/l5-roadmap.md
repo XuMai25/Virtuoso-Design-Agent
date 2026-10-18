@@ -486,3 +486,22 @@ per-instance override 或派生 CDF。不再在已知 fixture 上增加随机候
   稀疏插值器仍partial，fresh-create整体原子性和间歇transport超时未被包装成完全修复。
   实际设计下一门是在同一可行点按需求补noise/大信号和人工ADE交接；PVT显式可选，
   不默认加随机点、网格全域或新拓扑。详见[设计验证记录](validation/2026-09-18-tsmc18-common-source-spec-attempt.md)。
+
+## 2026-10-18 Bridge 1.0 main 底座升级 Gate
+
+- 修改前建立独立备份分支、Git bundles、源码与完整 venv 备份；在
+  `codex/vda-upstream-main-20261018` 合入上游 `ecaf5a5c`，不向第三方 origin 推送私有历史。
+- 采用上游 HMAC/签名 owner、IPC resync、Busy/recoverable requests、严格 schematic reader、
+  stored/CDF evidence、Maestro job/history locks 与发布资源修复；保留 VDA 的回环检查、
+  Windows 无窗口、stale PID、有限退避、发送前恢复和 cleanup。新 token 可放在工作区，
+  Windows 完整签名响应不再等 EOF，认证没有关闭。
+- VDA 929 项通过；Linux Bridge 2325 通过、89 跳过；Windows 平台既有失败与本次回归分开
+  记录，不以 Linux 通过包装全部 Windows 功能已验证。完整结果见
+  [升级验收](validation/2026-10-18-bridge-main-upgrade.md)。
+- 真实 TSMC18 已有 OA 共源 DC/AC 的网表 hash 与全部 28 个原始指标保持一致；N28 的两点
+  standalone AC preview 通过。原有两个 Virtuoso 会话保留，默认 daemon 已在原 PID 上完成
+  新协议重载，两个 profile 的 doctor 通过；没有 OA 写入或人工 ADE state 覆盖。
+- 这是兼容与安全底座 Gate，不另造一组随机电路测试。后续回到用户实际给定的模块/拓扑，
+  按现有 onboarding→理论初值→最小 DC/AC→局部 refinement→真实 winner 复核工作流推进。
+  shared-CIW receipts、丰富参数 evidence 或 Maestro job API 仅在具体任务需要时接入现有
+  operation 并补契约/恢复测试；ADE L 仍保持可人工调整，PVT 仍是按需可选。

@@ -899,7 +899,7 @@ VDA 层实行更严格策略：`bridge_worker._client()` 建立任何 OA/远端 
 
 2026-09-04 的功能验收又发现当前 Windows OpenSSH local forward 会把客户端 `shutdown(SHUT_WR)` 传播为整条 channel 关闭，导致远端已安全回环但回复丢失。Bridge 私有补丁因此只在 `Windows + managed SSH tunnel` 上保持写侧打开；本地 Windows 与非 Windows 客户端仍使用旧 half-close。配套 Python 3/2.7 daemon 不改变 JSON schema，而是在收到一个完整 JSON value 后立即派发，并继续接受 EOF 结束的旧客户端。该边界属于 Bridge transport framing，VDA 没有复制 socket/SSH 实现。修改前备份、逐文件差异、`106` 项 Bridge 回归、`910` 项 VDA 回归和 live `1+2`/doctor 证据见[第三方补丁记录](third-party/virtuoso-bridge-local-patch.md)与[回环验证](validation/2026-09-03-bridge-loopback-security.md)。
 
-这条边界解决远程网卡暴露，不等价于 RAMIC 协议已认证。同机其他 Unix 用户、原生 Cadence listener、SSH host-key 策略属于不同威胁面；若服务器策略要求进程级隔离，下一版应单独评估带权限的 Unix-domain socket 或认证 token，不能把请求边界修复包装成认证机制。
+截至 2026-09-03，上述边界只解决远程网卡暴露，不等价于 RAMIC 协议已认证。2026-10-18 升级另行接入了上游 token HMAC 与签名 owner handshake，见下文；这不取消回环，也不把它扩大为原生 Cadence listener、SSH host-key 或整台多用户主机的安全审计。
 
 ## Bridge 0.8 集成边界（2026-09-04）
 
@@ -916,3 +916,30 @@ Bridge 新增的 schematic netlist export 没有替换当前 OA→`si` 路径。
 私有网络与 Windows 行为继续由 Bridge 单点实现：daemon 与本地 SSH forward 默认回环；VDA worker 在 RAMIC-backed action 前 fail closed；Windows tunnel 不弹新控制台、不依赖不兼容的 `DETACHED_PROCESS`；complete-JSON framing 保留；只有发送前连接拒绝可自动恢复；身份与 bind 查询是可重复的只读操作。`status`、doctor 与 daemon `restart` 现在都使用 managed-tunnel 语义；restart 的 runner 在 `finally` 中关闭但不终止持久 forward，daemon 无响应或安全证据不可核实时不会返回健康。
 
 该升级没有改变 VDA 的 `--execute`、plan token、`allow_remote_compute`、`allow_remote_write`、library/cell allowlist、`vda_` 前缀或 `replace_existing=false` 规则。Bridge 0.8 的功能范围也不授权 VDA 绕过这些控制。完整 provenance、测试基线与 34 项未修改上游测试中的 Windows 边界见[第三方补丁记录](third-party/virtuoso-bridge-local-patch.md)和[升级验证](validation/2026-09-04-bridge-upstream-0.8-upgrade.md)。
+
+## Bridge 1.0 main 集成边界（2026-10-18）
+
+当前 Bridge 私有分支为 `codex/vda-upstream-main-20261018`，合入上游 main
+`ecaf5a5c5499051ea4c4796a480e278a3e9c0da8`。独立 Python worker/adapter 边界和原有
+正交 operation 不变，不复制上游执行实现。升级前源码、Git refs、完整 Bridge venv、
+本地配置和生成 runtime 均有独立备份；VDA 原有未提交文档未并入这次提交。
+
+RAMIC 现在使用上游 token HMAC、签名 capabilities 与 owner PID。签名身份属于
+`bridge_readback`，不代表 OA 参数已修改或电气规格已通过。VDA 原有两端回环、实际 bind
+fail-closed、显式执行授权和 OA/网表/结果指纹继续保留。新增 workspace token 路径选项，
+确保本环境首次认证初始化仍在批准的 `/data/xum`，而不是远端 home。
+
+Windows transport 继续避免 half-close，daemon 接收一个完整 JSON 后派发；client 在完整
+响应通过对应 nonce 的 HMAC 检查后即可结束接收，不依赖 SSH EOF。仅明确发生在 payload
+发送前的连接拒绝允许 warm/重连；上游 shared guard、Busy、resync 与 recoverable receipt
+不被私有恢复绕过。新 receipt/job API 尚未自动进入所有 VDA task，不声称已替代 checkpoint。
+
+上游严格读图、引号值解析、stored/CDF 可选证据、连通性、私有 netlist export、实际 shell
+stdout、Maestro job/history/session locks、CDF 配置打包等修复随依赖保留。compact `params`
+即使 `param_filters=None` 也不是无损全参数证据；最终参数仍服从 callback 后回读与真实
+`si` 网表。自动弹窗关闭不成为恢复策略，ADE L 的人工操作与状态保存不被 Maestro 新 API
+取代。操作变化与未接入边界见[Bridge 1.0 操作说明](bridge-1.0-operation-notes.md)。
+
+本轮真实验证包括现有 TSMC18 共源 OA→`si` DC/AC（网表 SHA 与 28 个原始指标精确一致）、
+TSMC N28 两变体 standalone preview，以及保留原 CIW PID 的认证重载和两 profile doctor。
+未做 OA 写入、人工 ADE state 迁移、新 PVT 或新拓扑搜索；这些结果不扩大 L5B 完成声明。
