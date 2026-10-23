@@ -1,0 +1,8 @@
+{
+  "minimum_objective_improvement": 0.0,
+  "minimum_relative_improvement_percent": 1.0,
+  "observed_error_multiplier": 1.0,
+  "minimum_predicted_slack": {},
+  "maximum_estimated_action_seconds": null,
+  "evidence_source": "software_inference"
+}

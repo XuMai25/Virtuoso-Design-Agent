@@ -47,6 +47,7 @@ from virtuoso_design_agent.generic_simulation import (
     render_generic_oa_testbench,
 )
 from virtuoso_design_agent.instance_path import split_instance_path
+from virtuoso_design_agent.simulation_input import audit_generic_wrapper, input_guard_body, verify_input_receipt
 from virtuoso_design_agent.models import (
     AnalysisStageSpec,
     DeviceCharacterizationSpec,
@@ -12941,6 +12942,7 @@ def _install_remote_spectre_guard(
     remote_run_dir: str,
     *,
     timeout: int,
+    input_contract: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Install a bounded remote Spectre launcher without changing Bridge."""
 
@@ -12961,6 +12963,11 @@ def _install_remote_spectre_guard(
         f"--kill-after={_SPECTRE_REMOTE_KILL_AFTER_SECONDS}s "
         f"{int(timeout)}s spectre \"$@\"\n"
     )
+    if input_contract is not None:
+        body = input_guard_body(remote_run_dir, input_contract)
+        script = ("#!/bin/sh\nexec timeout --signal=TERM "
+                  f"--kill-after={_SPECTRE_REMOTE_KILL_AFTER_SECONDS}s {int(timeout)}s "
+                  f"sh -c {shlex.quote(body)} vda-input-guard \"$@\"\n")
     local_path = work_dir / "vda_spectre_guard.sh"
     local_path.write_text(script, encoding="utf-8", newline="\n")
     upload_timeout = min(max(int(timeout), 1), 60)
@@ -12996,6 +13003,7 @@ def _install_remote_spectre_guard(
         "bridge_wait_timeout_seconds": (
             int(timeout) + _SPECTRE_REMOTE_CLEANUP_GRACE_SECONDS
         ),
+        **({"input_contract": input_contract, "input_guard_enabled": True} if input_contract is not None else {}),
     }
 
 
@@ -17086,7 +17094,19 @@ def simulate_existing_schematic(
             else "input_from_oa.scs"
         )
         local_wrapper = work_dir / wrapper_name
-        local_wrapper.write_text(deck, encoding="utf-8")
+        local_wrapper.write_text(deck, encoding="utf-8", newline="\n")
+        input_audit = audit_generic_wrapper(local_wrapper.read_bytes(), settings, analysis,
+            netlist_evidence.get("spectre_netlist_path", netlist_evidence["remote_netlist_path"]))
+        if input_audit["status"] != "matched":
+            raise RuntimeError("literal testbench input differs: " + "; ".join(input_audit["issues"]))
+        input_contract = {"wrapper_name": wrapper_name, "wrapper_sha256": input_audit["wrapper_sha256"],
+                          "dependencies": {netlist_evidence["remote_netlist_path"]: netlist_evidence["netlist_sha256"]}}
+        if netlist_evidence.get("spectre_netlist_path"):
+            include_path = netlist_evidence["spectre_netlist_path"]
+            include_hash = netlist_evidence.get("spectre_netlist_sha256", netlist_evidence["netlist_sha256"])
+            if include_path in input_contract["dependencies"] and input_contract["dependencies"][include_path] != include_hash:
+                raise RuntimeError("the same OA include path has conflicting raw/transformed hashes")
+            input_contract["dependencies"][include_path] = include_hash
         remote_wrapper = f"{netlist_evidence['remote_run_dir']}/{wrapper_name}"
         _upload_file(
             client,
@@ -17099,6 +17119,7 @@ def simulate_existing_schematic(
             work_dir,
             netlist_evidence["remote_run_dir"],
             timeout=timeout,
+            input_contract=input_contract,
         )
         simulator = _create_spectre_simulator(
             SpectreSimulator,
@@ -17129,6 +17150,12 @@ def simulate_existing_schematic(
         if not result.ok:
             detail = _spectre_failure_detail(result, work_dir)
             raise RuntimeError(f"Spectre simulation failed: {detail}")
+        input_receipt = {"status": "not_applicable_without_remote_guard", "source": "software_inference"}
+        if process_lifecycle.get("input_guard_enabled"):
+            receipt_dir = Path(str(result.metadata["output_dir"])).resolve()
+            if not receipt_dir.is_relative_to(work_dir.resolve()):
+                raise RuntimeError("executed-input receipt path escapes the owned local job directory")
+            input_receipt = verify_input_receipt(receipt_dir, netlist_evidence["remote_run_dir"], input_contract)
         tool_version = str(result.tool_version or "").strip()
         if not tool_version:
             tool_version = _spectre_version_from_log(work_dir)
@@ -17323,6 +17350,8 @@ def simulate_existing_schematic(
                     **({"measurement_context_sha256": measurement_plan.context_sha256}
                        if measurement_plan is not None else {}),
                     "rendering_source": "software_inference",
+                    "literal_input_audit": input_audit,
+                    "executed_input_binding": input_receipt,
                     "remote_path": remote_wrapper,
                     "sha256": hashlib.sha256(deck.encode("utf-8")).hexdigest(),
                     "analysis": analysis,

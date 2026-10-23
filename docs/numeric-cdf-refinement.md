@@ -79,7 +79,7 @@
   一个字段不能重复出现或被两个模型变量控制；所有成员都必须可在声明范围内搜索。
 - 摘要显示 MN0.w = MN1.w，并列出各成员的修改；post-run audit 仍逐字段对账，不能
   用主器件值代替其他器件回读。单字段旧 policy 不增加空 linked 字段，哈希保持兼容。
-- 这是声明的等值关系，不是自动识别器件匹配、任意比例/表达式约束或全局1:1规则，
+- 默认是声明的等值关系，不是自动识别器件匹配或全局1:1规则；显式比例/偏移见下文，
   尤其不把 NMOS/PMOS 默认绑成相同宽度。不要把 callback 派生字段当独立可写成员。
   同一候选的联动更新不是跨实例 OA 写入的底层原子事务，部分失败仍按原恢复规则对账。
 
@@ -161,7 +161,7 @@ d 个独立变量至少需要锚点加 d 个独立训练点，并保留互不重
 
 - primary 与 linked 成员须在每个训练/留出点完整显式记录，单位换算后等值；缺失、
   不等值或一个成员被另一模型变量控制均拒绝。等值比较不使用会吞掉 fF 差异的绝对
-  容差。同一组只能是同类型 DC 源或同类型负载，不自动识别匹配关系、比例或偏移。
+  容差。同一组只能是同类型 DC 源或同类型负载；不自动识别关系，比例/偏移须按下文显式声明。
 - 仅 DC/负载 value 参与联动。不同成员的 AC 幅值、相位、端子连接和其他固定字段
   各自保留；例如两输入反相 AC 不会被“同一个偏置变量”改成同相。源 DC 仍可显式
   为零或负值，这不赋予它器件 VGS 等物理含义。未声明的条件变化继续拒绝。
@@ -174,6 +174,112 @@ d 个独立变量至少需要锚点加 d 个独立训练点，并保留互不重
 
 源码、旧模型复算与未验证边界见
 [本地记录](validation/2026-10-23-p1b-linked-testbench-local.md)。没有新建或仿真真实电路。
+
+## 比例和固定偏移：仍是一个自由度
+
+联动成员现可显式声明 `member = scale × primary + offset`。scale 无量纲，offset 和
+可选的成员 quantization_grid 都使用该组声明的模型单位，不是自动按 SI 猜测。
+例如以下只是本地语法示例，不是推荐尺寸、真实 PDK 映射或完整执行任务：
+
+```json
+{
+  "instance": "MN0", "parameter": "w", "unit": "um",
+  "literal_format": "spectre_si", "meaning": "显式声明的局部宽度关系，仅作语法示例。",
+  "linked_parameters": [
+    {"instance": "MN1", "parameter": "w", "scale": 2, "offset": 0.1, "quantization_grid": 0.005}
+  ]
+}
+```
+
+testbench 的 linked_names 既保留原字符串等值写法，也可用对象，例如
+`[{"name":"VINN_SRC","scale":-1,"offset":900}]`，组单位 mV 时表示两源 DC 之和
+为900 mV；各源原 AC 幅相不变。这不是自动确定差模或共模激励。
+
+- 比例不能为零；常量继续放固定条件，不伪装成自由度。允许负比例，但整个声明范围
+  内的 CDF/负载仍须为正；源 DC 可以有符号。成员缺失或实际值不符合关系时拒绝。
+- 依赖成员可单独声明实际 PDK 网格。提案若不满足该网格就剔除并记录原因，绝不把
+  成员各自取整而破坏比例。已有训练点也必须符合声明的关系/成员网格。
+- 编译逐成员写实际派生值并保留原锚点字面量；回读/审计不能只看 primary。旧等值
+  声明不新增默认 scale/offset/grid 字段，保留旧哈希。没有引入任意表达式求值器。
+- 不跨 CDF 与 wrapper 源建立隐式关系，不自动确认匹配质量；未知字段仍走原单次
+  parameters.apply/Bridge 能力，不强迫进入数值模型。
+
+## 数据不足时，先给可操作的缺口
+
+原 policy 可以原样交给只读检查入口，允许诊断尚不足以拟合的数据：
+
+```powershell
+.\.venv\Scripts\vda.exe op-relinearize <policy.json> <run.json> --check-only --output <new-data-check.json>
+.\.venv\Scripts\vda.exe design-next <task.json> <run.json> --data-policy <policy.json> --output <new-next.json> --markdown <new-next.md>
+```
+
+检查给出缺失/非 EDA/混杂点、独立训练方向、实际重复的 holdout、逐轴扰动覆盖、
+从未变化的可固定轴，以及“其余坐标固定在锚点”的历史单轴切片。d 个独立变量的
+点数下界仍是 d+1 个训练点加至少一个未见留出点；够数不等于满秩或误差合格。
+它不自动重分 training/holdout、拼接不同 run、拟合缺失灵敏度或生成补点任务。
+check-only 的 CLI 数据可用返回0，不足返回2；严格 fitter 仍拒绝数据不足的声明。
+
+现有 PMOS 三点在三变量声明下明确缺少负载训练/留出方向、宽度留出方向以及独立
+训练点；也没有足够的单轴旧点可以带留出校准。可明确把负载固定为2 fF，但剩余两轴
+仍需自己的独立证据。2 fF 是这份旧记录，不是默认负载。诊断本身是 software_inference。
+
+## 有预测改善，还要判断是否值得继续
+
+design-next 在原模型门、已选锚点和规格连续性检查后，增加轻量收益判断：默认预测
+目标改善必须超过该模型目标指标的最大历史留出**绝对残差**。可选 --decision-policy
+进一步声明绝对改善、相对改善百分比、建模约束的最小预测余量和 action 时间上限。
+
+[策略模板](../examples/theory/refinement-decision-policy.template.json)中的1%仅是
+software_inference 语法示例，不是用户规格或全电路默认值；应按当前目的审阅修改。
+不提供文件时相对/绝对改善门为零、残差倍率为1，不要求默认追加分析。
+
+```powershell
+.\.venv\Scripts\vda.exe design-next <task.json> <run.json> `
+  --model <model.json> --policy <policy.json> --task-template <template.json> `
+  --decision-policy <reviewed-benefit-policy.json> --output <new-next.json> --markdown <new-next.md> --task-output <new-task.json>
+```
+
+预测增益未超过门限、余量不足，或显式成本上限无法估计/被超过时，保留诊断而不出
+草案。约束余量使用各指标本身单位；未被模型覆盖的约束不能填一个伪预测余量。
+即使同时给了 --task-output，停止时也保留新诊断文件并返回2，不写空任务、不删除或
+覆盖该路径已有草案；自动化调用应检查退出状态和本次 report，不能捡起旧任务执行。
+成本仅由旧 action 总时长/旧候选数乘本次编译候选数粗估，包含旧流程开销，既不是
+增量模拟器成本也不是 agent/人工总时长；缺时间就是未知。历史残差不是误差上界、
+统计置信区间或全局最优证明。允许出草案不等于应执行，更不等于实测收益。
+
+## 上轮失准后，显式刷新而非继续外推
+
+`design-next <completed-task> <run> --prior-model <previous-model> --prior-policy <previous-policy>`
+复用原 op-relinearization-validate，重新比较本次每个候选实际值与旧预测，分开报告
+执行完整性、模型精度和推荐一致性。失准则输出 local_model_refresh_required，记录
+新选点的输入指纹及刷新步骤，不撤销真实 EDA 选优、不自动放宽误差门限。
+
+已有足够的同上下文数据时，可同时传入显式重拟合后的 --model/--policy/--task-template，
+以新选点为锚再过原留出、收益和安全编译门；数据不足则用 --data-policy 解释缺口。
+拓扑、PDK、模型或工况发生变化时不能只换锚点沿用旧导数，需要新证据。
+
+历史 planner 版本仅可通过已有 exact-byte --binding-audit 绑定原 task/run。该身份
+审计不替代重算预测误差；不改旧 token/记录。验证器只为最早 semantic-only schema
+提供一个已知兼容投影：原 policy 未声明 include_measured_anchor、旧模型未存逐项
+relative_error_floor 时，允许核对该选项出现前的原 canonical hash。仍须精确哈希、
+原误差门限和归一化定义，不以当前默认值猜补，更不重新生成旧候选域。
+
+## 实际输入字节检查：保留真实未验证边界
+
+generic existing_schematic worker 现独立解析 VDA 自己输出的 literal wrapper，核对
+源/负载集合、端子、DC/AC 幅相和值，以及确切 OA include。它不是通用 SPICE parser，
+不展开/读取 PDK 模型文件，也不独立证明全部 sweep、模型选项或电路性能。
+
+Bridge 会把 wrapper 再传到自己的 UUID 子目录。已有有界 Spectre launcher 现于这个
+**最终上传副本**启动前核对 wrapper 与原始/转换后 OA include 的 SHA-256，并在同
+作业 raw 目录非覆盖写 vda-input-manifest.sha256；下载后必须核对回执。输入漂移或
+回执缺失会失败，不允许仅凭模拟器成功继续。检查仍在原 timeout 内，不增加逐候选
+SSH 往返，不复制或修改 Bridge 的 runner/传输实现，产物只在原批准 scratch 内。
+
+本地真实 shell＋替身程序已覆盖匹配、上传后变化、依赖漂移、错 raw 路径和回执冲突；
+旧 STB 原始输入束也已离线核对。但新 launcher/回执还没有真实 Bridge/Spectre 验收，
+旧作业没有该回执，不能事后补造。下一次实际 generic 任务可合并验收，不为这条机制
+另造电路或追加性能分析。详见[本轮完整记录](validation/2026-10-23-p1b-refinement-completion-local.md)。
 
 ## 先解释，再拟合；模型不足就停
 
@@ -255,9 +361,9 @@ input 已应用的独立证明。真实执行仍须原 OA→si/ADE 输入与结�
 原历史身份/audit、源模型确定性复算、已选锚点、目标/PDK/上下文/规格/目标一致性
 检查，并展示原 CDF 值→建议字符串和模型单位。不能伪造历史 token/audit 绕过绑定。
 
-新增停止判断：没有“预测满足模型约束、且目标严格优于已选锚点”的未测点，就返回
-no_predicted_improvement，不生成下一轮任务。它只排除数值舍入级差异，不证明预期
-收益显著、模型外无更优点或电路已经全局最优。确有诊断需要时，先说明假设和缺量；
+没有“预测满足模型约束、且目标严格优于已选锚点”的未测点，就返回
+no_predicted_improvement，不生成下一轮任务；有改善仍须经过上述收益/误差/余量/成本门。
+这些都不证明模型外无更优点或电路已经全局最优。确有诊断需要时，先说明假设和缺量；
 原 op-relinearize 结果仍可查看，不因此取消原单项操作或人工指定修改的能力。
 
 通过时仍输出原 TaskSpec/planner，compute/write/replace 为false、不得 create；只有

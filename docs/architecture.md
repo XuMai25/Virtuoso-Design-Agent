@@ -105,6 +105,38 @@ override。空组不参与旧 policy/result 序列化。另在拟合前比较实
 编号或 SI 拼法的训练/holdout 重叠；不改原满秩/误差门或增加拟合器。见
 [本地验收](validation/2026-10-23-p1b-linked-testbench-local.md)。
 
+### P1-b 的收益、缺口、关系和反馈接线
+
+`refinement_decision.py` 是 design-next 的本地草案门，不是另一个优化器：预测改善须
+超过显式绝对/相对要求和历史目标留出残差，可另声明建模约束余量与历史 action 时间
+预算。残差仅是风险参考，不是误差界；agent/人工耗时未知。失败只阻止建议草案，
+不收窄用户指定的单次改参或 Bridge 能力。
+
+`relinearization_data.py` 复用原输入筛查、坐标比较和训练矩阵，检查可辨识方向、
+未见 holdout、可固定轴及历史单轴切片。RelinearizationDataRequest 可描述不足数据，
+但不是 OperatingPointRelinearizationPolicy，严格 fitter 拒绝直接拿它拟合。没有自动
+改 split、补数据或把缺失响应设零。CLI 为 op-relinearize --check-only 或 design-next
+--data-policy，均不产任务。
+
+联动成员支持显式 scale/offset 和成员 grid，同单位共享一个自由度，仍展开为原 CDF
+updates/typed overrides；不满足依赖网格的提案剔除而非分别取整。旧等值默认字段不
+序列化，原 policy/result 哈希兼容。不是表达式求值或自动推断电路关系。
+
+design-next --prior-model 复用原候选全域验证器，分开记录 EDA 执行、旧预测误差和
+推荐一致性。历史身份仅接受原 exact-byte audit；误差重新计算。旧 semantic-only
+policy 只支持一个已知旧序列化形状的精确哈希恢复，不改旧 run/token 或误差要求。
+失准给出新锚点/数据检查/显式缩域步骤；有已验证的新模型才恢复普通草案生成，不
+自动跨拓扑、工艺或工作区转移响应。
+
+`simulation_input.py` 给 generic existing_schematic worker 增加独立 literal wrapper
+审查（端子、DC/AC、源/负载和 OA include，不展开 PDK）。Bridge 公共 runner 最终
+上传后，原 timeout launcher 在 exec Spectre 前核对 wrapper/OA include SHA，并在
+同 raw 目录非覆盖记录 manifest；下载后核对回执。复用原上传、SSH、timeout、raw
+下载和 cleanup，不增加往返或第三方补丁。wrapper 固定 LF 字节避免 Windows 换行
+使实际文件与声明哈希不同。新 guard 的本地程序测试和旧真实文件重放已通过，但
+真实 Bridge/Spectre 新回执仍未验收；这是实施/证据边界，不宣称性能闭环。详见
+[本轮验证](validation/2026-10-23-p1b-refinement-completion-local.md)。
+
 ## 为什么使用独立 worker
 
 `virtuoso-bridge-lite` 已有自己的 Python 虚拟环境和本机配置。主程序通过该环境中的 Python 启动 JSON worker，而不是把 Bridge 源码复制进来或强制安装成本项目依赖。这样可以保持 Bridge 独立升级、避免依赖漂移，并把跨环境协议缩小到版本化 JSON action。

@@ -60,17 +60,41 @@ class NumericInstanceParameterTarget(_FiniteStrictModel):
     parameter: StrictStr = Field(min_length=1, max_length=128)
 
 
+class NumericLinkedInstanceParameterTarget(NumericInstanceParameterTarget):
+    scale: float = 1.0
+    offset: float = 0.0
+    quantization_grid: float | None = Field(default=None, gt=0.0)
+
+    @model_validator(mode="after")
+    def nonzero_scale(self) -> "NumericLinkedInstanceParameterTarget":
+        if self.scale == 0:
+            raise ValueError("linked-field scale cannot be zero; declare constant fields as fixed")
+        return self
+
+    @model_serializer(mode="wrap")
+    def serialize_optional_relation(self, handler):
+        raw = handler(self)
+        for name, default in (("scale", 1.0), ("offset", 0.0), ("quantization_grid", None)):
+            if raw.get(name, default) == default:
+                raw.pop(name, None)
+        return raw
+
+
 class NumericInstanceParameterBinding(NumericInstanceParameterTarget):
-    """Explicit literal CDF meaning; optional equal-value fields share one axis."""
+    """Explicit literal CDF meaning; declared affine fields share one axis."""
 
     unit: Literal["m", "um", "nm", "ohm", "kohm", "F", "pF", "fF", "V", "mV", "A", "uA", "1"]
     literal_format: Literal["spectre_si"]
     meaning: StrictStr = Field(min_length=1, max_length=2000)
-    linked_parameters: list[NumericInstanceParameterTarget] = Field(default_factory=list, max_length=31)
+    linked_parameters: list[NumericLinkedInstanceParameterTarget] = Field(default_factory=list, max_length=31)
 
     def targets(self) -> list[tuple[str, str]]:
         return [(self.instance, self.parameter),
                 *((item.instance, item.parameter) for item in self.linked_parameters)]
+
+    def members(self) -> list[tuple[str, str, float, float, float | None]]:
+        return [(self.instance, self.parameter, 1.0, 0.0, None),
+                *((p.instance, p.parameter, p.scale, p.offset, p.quantization_grid) for p in self.linked_parameters)]
 
     @model_serializer(mode="wrap")
     def serialize_optional_links(self, handler):
@@ -93,6 +117,46 @@ _TESTBENCH_UNIT_KINDS = {"V": "voltage", "mV": "voltage", "A": "current", "uA": 
                          "ohm": "resistor", "kohm": "resistor"}
 
 
+class NumericLinkedTestbenchTarget(_FiniteStrictModel):
+    name: StrictStr = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$")
+    scale: float = 1.0
+    offset: float = 0.0
+    quantization_grid: float | None = Field(default=None, gt=0.0)
+
+    @model_validator(mode="after")
+    def nonzero_scale(self) -> "NumericLinkedTestbenchTarget":
+        if self.scale == 0:
+            raise ValueError("linked-field scale cannot be zero; declare constant fields as fixed")
+        return self
+
+    @model_serializer(mode="wrap")
+    def serialize_optional_relation(self, handler):
+        raw = handler(self)
+        for name, default in (("scale", 1.0), ("offset", 0.0), ("quantization_grid", None)):
+            if raw.get(name, default) == default:
+                raw.pop(name, None)
+        return raw
+
+
+def _related_value(base: float, scale: float, offset: float, grid: float | None, label: str) -> float:
+    value = scale * base + offset
+    if not math.isfinite(value):
+        raise ValueError(f"linked-field relation is nonfinite for {label}")
+    if grid is not None:
+        quotient = value / grid
+        if (not math.isfinite(quotient) or abs(quotient) > 2 ** 52
+                or not math.isclose(quotient, round(quotient), rel_tol=0.0, abs_tol=8 * math.ulp(quotient))):
+            raise ValueError(f"linked-field value for {label} is not representable on its explicit grid")
+    return value
+
+
+def _relation_matches(actual: float, expected: float, base: float, scale: float, offset: float) -> bool:
+    # Only binary arithmetic roundoff, not a fixed physical-unit tolerance. This
+    # permits cancellation near zero without hiding fF-scale or large-offset drift.
+    tolerance = 8 * max(math.ulp(scale * base), math.ulp(offset), math.ulp(expected))
+    return math.isclose(actual, expected, rel_tol=1e-12, abs_tol=tolerance)
+
+
 class NumericTestbenchParameterBinding(_FiniteStrictModel):
     """An explicit recorded DC-source/load coordinate, not a new simulator input."""
 
@@ -100,12 +164,17 @@ class NumericTestbenchParameterBinding(_FiniteStrictModel):
     name: StrictStr = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$")
     unit: Literal["V", "mV", "A", "uA", "F", "pF", "fF", "ohm", "kohm"]
     meaning: StrictStr = Field(min_length=1, max_length=2000)
-    linked_names: list[Annotated[StrictStr, Field(pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$")]] = Field(
+    linked_names: list[Annotated[StrictStr, Field(pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$")] | NumericLinkedTestbenchTarget] = Field(
         default_factory=list, max_length=31,
     )
 
     def targets(self) -> list[str]:
-        return [self.name, *self.linked_names]
+        return [self.name, *[p if isinstance(p, str) else p.name for p in self.linked_names]]
+
+    def members(self) -> list[tuple[str, float, float, float | None]]:
+        return [(self.name, 1.0, 0.0, None),
+                *[(p, 1.0, 0.0, None) if isinstance(p, str) else (p.name, p.scale, p.offset, p.quantization_grid)
+                  for p in self.linked_names]]
 
     @model_serializer(mode="wrap")
     def serialize_optional_links(self, handler):
@@ -126,7 +195,10 @@ class NumericTestbenchParameterBinding(_FiniteStrictModel):
         return self
 
     def value_from(self, overrides: GenericTestbenchOverrides | None, label: str = "testbench") -> float:
-        values = []
+        return self.values_from(overrides, label)[self.name]
+
+    def values_from(self, overrides: GenericTestbenchOverrides | None, label: str = "testbench") -> dict[str, float]:
+        values = {}
         for name in self.targets():
             value = None
             if overrides is not None:
@@ -140,10 +212,13 @@ class NumericTestbenchParameterBinding(_FiniteStrictModel):
             scaled = value / _NUMERIC_UNITS[self.unit][0]
             if not math.isfinite(scaled):
                 raise ValueError(f"{label} testbench unit conversion is nonfinite for {name}")
-            values.append(scaled)
-        if any(not math.isclose(value, values[0], rel_tol=1e-12, abs_tol=0.0) for value in values[1:]):
-            raise ValueError(f"{label} linked testbench fields for {self.name} must have equal numeric values")
-        return values[0]
+            values[name] = scaled
+        base = values[self.name]
+        for name, scale, offset, grid in self.members():
+            expected = _related_value(base, scale, offset, grid, name)
+            if not _relation_matches(values[name], expected, base, scale, offset):
+                raise ValueError(f"{label} linked testbench fields for {self.name} do not match the declared relation")
+        return values
 
 
 class RelinearizationParameter(_FiniteStrictModel):
@@ -179,6 +254,14 @@ class RelinearizationParameter(_FiniteStrictModel):
         signed_dc = self.testbench_parameter is not None and self.testbench_parameter.target == "source_dc"
         if not signed_dc and (self.minimum <= 0 or self.maximum <= 0):
             raise ValueError("CDF, semantic and load model bounds must remain positive")
+        relations = ([(scale, offset) for _, _, scale, offset, _ in self.instance_parameter.members()]
+                     if self.instance_parameter else
+                     [(scale, offset) for _, scale, offset, _ in self.testbench_parameter.members()]
+                     if self.testbench_parameter else [])
+        for scale, offset in relations:
+            endpoints = [_related_value(v, scale, offset, None, self.name) for v in (self.minimum, self.maximum)]
+            if not signed_dc and min(endpoints) <= 0:
+                raise ValueError("linked CDF/load values must remain positive throughout the declared bounds")
         return self
 
 
@@ -194,7 +277,7 @@ class RelinearizationMetric(_FiniteStrictModel):
     relative_error_floor: float = Field(default=1e-30, gt=0.0)
 
 
-class OperatingPointRelinearizationPolicy(_FiniteStrictModel):
+class _RelinearizationDefinition(_FiniteStrictModel):
     schema_version: Literal[1] = 1
     id: StrictStr = Field(
         min_length=1,
@@ -215,7 +298,7 @@ class OperatingPointRelinearizationPolicy(_FiniteStrictModel):
     evidence_source: Literal[EvidenceSource.USER_INPUT, EvidenceSource.SOFTWARE_INFERENCE] = EvidenceSource.USER_INPUT
 
     @model_validator(mode="after")
-    def validate_declared_model(self) -> "OperatingPointRelinearizationPolicy":
+    def validate_declared_model(self) -> "_RelinearizationDefinition":
         training = self.training_candidate_indices
         holdout = self.holdout_candidate_indices
         if len(training) != len(set(training)) or len(holdout) != len(set(holdout)):
@@ -224,11 +307,6 @@ class OperatingPointRelinearizationPolicy(_FiniteStrictModel):
             raise ValueError("training and holdout candidate indices must be disjoint")
         if self.anchor_candidate_index not in training:
             raise ValueError("anchor candidate must belong to the training set")
-        if len(training) < len(self.parameters) + 1:
-            raise ValueError(
-                "training set needs the anchor plus at least one independent point "
-                "per parameter"
-            )
         parameter_names = [item.name for item in self.parameters]
         if len(parameter_names) != len(set(parameter_names)):
             raise ValueError("relinearization parameters must be unique")
@@ -266,6 +344,21 @@ class OperatingPointRelinearizationPolicy(_FiniteStrictModel):
         if combinations > 4096:
             raise ValueError("local proposal grid exceeds 4096 combinations")
         return self
+
+
+class OperatingPointRelinearizationPolicy(_RelinearizationDefinition):
+    @model_validator(mode="after")
+    def require_training_count(self) -> "OperatingPointRelinearizationPolicy":
+        if len(self.training_candidate_indices) < len(self.parameters) + 1:
+            raise ValueError("training set needs the anchor plus at least one independent point per parameter")
+        return self
+
+
+class RelinearizationDataRequest(_RelinearizationDefinition):
+    """Same declarations, but incomplete sampling may be diagnosed, never fitted."""
+
+    training_candidate_indices: list[int] = Field(min_length=1, max_length=64)
+    holdout_candidate_indices: list[int] = Field(default_factory=list, max_length=32)
 
 
 class LocalMetricModel(_FiniteStrictModel):
@@ -473,7 +566,7 @@ def _validate_source_candidate(
 
 def _binding_value(fields: dict[str, dict[str, str]], binding: NumericInstanceParameterBinding,
                    label: str, parameter_name: str) -> float:
-    values = []
+    values = {}
     for instance, parameter in binding.targets():
         literal = fields.get(instance, {}).get(parameter)
         value = spectre_scalar(literal) if literal is not None else None
@@ -481,10 +574,13 @@ def _binding_value(fields: dict[str, dict[str, str]], binding: NumericInstancePa
             value /= _NUMERIC_UNITS[binding.unit][0]
         if value is None or not math.isfinite(value) or value <= 0.0:
             raise ValueError(f"{label} lacks positive literal parameter {parameter_name} ({instance}.{parameter})")
-        values.append(value)
-    if any(not math.isclose(value, values[0], rel_tol=1e-12, abs_tol=0.0) for value in values[1:]):
-        raise ValueError(f"{label} linked CDF fields for {parameter_name} must have equal numeric values")
-    return values[0]
+        values[(instance, parameter)] = value
+    base = values[(binding.instance, binding.parameter)]
+    for instance, parameter, scale, offset, grid in binding.members():
+        expected = _related_value(base, scale, offset, grid, f"{instance}.{parameter}")
+        if not _relation_matches(values[(instance, parameter)], expected, base, scale, offset):
+            raise ValueError(f"{label} linked CDF fields for {parameter_name} do not match the declared relation")
+    return base
 
 
 def _parameter_value(candidate: CandidateEvaluation, parameter: RelinearizationParameter) -> float:
@@ -581,6 +677,12 @@ def _features(
         / item.proposal_step
         for item in parameters
     ]
+
+
+def _same_parameter_coordinates(left: CandidateEvaluation, right: CandidateEvaluation,
+                                parameters: list[RelinearizationParameter]) -> bool:
+    return all(math.isclose(_parameter_value(left, p), _parameter_value(right, p), rel_tol=1e-12, abs_tol=0.0)
+               for p in parameters)
 
 
 def _fit_slopes(features: list[list[float]], responses: list[float]) -> list[float]:
@@ -681,10 +783,12 @@ def _atomic_proposal(proposal: RelinearizedProposal, parameters: list[Relineariz
             binding = p.testbench_parameter
             assert testbench is not None  # Every modeled coordinate was explicitly read from the anchor.
             if not math.isclose(value, _parameter_value(anchor, p), rel_tol=1e-12, abs_tol=0.0):
-                scaled = value * _NUMERIC_UNITS[binding.unit][0]
-                if not math.isfinite(scaled):
-                    raise ValueError(f"testbench serialization is nonfinite for {p.name}")
-                for name in binding.targets():
+                for name, scale, offset, grid in binding.members():
+                    related = _related_value(value, scale, offset, grid, name)
+                    scaled = related * _NUMERIC_UNITS[binding.unit][0]
+                    if (not math.isfinite(scaled) or not math.isclose(scaled / _NUMERIC_UNITS[binding.unit][0],
+                            related, rel_tol=1e-12, abs_tol=0.0)):
+                        raise ValueError(f"testbench serialization loses precision for {p.name}/{name}")
                     if binding.target == "source_dc":
                         testbench["sources"][name]["dc_value"] = scaled
                     else:
@@ -695,11 +799,12 @@ def _atomic_proposal(proposal: RelinearizedProposal, parameters: list[Relineariz
             semantic[p.name] = value
             continue
         is_anchor = math.isclose(value, _parameter_value(anchor, p), rel_tol=1e-12, abs_tol=0.0)
-        for instance, parameter in binding.targets():
+        for instance, parameter, scale, offset, grid in binding.members():
+            related = _related_value(value, scale, offset, grid, f"{instance}.{parameter}")
             literal = (anchor.instance_parameters[instance][parameter] if is_anchor else
-                       f"{value:.12g}{_NUMERIC_UNITS[binding.unit][1]}")
+                       f"{related:.12g}{_NUMERIC_UNITS[binding.unit][1]}")
             decoded = spectre_scalar(literal)
-            if decoded is None or not math.isclose(decoded / _NUMERIC_UNITS[binding.unit][0], value, rel_tol=1e-12, abs_tol=0.0):
+            if decoded is None or not math.isclose(decoded / _NUMERIC_UNITS[binding.unit][0], related, rel_tol=1e-12, abs_tol=0.0):
                 raise ValueError(f"numeric CDF serialization loses precision for {p.name}")
             instances.setdefault(instance, {})[parameter] = literal
     return AtomicCandidate(id=f"op-local-{index:03d}", parameters=semantic,
@@ -733,6 +838,8 @@ def relinearize_operating_point(
 ) -> OperatingPointRelinearizationResult:
     """Fit a forced-through-anchor local model and validate explicit holdouts."""
 
+    if not isinstance(policy, OperatingPointRelinearizationPolicy):
+        raise ValueError("fitting requires a strict OperatingPointRelinearizationPolicy, not a data-check request")
     source_sha256 = _file_sha256(source_run_path)
     if source_sha256 != policy.expected_source_run_sha256:
         raise ValueError("source run SHA-256 does not match relinearization policy")
@@ -764,8 +871,7 @@ def relinearize_operating_point(
     # declared coordinates (including SI-equivalent literals), never rounded grids.
     for candidate in holdout:
         for fitted in training:
-            if all(math.isclose(_parameter_value(candidate, parameter), _parameter_value(fitted, parameter),
-                                rel_tol=1e-12, abs_tol=0.0) for parameter in policy.parameters):
+            if _same_parameter_coordinates(candidate, fitted, policy.parameters):
                 raise ValueError(
                     f"held-out candidate {candidate.index} repeats training candidate {fitted.index} "
                     "coordinates; distinct indices are not an unseen parameter tuple"
@@ -901,11 +1007,24 @@ def relinearize_operating_point(
         for item in policy.parameters
     ]
     proposals: list[RelinearizedProposal] = []
+    relation_excluded_count, first_relation_issue = 0, None
     for values in itertools.product(*proposal_axes):
         signature = tuple(float(value) for value in values)
         if signature in observed and signature != anchor_signature:
             continue
         parameters = dict(zip(parameter_names, signature, strict=True))
+        try:
+            for parameter in policy.parameters:
+                binding = parameter.instance_parameter or parameter.testbench_parameter
+                if binding is None:
+                    continue
+                for member in binding.members():
+                    scale, offset, grid = member[-3:]
+                    _related_value(parameters[parameter.name], scale, offset, grid, parameter.name)
+        except ValueError as error:
+            relation_excluded_count += 1
+            first_relation_issue = first_relation_issue or str(error)
+            continue  # Do not round a dependent field and silently break its declared relationship.
         features = [(parameters[p.name] - _parameter_value(anchor, p)) / p.proposal_step for p in policy.parameters]
         predicted_metrics = {
             metric.metric: _predict_metric(
@@ -939,6 +1058,8 @@ def relinearize_operating_point(
         "every declared parameter is perturbed by at least one held-out point"
     ]
     notes.extend(observation_notes)
+    if relation_excluded_count:
+        notes.append(f"{relation_excluded_count} proposal tuples excluded by explicit linked-field relations/grids; first: {first_relation_issue}")
     failed_training = [
         model.metric for model in models if not model.training_gate_passed
     ]
@@ -1091,7 +1212,20 @@ def _load_bound_validation_policy(
     )
     policy_sha256 = _canonical_sha256(policy.model_dump(mode="json"))
     if policy_sha256 != result.policy_sha256:
-        raise ValueError("validation policy does not match the result policy hash")
+        # The original semantic-only schema predates include_measured_anchor.
+        # Only validation may recover that one known historical serialization;
+        # it cannot change a floor/limit, regenerate candidates or rehash a run.
+        legacy = policy.model_dump(mode="json")
+        legacy.pop("include_measured_anchor")
+        legacy_schema = (
+            "include_measured_anchor" not in policy.model_fields_set
+            and not result.parameter_bindings and not result.testbench_parameter_bindings
+            and all(p.instance_parameter is None and p.testbench_parameter is None for p in policy.parameters)
+            and all("relative_error_floor" not in m.model_fields_set for m in result.models)
+        )
+        if not legacy_schema or _canonical_sha256(legacy) != result.policy_sha256:
+            raise ValueError("validation policy does not match the result policy hash")
+        policy_sha256 = result.policy_sha256
     if (
         policy.id != result.policy_id
         or policy.expected_source_task_id != result.source_task_id
@@ -1131,6 +1265,7 @@ def validate_relinearization_run(
     task_path: Path,
     run_path: Path,
     policy_path: Path | None = None,
+    binding_audit_path: Path | None = None,
 ) -> OperatingPointRelinearizationRunValidation:
     """Audit a compiled local candidate set against its exhausted real EDA run."""
 
@@ -1173,8 +1308,10 @@ def validate_relinearization_run(
         raise ValueError("run/task identity mismatch")
     if run.adapter != "virtuoso-bridge-subprocess" or run.status is not RunStatus.SUCCEEDED:
         raise ValueError("run validation requires a successful real-Bridge run")
-    expected_token = build_plan(task).confirmation_token
-    if run.plan_token != expected_token:
+    if binding_audit_path is not None:
+        from .design_review import load_bound_run
+        load_bound_run(task_path, run_path, binding_audit_path)
+    elif run.plan_token != build_plan(task).confirmation_token:
         raise ValueError("run validation plan token mismatch")
 
     declared = len(task.candidate_set.candidates)
@@ -1363,6 +1500,9 @@ def validate_relinearization_run(
     notes = [
         "the exact atomic domain was exhausted and final selection used EDA metrics"
     ]
+    if binding_audit_path is not None:
+        notes.append("historical task/run identity was imported from the existing exact-byte audit "
+                     + _file_sha256(binding_audit_path) + "; prediction errors were recomputed, not inherited")
     if result.testbench_parameter_bindings:
         notes.append("candidate and selection overrides match recorded full testbench tuples; unmodeled fields remain fixed; "
                      "this is not an independent simulator-input check")
@@ -1374,6 +1514,9 @@ def validate_relinearization_run(
             "legacy relative-error floors restored from the exact hash-bound "
             "policy for: " + ", ".join(sorted(legacy_floor_metrics))
         )
+    if bound_policy is not None and _canonical_sha256(bound_policy.model_dump(mode="json")) != bound_policy_sha256:
+        notes.append("validation-only legacy policy hash matched before include_measured_anchor existed; "
+                     "the historical candidate domain and error limits were not regenerated or changed")
     if failed_metrics:
         notes.append(
             "live prediction error gate failed for: " + ", ".join(failed_metrics)
@@ -1488,6 +1631,9 @@ __all__ = [
     "LocalMetricModel",
     "NumericInstanceParameterBinding",
     "NumericInstanceParameterTarget",
+    "NumericLinkedInstanceParameterTarget",
+    "NumericLinkedTestbenchTarget",
+    "RelinearizationDataRequest",
     "NumericTestbenchParameterBinding",
     "OperatingPointRelinearizationPolicy",
     "OperatingPointRelinearizationResult",

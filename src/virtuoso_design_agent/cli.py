@@ -256,13 +256,19 @@ def _cmd_design_next(args: argparse.Namespace) -> int:
         binding_audit_path=args.binding_audit,
         small_signal_policy_path=args.small_signal_policy,
         iteration_path=args.iteration,
+        decision_policy_path=args.decision_policy,
+        data_policy_path=args.data_policy,
+        prior_model_path=args.prior_model, prior_policy_path=args.prior_policy,
     )
-    if args.task_output and draft is None:
-        raise ValueError("no validated task draft available; omit --task-output to retain diagnostic suggestions")
     payload = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
-    _write_review_outputs([(args.output, payload), (args.markdown, render_design_next(report)),
-                          (args.task_output, draft.model_dump_json(indent=2) + "\n" if draft else "")])
+    outputs = [(args.output, payload), (args.markdown, render_design_next(report))]
+    if draft is not None:
+        outputs.append((args.task_output, draft.model_dump_json(indent=2) + "\n"))
+    _write_review_outputs(outputs)
     print(payload if args.json else render_design_next(report))
+    if args.task_output and draft is None:
+        print("No validated task draft; diagnostics retained and task output was not written.", file=sys.stderr)
+        return 2
     return 0
 
 
@@ -499,6 +505,15 @@ def _cmd_theory_request_from_validation(args: argparse.Namespace) -> int:
 
 
 def _cmd_op_relinearize(args: argparse.Namespace) -> int:
+    if args.check_only:
+        from .op_relinearization import RelinearizationDataRequest
+        from .relinearization_data import inspect_relinearization_data
+        request = RelinearizationDataRequest.model_validate(read_json(args.policy))
+        report = inspect_relinearization_data(request, args.source_run)
+        payload = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+        _write_review_outputs([(args.output, payload)])
+        print(payload)
+        return 0 if report["strict_fit_inputs_ready"] else 2
     policy = OperatingPointRelinearizationPolicy.model_validate_json(
         args.policy.read_text(encoding="utf-8")
     )
@@ -530,6 +545,7 @@ def _cmd_op_relinearization_validate(args: argparse.Namespace) -> int:
         args.task,
         args.run_record,
         args.policy,
+        args.binding_audit,
     )
     payload = result.model_dump_json(indent=2)
     if args.output is not None:
@@ -1169,6 +1185,7 @@ def build_parser() -> argparse.ArgumentParser:
     op_relinearize.add_argument("policy", type=Path)
     op_relinearize.add_argument("source_run", type=Path)
     op_relinearize.add_argument("--output", type=Path)
+    op_relinearize.add_argument("--check-only", action="store_true", help="diagnose data/rank/holdout gaps without fitting or producing candidates")
     op_relinearize.set_defaults(handler=_cmd_op_relinearize)
 
     candidate_task = subparsers.add_parser(
@@ -1202,6 +1219,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     op_relinearization_validate.add_argument("--output", type=Path)
+    op_relinearization_validate.add_argument("--binding-audit", type=Path, help="existing exact-byte identity audit for historical task/run records; errors are recomputed")
     op_relinearization_validate.set_defaults(
         handler=_cmd_op_relinearization_validate
     )
@@ -1504,6 +1522,10 @@ def build_parser() -> argparse.ArgumentParser:
             review.add_argument("--task-output", type=Path)
             review.add_argument("--small-signal-policy", type=Path, help="recompute the existing OP/MNA analysis locally")
             review.add_argument("--iteration", type=Path, help="apply source-bound multi-round specification and stop guards")
+            review.add_argument("--decision-policy", type=Path, help="local minimum benefit, observed-error, headroom and action-budget policy")
+            review.add_argument("--data-policy", type=Path, help="inspect the original model declarations and split without fitting or generating a task")
+            review.add_argument("--prior-model", type=Path, help="audit the previous prediction model against this completed candidate run before refreshing")
+            review.add_argument("--prior-policy", type=Path, help="exact prior policy, required for legacy error-normalization floors")
     stb_audit = subparsers.add_parser("stability-audit", help="verify retained STB bytes and replay margins locally; never invokes Bridge")
     stb_audit.add_argument("evidence", type=Path, help="stability-evidence.json retained by an STB run")
     stb_audit.add_argument("--expected-sha256", help="evidence JSON hash from the original run record")

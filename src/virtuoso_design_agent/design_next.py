@@ -10,9 +10,21 @@ from .models import RunStatus, TaskSpec
 from .op_relinearization import (
     OperatingPointRelinearizationPolicy, OperatingPointRelinearizationResult,
     build_task_from_relinearization, relinearize_operating_point,
+    validate_relinearization_run,
 )
 from .planner import build_plan
 from .op_small_signal import OperatingPointSmallSignalPolicy, analyze_operating_point_small_signal_run
+from .refinement_decision import RefinementDecisionPolicy, assess_refinement_utility
+
+
+def _describe_linked_fields(primary: str, members: list, field: str = "") -> str:
+    parts = [primary]
+    for member in members:
+        target = member if isinstance(member, str) else member.get("name") or f"{member['instance']}.{member['parameter']}"
+        target += field
+        scale, offset = (1.0, 0.0) if isinstance(member, str) else (member.get("scale", 1.0), member.get("offset", 0.0))
+        parts.append(f" = {target}" if scale == 1 and offset == 0 else f"；{target} = {scale:g} × {primary} {offset:+g}")
+    return "".join(parts)
 
 
 def suggest_design_next(
@@ -22,6 +34,10 @@ def suggest_design_next(
     binding_audit_path: Path | None = None,
     small_signal_policy_path: Path | None = None,
     iteration_path: Path | None = None,
+    decision_policy_path: Path | None = None,
+    data_policy_path: Path | None = None,
+    prior_model_path: Path | None = None,
+    prior_policy_path: Path | None = None,
 ) -> tuple[dict, TaskSpec | None]:
     """No random proposals, hidden remote calls, or fabricated model accuracy."""
     review = build_design_review(task_path, run_path, checkpoint_path, binding_audit_path)
@@ -29,6 +45,12 @@ def suggest_design_next(
     supplied = (model_path is not None, policy_path is not None, template_path is not None)
     if any(supplied) and not all(supplied):
         raise ValueError("model, policy and task template must be supplied together")
+    if decision_policy_path is not None and not all(supplied):
+        raise ValueError("a decision policy requires model, policy and task template")
+    if data_policy_path is not None and any(supplied):
+        raise ValueError("data-only inspection cannot be combined with a fitted model/task template")
+    if prior_policy_path is not None and prior_model_path is None:
+        raise ValueError("a prior policy requires the corresponding prior prediction model")
     report = {
         "schema_version": 1, "kind": "design_next", "source": "software_inference",
         "read_only": True, "sources": review["sources"], "task_id": task.id,
@@ -102,6 +124,55 @@ def suggest_design_next(
         }
         add("op_small_signal", "已用原 OP 与声明边界重算小信号网络；先查看模型与 EDA 的差异和缺失量，"
             "不能把单个工作点的增益解释当作尺寸灵敏度。", "small_signal.comparisons / small_signal.missing_quantities")
+    if prior_model_path is not None:
+        from .design_iteration import design_input_fingerprints
+        from .design_review import selected_candidate
+        validated = validate_relinearization_run(prior_model_path, task_path, run_path,
+                                                prior_policy_path, binding_audit_path)
+        for label, path in (("prior_model", prior_model_path), ("prior_policy", prior_policy_path)):
+            if path is not None:
+                report["sources"][label] = file_reference(path)
+        worst = {}
+        for candidate in validated.candidates:
+            for comparison in candidate.comparisons:
+                row = {"candidate_index": candidate.index, **comparison.model_dump(mode="json")}
+                if comparison.metric not in worst or comparison.absolute_error_percent > worst[comparison.metric]["absolute_error_percent"]:
+                    worst[comparison.metric] = row
+        report["response_audit"] = {
+            "source": "software_inference", "status": validated.status.value,
+            "candidate_execution_gate_passed": validated.candidate_execution_gate_passed,
+            "prediction_accuracy_gate_passed": validated.prediction_accuracy_gate_passed,
+            "recommendation_agreement": validated.recommendation_agreement,
+            "comparison_count": sum(len(c.comparisons) for c in validated.candidates),
+            "worst_by_metric": worst,
+            "failed_metrics": [name for name, row in worst.items() if not row["passed"]],
+            "selected_candidate_index": review["selected_candidate_index"],
+            "selected_recorded_inputs": design_input_fingerprints(task, selected_candidate(run)),
+            "historical_identity_binding": review["binding"]["mode"],
+            "previous_model_reusable_as": "historical prediction only; no automatic topology/working-region transfer",
+            "new_model_required_before_further_refinement": not validated.prediction_accuracy_gate_passed,
+            "refresh_path": ["use this run's EDA-selected point as a new anchor",
+                             "inspect independent same-context training/unseen-holdout directions",
+                             "explicitly narrow bounds or freeze unsupported axes; do not raise error limits to pass",
+                             "recompute the original local model, utility and ordinary zero-permission task"],
+            "notes": validated.notes,
+        }
+        add("prior_response_audit", "已按本次实际 EDA 逐点复核旧预测；选优成功与模型准确度分别判断。"
+            "旧预测失准不否定已测结果，但不能继续盲目外推；新锚点/新模型须重新过门。", "response_audit")
+        if model_path is None and data_policy_path is None:
+            report["status"] = ("response_verified_review_or_stop" if validated.prediction_accuracy_gate_passed
+                                else "local_model_refresh_required")
+            return report, None
+    if data_policy_path is not None:
+        from .op_relinearization import RelinearizationDataRequest
+        from .relinearization_data import inspect_relinearization_data
+        data = inspect_relinearization_data(RelinearizationDataRequest.model_validate(read_json(data_policy_path)), run_path)
+        report["sources"]["data_policy"] = file_reference(data_policy_path)
+        report["data_check"] = data
+        report["status"] = data["status"]
+        add("model_data_check", "已定位训练独立性、未见点留出、缺失方向及历史固定切片；"
+            "不把无数据方向设为零，不自动改分组、拟合或追加计算。", "data_check")
+        return report, None
     if model_path is None:
         if review["selected_candidate_index"] is not None:
             report["status"] = "review_or_stop"
@@ -163,6 +234,19 @@ def suggest_design_next(
             "这不是全局最优证明；确需诊断时先说明物理假设或缺量，不为模型验收重复计算。",
             "model.objective_improvement / source-bound local proposals")
         return report, None
+    decision_policy = (RefinementDecisionPolicy.model_validate(read_json(decision_policy_path))
+                       if decision_policy_path else RefinementDecisionPolicy())
+    if decision_policy_path:
+        report["sources"]["decision_policy"] = file_reference(decision_policy_path)
+    utility = assess_refinement_utility(recomputed, anchor_objective, decision_policy,
+        historical_action_seconds=review["execution"]["action_seconds"], historical_candidate_count=len(run.candidates))
+    report["model"]["utility"] = utility
+    if not utility["task_draft_allowed"]:
+        report["status"] = utility["status"]
+        add("refinement_utility", "预测虽有改善，但尚未通过收益/历史误差、声明余量或运行预算检查；"
+            "保留诊断、不生成下一轮任务。历史误差不是置信区间，停止也不是全局最优证明。",
+            "model.utility")
+        return report, None
     draft = build_task_from_relinearization(model_path, template_path)
     # The existing compiler owns numerical proposal generation. This layer adds
     # source-task continuity and strips execution authority, not another solver.
@@ -201,6 +285,9 @@ def suggest_design_next(
                 "before": binding.value_from(anchor.testbench_overrides),
                 "proposed": binding.value_from(candidate.testbench_overrides), "unit": binding.unit,
                 "targets": binding.targets(),
+                "member_values": {target: {"before": binding.values_from(anchor.testbench_overrides)[target],
+                                            "proposed": binding.values_from(candidate.testbench_overrides)[target]}
+                                  for target in binding.targets()},
             } for name, binding in recomputed.testbench_parameter_bindings.items()
                 if binding.value_from(anchor.testbench_overrides) != binding.value_from(candidate.testbench_overrides)}
     report["status"] = "local_model_draft_ready"
@@ -221,7 +308,26 @@ def render_design_next(report: dict) -> str:
     if report.get("iteration"):
         from .design_iteration import render_design_iteration
         lines.extend(["", render_design_iteration(report["iteration"])])
+    if report.get("data_check"):
+        from .relinearization_data import render_relinearization_data
+        lines.extend(["", render_relinearization_data(report["data_check"])])
+    if report.get("response_audit"):
+        audit = report["response_audit"]
+        lines.extend(["", "## 上轮预测在本次 EDA 上的复核", "",
+                      f"候选执行门：{audit['candidate_execution_gate_passed']}；预测精度门：{audit['prediction_accuracy_gate_passed']}；"
+                      f"推荐一致：{audit['recommendation_agreement']}。",
+                      f"超限指标：{audit['failed_metrics']}。旧预测失准不撤销真实 EDA 选优，也不允许旧模型跨拓扑/工作区直接迁移。",
+                      "当前 OA 和 PDK 文件未重新核对；以下刷新仅使用已保存记录。", "",
+                      *[f"- {step}" for step in audit["refresh_path"]]])
     if report["model"]:
+        if report["model"].get("utility"):
+            utility = report["model"]["utility"]
+            lines.extend(["## 是否值得继续", "", f"判断：{utility['status']}；预测最大改善 "
+                          f"{utility['best_predicted_improvement']}；要求超过 {utility['required_objective_improvement']}。",
+                          f"历史留出绝对误差：{utility['maximum_observed_holdout_absolute_error']}；"
+                          "只作风险参考，不是置信区间。",
+                          f"预计 action 时间：{utility['cost']['estimated_action_seconds']} 秒；"
+                          "只由历史记录均值估计，不包含 agent 思考/人工时间。", ""])
         if report["model"].get("fixed_testbench_overrides"):
             lines.extend(["", "## 模型使用的固定仿真条件", "",
                           "以下原记录的源/负载 override 已逐候选保留，不改写基础 setup 或 OA；"
@@ -231,14 +337,13 @@ def render_design_next(report: dict) -> str:
             lines.extend(["## 源/负载数值映射", "", "仅显式声明的 DC/负载值参与模型；其他 override 保持固定。", ""])
             for name, binding in report["model"]["testbench_parameter_bindings"].items():
                 field = "dc_value" if binding["target"] == "source_dc" else "value"
-                targets = " = ".join(f"{target}.{field}" for target in [binding["name"], *binding.get("linked_names", [])])
+                targets = _describe_linked_fields(f"{binding['name']}.{field}", binding.get("linked_names", []), f".{field}")
                 lines.append(f"- {name} → {targets}；模型单位 {binding['unit']}；{binding['meaning']}")
         if report["model"].get("parameter_bindings"):
             lines.extend(["## 显式 CDF 数值映射", "",
                           "字段单位/含义为声明，不是新的 PDK 回读；只接受显式 Spectre SI 字面量。", ""])
             for name, binding in report["model"]["parameter_bindings"].items():
-                targets = [binding, *binding.get("linked_parameters", [])]
-                fields = " = ".join(f"{item['instance']}.{item['parameter']}" for item in targets)
+                fields = _describe_linked_fields(f"{binding['instance']}.{binding['parameter']}", binding.get("linked_parameters", []))
                 lines.append(f"- {name} → {fields}；"
                              f"模型单位 {binding['unit']}；{binding['meaning']}")
         if report["model"].get("objective_improvement"):
