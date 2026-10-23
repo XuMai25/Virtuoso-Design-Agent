@@ -142,6 +142,18 @@ targeted CDF verifier 保留实际返回值；仅 parseAsNumber=t 的有限普�
 worker 路径分开记录。见[本地接线](validation/2026-10-23-p1b-refinement-completion-local.md)
 和[真实验收](validation/2026-10-23-p1b-joint-input-live.md)。
 
+`review_evidence.py` 把上述 generic 输入回执与显式收尾链接入原 design-review/next，
+没有 Bridge 导入或新 operation。复用原 wrapper/receipt 校验器，在明确本地根目录内
+核对 retained 文件、SHA 与有效候选输入；正常已清理的文件标为 recorded_not_replayed，
+不宣称重新验收，也不误报执行失败。声明损坏/部分缺失或显式 replay 缺文件仍阻止草案。
+数值格式兼容只用于有任务 OA→si binding 佐证的参数，原 CDF 回读字符串不改写。
+可选 completion 用文件哈希关联已有 baseline→探针→parameters.apply→独立最终观察，
+完整原始状态比较不归一化。最后观察可为 schematic.inspect，无需为了收尾重跑仿真；
+最终 testbench 未知则保持未知。已恢复不同元组时 design-next 要求显式重新定锚，
+不沿旧探针产生自动任务；pending checkpoint、token、权限与原 executor 均不放宽。
+这是历史证据接线，不是当前 OA/PDK 验证、独立 PSF 重算或联合模型校准。
+见[工作流](design-review-workflow.md)及[本地记录](validation/2026-10-23-p1b-review-evidence-local.md)。
+
 ## 为什么使用独立 worker
 
 `virtuoso-bridge-lite` 已有自己的 Python 虚拟环境和本机配置。主程序通过该环境中的 Python 启动 JSON worker，而不是把 Bridge 源码复制进来或强制安装成本项目依赖。这样可以保持 Bridge 独立升级、避免依赖漂移，并把跨环境协议缩小到版本化 JSON action。

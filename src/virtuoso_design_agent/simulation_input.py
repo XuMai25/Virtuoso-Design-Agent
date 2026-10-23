@@ -123,14 +123,11 @@ def input_guard_body(root: str, contract: dict) -> str:
     return "\n".join(lines)
 
 
-def verify_input_receipt(raw_dir: Path, root: str, contract: dict) -> dict:
-    path = raw_dir / INPUT_RECEIPT
-    entries = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
-        if match is None or match.group(2) in entries:
-            raise ValueError("malformed or duplicate executed-input receipt")
-        entries[match.group(2)] = match.group(1)
+def validate_input_receipt_entries(entries: dict, root: str, contract: dict) -> None:
+    """Check recorded entries without claiming that local bytes were re-read."""
+    if (not isinstance(entries, dict) or any(not isinstance(p, str) or not isinstance(h, str)
+            or re.fullmatch(r'[0-9a-f]{64}', h) is None for p, h in entries.items())):
+        raise ValueError('malformed recorded executed-input entries')
     dependencies = contract["dependencies"]
     wrapper_paths = [p for p in entries if p not in dependencies]
     if (len(wrapper_paths) != 1 or len(entries) != len(dependencies) + 1
@@ -140,6 +137,17 @@ def verify_input_receipt(raw_dir: Path, root: str, contract: dict) -> dict:
     if (not wrapper.startswith(root.rstrip("/") + "/") or ".." in wrapper.split("/")
             or not wrapper.endswith("/" + contract["wrapper_name"]) or entries[wrapper] != contract["wrapper_sha256"]):
         raise ValueError("executed wrapper input does not match the declared bytes/path")
+
+
+def verify_input_receipt(raw_dir: Path, root: str, contract: dict) -> dict:
+    path = raw_dir / INPUT_RECEIPT
+    entries = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+        if match is None or match.group(2) in entries:
+            raise ValueError("malformed or duplicate executed-input receipt")
+        entries[match.group(2)] = match.group(1)
+    validate_input_receipt_entries(entries, root, contract)
     return {"source": "bridge_readback", "status": "matched", "receipt_path": str(path),
             "receipt_sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "remote_input_files": entries,
             "scope": "guard checked final staged input/include bytes immediately before Spectre; not a model/OP/performance guarantee"}

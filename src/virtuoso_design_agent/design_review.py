@@ -17,6 +17,7 @@ from .models import (
 from .planner import build_plan
 from .stability import STABILITY_METRICS
 from .stability_evidence import audit_stability_artifacts
+from .spectre_values import spectre_numeric_literals_equal
 
 
 def read_json(path: Path) -> Any:
@@ -171,12 +172,13 @@ def selected_candidate(run: RunRecord) -> CandidateEvaluation | None:
     return candidate
 
 
-def _writeback(run: RunRecord, selected: CandidateEvaluation | None) -> dict:
+def _writeback(task: TaskSpec, run: RunRecord, selected: CandidateEvaluation | None) -> dict:
     # Historical confirmation only. Never claims today's OA was freshly read.
     actions = [a for a in run.actions if a.action == "schematic.inspect.after"
                and a.status == "succeeded" and a.evidence_source is EvidenceSource.BRIDGE_READBACK]
     status = "not_confirmed_in_record"
     reference = None
+    checks = []
     if actions:
         action = actions[-1]
         reference = run.actions.index(action)
@@ -185,17 +187,27 @@ def _writeback(run: RunRecord, selected: CandidateEvaluation | None) -> dict:
         actual_parameters = raw.get("semantic_parameters", {})
         expected_instances = selected.instance_parameters if selected else {}
         expected_parameters = selected.oa_parameters if selected else {}
-        instances_match = all(
-            isinstance(actual_instances.get(name), dict)
-            and all(actual_instances[name].get(key) == value for key, value in fields.items())
-            for name, fields in expected_instances.items()
-        )
+        from .review_evidence import numeric_binding_support
+        supported = numeric_binding_support(task, run, selected.index) if selected else {}
+        for name, fields in expected_instances.items():
+            for key, value in fields.items():
+                values = actual_instances.get(name)
+                actual = values.get(key) if isinstance(values, dict) else None
+                basis = "literal" if actual == value else None
+                if ((name, key) in supported and actual is not None
+                        and spectre_numeric_literals_equal(actual, value)
+                        and spectre_numeric_literals_equal(actual, supported[(name, key)])):
+                    basis = basis or "declared_oa_si_numeric_binding"
+                checks.append({"instance": name, "parameter": key, "requested": value,
+                               "actual": actual, "matched": basis is not None, "basis": basis})
+        instances_match = all(row["matched"] for row in checks)
         parameters_match = all(actual_parameters.get(key) == value
                                for key, value in expected_parameters.items())
         status = "readback_recorded_selection_unverified"
         if selected and (expected_instances or expected_parameters) and instances_match and parameters_match:
             status = "selected_parameter_readback_matched_in_record"
     return {"status": status, "action_index": reference,
+            "parameter_checks": checks,
             "current_remote_state_verified": False, "source": "software_inference"}
 
 
@@ -276,18 +288,29 @@ def _stability_evidence(task: TaskSpec, run: RunRecord) -> list[dict]:
 
 
 def build_design_review(task_path: Path, run_path: Path, checkpoint_path: Path | None = None,
-                        binding_audit_path: Path | None = None) -> dict:
+                        binding_audit_path: Path | None = None, *,
+                        completion_path: Path | None = None, artifact_root: Path | None = None) -> dict:
     task, run = load_bound_run(task_path, run_path, binding_audit_path)
     selected = selected_candidate(run)
     candidates = [_candidate(task, candidate) for candidate in run.candidates]
     stability_evidence = _stability_evidence(task, run)
+    from .review_evidence import audit_recorded_inputs, audit_review_completion
+    local_root = (artifact_root or run_path.parent).resolve()
+    input_evidence = audit_recorded_inputs(task, run, local_root,
+                                          require_files=completion_path is not None or artifact_root is not None)
+    completion = (audit_review_completion(completion_path, task_path, run_path, local_root)
+                  if completion_path else None)
     for candidate in candidates:
         if any(row["candidate_index"] == candidate["index"] and row["role"] == "candidate"
-               and row["status"] != "verified" for row in stability_evidence):
+               and row["status"] != "verified" for row in stability_evidence) or any(
+                row["candidate_index"] == candidate["index"] and row["status"] == "incomplete"
+                for row in input_evidence):
             candidate["status"] = "incomplete"
     source_refs = {"task": file_reference(task_path), "run": file_reference(run_path)}
     if binding_audit_path:
         source_refs["historical_binding_audit"] = file_reference(binding_audit_path)
+    if completion:
+        source_refs.update(completion['sources'])
     checkpoint = None
     if checkpoint_path:
         cp = ExecutionCheckpoint.model_validate(read_json(checkpoint_path))
@@ -335,19 +358,22 @@ def build_design_review(task_path: Path, run_path: Path, checkpoint_path: Path |
                       "wall_seconds": (run.finished_at - run.started_at).total_seconds(),
                       "action_seconds": sum((a.finished_at - a.started_at).total_seconds() for a in run.actions),
                       "agent_thinking_seconds": None, "failures": failures,
-                      "incomplete_evidence": has_incomplete or any(r["status"] != "verified" for r in stability_evidence),
+                      "incomplete_evidence": has_incomplete or any(r["status"] != "verified" for r in stability_evidence)
+                      or bool(completion and completion['status'] == 'incomplete'),
                       "budget_exhausted": budget_exhausted},
         "stability_evidence": stability_evidence,
+        "input_evidence": input_evidence, "input_artifact_root": str(local_root),
+        "completion": completion,
         "candidates": candidates, "selected_candidate_index": selected.index if selected else None,
         "recorded_selection": {"parameters": run.selected_parameters,
                                "instance_parameters": run.selected_instance_parameters,
                                "topology_variant_id": run.selected_topology_variant_id},
-        "search_audit": search, "checkpoint": checkpoint, "writeback": _writeback(run, selected),
+        "search_audit": search, "checkpoint": checkpoint, "writeback": _writeback(task, run, selected),
         "winner_verification": run.winner_verification.model_dump(mode="json") if run.winner_verification else None,
         "missing_declared_stages": missing_stages,
         "winner_verification_missing": task.winner_verification is not None and run.winner_verification is None,
         "notes": run.notes,
-        "boundaries": ["仅复盘保存记录；未连接远端或核对当前 OA。显式 STB bundle 核对本地原始文件哈希并重放已保存的解码向量，其他分析不自动复核原始文件。",
+        "boundaries": ["仅复盘保存记录；未连接远端或核对当前 OA。显式 STB bundle 可重放已保存解码向量；generic 输入回执与保留文件可核对，但不等于独立重算波形或展开 PDK。",
                        "有限候选最佳不是连续或全局最优；预算耗尽不等于规格不可行。",
                        "demo/software_inference 不证明电路性能；缺指标不等于电路不达标。",
                        "参数、拓扑、PDK 或条件变化后旧性能只能对比，不能直接用于新设计闭环。"],
@@ -394,6 +420,21 @@ def render_design_review(review: dict) -> str:
                          + ("；".join(row["issues"]) or "本地文件哈希及同作业 native margin 对照通过"))
             if row.get("evidence_file"):
                 lines.append(f"  - [保留的 STB 证据](<{row['evidence_file']}>)")
+    if review.get('input_evidence'):
+        lines.extend(['', '## 实际输入回执', ''])
+        for row in review['input_evidence']:
+            lines.append(f"- 候选 {row['candidate_index']}：{row['status']}；"
+                         + ('；'.join(row['issues']) or ('本地回执/文件字节/有效 wrapper 条件已核对'
+                            if row['status'] == 'verified' else '旧记录未提供新回执，不补造通过')))
+    if review.get('completion'):
+        completion = review['completion']
+        lines.extend(['', '## 已记录收尾，不是当前 OA 状态', '',
+                      f"- 状态：{completion['status']}；现场未重新读取。",
+                      f"- 问题：{'；'.join(completion['issues']) or '无已发现的不一致'}"])
+        if completion['status'] != 'incomplete':
+            lines.extend([f"- 最后关联的 OA 观察时间：{completion['observed_at']}",
+                          f"- 探针选中点仍是最终记录状态：{completion['selected_point_is_final_state']}",
+                          f"- 基线/恢复后数值指标相等：{completion['baseline_final_metrics_equal']}"])
     lines.extend(["", "## 未闭合与使用注意", ""])
     lines.extend(f"- {text}" for text in [*review["boundaries"], *review["notes"]])
     if review["missing_declared_stages"]:

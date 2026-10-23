@@ -1,0 +1,355 @@
+"""Offline record-corruption tests using existing generic fixtures, not EDA runs."""
+import hashlib
+import json
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from virtuoso_design_agent.cli import main
+from virtuoso_design_agent.design_next import suggest_design_next
+from virtuoso_design_agent.design_review import build_design_review, render_design_review
+from virtuoso_design_agent.generic_simulation import render_generic_oa_testbench
+from virtuoso_design_agent.models import RunRecord, TaskSpec
+from virtuoso_design_agent.planner import build_plan
+from test_generic_simulation import _inspection, _task
+
+
+def write(path, value):
+    path.write_text(json.dumps(value, indent=2), encoding='utf-8')
+    return path
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.fixture
+def rounds(tmp_path):
+    original = _inspection()
+    original['instance_parameters']['MN0']['w'] = '500n'
+    original['placement'] = {'canonical_geometry': {'instances': [{'xy': [0, 0]}], 'wires': []}}
+    probe = deepcopy(original)
+    probe['instance_parameters']['MN0']['w'] = '475.00n'
+    records = {}
+    for number, stage in enumerate(('A', 'B', 'restore', 'C')):
+        raw = _task().model_dump(mode='json')
+        raw.update(id='fixture-' + stage)
+        if stage == 'B':
+            raw.update(operation='design.tune', objective={'metric': 'low_frequency_gain_db', 'goal': 'maximize'},
+                       instance_parameter_space=[{'instance': 'MN0', 'parameter': 'w', 'values': ['475n']}])
+            raw['safety']['allow_remote_write'] = True
+        if stage == 'restore':
+            raw.update(operation='parameters.apply', analysis=None, ac_sweep=None, generic_simulation=None, constraints=[],
+                       instance_parameter_updates=[{'instance': 'MN0', 'parameters': {'w': '500n'}}])
+            raw['safety'].update(allow_remote_write=True, allow_remote_compute=False)
+        task = TaskSpec.model_validate(raw)
+        tp = write(tmp_path / (stage + '-task.json'), raw)
+        start = datetime(2026, 10, 23, tzinfo=timezone.utc) + timedelta(seconds=20 * number)
+
+        def action(name, data, source='bridge_readback'):
+            return {'action': name, 'status': 'succeeded', 'started_at': start.isoformat(),
+                    'finished_at': (start + timedelta(seconds=1)).isoformat(),
+                    'evidence_source': source, 'details': deepcopy(data)}
+
+        actions = [action('schematic.inspect.before', probe if stage == 'restore' else original)]
+        candidates = []
+        selected = {'MN0': {'w': '475n'}} if stage == 'B' else {}
+        if stage == 'restore':
+            actions += [action('parameters.apply', {'requested_instance_parameters': {'MN0': {'w': '500n'}},
+                                                   'confirmed_instance_parameters': {'MN0': {'w': '500n'}}}),
+                        action('schematic.inspect.after', original)]
+        else:
+            folder = tmp_path / stage
+            receipt = folder / 'input_from_oa.raw' / 'vda-input-manifest.sha256'
+            receipt.parent.mkdir(parents=True)
+            remote = '/data/xum/fixture/' + stage
+            wrapper = render_generic_oa_testbench(task.generic_simulation, analysis='ac',
+                remote_netlist_path=remote + '/vda_oa_netlist.scs', model_configuration='',
+                ac_sweep=task.ac_sweep.model_dump(mode='json'))
+            # These files intentionally contain fixture text, not physical simulation data.
+            for name, data in {'input_from_oa.scs': wrapper, 'oa_netlist.scs': '// fixture only\n',
+                               'oa_netlist_spectre.scs': 'simulator lang=spectre\n// fixture only\n',
+                               'spectre.out': 'fixture only\n'}.items():
+                (folder / name).write_bytes(data.encode())
+            raw_hash, include_hash, wrapper_hash = [sha(folder / n) for n in
+                ('oa_netlist.scs', 'oa_netlist_spectre.scs', 'input_from_oa.scs')]
+            entries = {remote + '/job/input_from_oa.scs': wrapper_hash,
+                       remote + '/netlist': raw_hash, remote + '/vda_oa_netlist.scs': include_hash}
+            receipt.write_bytes(''.join(f'{digest}  {path}\n' for path, digest in entries.items()).encode())
+            manifest = [{'path': p.relative_to(folder).as_posix(), 'size_bytes': p.stat().st_size, 'sha256': sha(p)}
+                        for p in sorted(folder.rglob('*')) if p.is_file()]
+            actual = '475.00n' if stage == 'B' else '500n'
+            evidence = {'schematic_readback': {'target': task.target.model_dump(mode='json')},
+                'netlist': {'source': 'eda_result', 'remote_path': remote + '/netlist', 'sha256': raw_hash,
+                    'topology_consistency': 'matched', 'parameter_consistency': 'matched',
+                    'parameter_bindings': [{'instance': 'MN0', 'oa_parameter': 'w', 'netlist_parameter': 'w',
+                                            'oa_value': actual, 'netlist_value': actual}],
+                    'spectre_include': {'remote_path': remote + '/vda_oa_netlist.scs', 'sha256': include_hash}},
+                'testbench': {'sha256': wrapper_hash, 'analysis': 'ac',
+                    'settings': task.generic_simulation.model_dump(mode='json'), 'operating_condition': None,
+                    'executed_input_binding': {'source': 'bridge_readback', 'status': 'matched',
+                        'receipt_path': str(receipt), 'receipt_sha256': sha(receipt), 'remote_input_files': entries}},
+                'simulation': {'source': 'eda_result', 'artifact_manifest_complete': True, 'artifact_manifest': manifest,
+                    'artifact_manifest_sha256': hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()).hexdigest()}}
+            actions.append(action('simulation.candidate.1', {'evidence': evidence}, 'eda_result'))
+            if stage == 'B':
+                after = deepcopy(probe)
+                after['confirmed_instance_parameters'] = {'MN0': {'w': actual}}
+                actions.append(action('schematic.inspect.after', after))
+            candidates = [{'index': 1, 'parameters': {}, 'instance_parameters': selected,
+                           'metrics': {'low_frequency_gain_db': 1.0}, 'constraints': [], 'feasible': True,
+                           'total_violation': 0.0, 'evidence_source': 'eda_result'}]
+        run = RunRecord.model_validate({'task_id': task.id, 'plan_token': build_plan(task).confirmation_token,
+            'adapter': 'virtuoso-bridge-subprocess', 'status': 'succeeded', 'started_at': start,
+            'finished_at': start + timedelta(seconds=10), 'actions': actions, 'candidates': candidates,
+            'selected_parameters': {} if candidates else None,
+            'selected_instance_parameters': selected if candidates else None,
+            'selected_metrics': {'low_frequency_gain_db': 1.0} if candidates else None})
+        rp = write(tmp_path / (stage + '-run.json'), run.model_dump(mode='json'))
+        records[stage] = (tp, rp)
+    request = {'schema_version': 1}
+    cp = tmp_path / 'completion.json'
+
+    def bind():
+        request.update(reviewed_task_sha256=sha(records['B'][0]), reviewed_run_sha256=sha(records['B'][1]))
+        for label, stage in [('baseline', 'A'), ('restoration', 'restore'), ('final', 'C')]:
+            tp, rp = records[stage]
+            request[label] = {'task': tp.name, 'run': rp.name, 'task_sha256': sha(tp), 'run_sha256': sha(rp)}
+        write(cp, request)
+    bind()
+    return records, cp, bind
+
+
+def test_review_preserves_numeric_actual_and_consumes_explicit_restoration(rounds):
+    records, completion, _ = rounds
+    review = build_design_review(*records['B'], completion_path=completion)
+    check = review['writeback']['parameter_checks'][0]
+    assert check['actual'] == '475.00n' and check['requested'] == '475n' and check['matched']
+    assert check['basis'] == 'declared_oa_si_numeric_binding'
+    assert review['input_evidence'][0]['status'] == 'verified'
+    assert review['completion']['status'] == 'restored_to_baseline_in_record'
+    assert not review['completion']['selected_point_is_final_state']
+    assert not review['completion']['current_remote_state_verified']
+    assert review['recorded_selection']['instance_parameters']['MN0']['w'] == '475n'
+    report, draft = suggest_design_next(*records['B'], completion_path=completion)
+    assert report['status'] == 'restored_baseline_review_or_stop' and draft is None
+    assert '不是当前 OA 状态' in render_design_review(review)
+
+
+@pytest.mark.parametrize('case', ['changed', 'no_binding', 'string_field'])
+def test_numeric_formatting_needs_corroborating_field_not_global_normalization(rounds, case):
+    records, _, _ = rounds
+    tp, rp = records['B']; raw = json.loads(rp.read_text())
+    if case == 'changed':
+        raw['actions'][-1]['details']['confirmed_instance_parameters']['MN0']['w'] = '480n'
+    elif case == 'no_binding':
+        raw['actions'][1]['details']['evidence']['netlist']['parameter_bindings'] = []
+    else:
+        raw['candidates'][0]['instance_parameters']['MN0']['model'] = '001'
+        raw['selected_instance_parameters']['MN0']['model'] = '001'
+        raw['actions'][-1]['details']['confirmed_instance_parameters']['MN0']['model'] = '1'
+    write(rp, raw)
+    review = build_design_review(tp, rp)
+    assert review['writeback']['status'] == 'readback_recorded_selection_unverified'
+
+
+@pytest.mark.parametrize('case', ['receipt', 'wrapper', 'missing', 'manifest_escape', 'partial_binding', 'settings',
+                                  'wrong_target', 'netlist_mismatch'])
+def test_bad_retained_inputs_block_next_without_any_adapter(rounds, case, tmp_path):
+    records, _, _ = rounds
+    tp, rp = records['B']; raw = json.loads(rp.read_text()); e = raw['actions'][1]['details']['evidence']
+    receipt = Path(e['testbench']['executed_input_binding']['receipt_path'])
+    if case == 'receipt':
+        receipt.write_bytes(b'changed receipt\n')
+    elif case == 'wrapper':
+        receipt.parent.parent.joinpath('input_from_oa.scs').write_bytes(b'changed wrapper\n')
+    elif case == 'missing':
+        receipt.unlink()
+    elif case == 'manifest_escape':
+        e['simulation']['artifact_manifest'][0]['path'] = '../outside'
+        e['simulation']['artifact_manifest_sha256'] = hashlib.sha256(json.dumps(
+            e['simulation']['artifact_manifest'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    elif case == 'partial_binding':
+        e['testbench'].pop('executed_input_binding')  # Receipt in manifest prevents a legacy downgrade.
+    elif case == 'settings':
+        e['testbench']['settings']['sources'][0]['dc_value'] += .01
+    elif case == 'wrong_target':
+        e['schematic_readback']['target']['cell'] = 'vda_other'
+    else:
+        e['netlist']['parameter_consistency'] = 'mismatch'
+    write(rp, raw)
+    review = build_design_review(tp, rp)
+    assert review['execution']['incomplete_evidence'] and any(r['issues'] for r in review['input_evidence'])
+    report, draft = suggest_design_next(tp, rp)
+    assert report['status'] == 'reconcile_execution_first' and draft is None
+
+
+@pytest.mark.parametrize('case', ['parameter', 'placement', 'literal', 'failed_restore', 'order', 'mutation', 'demo'])
+def test_completion_rejects_state_drift_or_invalid_chain_even_with_updated_file_hashes(rounds, case):
+    records, completion, bind = rounds
+    stage = 'restore' if case == 'failed_restore' else 'A' if case == 'demo' else 'C'
+    tp, rp = records[stage]; raw = json.loads(rp.read_text())
+    if case == 'parameter':
+        raw['actions'][0]['details']['instance_parameters']['MN0']['l'] = '31n'
+    elif case == 'literal':
+        raw['actions'][0]['details']['instance_parameters']['MN0']['w'] = '500.00n'
+    elif case == 'placement':
+        raw['actions'][0]['details']['placement']['canonical_geometry']['instances'][0]['xy'] = [1, 0]
+    elif case == 'failed_restore':
+        raw['status'] = 'failed'
+    elif case == 'order':
+        raw['started_at'] = '2026-10-23T00:00:00Z'
+    elif case == 'mutation':
+        raw['actions'].append({**raw['actions'][0], 'action': 'parameters.apply'})
+    else:
+        raw['adapter'] = 'deterministic-demo'
+    write(rp, raw); bind()
+    review = build_design_review(*records['B'], completion_path=completion)
+    assert review['completion']['status'] == 'incomplete' and review['completion']['issues']
+    assert suggest_design_next(*records['B'], completion_path=completion)[0]['status'] == 'reconcile_execution_first'
+
+
+def test_completion_exact_hash_binding_and_reanchor_barrier(rounds, tmp_path):
+    records, completion, bind = rounds
+    report, draft = suggest_design_next(*records['B'], completion_path=completion,
+        model_path=tmp_path/'not-read-model', policy_path=tmp_path/'not-read-policy', template_path=tmp_path/'not-read-task')
+    assert report['status'] == 'recorded_state_requires_reanchor' and draft is None
+    raw = json.loads(completion.read_text()); raw['final']['run_sha256'] = '0'*64; write(completion, raw)
+    with pytest.raises(ValueError, match='SHA-256'):
+        build_design_review(*records['B'], completion_path=completion)
+    bind(); raw = json.loads(completion.read_text()); raw['reviewed_run_sha256'] = '0'*64; write(completion, raw)
+    with pytest.raises(ValueError, match='exact reviewed'):
+        build_design_review(*records['B'], completion_path=completion)
+
+
+def test_cli_completion_outputs_are_local_nonoverwriting_and_never_mint_a_task(rounds, tmp_path):
+    records, completion, _ = rounds
+    output, markdown, old_task = [tmp_path/name for name in ('review.json', 'review.md', 'old-task.json')]
+    args = [*map(str, records['B']), '--completion', str(completion)]
+    assert main(['design-review', *args, '--output', str(output), '--markdown', str(markdown)]) == 0
+    assert '已记录收尾' in markdown.read_text(encoding='utf-8')
+    before = output.read_bytes()
+    assert main(['design-review', *args, '--output', str(output)]) == 2 and output.read_bytes() == before
+    old_task.write_bytes(b'keep existing draft')
+    assert main(['design-next', *args, '--task-output', str(old_task)]) == 2
+    assert old_task.read_bytes() == b'keep existing draft'
+
+
+def test_legacy_absence_is_not_upgraded_to_a_verified_input_receipt(rounds):
+    records, _, _ = rounds
+    tp, rp = records['B']; raw = json.loads(rp.read_text()); e = raw['actions'][1]['details']['evidence']
+    e['testbench'].pop('executed_input_binding')
+    e['simulation']['artifact_manifest'] = [p for p in e['simulation']['artifact_manifest']
+                                          if not p['path'].endswith('vda-input-manifest.sha256')]
+    write(rp, raw)
+    report = build_design_review(tp, rp)
+    assert [r['status'] for r in report['input_evidence']] == ['not_recorded']
+    assert not report['execution']['incomplete_evidence']
+
+
+def test_normal_cleanup_is_not_a_failed_execution_or_a_new_byte_verification(rounds, monkeypatch):
+    records, completion, _ = rounds
+    job = records['B'][0].parent / 'B'
+    original_is_dir = Path.is_dir
+    monkeypatch.setattr(Path, 'is_dir', lambda path: False if path == job else original_is_dir(path))
+    review = build_design_review(*records['B'])
+    assert review['input_evidence'][0]['status'] == 'recorded_not_replayed'
+    assert not review['execution']['incomplete_evidence']
+    report, _ = suggest_design_next(*records['B'])
+    assert report['status'] != 'reconcile_execution_first'
+    assert any(r['kind'] == 'input_replay_boundary' for r in report['recommendations'])
+    # Explicit replay/closure requires actual files; metadata alone cannot complete it.
+    receipt = job/'input_from_oa.raw'/'vda-input-manifest.sha256'
+    original_open = Path.open
+
+    def missing_receipt(path, *args, **kwargs):
+        if path == receipt:
+            raise FileNotFoundError(str(path))
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'open', missing_receipt)
+    for options in ({'artifact_root': job.parent}, {'completion_path': completion}):
+        report, draft = suggest_design_next(*records['B'], **options)
+        assert report['status'] == 'reconcile_execution_first' and draft is None
+
+
+@pytest.mark.parametrize('corrupt', [False, True])
+def test_default_root_never_reads_external_job_bytes_or_skips_bad_metadata(rounds, tmp_path, corrupt):
+    records, _, _ = rounds
+    tp, rp = records['B']; raw = json.loads(rp.read_text())
+    # Place only the run in a separate directory; the report must not follow its job paths.
+    moved = tmp_path/'moved'; moved.mkdir()
+    if corrupt:
+        raw['actions'][1]['details']['evidence']['testbench']['executed_input_binding']['remote_input_files'].clear()
+    report_path = write(moved/'B-run.json', raw)
+    review = build_design_review(tp, report_path)
+    assert review['input_evidence'][0]['status'] == ('incomplete' if corrupt else 'recorded_not_replayed')
+    if not corrupt:
+        assert build_design_review(tp, report_path, artifact_root=tmp_path)['input_evidence'][0]['status'] == 'verified'
+
+
+def test_input_action_cannot_promote_software_inference_to_eda_evidence(rounds):
+    records, _, _ = rounds
+    tp, rp = records['B']; raw = json.loads(rp.read_text())
+    raw['actions'][1]['evidence_source'] = 'software_inference'; write(rp, raw)
+    report, draft = suggest_design_next(tp, rp)
+    assert report['status'] == 'reconcile_execution_first' and draft is None
+
+
+def test_duplicate_receipt_cannot_hide_conflicting_successful_action_details(rounds):
+    records, _, _ = rounds
+    tp, rp = records['B']; raw = json.loads(rp.read_text())
+    duplicate = deepcopy(raw['actions'][1])
+    duplicate['details']['evidence']['testbench']['settings']['sources'][0]['dc_value'] += .01
+    raw['actions'].append(duplicate); write(rp, raw)
+    report, draft = suggest_design_next(tp, rp)
+    assert report['status'] == 'reconcile_execution_first' and draft is None
+
+
+def test_completed_restore_never_hides_a_supplied_pending_checkpoint(rounds, tmp_path):
+    from virtuoso_design_agent.models import ExecutionCheckpoint
+    records, completion, _ = rounds
+    run = RunRecord.model_validate_json(records['B'][1].read_text())
+    checkpoint = ExecutionCheckpoint(task_id=run.task_id, plan_token=run.plan_token, adapter=run.adapter,
+        started_at=run.started_at, initial_parameters={}, expected_oa_parameters={},
+        pending_oa_instance_parameters={'MN0': {'w': '475n'}}, next_candidate_index=2,
+        candidates=run.candidates, complete=False)
+    path = write(tmp_path/'pending.json', checkpoint.model_dump(mode='json'))
+    report, draft = suggest_design_next(*records['B'], completion_path=completion, checkpoint_path=path)
+    assert report['status'] == 'reconcile_execution_first' and draft is None
+
+
+@pytest.mark.parametrize('unchanged_oa', [False, True])
+def test_existing_inspection_can_close_the_state_chain_without_an_extra_simulation(rounds, unchanged_oa):
+    records, completion, bind = rounds
+    if unchanged_oa:
+        tp, rp = records['B']; t = json.loads(tp.read_text()); r = json.loads(rp.read_text())
+        t['instance_parameter_space'][0]['values'] = ['500n']
+        r['plan_token'] = build_plan(TaskSpec.model_validate(t)).confirmation_token
+        r['candidates'][0]['instance_parameters']['MN0']['w'] = '500n'
+        r['selected_instance_parameters']['MN0']['w'] = '500n'
+        r['actions'][-1]['details']['instance_parameters']['MN0']['w'] = '500n'
+        r['actions'][-1]['details']['confirmed_instance_parameters']['MN0']['w'] = '500n'
+        binding = r['actions'][1]['details']['evidence']['netlist']['parameter_bindings'][0]
+        binding.update(oa_value='500n', netlist_value='500n'); write(tp, t); write(rp, r)
+        restore = json.loads(records['restore'][1].read_text())
+        restore['actions'][0]['details']['instance_parameters']['MN0']['w'] = '500n'
+        write(records['restore'][1], restore)
+    tp, rp = records['C']; raw_task = json.loads(tp.read_text())
+    raw_task.update(operation='schematic.inspect', analysis=None, generic_simulation=None, ac_sweep=None, constraints=[])
+    raw_task['safety']['allow_remote_compute'] = False
+    task = TaskSpec.model_validate(raw_task); write(tp, raw_task)
+    raw = json.loads(rp.read_text())
+    raw.update(plan_token=build_plan(task).confirmation_token, candidates=[], selected_parameters=None,
+               selected_instance_parameters=None, selected_metrics=None)
+    raw['actions'] = [{**raw['actions'][0], 'action': 'schematic.inspect'}]
+    write(rp, raw); bind()
+    review = build_design_review(*records['B'], completion_path=completion)
+    assert review['completion']['status'] == 'restored_to_baseline_in_record'
+    assert review['completion']['baseline_final_metrics_equal'] is None
+    assert 'final' not in review['completion']['input_evidence']
+    if unchanged_oa:
+        assert review['completion']['selected_point_is_final_state'] is None
+        assert suggest_design_next(*records['B'], completion_path=completion)[0]['status'] == 'restored_baseline_review_or_stop'

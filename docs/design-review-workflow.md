@@ -34,6 +34,83 @@ stage、选择范围、原操作失败、预算与 checkpoint 状态。余量为
 simulation.run 不写 OA，缺少末尾写回记录属正常边界，不要求为了报告再写一次。
 run 的总时长与各 action 时长分别保留；恢复间隔可能计入前者，agent 思考时长没有数据便留空。
 
+### 实际输入与恢复状态的本地接线（2026-10-23）
+
+数值格式不再只按字符串判断：只有任务显式声明的 OA→si 参数 binding，且成功的
+`eda_result` 已记录同目标、连接/参数一致和数值等值，才允许 `475n` 与 `475.00n`
+按有限普通 Spectre 标量比较。`writeback.parameter_checks` 保留请求值、实际值和匹配
+依据；字符串、表达式、未声明字段和实际数值变化不按此放行。executor 的请求 echo、
+checkpoint、完整恢复状态和权限检查不变，不修改旧 task/run。
+
+generic existing_schematic 的新输入回执现自动进入 `input_evidence`：
+
+| 状态 | 实际含义 |
+| --- | --- |
+| `verified` | 在允许的本地目录内，核对原回执、manifest 大小/SHA、wrapper/原始及转换后 OA 网表的字节绑定，并独立核对有效 wrapper 的源/负载连接与 DC/AC 字面量 |
+| `recorded_not_replayed` | 原记录的输入绑定与有效任务/候选自洽，但作业文件已正常清理或在默认目录范围外；未读取范围外字节，不是一次新的文件验收，也不单独判为执行失败 |
+| `not_recorded` | 旧记录没有新回执；不补造通过，不要求为了报告重跑电路 |
+| `incomplete` | 声明证据不一致、保留目录仅缺部分文件、哈希/条件/来源错误、同回执出现冲突，或显式验收缺文件；下一轮先对账，不自动重试/出任务 |
+
+默认读取范围为 run 文件所在目录及子目录，不自动搜索、下载、迁移或追随其他目录的
+作业文件。若保留文件位于另一位置，用 `--artifact-root <明确的本地根目录>`；显式提供
+此选项或 `--completion` 时要求原文件完整可回放，不能仅凭记录内元数据通过。
+路径必须仍对应原记录；本入口不提供自动路径重写。
+
+探针结束后已恢复基线时，可用 `--completion <completion.json>` 显式关联普通的
+baseline、restoration、final task/run。无需读取一次性 helper 的私有格式，也不需要为
+收尾额外仿真：final 可以是已有 `simulation.run`，或独立 `schematic.inspect`。
+后者仅证实已记录 OA 状态，不补造最终性能/testbench 验收。
+
+completion JSON 使用 `review_evidence.ReviewCompletion` 契约：
+
+```json
+{
+  "schema_version": 1,
+  "reviewed_task_sha256": "被复盘 task 的64位小写 SHA-256，须填写实值",
+  "reviewed_run_sha256": "被复盘 run 的64位小写 SHA-256，须填写实值",
+  "baseline": {
+    "task": "baseline-task.json", "task_sha256": "该文件的 SHA-256",
+    "run": "baseline-run.json", "run_sha256": "该文件的 SHA-256"
+  },
+  "restoration": {
+    "task": "restore-task.json", "task_sha256": "该文件的 SHA-256",
+    "run": "restore-run.json", "run_sha256": "该文件的 SHA-256"
+  },
+  "final": {
+    "task": "final-task.json", "task_sha256": "该文件的 SHA-256",
+    "run": "final-run.json", "run_sha256": "该文件的 SHA-256"
+  }
+}
+```
+
+以上哈希为待替换说明，不是可执行示例。相对路径按 completion 所在目录解析。
+所有引用要求精确文件哈希、现版本 task/run token、同目标/PDK、成功的真实记录、四份
+不同 run 及时间顺序；恢复必须是显式 `parameters.apply`，最终观察不能写 OA。
+比对完整实例/master/端子/pin 拓扑、全部参数和 placement 的原始状态；恢复请求及
+确认值须等于初始原字符串，不用数值格式归一化掩盖状态差异。baseline/final 的仿真
+设置须一致并有完整输入文件；检查 final 为 inspect 时，不要求新的仿真结果。
+目前 completion 不接受旧版本 token 的 `binding-audit` 拼接；原单轮历史复盘支持不变。
+
+本次真实 A/B/A 的已填描述与本地报告位于
+`artifacts/p1b-review-wiring-20261023/`，依赖的原始证据不入 Git。复用方式：
+
+```powershell
+.\.venv\Scripts\vda.exe design-review `
+  artifacts/p1b-joint-live-20261023/tasks-current/B.json `
+  artifacts/p1b-joint-live-20261023/B-format-fixed-run.json `
+  --checkpoint artifacts/p1b-joint-live-20261023/B-format-fixed-checkpoint.json `
+  --completion artifacts/p1b-review-wiring-20261023/completion.json `
+  --output <new-review.json> --markdown <new-review.md>
+```
+
+`design-next` 接受相同两项新选项。报告分开保留 B 的历史选中点和
+`completion.status=restored_to_baseline_in_record`、最后观察时间、完整最终参数及 A/C
+指标是否相等；所有 `current_remote_state_verified` 仍为 false。B 不是最终记录状态
+时，不自动沿 B 的模型/iteration 出草案，应显式选 baseline/final 重新定锚。
+缺失的最终 testbench 也不按“相同”处理。已提供的 pending checkpoint 始终先对账，
+成功恢复链不能将它隐藏；旧失败 actions/notes 不删除。详情见
+[本地接线验收与边界](validation/2026-10-23-p1b-review-evidence-local.md)。
+
 ## 2. 再决定是否需要继续
 
 ```powershell

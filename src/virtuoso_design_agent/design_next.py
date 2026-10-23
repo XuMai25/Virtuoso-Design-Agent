@@ -38,9 +38,12 @@ def suggest_design_next(
     data_policy_path: Path | None = None,
     prior_model_path: Path | None = None,
     prior_policy_path: Path | None = None,
+    completion_path: Path | None = None,
+    artifact_root: Path | None = None,
 ) -> tuple[dict, TaskSpec | None]:
     """No random proposals, hidden remote calls, or fabricated model accuracy."""
-    review = build_design_review(task_path, run_path, checkpoint_path, binding_audit_path)
+    review = build_design_review(task_path, run_path, checkpoint_path, binding_audit_path,
+                                 completion_path=completion_path, artifact_root=artifact_root)
     task, run = load_bound_run(task_path, run_path, binding_audit_path)
     supplied = (model_path is not None, policy_path is not None, template_path is not None)
     if any(supplied) and not all(supplied):
@@ -56,6 +59,8 @@ def suggest_design_next(
         "read_only": True, "sources": review["sources"], "task_id": task.id,
         "status": "needs_evidence", "recommendations": [], "model": None, "small_signal": None,
         "task_draft": None, "execution_authorized": False,
+        "input_evidence": review['input_evidence'], "completion": review['completion'],
+        "writeback": review['writeback'],
         "reuse": {"allowed": ["原记录作为历史对比；同一来源的本地理论重算"],
                   "requires_new_evidence": ["尺寸/拓扑/PDK/仿真条件变化后的最终规格",
                                             "当前 OA/会话状态与人工改动"]},
@@ -65,6 +70,25 @@ def suggest_design_next(
     def add(kind: str, reason: str, evidence: str) -> None:
         steps.append({"kind": kind, "reason": reason, "evidence": evidence,
                       "execution_authorized": False})
+
+    completion = review['completion']
+    if (any(row['status'] == 'incomplete' for row in review['input_evidence'])
+            or (completion and completion['status'] == 'incomplete')
+            or (review['checkpoint'] and review['checkpoint']['pending_write'])):
+        report['status'] = 'reconcile_execution_first'
+        add('reconcile_saved_evidence', '已声明的输入/恢复证据缺失或不一致，或 checkpoint 仍有未决写入；'
+            '先保全并对账，不把证据问题当电路不可行，不自动重新运行。', 'input_evidence / completion / checkpoint')
+        return report, None
+    if any(row['status'] == 'recorded_not_replayed' for row in review['input_evidence']):
+        add('input_replay_boundary', '运行记录的输入绑定自洽，但本地原始文件已清理或不在指定范围；'
+            '不把它误报成仿真失败，也不声称已重新核对文件字节。', 'input_evidence')
+    restored_elsewhere = bool(completion and completion.get('selected_point_is_final_state') is not True)
+    if restored_elsewhere:
+        add('recorded_restore', '探针执行后已记录恢复基线；不能把其选中 OA/testbench 元组当作最后已验证状态。'
+            '下一轮应显式改用收尾中的 baseline/final task/run，旧结果不代替新鲜 OA 检查。', 'completion')
+        if any(supplied) or iteration_path is not None:
+            report['status'] = 'recorded_state_requires_reanchor'
+            return report, None
 
     if iteration_path is not None:
         from .design_iteration import build_design_iteration
@@ -174,6 +198,9 @@ def suggest_design_next(
             "不把无数据方向设为零，不自动改分组、拟合或追加计算。", "data_check")
         return report, None
     if model_path is None:
+        if restored_elsewhere:
+            report['status'] = 'restored_baseline_review_or_stop'
+            return report, None
         if review["selected_candidate_index"] is not None:
             report["status"] = "review_or_stop"
             add("review_or_stop", "先检查已声明规格和 winner 质量是否满足用途；已达标不强制继续调参。", "selected candidate constraints")
@@ -305,6 +332,18 @@ def render_design_next(report: dict) -> str:
     lines = [f"# 下一步建议：{report['task_id']}", "", f"状态：`{report['status']}`。仅建议，未执行。", ""]
     for step in report["recommendations"]:
         lines.extend([f"- {step['reason']}（依据：{step['evidence']}）"])
+    if report.get('input_evidence'):
+        lines.extend(['', '## 保存的输入证据', ''])
+        for row in report['input_evidence']:
+            lines.append(f"- 候选 {row['candidate_index']}：{row['status']}；" +
+                         ('；'.join(row['issues']) or '仅说明本地保存证据的核对范围，不是新的远端运行'))
+    if report.get('completion'):
+        completion = report['completion']
+        lines.extend(['', '## 已记录收尾', '',
+                      f"{completion['status']}；当前 OA 未重新读取，不自动恢复或授权。"])
+        if completion.get('observed_at'):
+            lines.append(f"最后关联 OA 观察：{completion['observed_at']}；"
+                         f"探针选中点仍为最终状态：{completion['selected_point_is_final_state']}。")
     if report.get("iteration"):
         from .design_iteration import render_design_iteration
         lines.extend(["", render_design_iteration(report["iteration"])])

@@ -234,7 +234,8 @@ def _write_review_outputs(outputs: list[tuple[Path | None, str]]) -> None:
 
 
 def _cmd_design_review(args: argparse.Namespace) -> int:
-    report = build_design_review(args.task, args.run_record, args.checkpoint, args.binding_audit)
+    report = build_design_review(args.task, args.run_record, args.checkpoint, args.binding_audit,
+                                 completion_path=args.completion, artifact_root=args.artifact_root)
     payload = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
     _write_review_outputs([(args.output, payload), (args.markdown, render_design_review(report))])
     print(payload if args.json else render_design_review(report))
@@ -259,6 +260,7 @@ def _cmd_design_next(args: argparse.Namespace) -> int:
         decision_policy_path=args.decision_policy,
         data_policy_path=args.data_policy,
         prior_model_path=args.prior_model, prior_policy_path=args.prior_policy,
+        completion_path=args.completion, artifact_root=args.artifact_root,
     )
     payload = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
     outputs = [(args.output, payload), (args.markdown, render_design_next(report))]
@@ -1511,6 +1513,8 @@ def build_parser() -> argparse.ArgumentParser:
         review.add_argument("run_record", type=Path)
         review.add_argument("--checkpoint", type=Path)
         review.add_argument("--binding-audit", type=Path, help="existing exact-byte relinearization execution audit for historical plan versions")
+        review.add_argument("--completion", type=Path, help="hash-bound baseline/restoration/final task/run links; local observations only")
+        review.add_argument("--artifact-root", type=Path, help="explicit local root for retained input artifacts; defaults to the run directory")
         review.add_argument("--output", type=Path)
         review.add_argument("--markdown", type=Path)
         review.add_argument("--json", action="store_true")
