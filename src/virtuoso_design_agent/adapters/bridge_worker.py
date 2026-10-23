@@ -83,7 +83,9 @@ from virtuoso_design_agent.model_includes import (
     render_spectre_model_includes,
     resolve_spectre_model_includes,
 )
-from virtuoso_design_agent.spectre_values import spectre_values_equal
+from virtuoso_design_agent.spectre_values import (
+    spectre_numeric_literals_equal, spectre_values_equal,
+)
 from virtuoso_design_agent.stability import extract_stability_metrics
 from virtuoso_design_agent.stability_evidence import (
     audit_stability_artifacts, canonical_sha256, compare_native_stb_margin,
@@ -1825,8 +1827,11 @@ def _verify_instance_parameter_values(
     cell: str,
     expected: dict[str, dict[str, str]],
 ) -> dict[str, dict[str, str]]:
-    """Read target CDF values directly, including empty or long strings."""
+    """Read actual CDF values; allow numeric formatting only for numeric CDFs."""
     from virtuoso_bridge.virtuoso.ops import escape_skill_string
+    from virtuoso_bridge.virtuoso.skill_output import (
+        is_single_complete_skill_list, parse_sexpr,
+    )
 
     checks: list[str] = []
     for instance, parameters in expected.items():
@@ -1842,28 +1847,28 @@ def _verify_instance_parameter_values(
                 f'"instance has no CDF during parameter verification: {escaped_instance}"))',
             ]
         )
-        for name, value in parameters.items():
+        for name in parameters:
             escaped_name = escape_skill_string(name)
-            escaped_value = escape_skill_string(value)
             label = escape_skill_string(f"{instance}.{name}")
             checks.extend(
                 [
                     f'p = get(iCDF "{escaped_name}")',
                     f'unless(p error("unknown CDF parameter: {label}"))',
-                    "unless(p~>value == "
-                    f'"{escaped_value}" error("CDF parameter readback mismatch: {label}"))',
+                    'values = cons(list('
+                    f'"{escaped_instance}" "{escaped_name}" p~>value '
+                    'if(p~>parseAsNumber == t t nil)) values)',
                 ]
             )
 
     skill = " ".join(
         [
-            "let((cv inst iCDF p)",
+            "let((cv inst iCDF p values)",
             "cv = dbOpenCellViewByType("
             f'"{escape_skill_string(library)}" "{escape_skill_string(cell)}" '
             '"schematic" "schematic" "r")',
             'unless(cv error("target schematic not found during parameter verification"))',
             *checks,
-            "t)",
+            "reverse(values))",
         ]
     )
     result = client.execute_skill(skill, timeout=60)
@@ -1873,12 +1878,38 @@ def _verify_instance_parameter_values(
         if "CDF parameter readback mismatch:" in str(errors[0]):
             raise ParameterReadbackMismatch(message)
         raise RuntimeError(message)
-    output = str(getattr(result, "output", "")).strip().strip('"').lower()
-    if output != "t":
-        raise RuntimeError(f"unexpected targeted CDF readback result: {output!r}")
-    return {
-        instance: dict(parameters) for instance, parameters in expected.items()
-    }
+    output = str(getattr(result, "output", "")).strip()
+    if not is_single_complete_skill_list(output):
+        raise RuntimeError("targeted CDF readback is not one complete list")
+    rows = parse_sexpr(output)
+    if not isinstance(rows, list):
+        raise RuntimeError("targeted CDF readback is not a list")
+    confirmed: dict[str, dict[str, str]] = {}
+    for row in rows:
+        if not isinstance(row, list) or len(row) != 4:
+            raise RuntimeError("malformed targeted CDF readback row")
+        instance, name, actual, numeric = row
+        if (
+            not isinstance(instance, str) or not isinstance(name, str)
+            or instance not in expected or name not in expected[instance]
+            or name in confirmed.get(instance, {})
+        ):
+            raise RuntimeError("unexpected or duplicate targeted CDF readback key")
+        value = expected[instance][name]
+        if not isinstance(actual, str) or not (
+            actual == value
+            or (numeric is True and spectre_numeric_literals_equal(actual, value))
+        ):
+            raise ParameterReadbackMismatch(
+                f"CDF parameter readback mismatch: {instance}.{name}: "
+                f"requested={value!r}, readback={actual!r}"
+            )
+        confirmed.setdefault(instance, {})[name] = actual
+    if {i: set(p) for i, p in confirmed.items()} != {
+        i: set(p) for i, p in expected.items()
+    }:
+        raise RuntimeError("targeted CDF readback omitted requested parameters")
+    return confirmed
 
 
 def _resolved_parameters(
@@ -13319,6 +13350,7 @@ def _generate_oa_netlist(
         local_spectre_netlist.write_text(
             spectre_netlist_text,
             encoding="utf-8",
+            newline="\n",
         )
         spectre_netlist_path = f"{run_dir}/vda_oa_netlist.scs"
         _upload_file(
@@ -13328,7 +13360,7 @@ def _generate_oa_netlist(
             timeout=min(timeout, 60),
         )
         spectre_netlist_sha256 = hashlib.sha256(
-            spectre_netlist_text.encode("utf-8")
+            local_spectre_netlist.read_bytes()
         ).hexdigest()
         spectre_netlist_transform = "prepend_simulator_lang_spectre"
     return {

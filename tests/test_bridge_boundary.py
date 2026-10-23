@@ -7567,13 +7567,21 @@ def test_targeted_cdf_verification_does_not_use_reader_length_or_empty_filters(
         '"', '\\"'
     )
     monkeypatch.setitem(sys.modules, "virtuoso_bridge.virtuoso.ops", ops_module)
+    skill_output = ModuleType("virtuoso_bridge.virtuoso.skill_output")
+    skill_output.is_single_complete_skill_list = lambda output: output == "(rows)"
+    skill_output.parse_sexpr = lambda output: [
+        [instance, name, value, False]
+        for instance, parameters in expected.items()
+        for name, value in parameters.items()
+    ]
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.virtuoso.skill_output", skill_output)
     captured = {}
 
     class Client:
         def execute_skill(self, skill, timeout):
             captured["skill"] = skill
             captured["timeout"] = timeout
-            return SimpleNamespace(output="t", errors=[])
+            return SimpleNamespace(output="(rows)", errors=[])
 
     long_value = "x" * 256
     expected = {
@@ -7590,9 +7598,65 @@ def test_targeted_cdf_verification_does_not_use_reader_length_or_empty_filters(
 
     assert confirmed == expected
     assert captured["timeout"] == 60
-    assert 'p~>value == ""' in captured["skill"]
-    assert long_value in captured["skill"]
+    assert 'p~>value if(p~>parseAsNumber == t t nil)' in captured["skill"]
+    assert long_value not in captured["skill"]  # Actual values are read, not echoed.
     assert 'p = get(iCDF "display-mode")' in captured["skill"]
+
+
+@pytest.mark.parametrize(
+    "expected,actual,numeric,accepted",
+    [
+        ("475n", "475.00n", True, True),
+        ("22k", "2.2e4", True, True),
+        ("475n", "480n", True, False),
+        ("1", "01", False, False),
+        ("475n", "475.00n", False, False),
+        ("1n", "1n*1", True, False),
+        ("1m", "1M", True, False),
+        ("BIAS", '"BIAS"', True, False),
+        ("475n", '"475n"', True, False),
+        ("1e999", "1e1000", True, False),
+    ],
+)
+def test_targeted_cdf_numeric_formatting_requires_numeric_cdf_and_equal_value(
+    monkeypatch, expected, actual, numeric, accepted,
+) -> None:
+    ops = ModuleType("virtuoso_bridge.virtuoso.ops")
+    ops.escape_skill_string = lambda value: value
+    parser = ModuleType("virtuoso_bridge.virtuoso.skill_output")
+    parser.is_single_complete_skill_list = lambda output: output == "(rows)"
+    parser.parse_sexpr = lambda output: [["MN0", "Wfg", actual, numeric]]
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.virtuoso.ops", ops)
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.virtuoso.skill_output", parser)
+    client = SimpleNamespace(execute_skill=lambda *_args, **_kwargs:
+                             SimpleNamespace(output="(rows)", errors=[]))
+    if accepted:
+        assert _verify_instance_parameter_values(
+            client, "vda_test", "vda_existing", {"MN0": {"Wfg": expected}}
+        ) == {"MN0": {"Wfg": actual}}  # Preserve the actual callback formatting.
+    else:
+        with pytest.raises(ParameterReadbackMismatch, match="MN0.Wfg"):
+            _verify_instance_parameter_values(
+                client, "vda_test", "vda_existing", {"MN0": {"Wfg": expected}}
+            )
+
+
+@pytest.mark.parametrize("rows", [[], [["MN0", "Wfg", "475n", True]] * 2,
+                                  [["OTHER", "Wfg", "475n", True]]])
+def test_targeted_cdf_readback_rejects_missing_duplicate_or_extra_keys(monkeypatch, rows):
+    ops = ModuleType("virtuoso_bridge.virtuoso.ops")
+    ops.escape_skill_string = lambda value: value
+    parser = ModuleType("virtuoso_bridge.virtuoso.skill_output")
+    parser.is_single_complete_skill_list = lambda output: True
+    parser.parse_sexpr = lambda output: rows
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.virtuoso.ops", ops)
+    monkeypatch.setitem(sys.modules, "virtuoso_bridge.virtuoso.skill_output", parser)
+    client = SimpleNamespace(execute_skill=lambda *_args, **_kwargs:
+                             SimpleNamespace(output="(rows)", errors=[]))
+    with pytest.raises(RuntimeError, match="omitted|duplicate"):
+        _verify_instance_parameter_values(
+            client, "vda_test", "vda_existing", {"MN0": {"Wfg": "475n"}}
+        )
 
 
 def test_empty_netlist_and_empty_waveform_are_rejected(tmp_path) -> None:

@@ -18,6 +18,12 @@ Maestro 是保存 ADE setup 的 view 类型；Explorer/Assembler 是相关使用
 
 远端执行沿用现有任务授权、`--execute`、计划 token、library 白名单、cell 前缀和写入/计算权限。不把历史实验的授权、会话号、DISPLAY 或 scratch 路径当成本次默认值。默认不覆盖已有 cellview、state 或人工修改。超时后先读回实际状态，不盲目重放写入。
 
+本任务独占的临时会话收尾也要先核对身份、计算完成、lane idle 和未保存 cellview。
+`Save Display Information` 可以是显示资源而非 OA/ADE 的保存提示：2026-10-23 的隔离
+会话退出中，原生截图明确说明 Cancel 为继续且不保存 display.drf，审阅后只对该
+确切 PID/window 操作并核对退出；没有写显示文件。不能只凭标题自动 Cancel、重发
+exit 或批量杀进程，其他会话/未知保存提示仍须保留。见[收尾记录](validation/2026-10-23-p1b-joint-input-live.md)。
+
 ## 2. 原理图：画面、连接与仿真输入分别确认
 
 按参考图片新建时使用[图片复现工作流](schematic-image-reproduction.md)：先审阅电气/图面/疑点

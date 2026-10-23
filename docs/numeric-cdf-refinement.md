@@ -84,8 +84,10 @@
   同一候选的联动更新不是跨实例 OA 写入的底层原子事务，部分失败仍按原恢复规则对账。
 
 沿用下面的 op-relinearize / design-next / op-relinearization-validate 入口，没有新增操作
-或 solver。已完成本地模型→候选→安全任务→审计回归，尚未做真实联动写入/网表验收；
-见[本地验收](validation/2026-10-23-p1b-linked-cdf-local.md)。
+或 solver。已完成本地模型→候选→安全任务→审计回归，见
+[本地验收](validation/2026-10-23-p1b-linked-cdf-local.md)。另有一次既有 N28 电路的
+两尺寸＋wrapper 偏置/负载原子候选真实执行；它不是校准模型→linked_parameters
+编译→真实执行的全路径证明，见[真实范围](validation/2026-10-23-p1b-joint-input-live.md)。
 
 ## 偏置、负载与尺寸联合微调
 
@@ -277,9 +279,16 @@ Bridge 会把 wrapper 再传到自己的 UUID 子目录。已有有界 Spectre l
 SSH 往返，不复制或修改 Bridge 的 runner/传输实现，产物只在原批准 scratch 内。
 
 本地真实 shell＋替身程序已覆盖匹配、上传后变化、依赖漂移、错 raw 路径和回执冲突；
-旧 STB 原始输入束也已离线核对。但新 launcher/回执还没有真实 Bridge/Spectre 验收，
-旧作业没有该回执，不能事后补造。下一次实际 generic 任务可合并验收，不为这条机制
-另造电路或追加性能分析。详见[本轮完整记录](validation/2026-10-23-p1b-refinement-completion-local.md)。
+旧 STB 原始输入束也已离线核对。随后既有 N28 PMOS-loaded CS 的3个 DC＋AC 作业均
+通过新 launcher 的实际输入回执；旧作业仍不能事后补造回执。实机暴露的转换后 OA
+include 也已固定 LF，并按上传文件实际字节计算哈希，不只固定 wrapper。见
+[本地记录](validation/2026-10-23-p1b-refinement-completion-local.md)和
+[真实验收](validation/2026-10-23-p1b-joint-input-live.md)。
+
+数值型 CDF 的 callback 可能把475n显示为475.00n。targeted verifier 现独立读取实际
+值及 parseAsNumber，仅数值型、有限普通标量接受工程字面量等值；实际格式保留在
+confirmed/readback，不伪造请求回显。表达式/标识符/普通字符串仍须严格匹配，请求
+echo 和 checkpoint 状态比较也不放宽。此规则不替代真实 PDK 合法范围、网格或 si binding。
 
 ## 先解释，再拟合；模型不足就停
 
@@ -372,7 +381,9 @@ no_predicted_improvement，不生成下一轮任务；有改善仍须经过上�
 
 ## 尚未闭合
 
-新 CDF/源/负载数值建议的真实执行、callback 后实际值/si 一致性、新点性能和新模块
-泛化仍未验证；仅完成本地编译/防误归因，以及旧保存记录复算。更多隐含单位、表达式、
-尚未覆盖的 testbench 量和未知物理语义按需接入，不新增优化框架或为此造电路。
+已有一份普通原子候选的双 Wfg＋wrapper DC/CL 真实执行、callback/si/实际输入一致性
+与精确原值恢复通过；不是联合模型建议有效性或完整 linked_names 泛化。该 A/B/A
+只有一个新联合方向，不能消除 PMOS 历史点缺独立训练/留出的事实，没有据此拟合。
+新模块泛化、更多隐含单位/表达式/testbench量与未知物理语义仍按真实需求接入，
+不新增优化框架或为补模型而立即造电路/追加计算。
 详见[本地验证记录](validation/2026-10-23-p1b-numeric-cdf-local.md)。

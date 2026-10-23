@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -50,3 +51,16 @@ def spectre_values_equal(left: Any, right: Any) -> bool:
         return False
     tolerance = max(abs(left_value), abs(right_value), 1e-30) * 1e-9
     return abs(left_value - right_value) <= tolerance
+
+
+def spectre_numeric_literals_equal(left: Any, right: Any) -> bool:
+    """Compare only finite plain scalar literals, not identifiers or expressions."""
+    if any(_SPECTRE_SCALAR.fullmatch(str(value).strip()) is None
+           for value in (left, right)):
+        return False
+    left_value, right_value = spectre_scalar(left), spectre_scalar(right)
+    return (
+        left_value is not None and right_value is not None
+        and math.isfinite(left_value) and math.isfinite(right_value)
+        and spectre_values_equal(left, right)
+    )

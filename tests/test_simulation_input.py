@@ -120,3 +120,46 @@ def test_guard_rejects_escaping_dependency_and_missing_receipt(tmp_path):
         input_guard_body("/data/xum/job", contract)
     with pytest.raises(OSError):
         verify_input_receipt(tmp_path, "/data/xum/job", contract)
+
+
+def test_generated_oa_include_upload_bytes_match_the_guard_hash_with_windows_newlines(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from virtuoso_design_agent.adapters import bridge_worker as worker
+    from virtuoso_design_agent.profiles import load_pdk_profile
+    spec, _ = wrapper()
+    success = SimpleNamespace(ok=True, errors=[])
+    uploaded = {}
+    original_write = Path.write_text
+
+    def windows_text_write(path, data, *args, **kwargs):
+        kwargs.setdefault("newline", "\r\n")
+        return original_write(path, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", windows_text_write)
+    monkeypatch.setattr(worker, "_parse_existing_schematic_netlist", lambda *args, **kwargs: {})
+
+    class Client:
+        ssh_runner = SimpleNamespace(run_command=lambda *args, **kwargs: SimpleNamespace(returncode=0, stderr=""))
+
+        def execute_skill(self, *args, **kwargs):
+            return success
+
+        def upload_file(self, local, remote, **kwargs):
+            uploaded[str(remote)] = Path(local).read_bytes()
+            return success
+
+        def download_file(self, remote, local, **kwargs):
+            text = ('simLibName="fixture"\n' if str(remote).endswith("si.env") else
+                    "End netlisting\n" if str(remote).endswith("si_batch_stdout.log") else
+                    "// retained native si fixture\n")
+            Path(local).write_bytes(text.encode())
+            return success
+
+    result = worker._generate_oa_netlist(Client(), {"circuit": "existing_schematic",
+        "target": {"library": "vb_pdk_smoke", "cell": "vda_fixture", "view": "schematic"},
+        "profile": load_pdk_profile("nics4304_tsmc28").model_dump(mode="json"),
+        "generic_simulation": spec.model_dump(mode="json")}, tmp_path, timeout=60, schematic={})
+    actual = uploaded[result["spectre_netlist_path"]]
+    assert b"\r\n" not in actual and actual.startswith(b"simulator lang=spectre\n")
+    assert hashlib.sha256(actual).hexdigest() == result["spectre_netlist_sha256"]
+    assert actual == (tmp_path / "oa_netlist_spectre.scs").read_bytes()

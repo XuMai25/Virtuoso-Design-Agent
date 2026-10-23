@@ -48,7 +48,9 @@ from .parameter_binding import (
     validate_parameter_binding_eda_stage,
 )
 from .safety import authorize_execution
-from .spectre_values import spectre_scalar, spectre_values_equal
+from .spectre_values import (
+    spectre_numeric_literals_equal, spectre_scalar, spectre_values_equal,
+)
 from .topology_delta import (
     audit_derived_topology_delta,
     snapshot_from_inspection,
@@ -2405,6 +2407,8 @@ class TaskExecutor:
     def _assert_explicit_parameter_confirmation(
         requested: dict[str, dict[str, str]],
         confirmed: dict[str, dict[str, str]],
+        *,
+        numeric_cdf_readback: bool = False,
     ) -> None:
         for instance, parameters in requested.items():
             if instance not in confirmed:
@@ -2412,7 +2416,11 @@ class TaskExecutor:
                     f"parameter confirmation is missing instance {instance}"
                 )
             for name, value in parameters.items():
-                if confirmed[instance].get(name) != value:
+                actual = confirmed[instance].get(name)
+                if actual != value and not (
+                    numeric_cdf_readback and actual is not None
+                    and spectre_numeric_literals_equal(actual, value)
+                ):
                     raise RuntimeError(
                         "parameter confirmation mismatch for "
                         f"{instance}.{name}: requested={value!r}, "
@@ -2513,7 +2521,9 @@ class TaskExecutor:
         confirmed = cls._confirmed_instance_parameters(
             result.data, "confirmed_instance_parameters"
         )
-        cls._assert_explicit_parameter_confirmation(applied, confirmed)
+        cls._assert_explicit_parameter_confirmation(
+            applied, confirmed, numeric_cdf_readback=True
+        )
         return confirmed
 
     @staticmethod
@@ -6243,7 +6253,7 @@ class TaskExecutor:
                         applied.data, "confirmed_instance_parameters"
                     )
                     self._assert_explicit_parameter_confirmation(
-                        expected, confirmed
+                        expected, confirmed, numeric_cdf_readback=True
                     )
 
                     def inspect_confirmed_parameters() -> AdapterResult:
@@ -6252,7 +6262,7 @@ class TaskExecutor:
                             result.data, "confirmed_instance_parameters"
                         )
                         self._assert_explicit_parameter_confirmation(
-                            expected, final
+                            expected, final, numeric_cdf_readback=True
                         )
                         return result
 

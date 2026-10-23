@@ -2478,6 +2478,27 @@ def test_explicit_parameter_apply_fails_on_untrusted_adapter_confirmation() -> N
     assert any("confirmation mismatch" in note for note in record.notes)
 
 
+def test_numeric_cdf_confirmation_keeps_actual_value_and_strict_request_echo() -> None:
+    requested = {"MN0": {"Wfg": "475n"}}
+    actual = {"MN0": {"Wfg": "475.00n"}}
+    TaskExecutor._assert_explicit_parameter_confirmation(
+        requested, actual, numeric_cdf_readback=True
+    )
+    with pytest.raises(RuntimeError, match="confirmation mismatch"):
+        TaskExecutor._assert_explicit_parameter_confirmation(requested, actual)
+    with pytest.raises(RuntimeError, match="confirmation mismatch"):
+        TaskExecutor._assert_explicit_parameter_confirmation(
+            requested, {"MN0": {"Wfg": "480n"}}, numeric_cdf_readback=True
+        )
+    with pytest.raises(RuntimeError, match="confirmation mismatch"):
+        TaskExecutor._assert_explicit_parameter_confirmation(
+            {"MN0": {"Wfg": "BIAS"}}, {"MN0": {"Wfg": '"BIAS"'}},
+            numeric_cdf_readback=True,
+        )
+    # Checkpoint state comparisons remain exact, rather than hiding external edits.
+    assert not TaskExecutor._same_instance_parameters(requested, actual)
+
+
 def test_semantic_and_explicit_instance_parameters_are_both_applied() -> None:
     task = _explicit_parameter_apply().model_copy(
         update={"parameters": {"device_width_um": 0.5}}

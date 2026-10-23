@@ -132,10 +132,15 @@ policy 只支持一个已知旧序列化形状的精确哈希恢复，不改旧 
 审查（端子、DC/AC、源/负载和 OA include，不展开 PDK）。Bridge 公共 runner 最终
 上传后，原 timeout launcher 在 exec Spectre 前核对 wrapper/OA include SHA，并在
 同 raw 目录非覆盖记录 manifest；下载后核对回执。复用原上传、SSH、timeout、raw
-下载和 cleanup，不增加往返或第三方补丁。wrapper 固定 LF 字节避免 Windows 换行
-使实际文件与声明哈希不同。新 guard 的本地程序测试和旧真实文件重放已通过，但
-真实 Bridge/Spectre 新回执仍未验收；这是实施/证据边界，不宣称性能闭环。详见
-[本轮验证](validation/2026-10-23-p1b-refinement-completion-local.md)。
+下载和 cleanup，不增加往返或第三方补丁。wrapper 与转换后的 OA include 均固定
+LF，并从实际上传文件字节计算 SHA；后者是在真实 guard 先拒绝 CRLF 差异后修复的。
+新回执现已在既有 N28 PMOS-loaded CS 的批准 A/B/A 中通过：3次 si、3个 DC＋AC，
+两个 Wfg 与 wrapper 偏置/负载联合生效，最终原值、图面和初始数值结果恢复。
+targeted CDF verifier 保留实际返回值；仅 parseAsNumber=t 的有限普通标量允许工程
+格式等值，字符串/表达式、请求 echo 与 checkpoint 状态不静默归一化。
+这不证明联合响应模型已校准或完整规格闭环；A 复用首次 si 的恢复路径与 B/C 普通
+worker 路径分开记录。见[本地接线](validation/2026-10-23-p1b-refinement-completion-local.md)
+和[真实验收](validation/2026-10-23-p1b-joint-input-live.md)。
 
 ## 为什么使用独立 worker
 
