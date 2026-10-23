@@ -43,6 +43,48 @@
 中的 master/端子/parameter binding、权限及 callback 规则；这些检查不被绕过。
 原 parameters.apply 和其他原始 CDF/Bridge 能力不受此数值模型的格式/单位限制。
 
+## 一个变量联动多个等值字段
+
+通用 existing_schematic 的匹配输入对/镜像支路不能依赖某个固定模板代替联动：若两只
+器件的宽度始终一起变化，把它们声明为两个独立模型变量会使扰动矩阵不满秩；只声明
+一只又会正确触发“未建模的另一只字段发生变化”。可在原 instance_parameter 下显式加
+`linked_parameters`，以**一个自由度**生成多个普通 CDF updates。例如这个本地语法片段：
+
+```json
+{
+  "name": "matched_width_um",
+  "minimum": 0.8,
+  "maximum": 1.3,
+  "proposal_step": 0.05,
+  "quantization_grid": 0.005,
+  "instance_parameter": {
+    "instance": "MN0", "parameter": "w", "unit": "um",
+    "literal_format": "spectre_si",
+    "meaning": "本地示例中的两个等值宽度字段；不代表真实 PDK、匹配质量或推荐尺寸。",
+    "linked_parameters": [{"instance": "MN1", "parameter": "w"}]
+  }
+}
+```
+
+这是 policy.parameters 的一个条目，不是完整可执行任务。实例、字段、单位/含义、
+范围及权限必须按当前真实设计确认；例中的 w 不自动替代其他 PDK 的 Wfg 或总宽含义。
+
+- 主字段和所有 linked 字段共同使用明确声明的 unit、literal_format、范围、网格和含义。
+  训练/留出各点必须完整出现且 SI 数值相等（只容许1e-12级相对表示误差）；不同字面量
+  如1.1u与1.1e-6可等值。成员缺失、不等值、表达式或其他未建模字段漂移均拒绝。
+- 锚点分别保留每个成员的原字符串；新点逐成员输出相同数值，每个字段的原权限、
+  binding、CDF callback、OA/si 回读与 checkpoint 规则照常适用。不得漏掉某一成员。
+  一个字段不能重复出现或被两个模型变量控制；所有成员都必须可在声明范围内搜索。
+- 摘要显示 MN0.w = MN1.w，并列出各成员的修改；post-run audit 仍逐字段对账，不能
+  用主器件值代替其他器件回读。单字段旧 policy 不增加空 linked 字段，哈希保持兼容。
+- 这是声明的等值关系，不是自动识别器件匹配、任意比例/表达式约束或全局1:1规则，
+  尤其不把 NMOS/PMOS 默认绑成相同宽度。不要把 callback 派生字段当独立可写成员。
+  同一候选的联动更新不是跨实例 OA 写入的底层原子事务，部分失败仍按原恢复规则对账。
+
+沿用下面的 op-relinearize / design-next / op-relinearization-validate 入口，没有新增操作
+或 solver。已完成本地模型→候选→安全任务→审计回归，尚未做真实联动写入/网表验收；
+见[本地验收](validation/2026-10-23-p1b-linked-cdf-local.md)。
+
 ## 先解释，再拟合；模型不足就停
 
 先用已有器件表、实际连接和 OP/MNA 解释偏置、gm/gds、负载和摆幅瓶颈。已有

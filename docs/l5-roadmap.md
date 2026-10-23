@@ -161,6 +161,10 @@ L5B 可以先在 schematic 范围成立。是否声明物理实现质量，仍�
 保留固定源/负载 override，拒绝结果条件错配；复用原 compiler/audit 和旧记录，本地验收
 不增加电路或远端 Gate，也不提升 L5B 的质量声明。后续顺序不因此扩大。
 
+同日 P1-b 继续补齐[显式等值 CDF 联动](validation/2026-10-23-p1b-linked-cdf-local.md)：
+多个受控字段共用一个已有模型变量，避免把匹配支路误列为独立自由度；本地展开为原
+候选并审计，保留旧记录与单字段兼容。未知比例、偏置/负载联合模型及真实写入仍按需。
+
 成本观测贯穿 P1/P2，而不是另建监控工程：现有 design-review 有 run/action 时长，
 design-iterate 可用 action-time 预算；`agent_thinking_seconds` 当前明确为 None。
 可靠的 agent/工具调用总数、上下文/模型开销、人工操作/返工和端到端交付时长仍不完整。

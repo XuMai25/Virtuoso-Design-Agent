@@ -87,6 +87,11 @@ P1-b 首个本地切片直接扩展 `op_relinearization.py`：可选
 候选及最终选择的源/负载 override。未使用 override 的旧模型不增加空字段。此检查绑定
 声明/保存记录，不独立证明实际 Spectre input 已应用；不新增 executor 或 Bridge API。
 
+同一 NumericInstanceParameterBinding 可显式追加 linked_parameters：完整等值字段组
+只占原模型的一个数值自由度，固定输入检查剔除整组、编译展开全部成员；源记录缺字段/
+不等值或成员权限不足则拒绝。锚点逐成员保留字符串，原 post-run audit 逐字段对账。
+不增加矩阵求解器、匹配识别器或任意比例关系，不改变原 OA 写入/恢复与授权规则。
+
 ## 为什么使用独立 worker
 
 `virtuoso-bridge-lite` 已有自己的 Python 虚拟环境和本机配置。主程序通过该环境中的 Python 启动 JSON worker，而不是把 Bridge 源码复制进来或强制安装成本项目依赖。这样可以保持 Bridge 独立升级、避免依赖漂移，并把跨环境协议缩小到版本化 JSON action。

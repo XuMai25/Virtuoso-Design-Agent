@@ -55,19 +55,36 @@ _NUMERIC_UNITS = {
 }
 
 
-class NumericInstanceParameterBinding(_FiniteStrictModel):
-    """Explicit literal CDF meaning; never inferred from a PDK field name."""
-
+class NumericInstanceParameterTarget(_FiniteStrictModel):
     instance: StrictStr = Field(pattern=INSTANCE_PATH_PATTERN)
     parameter: StrictStr = Field(min_length=1, max_length=128)
+
+
+class NumericInstanceParameterBinding(NumericInstanceParameterTarget):
+    """Explicit literal CDF meaning; optional equal-value fields share one axis."""
+
     unit: Literal["m", "um", "nm", "ohm", "kohm", "F", "pF", "fF", "V", "mV", "A", "uA", "1"]
     literal_format: Literal["spectre_si"]
     meaning: StrictStr = Field(min_length=1, max_length=2000)
+    linked_parameters: list[NumericInstanceParameterTarget] = Field(default_factory=list, max_length=31)
+
+    def targets(self) -> list[tuple[str, str]]:
+        return [(self.instance, self.parameter),
+                *((item.instance, item.parameter) for item in self.linked_parameters)]
+
+    @model_serializer(mode="wrap")
+    def serialize_optional_links(self, handler):
+        raw = handler(self)
+        if not self.linked_parameters:
+            raw.pop("linked_parameters", None)
+        return raw
 
     @model_validator(mode="after")
     def require_meaning(self) -> "NumericInstanceParameterBinding":
         if not self.meaning.strip():
             raise ValueError("numeric CDF meaning cannot be blank")
+        if len(self.targets()) != len(set(self.targets())):
+            raise ValueError("linked CDF targets must be unique, including the primary field")
         return self
 
 
@@ -149,8 +166,8 @@ class OperatingPointRelinearizationPolicy(_FiniteStrictModel):
         parameter_names = [item.name for item in self.parameters]
         if len(parameter_names) != len(set(parameter_names)):
             raise ValueError("relinearization parameters must be unique")
-        raw_targets = [(p.instance_parameter.instance, p.instance_parameter.parameter)
-                       for p in self.parameters if p.instance_parameter is not None]
+        raw_targets = [target for p in self.parameters if p.instance_parameter is not None
+                       for target in p.instance_parameter.targets()]
         if len(raw_targets) != len(set(raw_targets)):
             raise ValueError("numeric CDF bindings must not alias the same instance parameter")
         metric_names = [item.metric for item in self.metrics]
@@ -380,15 +397,28 @@ def _validate_source_candidate(
         _parameter_value(candidate, parameter)
 
 
-def _parameter_value(candidate: CandidateEvaluation, parameter: RelinearizationParameter) -> float:
-    binding = parameter.instance_parameter
-    if binding is None:
-        value = candidate.parameters.get(parameter.name)
-    else:
-        literal = candidate.instance_parameters.get(binding.instance, {}).get(binding.parameter)
+def _binding_value(fields: dict[str, dict[str, str]], binding: NumericInstanceParameterBinding,
+                   label: str, parameter_name: str) -> float:
+    values = []
+    for instance, parameter in binding.targets():
+        literal = fields.get(instance, {}).get(parameter)
         value = spectre_scalar(literal) if literal is not None else None
         if value is not None:
             value /= _NUMERIC_UNITS[binding.unit][0]
+        if value is None or not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{label} lacks positive literal parameter {parameter_name} ({instance}.{parameter})")
+        values.append(value)
+    if any(not math.isclose(value, values[0], rel_tol=1e-12, abs_tol=0.0) for value in values[1:]):
+        raise ValueError(f"{label} linked CDF fields for {parameter_name} must have equal numeric values")
+    return values[0]
+
+
+def _parameter_value(candidate: CandidateEvaluation, parameter: RelinearizationParameter) -> float:
+    binding = parameter.instance_parameter
+    if binding is not None:
+        return _binding_value(candidate.instance_parameters, binding,
+                              f"source candidate {candidate.index}", parameter.name)
+    value = candidate.parameters.get(parameter.name)
     if value is None or not math.isfinite(value) or value <= 0.0:
         raise ValueError(f"source candidate {candidate.index} lacks positive literal parameter {parameter.name}")
     return value
@@ -426,10 +456,10 @@ def _constant_inputs(
         values = {name: dict(fields) for name, fields in candidate.instance_parameters.items()}
         for p in parameters:
             if p.instance_parameter is not None:
-                name = p.instance_parameter.instance
-                values.get(name, {}).pop(p.instance_parameter.parameter, None)
-                if name in values and not values[name]:
-                    values.pop(name)
+                for name, parameter in p.instance_parameter.targets():
+                    values.get(name, {}).pop(parameter, None)
+                    if name in values and not values[name]:
+                        values.pop(name)
         return values
 
     instance_parameters = fixed_raw(candidates[0])
@@ -556,13 +586,14 @@ def _atomic_proposal(proposal: RelinearizedProposal, parameters: list[Relineariz
         if binding is None:
             semantic[p.name] = value
             continue
-        literal = f"{value:.12g}{_NUMERIC_UNITS[binding.unit][1]}"
-        if math.isclose(value, _parameter_value(anchor, p), rel_tol=1e-12, abs_tol=0.0):
-            literal = anchor.instance_parameters[binding.instance][binding.parameter]
-        decoded = spectre_scalar(literal)
-        if decoded is None or not math.isclose(decoded / _NUMERIC_UNITS[binding.unit][0], value, rel_tol=1e-12, abs_tol=0.0):
-            raise ValueError(f"numeric CDF serialization loses precision for {p.name}")
-        instances.setdefault(binding.instance, {})[binding.parameter] = literal
+        is_anchor = math.isclose(value, _parameter_value(anchor, p), rel_tol=1e-12, abs_tol=0.0)
+        for instance, parameter in binding.targets():
+            literal = (anchor.instance_parameters[instance][parameter] if is_anchor else
+                       f"{value:.12g}{_NUMERIC_UNITS[binding.unit][1]}")
+            decoded = spectre_scalar(literal)
+            if decoded is None or not math.isclose(decoded / _NUMERIC_UNITS[binding.unit][0], value, rel_tol=1e-12, abs_tol=0.0):
+                raise ValueError(f"numeric CDF serialization loses precision for {p.name}")
+            instances.setdefault(instance, {})[parameter] = literal
     return AtomicCandidate(id=f"op-local-{index:03d}", parameters=semantic,
                            instance_parameter_updates=[InstanceParameterUpdate(instance=name, parameters=fields)
                                                        for name, fields in instances.items()],
@@ -895,6 +926,15 @@ def _validate_fixed_testbench(result: OperatingPointRelinearizationResult) -> No
         raise ValueError("relinearization candidates do not retain the fixed testbench overrides")
 
 
+def _validate_linked_parameters(result: OperatingPointRelinearizationResult) -> None:
+    assert result.candidate_set is not None
+    for candidate in result.candidate_set.candidates:
+        for name, binding in result.parameter_bindings.items():
+            if binding.linked_parameters:
+                _binding_value(candidate.instance_parameters(), binding,
+                               f"atomic candidate {candidate.id}", name)
+
+
 def _load_bound_validation_policy(
     result: OperatingPointRelinearizationResult,
     policy_path: Path | None,
@@ -967,6 +1007,7 @@ def validate_relinearization_run(
     if task.candidate_set is None:
         raise ValueError("run validation task has no atomic candidate set")
     _validate_fixed_testbench(result)
+    _validate_linked_parameters(result)
     task_source = task.candidate_set.source
     result_source = result.candidate_set.source
     if task_source.bindings.get("relinearization_result_sha256") != result_sha256:
@@ -1234,6 +1275,7 @@ def build_task_from_relinearization(
     ):
         raise ValueError("only a passed relinearization result can create a task")
     _validate_fixed_testbench(result)
+    _validate_linked_parameters(result)
     raw = json.loads(task_template_path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("relinearization task template must contain one JSON object")
@@ -1294,6 +1336,7 @@ def build_task_from_relinearization(
 __all__ = [
     "LocalMetricModel",
     "NumericInstanceParameterBinding",
+    "NumericInstanceParameterTarget",
     "OperatingPointRelinearizationPolicy",
     "OperatingPointRelinearizationResult",
     "OperatingPointRelinearizationRunValidation",

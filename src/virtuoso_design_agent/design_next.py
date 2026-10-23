@@ -220,7 +220,9 @@ def render_design_next(report: dict) -> str:
             lines.extend(["## 显式 CDF 数值映射", "",
                           "字段单位/含义为声明，不是新的 PDK 回读；只接受显式 Spectre SI 字面量。", ""])
             for name, binding in report["model"]["parameter_bindings"].items():
-                lines.append(f"- {name} → {binding['instance']}.{binding['parameter']}；"
+                targets = [binding, *binding.get("linked_parameters", [])]
+                fields = " = ".join(f"{item['instance']}.{item['parameter']}" for item in targets)
+                lines.append(f"- {name} → {fields}；"
                              f"模型单位 {binding['unit']}；{binding['meaning']}")
         if report["model"].get("objective_improvement"):
             improvement = report["model"]["objective_improvement"]

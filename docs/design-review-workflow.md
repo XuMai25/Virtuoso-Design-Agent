@@ -82,6 +82,10 @@ Spectre SI 字面量格式、模型单位、含义和范围，复用同一拟合
 丢失这些条件，应从原 run/policy 本地重算到新文件并重新编译/plan，不补改旧 token 或
 checkpoint。此一致性是记录层检查，不替代实际 simulator input、OA 或新点性能验收。
 
+需要联动的等值 CDF 字段可通过 instance_parameter.linked_parameters 共用一个模型
+变量；摘要展示整组关系及逐字段前后值。它不是自动匹配或比例推断，实际 OA/CDF/si
+仍分别验收。使用与边界见[数值微调说明](numeric-cdf-refinement.md)。
+
 ## 3. 窗口优先复用，任务完成后收拢
 
 运行前记录真实窗口/session 身份、target、PDK、归属、任务状态、dirty/running 状态及是否
