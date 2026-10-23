@@ -1,5 +1,9 @@
 # Existing-schematic 自动接入工作流
 
+已有 draft+resolution 或编译后的普通 task 时，可用本地
+[`design-intake`](design-intake-workflow.md) 绑定测量、理由和可选历史，输出一份决策摘要及
+零远端权限草案。它复用下述接入校验，不替代首次 inspect、意图确认或 binding discovery。
+
 ## 目标
 
 `vda onboarding-draft` 把已经完成的只读 `schematic.inspect` 任务与 run record 编译为一份

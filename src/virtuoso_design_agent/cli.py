@@ -38,6 +38,7 @@ from .execution_scope import compile_execution_scope
 from .design_review import build_design_review, read_json, render_design_review
 from .design_next import suggest_design_next, render_design_next
 from .design_iteration import build_design_iteration, render_design_iteration
+from .design_intake import build_design_intake, render_design_intake
 from .measurements import compile_measurement_task
 from .stability_evidence import audit_stability_artifacts, render_stability_audit
 from .window_lifecycle import EdaWindowInventory, plan_window_lifecycle
@@ -273,6 +274,17 @@ def _cmd_measurement_compile(args: argparse.Namespace) -> int:
     _write_review_outputs([(args.output, payload),
                           (args.task_output, draft.model_dump_json(indent=2, exclude_none=True) + "\n" if draft else "")])
     print(payload)
+    return 0
+
+
+def _cmd_design_intake(args: argparse.Namespace) -> int:
+    report, draft = build_design_intake(args.request)
+    if args.task_output and draft is None:
+        raise ValueError("no complete intake task; omit --task-output to retain unresolved decisions")
+    payload = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    _write_review_outputs([(args.output, payload), (args.markdown, render_design_intake(report)),
+                          (args.task_output, draft.model_dump_json(indent=2, exclude_none=True) + "\n" if draft else "")])
+    print(payload if args.json else render_design_intake(report))
     return 0
 
 
@@ -1505,6 +1517,13 @@ def build_parser() -> argparse.ArgumentParser:
     measurement.add_argument("--output", type=Path)
     measurement.add_argument("--task-output", type=Path)
     measurement.set_defaults(handler=_cmd_measurement_compile)
+    intake = subparsers.add_parser("design-intake", help="assemble existing intent, measurements and history locally; never executes")
+    intake.add_argument("request", type=Path)
+    intake.add_argument("--output", type=Path)
+    intake.add_argument("--markdown", type=Path)
+    intake.add_argument("--task-output", type=Path)
+    intake.add_argument("--json", action="store_true")
+    intake.set_defaults(handler=_cmd_design_intake)
     iterate = subparsers.add_parser("design-iterate", help="replay bound rounds and generate a guarded next-task draft; never executes")
     iterate.add_argument("request", type=Path)
     iterate.add_argument("--task-template", type=Path)

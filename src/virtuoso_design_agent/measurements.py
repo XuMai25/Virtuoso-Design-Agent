@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from copy import deepcopy
 from itertools import product
 from pathlib import Path
 from typing import Any, Literal
@@ -202,18 +203,27 @@ def missing_required_measurements(plan: MeasurementPlan | None, metrics: dict[st
 
 def compile_measurement_task(template_path: Path, request_path: Path) -> tuple[dict, Any | None]:
     from .design_review import file_reference, read_json
+
+    request = MeasurementRequest.model_validate(read_json(request_path))
+    return compile_measurement_request(
+        read_json(template_path) if not request.uncertainties else {}, request,
+        sources={"template": file_reference(template_path), "request": file_reference(request_path)},
+    )
+
+
+def compile_measurement_request(raw: dict, request: MeasurementRequest, *, sources: dict) -> tuple[dict, Any | None]:
+    """Compose already loaded intent without temporary files or mutating inputs."""
     from .models import TaskSpec
     from .planner import build_plan
 
-    request = MeasurementRequest.model_validate(read_json(request_path))
     report = {"schema_version": 1, "kind": "measurement_compile", "source": "software_inference",
-              "sources": {"template": file_reference(template_path), "request": file_reference(request_path)},
+              "sources": sources,
               "uncertainties": list(request.uncertainties), "issues": [], "task_emitted": False,
               "remote_execution_performed": False, "execution_authorized": False}
     if request.uncertainties:
         report["status"] = "needs_confirmation"
         return report, None
-    raw = read_json(template_path)
+    raw = deepcopy(raw)
     raw.pop("measurement_plan", None)
     analyses = list(dict.fromkeys(item.analysis for item in request.measurements))
     if not raw.get("analysis_stages"):

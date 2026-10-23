@@ -11,8 +11,9 @@ VDA 是 Bridge 之上的设计与验证编排层。按[分级 v2.1](l5-roadmap.m
 - **不是缺执行器。** 安全契约、既有电路接入、CDF/拓扑微调、同源仿真、理论分析、
   preview 和跨轮次保护均有现成实现，不重新搭建。
 - **首要是少手工接线。** 新模块的语义角色、变量范围、测量和理论理由仍需 agent 整理；
-  初始 pin/inventory 角色不是完整电路功能识别。先用已有 onboarding/design_context/
-  measurement/review 形成可审阅上下文，实际有重复成本才补薄接线。
+  初始 pin/inventory 角色不是完整电路功能识别。P1-a 已有 design-intake，引用原 task/
+  onboarding、measurement 和可选 history，导出上下文及零远端权限草案，不重抄角色、
+  权限、规格和候选。物理解释仍需判断，不声称已测出端到端节省。
 - **数值建议有适用域。** design-next 依赖通过校验的 semantic 局部模型；任意 raw CDF
   可写不等于已知其单位、灵敏度或最优范围。优先复用器件表、OP/MNA、binding 和现有
   proposer，按实际变量补映射/最小诊断，不另造求解器或限制单次参数应用。
@@ -31,6 +32,7 @@ VDA 是 Bridge 之上的设计与验证编排层。按[分级 v2.1](l5-roadmap.m
 | 已有原理图的受控微调 | existing_schematic、CDF binding、topology delta、checkpoint、winner verification | 任意 CDF 的物理含义或任意拓扑已经自动建模 |
 | 图片复现 | electrical/drawing/uncertainties 描述 → `schematic-compile` → 非覆盖 create/inspect | 任意图片自动识别、N28 fresh-create 单次全链或性能已验收 |
 | 已跑任务的摘要与下一轮 | `design-review` / `design-next` / `design-iterate` | 摘要等于新鲜 OA 回读，或旧结果可移植给已修改设计 |
+| 接入与决策上下文整理 | [`design-intake`](design-intake-workflow.md)，复用 task/onboarding、测量和可选 run | 自动识别所有功能角色、理由已被物理验证或草案已有执行权限 |
 | DC/AC/STB 等测量 | `measurement-compile` 编译到普通任务；`stability-audit` 离线核对 STB | 普通 AC 相位等于 PM，或证据自洽等于规格通过 |
 | 人工 ADE 介入 | ADE L 原生操作指南；正式 `ade.*` 仍为 Maestro 接口 | 所有 ADE L 旧 state 或 STB GUI 保存/重开已打通 |
 | 窗口收拢 | `windows-plan` 仅生成保守建议 | 自动保存、关闭已完成；跨任务窗口可以一并收走 |

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "source": {
+    "kind": "task",
+    "task": "../tasks/pmos-loaded-common-source-onboarding-tune.bridge.json"
+  },
+  "measurements": "../measurements/pmos-loaded-cs.json",
+  "rationale": [
+    {
+      "role": "device.gain",
+      "text": "复用已有 PMOS 有源负载共源接入配置：先用 DC 检查输出偏置和两管 VDS，再解释 AC 增益/带宽。gm 与输出电导只提供修改方向，不能由这些近似宣称规格已通过。",
+      "source": "software_inference"
+    },
+    {
+      "role": "load.active",
+      "text": "保留原任务已显式给出的 3 个原子候选及其 W/L、偏置和负载绑定；本次只整理上下文，不新增搜索点、不应用历史 winner、不改变拓扑。",
+      "source": "software_inference"
+    },
+    {
+      "metric": "gain_bandwidth_product_hz",
+      "text": "沿用原约束和 GBW 目标，同时查看增益与带宽，避免只优化一个量而漏掉另一项；GBW 与 unity-gain frequency 分开，不混作同一个测量。有限候选最佳不等于连续或全局最优。",
+      "source": "software_inference"
+    }
+  ],
+  "uncertainties": []
+}

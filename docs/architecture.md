@@ -65,6 +65,15 @@ measurement 固定测量，design-review/next/iterate 复用 OP/MNA/局部模型
 自动识别器；P2 的实机证据缺口也不意味着缺另一套 runner。调用/人工总成本只记录可观察
 数据。路线优先级不新增服务、数据库、agent 框架或实验授权。
 
+P1-a 的本地实现是 `design_intake.py` / `design-intake`：请求仅维护原 task 或
+onboarding draft+resolution、可选测量/历史引用及带来源的理由。接入沿用原 resolver；
+`compile_measurement_request` 是原文件编译器的无临时文件组合入口，不修改输入；
+历史绑定与建议沿用 design-review/next。范围、候选和规格从原契约导出，输入字节
+哈希结束时复核；草案固定关闭 compute/write/create/replace。未完成/pending checkpoint
+先对账，未知角色/字段/测量不猜。不增加 executor、Bridge API 或数值求解器，也不
+宣称解决未知 CDF 语义/自动角色识别。见[流程](design-intake-workflow.md)及
+[本地验收](validation/2026-10-23-p1a-design-intake-local.md)。
+
 ## 为什么使用独立 worker
 
 `virtuoso-bridge-lite` 已有自己的 Python 虚拟环境和本机配置。主程序通过该环境中的 Python 启动 JSON worker，而不是把 Bridge 源码复制进来或强制安装成本项目依赖。这样可以保持 Bridge 独立升级、避免依赖漂移，并把跨环境协议缩小到版本化 JSON action。

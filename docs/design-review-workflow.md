@@ -1,5 +1,9 @@
 # 设计复盘、下一步建议与窗口管理
 
+整理下一设计的输入时，可用 [`design-intake`](design-intake-workflow.md) 把现有 task/
+onboarding、测量和本页的历史复盘/建议合成一份摘要；不重抄角色、权限和候选，不把
+历史指标算成当前结果，不自动恢复或执行。单独复盘仍用下列原入口。
+
 ## 1. 每轮先读一份摘要
 
 `design-review` 复用现有 `TaskSpec`、`RunRecord`、`evaluate_constraints`，不访问 EDA：
