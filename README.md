@@ -22,6 +22,9 @@ P1-b 首个本地切片为[显式 CDF 数值映射](docs/numeric-cdf-refinement.
 已有 generic DC 源及电阻/电容负载也可显式映射，与尺寸联合进入原模型；单位/类型、
 其他固定条件、满秩与独立留出继续检查。旧 PMOS 三点不足以校准联合模型，未硬拟合
 或补跑电路。见[本地接入及数据缺口](docs/validation/2026-10-23-p1b-joint-testbench-local.md)。
+成组偏置/对称负载现可显式用 linked_names 共用一个变量，与尺寸联合微调；各源 AC
+设置保持独立。训练/留出还会拒绝实际坐标重复，不靠换编号制造未见点验证。旧模型
+复算保持一致、PMOS 数据不足仍保留，见[本地记录](docs/validation/2026-10-23-p1b-linked-testbench-local.md)。
 
 2026-10-23 已把 STB 的原始文件持久留存、同作业 native margin 对照、失败/中断证据及
 `stability-audit` 离线复核接入正式路径，设计复盘和跨轮次控制也会检查这些证据。

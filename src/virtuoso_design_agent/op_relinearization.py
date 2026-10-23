@@ -13,7 +13,7 @@ import json
 import math
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import ConfigDict, Field, StrictStr, model_serializer, model_validator
 
@@ -100,6 +100,19 @@ class NumericTestbenchParameterBinding(_FiniteStrictModel):
     name: StrictStr = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$")
     unit: Literal["V", "mV", "A", "uA", "F", "pF", "fF", "ohm", "kohm"]
     meaning: StrictStr = Field(min_length=1, max_length=2000)
+    linked_names: list[Annotated[StrictStr, Field(pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$")]] = Field(
+        default_factory=list, max_length=31,
+    )
+
+    def targets(self) -> list[str]:
+        return [self.name, *self.linked_names]
+
+    @model_serializer(mode="wrap")
+    def serialize_optional_links(self, handler):
+        raw = handler(self)
+        if not self.linked_names:
+            raw.pop("linked_names", None)
+        return raw
 
     @model_validator(mode="after")
     def validate_quantity(self) -> "NumericTestbenchParameterBinding":
@@ -108,22 +121,29 @@ class NumericTestbenchParameterBinding(_FiniteStrictModel):
             raise ValueError("testbench target and declared unit are incompatible")
         if not self.meaning.strip():
             raise ValueError("numeric testbench meaning cannot be blank")
+        if len(self.targets()) != len(set(self.targets())):
+            raise ValueError("linked testbench targets must be unique, including the primary field")
         return self
 
     def value_from(self, overrides: GenericTestbenchOverrides | None, label: str = "testbench") -> float:
-        value = None
-        if overrides is not None:
-            if self.target == "source_dc":
-                source = overrides.sources.get(self.name)
-                value = source.dc_value if source is not None else None
-            else:
-                value = overrides.loads.get(self.name)
-        if value is None or not math.isfinite(value) or (self.target == "load" and value <= 0):
-            raise ValueError(f"{label} lacks an explicit testbench {self.target} value for {self.name}")
-        scaled = value / _NUMERIC_UNITS[self.unit][0]
-        if not math.isfinite(scaled):
-            raise ValueError(f"{label} testbench unit conversion is nonfinite for {self.name}")
-        return scaled
+        values = []
+        for name in self.targets():
+            value = None
+            if overrides is not None:
+                if self.target == "source_dc":
+                    source = overrides.sources.get(name)
+                    value = source.dc_value if source is not None else None
+                else:
+                    value = overrides.loads.get(name)
+            if value is None or not math.isfinite(value) or (self.target == "load" and value <= 0):
+                raise ValueError(f"{label} lacks an explicit testbench {self.target} value for {name}")
+            scaled = value / _NUMERIC_UNITS[self.unit][0]
+            if not math.isfinite(scaled):
+                raise ValueError(f"{label} testbench unit conversion is nonfinite for {name}")
+            values.append(scaled)
+        if any(not math.isclose(value, values[0], rel_tol=1e-12, abs_tol=0.0) for value in values[1:]):
+            raise ValueError(f"{label} linked testbench fields for {self.name} must have equal numeric values")
+        return values[0]
 
 
 class RelinearizationParameter(_FiniteStrictModel):
@@ -216,8 +236,9 @@ class OperatingPointRelinearizationPolicy(_FiniteStrictModel):
                        for target in p.instance_parameter.targets()]
         if len(raw_targets) != len(set(raw_targets)):
             raise ValueError("numeric CDF bindings must not alias the same instance parameter")
-        testbench_targets = [(p.testbench_parameter.target, p.testbench_parameter.name)
-                             for p in self.parameters if p.testbench_parameter is not None]
+        testbench_targets = [(p.testbench_parameter.target, name)
+                             for p in self.parameters if p.testbench_parameter is not None
+                             for name in p.testbench_parameter.targets()]
         if len(testbench_targets) != len(set(testbench_targets)):
             raise ValueError("numeric testbench bindings must not alias the same field")
         metric_names = [item.metric for item in self.metrics]
@@ -485,13 +506,14 @@ def _fixed_testbench(overrides: GenericTestbenchOverrides | None,
         return overrides
     raw = overrides.model_dump(mode="json", exclude_none=True)
     for binding in bindings.values():
-        if binding.target == "load":
-            raw["loads"].pop(binding.name, None)
-        else:
-            source = raw["sources"].get(binding.name, {})
-            source.pop("dc_value", None)
-            if not source:
-                raw["sources"].pop(binding.name, None)
+        for name in binding.targets():
+            if binding.target == "load":
+                raw["loads"].pop(name, None)
+            else:
+                source = raw["sources"].get(name, {})
+                source.pop("dc_value", None)
+                if not source:
+                    raw["sources"].pop(name, None)
     return GenericTestbenchOverrides.model_validate(raw) if raw["sources"] or raw["loads"] else None
 
 
@@ -662,10 +684,11 @@ def _atomic_proposal(proposal: RelinearizedProposal, parameters: list[Relineariz
                 scaled = value * _NUMERIC_UNITS[binding.unit][0]
                 if not math.isfinite(scaled):
                     raise ValueError(f"testbench serialization is nonfinite for {p.name}")
-                if binding.target == "source_dc":
-                    testbench["sources"][binding.name]["dc_value"] = scaled
-                else:
-                    testbench["loads"][binding.name] = scaled
+                for name in binding.targets():
+                    if binding.target == "source_dc":
+                        testbench["sources"][name]["dc_value"] = scaled
+                    else:
+                        testbench["loads"][name] = scaled
             continue
         binding = p.instance_parameter
         if binding is None:
@@ -737,6 +760,16 @@ def relinearize_operating_point(
     )
     training = [by_index[index] for index in policy.training_candidate_indices]
     holdout = [by_index[index] for index in policy.holdout_candidate_indices]
+    # Disjoint indices alone do not reserve an unseen input tuple. Compare actual
+    # declared coordinates (including SI-equivalent literals), never rounded grids.
+    for candidate in holdout:
+        for fitted in training:
+            if all(math.isclose(_parameter_value(candidate, parameter), _parameter_value(fitted, parameter),
+                                rel_tol=1e-12, abs_tol=0.0) for parameter in policy.parameters):
+                raise ValueError(
+                    f"held-out candidate {candidate.index} repeats training candidate {fitted.index} "
+                    "coordinates; distinct indices are not an unseen parameter tuple"
+                )
     training_features = [
         _features(candidate, anchor, policy.parameters) for candidate in training
     ]
@@ -1030,11 +1063,12 @@ def _validate_testbench_binding_kinds(result: OperatingPointRelinearizationResul
     sources = {source.name: source for source in spec.sources}
     loads = {load.name: load for load in spec.loads}
     for binding in result.testbench_parameter_bindings.values():
-        target = (sources if binding.target == "source_dc" else loads).get(binding.name)
-        if target is None or target.kind != _TESTBENCH_UNIT_KINDS[binding.unit]:
-            raise ValueError(f"testbench binding {binding.name} is missing or has incompatible kind for {binding.unit}")
-        if binding.target == "source_dc" and task.operating_conditions and spec.operating_condition_supply_source == binding.name:
-            raise ValueError("an operating-condition supply cannot be modeled as a candidate DC source")
+        for name in binding.targets():
+            target = (sources if binding.target == "source_dc" else loads).get(name)
+            if target is None or target.kind != _TESTBENCH_UNIT_KINDS[binding.unit]:
+                raise ValueError(f"testbench binding {name} is missing or has incompatible kind for {binding.unit}")
+            if binding.target == "source_dc" and task.operating_conditions and spec.operating_condition_supply_source == name:
+                raise ValueError("an operating-condition supply cannot be modeled as a candidate DC source")
 
 
 def _validate_linked_parameters(result: OperatingPointRelinearizationResult) -> None:

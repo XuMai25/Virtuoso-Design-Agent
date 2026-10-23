@@ -260,3 +260,16 @@ def test_current_bias_and_resistive_load_use_declared_model_units(joint_source, 
     assert next(load.value for load in anchor.loads if load.name == "CL0") == pytest.approx(5000)
     assert any(c.testbench_overrides.sources["VIN_SRC"].dc_value == pytest.approx(39e-6)
                for c in task.candidate_set.candidates)
+
+
+def test_joint_holdout_cannot_reuse_training_coordinates_with_equivalent_cdf_spelling(joint_source):
+    run = json.loads(joint_source[1].read_text())
+    repeated = copy.deepcopy(run["candidates"][4])
+    repeated.update(index=6, instance_parameters={"MN0": {"w": "9e-7", "l": "30n"}})
+    run["candidates"].append(repeated)
+    write(joint_source[1], run)
+    policy = copy.deepcopy(joint_source[2])
+    policy.update(expected_source_run_sha256=sha(joint_source[1]),
+                  training_candidate_indices=[1, 2, 3, 4, 5], holdout_candidate_indices=[6])
+    with pytest.raises(ValueError, match="held-out candidate 6 repeats training candidate 5"):
+        relinearize_operating_point(OperatingPointRelinearizationPolicy.model_validate(policy), joint_source[1])

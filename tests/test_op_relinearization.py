@@ -144,6 +144,12 @@ def _policy(source_run: Path) -> OperatingPointRelinearizationPolicy:
     )
 
 
+def test_holdout_must_be_an_unseen_tuple_not_just_a_different_candidate_index(tmp_path):
+    source = _write_source_run(tmp_path, points=[(0, 0), (1, 1), (1, 0), (1, 1)])
+    with pytest.raises(ValueError, match="held-out candidate 4 repeats training candidate 2"):
+        relinearize_operating_point(_policy(source), source)
+
+
 def _write_template(tmp_path: Path, policy: OperatingPointRelinearizationPolicy) -> Path:
     template = {
         "schema_version": 1,

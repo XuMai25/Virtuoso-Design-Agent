@@ -200,6 +200,7 @@ def suggest_design_next(
             comparisons[-1]["testbench_changes"] = {name: {
                 "before": binding.value_from(anchor.testbench_overrides),
                 "proposed": binding.value_from(candidate.testbench_overrides), "unit": binding.unit,
+                "targets": binding.targets(),
             } for name, binding in recomputed.testbench_parameter_bindings.items()
                 if binding.value_from(anchor.testbench_overrides) != binding.value_from(candidate.testbench_overrides)}
     report["status"] = "local_model_draft_ready"
@@ -230,7 +231,8 @@ def render_design_next(report: dict) -> str:
             lines.extend(["## 源/负载数值映射", "", "仅显式声明的 DC/负载值参与模型；其他 override 保持固定。", ""])
             for name, binding in report["model"]["testbench_parameter_bindings"].items():
                 field = "dc_value" if binding["target"] == "source_dc" else "value"
-                lines.append(f"- {name} → {binding['name']}.{field}；模型单位 {binding['unit']}；{binding['meaning']}")
+                targets = " = ".join(f"{target}.{field}" for target in [binding["name"], *binding.get("linked_names", [])])
+                lines.append(f"- {name} → {targets}；模型单位 {binding['unit']}；{binding['meaning']}")
         if report["model"].get("parameter_bindings"):
             lines.extend(["## 显式 CDF 数值映射", "",
                           "字段单位/含义为声明，不是新的 PDK 回读；只接受显式 Spectre SI 字面量。", ""])

@@ -98,6 +98,13 @@ typed override 仍使用 SI，编译核对源/负载类型和单位，拒绝工�
 只有已建模字段从固定上下文中剔除，fixed_testbench_overrides 保存剩余部分，完整候选
 仍保留全部值。原满秩/holdout、普通任务/完整元组审计不变；不改 worker 或 Bridge API。
 
+NumericTestbenchParameterBinding 的可选 linked_names 把显式等值 DC 源/同类负载组
+映射为一个自由度，避免同一共模/对称负载变化被拆成共线独立轴。训练、候选及编译
+均逐成员核对；仅替换 DC/value，各成员 AC 幅相及连接保持不变，仍展开为原 typed
+override。空组不参与旧 policy/result 序列化。另在拟合前比较实际数值元组，拒绝仅换
+编号或 SI 拼法的训练/holdout 重叠；不改原满秩/误差门或增加拟合器。见
+[本地验收](validation/2026-10-23-p1b-linked-testbench-local.md)。
+
 ## 为什么使用独立 worker
 
 `virtuoso-bridge-lite` 已有自己的 Python 虚拟环境和本机配置。主程序通过该环境中的 Python 启动 JSON worker，而不是把 Bridge 源码复制进来或强制安装成本项目依赖。这样可以保持 Bridge 独立升级、避免依赖漂移，并把跨环境协议缩小到版本化 JSON action。
