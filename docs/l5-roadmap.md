@@ -169,6 +169,9 @@ L5B 可以先在 schematic 范围成立。是否声明物理实现质量，仍�
 仍用原局部模型，未声明条件继续固定；有代码接线不等于有可用校准数据。既有 PMOS
 三点不足以训练并独立留出两变量，负载方向也没有变化，保留缺口而不新建/补跑电路。
 
+本地完整验收现统一调度双环境；P1-b 同时修复历史点跨固定上下文/不完整证据/近格点
+舍入的误判重。仍复用原模型与记录，不新增 EDA Gate；见[本次记录](validation/2026-10-23-dual-validation-p1b-local.md)。
+
 成本观测贯穿 P1/P2，而不是另建监控工程：现有 design-review 有 run/action 时长，
 design-iterate 可用 action-time 预算；`agent_thinking_seconds` 当前明确为 None。
 可靠的 agent/工具调用总数、上下文/模型开销、人工操作/返工和端到端交付时长仍不完整。

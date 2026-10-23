@@ -102,6 +102,10 @@ typed override 仍使用 SI，编译核对源/负载类型和单位，拒绝工�
 
 `virtuoso-bridge-lite` 已有自己的 Python 虚拟环境和本机配置。主程序通过该环境中的 Python 启动 JSON worker，而不是把 Bridge 源码复制进来或强制安装成本项目依赖。这样可以保持 Bridge 独立升级、避免依赖漂移，并把跨环境协议缩小到版本化 JSON action。
 
+本地验证也保留这种隔离：`python -m virtuoso_design_agent.local_validation` 统一调度
+主环境全量与 Bridge 环境的已声明必需本地模块，解析各自 JUnit，拒绝未知 skip/缺补验。
+它是开发入口而非设计 operation，不装依赖、不启动 worker/远端服务；见[验收方式](local-validation.md)。
+
 ## PDK 选择边界
 
 VDA 默认从晶圆厂 CMOS PDK 出发。任务和 CLI doctor 共用 `DEFAULT_PDK_PROFILE=nics4304_tsmc28`，其当前工艺身份是 TSMC N28/`tsmcN28`，默认器件为 `nch_lvt_mac/pch_lvt_mac`。profile loader 支持显式单继承，避免同一工艺的 device-flavor profile 复制 model/corner/远端路径；`nics4304_tsmc28_svt` 同时覆盖 OA master 与 Spectre model 为 `nch_mac/pch_mac`。`PdkProfile` 分开保存 `nmos_cell/pmos_cell` 和 `nmos_model/pmos_model`：前者只用于 OA master 创建与结构回读，后者用于 standalone deck、器件表征和 `si` 网表真值检查。一个 process corner 可映射为有序的多个 Spectre include；preview、器件表征、反相器和通用 OA 仿真都通过同一解析器生成模型配置，未声明 bundle 的旧 profile 仍回退到 `model_include + model_section`。这样既支持 TSMC18 的 `nmos2v_mac/pmos2v_mac -> nch_mac/pch_mac` 映射及 `tt + stat_noise` 环境，也不放松模型一致性检查或改变 N28 默认路径。

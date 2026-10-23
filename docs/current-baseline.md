@@ -66,6 +66,7 @@ DC、AC、noise、STB、transient 和 PVT 按电路及规格需要选择，不�
 ```powershell
 .\.venv\Scripts\vda.exe catalog
 .\.venv\Scripts\vda.exe plan examples\tasks\inverter-close-loop.demo.json
+.\.venv\Scripts\python.exe -X utf8 -m virtuoso_design_agent.local_validation
 .\.venv\Scripts\vda.exe schematic-compile --help
 .\.venv\Scripts\vda.exe design-review <task.json> <run.json> --output <new-review.json> --markdown <new-review.md>
 .\.venv\Scripts\vda.exe design-next <task.json> <run.json> --output <new-next.json> --markdown <new-next.md>
@@ -77,6 +78,9 @@ DC、AC、noise、STB、transient 和 PVT 按电路及规格需要选择，不�
 [复盘和窗口策略](design-review-workflow.md)，STB 文件与一致性检查见
 [STB 证据工作流](stability-evidence-workflow.md)。工具处理耗时与 agent 思考/对话耗时分别
 记录；没有测量就不宣称加速。
+
+完整本地软件验收统一走[双环境入口](local-validation.md)，主环境全量和 Bridge 必需
+模块分别记录；未知 skip、缺环境或补验不完整时退出非零。它不执行真实 Bridge smoke。
 
 执行仍须按现有计划、token、compute/write 开关、白名单和非覆盖规则授权；上述本地命令
 不授予远端权限。真实写入和计算先明确目标、范围、预计路径及风险。失败/部分状态先回读，

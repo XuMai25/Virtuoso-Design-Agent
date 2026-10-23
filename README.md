@@ -4,6 +4,9 @@
 
 当前入口与能力边界见[可用基线](docs/current-baseline.md)：先复用已有任务和证据，按真实设计需求选择操作，不把所有分析或新增电路 Gate 作为日常必经流程。本地收口记录见[2026-10-23 验收](docs/validation/2026-10-23-baseline-closeout.md)。
 
+完整本地软件验收使用[双环境统一入口](docs/local-validation.md)：一次运行主环境全量及
+Bridge 专用环境的必需本地补验；不再把环境隔离产生的 skip 留作未解释缺口，也不运行远端。
+
 P1-a 本地薄接线已实现：[`design-intake`](docs/design-intake-workflow.md) 引用既有配置、
 测量和可选 run，导出角色/变量/冻结范围、设计理由和历史依据，输出普通零远端权限草案。
 疑点或待对账执行阻止出草案；历史结果不当作当前 OA。已用旧共源记录本地重放，

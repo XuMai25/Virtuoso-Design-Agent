@@ -124,6 +124,7 @@ def suggest_design_next(
         "gate_passed": recomputed.gate_passed, "anchor_candidate_index": policy.anchor_candidate_index,
         "scope": "local first-order EDA response; not a global physical law",
         "evidence_source": "software_inference",
+        "notes": list(recomputed.notes),
         "parameter_bindings": {name: binding.model_dump(mode="json")
                                for name, binding in recomputed.parameter_bindings.items()},
         "constraints_without_prediction": [c.metric for c in task.constraints
@@ -244,7 +245,10 @@ def render_design_next(report: dict) -> str:
                           f"记录锚点 {improvement['recorded_anchor_value']}；"
                           f"预测更优的新点 {improvement['predicted_improving_count']} 个。不是实测收益。", ""])
         lines.extend(["", "## 局部模型依据", "",
-                      "仅适用于当前 PDK、拓扑、条件和锚点附近；预测是 software_inference。", "",
+                      "仅适用于当前 PDK、拓扑、条件和锚点附近；预测是 software_inference。", ""])
+        if report["model"].get("notes"):
+            lines.extend(["模型/历史点复用说明：", "", *[f"- {note}" for note in report["model"]["notes"]], ""])
+        lines.extend([
                       "| 指标 | 归一化局部灵敏度 | 留出误差 % |",
                       "| --- | --- | ---: |"])
         for model in report["model"]["sensitivities"]:

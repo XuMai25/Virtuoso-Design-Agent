@@ -84,6 +84,17 @@
 
 ## 验证入口
 
+完整本地软件验收统一使用双环境入口；主环境全量与已安装 Bridge 的本地适配器补验
+必须一起通过。缺环境、未知 skip 或 Bridge 补验仍 skip 时不算完整通过；不据此安装
+第二份 Bridge 或启动真实 smoke。tests/ 保持离线，真实 EDA 验收须在明确授权范围内单独做。
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -m virtuoso_design_agent.local_validation
+```
+
+单环境 pytest 仍可用于针对性开发，但不能单独替代上述完整验收。输出/配置见
+`docs/local-validation.md`。以下原诊断与计划入口保留：
+
 ```powershell
 python -m pytest
 python -m virtuoso_design_agent catalog

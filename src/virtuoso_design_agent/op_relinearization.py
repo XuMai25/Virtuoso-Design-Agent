@@ -850,13 +850,18 @@ def relinearize_operating_point(
 
     model_by_metric = {model.metric: model for model in models}
     observed = set()
+    observation_notes = []
     for candidate in run.candidates:
-        if _source_context(candidate, policy.parameters) != _source_context(anchor, policy.parameters):
-            continue
         try:
-            observed.add(_parameter_signature(candidate, policy.parameters))
-        except ValueError:
-            continue  # Unused points with missing inputs are not model evidence.
+            _validate_source_candidate(candidate, policy)
+            _constant_inputs([anchor, candidate], policy.parameters)
+            signature = _parameter_signature(candidate, policy.parameters)
+            if any(not math.isclose(_parameter_value(candidate, parameter), value, rel_tol=1e-12, abs_tol=0.0)
+                   for parameter, value in zip(policy.parameters, signature, strict=True)):
+                raise ValueError("recorded coordinates do not exactly match the current proposal grid")
+            observed.add(signature)
+        except ValueError as error:
+            observation_notes.append(f"source candidate {candidate.index} not reused as an evaluated proposal tuple: {error}")
     anchor_signature = _parameter_signature(anchor, policy.parameters)
     proposal_axes = [
         _proposal_values(_parameter_value(anchor, item), item)
@@ -900,6 +905,7 @@ def relinearize_operating_point(
     notes = [
         "every declared parameter is perturbed by at least one held-out point"
     ]
+    notes.extend(observation_notes)
     failed_training = [
         model.metric for model in models if not model.training_gate_passed
     ]
