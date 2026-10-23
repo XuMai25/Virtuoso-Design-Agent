@@ -37,6 +37,8 @@ class _History(_Contract):
     run: Path
     checkpoint: Path | None = None
     binding_audit: Path | None = None
+    completion: Path | None = None
+    artifact_root: Path | None = None
 
 
 class DesignRationale(_Contract):
@@ -177,8 +179,16 @@ def build_design_intake(request_path: Path) -> tuple[dict, TaskSpec | None]:
     history = None
     if request.history is not None:
         paths = {name: path_ref(f"history_{name}", value)
-                 for name, value in request.history.model_dump().items() if value is not None}
-        review = build_design_review(paths["task"], paths["run"], paths.get("checkpoint"), paths.get("binding_audit"))
+                 for name, value in request.history.model_dump(exclude={"artifact_root"}).items() if value is not None}
+        artifact_root = ((root / request.history.artifact_root).resolve()
+                         if request.history.artifact_root is not None else None)
+        review = build_design_review(paths["task"], paths["run"], paths.get("checkpoint"), paths.get("binding_audit"),
+                                     completion_path=paths.get("completion"), artifact_root=artifact_root)
+        for name, ref in review["sources"].items():
+            key = f"history_{name}"
+            if key in sources and sources[key] != ref:
+                raise ValueError("intake history source changed during review")
+            sources[key] = ref
         old_task = TaskSpec.model_validate(read_json(paths["task"]))
         if (old_task.target, old_task.pdk_profile) != (task.target, task.pdk_profile):
             raise ValueError("history target/PDK differs from intake; keep it in a separate review")
@@ -188,6 +198,7 @@ def build_design_intake(request_path: Path) -> tuple[dict, TaskSpec | None]:
         next_report, _ = suggest_design_next(
             paths["task"], paths["run"], checkpoint_path=paths.get("checkpoint"),
             binding_audit_path=paths.get("binding_audit"),
+            completion_path=paths.get("completion"), artifact_root=artifact_root,
         )
         selected = next((c for c in review["candidates"] if c["index"] == review["selected_candidate_index"]), None)
         history = {
@@ -195,6 +206,8 @@ def build_design_intake(request_path: Path) -> tuple[dict, TaskSpec | None]:
             "candidate_count": len(review["candidates"]), "selected_candidate": selected,
             "last_candidate_diagnostic": review["candidates"][-1] if selected is None and review["candidates"] else None,
             "checkpoint": review["checkpoint"], "writeback": review["writeback"],
+            "input_evidence": review["input_evidence"], "input_artifact_root": review["input_artifact_root"],
+            "completion": review["completion"],
             "winner_verification": review["winner_verification"],
             "missing_declared_stages": review["missing_declared_stages"],
             "winner_verification_missing": review["winner_verification_missing"],
@@ -208,6 +221,10 @@ def build_design_intake(request_path: Path) -> tuple[dict, TaskSpec | None]:
         if (next_report["status"] == "reconcile_execution_first"
                 or review["checkpoint"] and (not review["checkpoint"]["complete"] or review["checkpoint"]["pending_write"])):
             issues.append("历史执行未对账或 checkpoint 未完成；先查询原作业/回读，不生成可重放任务。")
+        elif (review["completion"]
+              and review["completion"].get("selected_point_is_final_state") is not True):
+            issues.append("历史选中点不是最后已确认的 OA/testbench 元组；请显式改用 baseline/final task/run "
+                          "重新定锚，不沿已恢复的探针生成草案。")
     ready = not uncertainties and not issues
     report = {
         "schema_version": 1, "kind": "design_intake", "source": "software_inference", "read_only": True,
@@ -276,6 +293,15 @@ def render_design_intake(report: dict) -> str:
                       f"- 执行状态：{history['execution']['status']}；后续判断：{history['next_status_for_historical_run']}。",
                       f"- 与本次已记录输入不同的维度：`{history['changed_recorded_inputs']}`。",
                       f"- 参数写回记录：{history['writeback']['status']}；不证明当前 OA。"])
+        for row in history.get("input_evidence", []):
+            lines.append(f"- 输入证据（候选 {row['candidate_index']}）：{row['status']}；"
+                         + ("；".join(row["issues"]) or "仅为保存记录的本地审计，不是新仿真。"))
+        if history.get("completion"):
+            completion = history["completion"]
+            lines.append(f"- 已记录收尾：{completion['status']}；当前 OA 未重新读取。")
+            if completion.get("observed_at"):
+                lines.append(f"- 最后关联观察：{completion['observed_at']}；"
+                             f"历史选中点仍为最终状态：{completion['selected_point_is_final_state']}。")
         if candidate:
             lines.extend(["", ("历史已选候选：" if history["selected_candidate"] else "最后候选，仅诊断：")
                           + f"{candidate['index']}，{candidate['status']}。", "",

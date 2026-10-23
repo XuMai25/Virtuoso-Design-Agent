@@ -28,6 +28,8 @@ class IterationRound(_Contract):
     candidate_index: int | None = Field(default=None, ge=1)
     checkpoint: Path | None = None
     binding_audit: Path | None = None
+    completion: Path | None = None
+    artifact_root: Path | None = None
 
 
 class IterationRequest(_Contract):
@@ -213,7 +215,9 @@ def build_design_iteration(request_path: Path, template_path: Path | None = None
         assert task_path is not None and run_path is not None
         references = {"task": file_reference(task_path), "run": file_reference(run_path)}
         task, run = load_bound_run(task_path, run_path, audit_path)
-        review = build_design_review(task_path, run_path, checkpoint_path, audit_path)
+        review = build_design_review(task_path, run_path, checkpoint_path, audit_path,
+                                     completion_path=_resolve(base, source.completion),
+                                     artifact_root=_resolve(base, source.artifact_root))
         if any(review["sources"][name] != references[name] for name in references):
             raise ValueError("iteration source files changed during review")
         source_key = review["sources"]["run"]["sha256"]
@@ -310,10 +314,21 @@ def build_design_iteration(request_path: Path, template_path: Path | None = None
                                     if candidate is not None and row["candidate_index"] == candidate.index
                                     for issue in row["issues"]]
         measured = real and not unmeasured
+        completion = review["completion"]
         reconcile = (run.status.value == "failed" or candidate is None or
                      not candidate.analysis_complete or
                      bool(review["checkpoint"] and review["checkpoint"]["pending_write"]) or
-                     bool(stability_evidence_issues))
+                     bool(stability_evidence_issues) or
+                     any(row["status"] == "incomplete" for row in review["input_evidence"]) or
+                     bool(completion and completion["status"] == "incomplete"))
+        reanchor = bool(completion and completion["status"] != "incomplete" and (
+            completion.get("selected_point_is_final_state") is not True
+            or candidate is not None and candidate.index != review["selected_candidate_index"]))
+        if reanchor:
+            # Keep historical metrics, but do not carry a restored probe's starting state forward.
+            anchor = None
+            prior_passed.clear()
+            objective_scores.clear()
         regressed = [s["id"] for s in stages if s["id"] in prior_passed and s["status"] == "fail"]
         missing_protected = [s["id"] for s in stages if s["id"] in prior_passed and s["status"] == "missing"]
         first_unmet = next((s for s in stages if s["status"] != "pass"), None)
@@ -323,7 +338,7 @@ def build_design_iteration(request_path: Path, template_path: Path | None = None
         score = None
         if candidate and task.objective and task.objective.metric in available:
             score = available[task.objective.metric] * (1 if task.objective.goal.value == "maximize" else -1)
-        if feasible and (anchor is None or (score is not None and
+        if feasible and not reanchor and (anchor is None or (score is not None and
                                            (anchor["objective_score"] is None or score > anchor["objective_score"]))):
             anchor = {"round": number, "sources": review["sources"], "candidate_index": candidate.index,
                       "parameters": candidate.parameters, "instance_parameters": candidate.instance_parameters,
@@ -331,16 +346,17 @@ def build_design_iteration(request_path: Path, template_path: Path | None = None
                       if candidate.testbench_overrides else None,
                       "topology_sha256": candidate.topology_sha256, "inputs": inputs,
                       "objective_score": score, "current_remote_state_verified": False}
-        if measured and not reconcile:
+        if measured and not reconcile and not reanchor:
             prior_passed.update(s["id"] for s in stages if s["status"] == "pass")
         action_seconds += review["execution"]["action_seconds"]
-        if measured and not reconcile and score is not None:
+        if measured and not reconcile and not reanchor and score is not None:
             objective_scores.append(score)
         else:
             objective_scores.clear()
         status = (
             "reconcile_execution" if reconcile else
             "software_only" if not real else
+            "recorded_state_requires_reanchor" if reanchor else
             "revalidation_required" if not regressed and (missing_protected or missing_required or
                 (first_unmet and first_unmet["status"] == "missing")) else
             "evidence_source_unverified" if unmeasured else
@@ -350,7 +366,8 @@ def build_design_iteration(request_path: Path, template_path: Path | None = None
             "refine_objective" if feasible else "refine_stage"
         )
         stop_reason = None
-        if status not in {"reconcile_execution", "software_only", "specifications_satisfied", "regressed"}:
+        if status not in {"reconcile_execution", "software_only", "specifications_satisfied", "regressed",
+                          "recorded_state_requires_reanchor"}:
             if number >= request.max_rounds:
                 status, stop_reason = "budget_exhausted", "maximum design rounds reached"
             elif review["execution"]["budget_exhausted"]:
@@ -377,6 +394,9 @@ def build_design_iteration(request_path: Path, template_path: Path | None = None
                         "selection_scope": (review["search_audit"] or {}).get("selection_scope"),
                         "winner_verification_issues": verification_issues,
                         "stability_evidence_issues": stability_evidence_issues,
+                        "input_evidence": review["input_evidence"],
+                        "input_artifact_root": review["input_artifact_root"],
+                        "completion": completion, "recorded_state_requires_reanchor": reanchor,
                         "objective_score": score})
         previous_inputs, last_task = inputs, task
     assert last_task is not None
@@ -387,7 +407,8 @@ def build_design_iteration(request_path: Path, template_path: Path | None = None
               "history": history, "best_feasible_anchor": anchor,
               "action_seconds": action_seconds, "agent_thinking_seconds": None,
               "current_remote_state_verified": False, "task_draft": None, "draft_issues": [],
-              "next_action": "stop" if latest["status"] in {
+              "next_action": "reanchor" if latest["status"] == "recorded_state_requires_reanchor"
+              else "stop" if latest["status"] in {
                   "specifications_satisfied", "budget_exhausted", "stagnated", "software_only"}
               else "inspect_before_restore" if latest["status"] in {"regressed", "reconcile_execution"}
               else "revalidate" if latest["status"] in {"revalidation_required", "winner_verification_required", "evidence_source_unverified"}
@@ -395,7 +416,7 @@ def build_design_iteration(request_path: Path, template_path: Path | None = None
     draft = None
     if report["next_action"] == "inspect_before_restore":
         draft = _reconcile_task(last_task, len(history))
-    elif template_path is not None and report["next_action"] != "stop":
+    elif template_path is not None and report["next_action"] not in {"stop", "reanchor"}:
         raw = read_json(template_path)
         report["template"] = file_reference(template_path)
         if (last_task.target is None or DesignTarget.model_validate(raw.get("target")) != last_task.target
@@ -439,6 +460,9 @@ def build_design_iteration(request_path: Path, template_path: Path | None = None
                                 "restoration_executed": False}
     if file_reference(request_path) != request_reference:
         raise ValueError("iteration request changed during review")
+    for row in history:
+        if any(file_reference(Path(ref["path"])) != ref for ref in row["sources"].values()):
+            raise ValueError("iteration source changed during review")
     return report, draft
 
 
@@ -448,6 +472,17 @@ def render_design_iteration(report: dict) -> str:
              "| 轮次 | 状态 | 当前阶段 | 变化的输入 |", "| --- | --- | --- | --- |"]
     for row in report["history"]:
         lines.append(f"| {row['round']} | {row['status']} | {row['active_stage']} | {', '.join(row['changed_inputs'])} |")
+    for row in report["history"]:
+        for evidence in row.get("input_evidence", []):
+            lines.append(f"\n- 第 {row['round']} 轮输入证据（候选 {evidence['candidate_index']}）：{evidence['status']}；"
+                         + ("；".join(evidence["issues"]) or "仅核对保存记录，不是新的远端结果。"))
+        if row.get("completion"):
+            completion = row["completion"]
+            lines.append(f"\n- 第 {row['round']} 轮已记录收尾：{completion['status']}；"
+                         f"最后观察 {completion.get('observed_at', '未确认')}，当前 OA 未重新读取。")
+        if row.get("recorded_state_requires_reanchor"):
+            lines.append("\n- 该历史选中点不能作为最后确认的 OA/testbench 起点；"
+                         "请显式引用 baseline/final 或新鲜记录重新定锚，不自动恢复或生成续跑任务。")
     anchor = report["best_feasible_anchor"]
     lines.extend(["", f"最近最佳可行锚点：第 {anchor['round']} 轮。" if anchor else "尚无完整真实可行锚点。",
                   "历史指标仅作对照，不补齐新设计缺失的指标；回退前必须先独立核对实际状态。",

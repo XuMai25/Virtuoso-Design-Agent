@@ -75,6 +75,29 @@
 history 复用 design-review/next 的原 task/run 身份和 plan 绑定；可选 checkpoint、
 binding_audit 继续使用原 exact-byte 校验。旧 token 不匹配时不得制造 audit 或改记录。
 
+2026-10-24 补齐同一审计链的转接：history 还可声明 `completion`（已有收尾描述）和
+`artifact_root`（保留原文件的本地目录），例如：
+
+```json
+{
+  "task": "../runs/probe-task.json", "run": "../runs/probe-run.json",
+  "completion": "../runs/completion.json", "artifact_root": "../runs"
+}
+```
+
+这是 history 对象的格式示意，两项均可省略；不是新增 CLI 执行选项。路径相对 intake
+请求文件解析，completion 内的引用则相对 completion 文件解析。目录本身不作为文件
+计算 SHA；实际输入按原回执/manifest 验证。新 `history.input_evidence`、
+`history.input_artifact_root` 和 `history.completion` 原样保留审计范围，关联 task/run
+的精确文件引用也纳入 sources 与结束时的哈希复核。没有复制另一套校验器。
+
+若已记录“探针 B 后恢复 A”，intake 保留 B 的历史指标和实际回读，但不自动沿 B 发出
+新任务；issues 要求显式改用 baseline/final task/run 重新定锚，task_draft 为 null。
+没有最终 testbench 证据也按未知处理。检查通过后显式引用 C 是新的本地输入选择，
+不是自动恢复现场或继承 B 的目标。输入/恢复证据损坏或 pending checkpoint 仍先对账。
+回执的 verified、recorded_not_replayed、not_recorded、incomplete 含义沿用
+[复盘工作流](design-review-workflow.md)，正常 cleanup 不伪装成错误或重新验收通过。
+
 - target/PDK 不同则拒绝混入，应分别复盘。
 - 比较记录中的拓扑、固定参数、testbench、条件、分析/测量、搜索域及决策范围指纹；
   改候选、规格或权限也会标明，不只比较名义尺寸。
@@ -103,3 +126,5 @@ allow_remote_write、create_if_missing、replace_existing；原白名单和前�
 CDF 数值语义、自动角色识别和模型适用域仍未解决，不能据此宣称通用 L5B 闭环。
 
 见[本地实现与旧记录重放验收](validation/2026-10-23-p1a-design-intake-local.md)。
+输入/恢复链的跨入口接线及 A/B/A 离线重放见
+[2026-10-24 收口记录](validation/2026-10-24-intake-iteration-closeout.md)。

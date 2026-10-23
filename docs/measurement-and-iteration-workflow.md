@@ -154,7 +154,10 @@ sweep 两端并绑定原始文件大小/SHA。按显式 `return_ratio`（原值�
 ```
 
 request 的每个 round 含 `task`、`run`，可有 `checkpoint`、`binding_audit` 和
-`candidate_index`。有 selection 时复核唯一候选，无 selection 的多候选记录必须指定 index。
+`candidate_index`；2026-10-24 同时接入可选 `completion` 和 `artifact_root`，含义与
+[复盘输入/恢复链](design-review-workflow.md)相同。两项路径相对 iteration request 解析，
+不是执行许可；目录不计算文件 SHA，实际文件沿用原回执/manifest 校验。
+有 selection 时复核唯一候选，无 selection 的多候选记录必须指定 index。
 每轮按原 task/plan 或既有 exact-byte audit 验证；文件变动、重复 run、乱序或规格/objective
 改变会拒绝。阶段策略必须恰好保护每条约束，不重复分配。
 
@@ -174,7 +177,8 @@ PDK、target、topology、parameters、testbench、conditions 和 analysis/验�
 | `regressed` | 前面已通过的 stage 退化，生成只读 inspect 草案，先核对再讨论恢复 |
 | `revalidation_required` / `winner_verification_required` | 补齐本轮缺失的 analysis 或 winner 门，不拿旧指标凑数 |
 | `evidence_source_unverified` | 所需数值缺实测来源或逐条件 lineage，不能形成可行锚点 |
-| `reconcile_execution` | 故障、结果不完整或 checkpoint 未决写入：只生成 inspect，不重放 |
+| `reconcile_execution` | 故障、结果不完整、输入/恢复证据不一致或 checkpoint 未决写入：只生成 inspect，不重放 |
+| `recorded_state_requires_reanchor` | 历史选中点不是最后确认的 OA/testbench 元组，或最终 testbench 未知：明确重新定锚，不生成续跑任务 |
 | `specifications_satisfied` | 默认停止；不宣称全局最优 |
 | `budget_exhausted` / `stagnated` | 停止自动续提案；不等于电路物理不可行 |
 | `software_only` | 不产生实际性能可行锚点 |
@@ -186,6 +190,22 @@ PDK、target、topology、parameters、testbench、conditions 和 analysis/验�
 最佳可行锚点绑定具体 run/candidate、参数、topology 与 testbench identity；仍是历史点，
 不证明今天的 OA 已恢复。**不自动执行 inverse patch、参数回写或 checkpoint resume。**
 已有 executor 的恢复机制继续负责真实任务内恢复；跨轮次恢复前需 fresh readback 与明确计划。
+
+每轮 JSON 保留 input_evidence、input_artifact_root、completion 及其精确文件来源；结束
+时复核全部关联 task/run/收尾文件，变动则拒绝。新输入证据损坏不能被成功 metrics 或
+budget/stagnation 状态掩盖；正常已清理文件仍为 recorded_not_replayed，不是新的字节
+验收，也不单独视为仿真失败。普通缺 analysis/objective 继续走原 revalidation_required，
+不混同输入损坏。STB、规格保护、PDK/目标、白名单和冻结结构检查保持原规则。
+
+若 completion 表明 B 已恢复，`next_action=reanchor`，不读取 template 或自动替换成 C，
+也不把 B 继续提升为可用起点。原历史 full_specification_feasible 可以仍为 true：它是
+旧测量的规格判定，不等于 B 仍在现场；起点资格另由 recorded_state_requires_reanchor
+标明。重新定锚须显式提供 baseline/final 或新鲜 task/run，所有原 identity/规格/预算门
+仍适用。若目标改变，须新建明确的 campaign，不删旧 objective 或重造 token 强行串联。
+
+同一约束的已有 C 记录可作新的本地输入，不必为本次接线再仿真；所得 satisfied 仅描述
+原记录的声明规格。真实运行、当前 OA 和新目标均未因此验收。示例和结果见
+[跨入口接线收口](validation/2026-10-24-intake-iteration-closeout.md)。
 
 可加 `--task-template <next-template.json> --task-output <new-task.json>`：复用普通任务结构，
 保持所有约束/objective、完整阶段门、参数/拓扑编辑范围、library/prefix 白名单；不创建或

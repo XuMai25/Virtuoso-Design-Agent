@@ -154,6 +154,13 @@ worker 路径分开记录。见[本地接线](validation/2026-10-23-p1b-refineme
 这是历史证据接线，不是当前 OA/PDK 验证、独立 PSF 重算或联合模型校准。
 见[工作流](design-review-workflow.md)及[本地记录](validation/2026-10-23-p1b-review-evidence-local.md)。
 
+2026-10-24 收口把同一 completion/artifact_root 传入 design-intake.history 与
+design-iterate.rounds，不增加审计器或执行路径。两者保留输入回执/恢复状态及精确来源；
+输入或收尾不一致进入原对账门，缺测量仍是复验问题。已恢复的历史选中点不再用于
+推进新草案，必须显式重新定锚；metrics 仍按原来源作为历史保存，不伪装当前 OA。
+所有关联文件结束时复核哈希，授权/状态/CAS/白名单保持。复用同一 A/B/A 完成本地
+重放与回归后停止此切片，见[收口记录](validation/2026-10-24-intake-iteration-closeout.md)。
+
 ## 为什么使用独立 worker
 
 `virtuoso-bridge-lite` 已有自己的 Python 虚拟环境和本机配置。主程序通过该环境中的 Python 启动 JSON worker，而不是把 Bridge 源码复制进来或强制安装成本项目依赖。这样可以保持 Bridge 独立升级、避免依赖漂移，并把跨环境协议缩小到版本化 JSON action。

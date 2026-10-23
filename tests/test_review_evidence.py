@@ -8,12 +8,15 @@ from pathlib import Path
 import pytest
 
 from virtuoso_design_agent.cli import main
+from virtuoso_design_agent.design_intake import build_design_intake, render_design_intake
+from virtuoso_design_agent.design_iteration import build_design_iteration, render_design_iteration
 from virtuoso_design_agent.design_next import suggest_design_next
 from virtuoso_design_agent.design_review import build_design_review, render_design_review
 from virtuoso_design_agent.generic_simulation import render_generic_oa_testbench
 from virtuoso_design_agent.models import RunRecord, TaskSpec
 from virtuoso_design_agent.planner import build_plan
 from test_generic_simulation import _inspection, _task
+from test_measurement_iteration import measurement
 
 
 def write(path, value):
@@ -353,3 +356,163 @@ def test_existing_inspection_can_close_the_state_chain_without_an_extra_simulati
     if unchanged_oa:
         assert review['completion']['selected_point_is_final_state'] is None
         assert suggest_design_next(*records['B'], completion_path=completion)[0]['status'] == 'restored_baseline_review_or_stop'
+
+
+@pytest.fixture
+def workflow_requests(rounds, tmp_path, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail('local intake/iteration attempted to construct or run a remote adapter')
+
+    monkeypatch.setattr('virtuoso_design_agent.cli.SubprocessBridgeAdapter.__init__', forbidden)
+    monkeypatch.setattr('virtuoso_design_agent.cli.run_bridge_lifecycle', forbidden)
+    records, completion, _ = rounds
+    measures = write(tmp_path/'measurements.json', {'measurements': [measurement()]})
+    history = {'task': records['B'][0].name, 'run': records['B'][1].name,
+               'completion': completion.name, 'artifact_root': '.'}
+    intake = write(tmp_path/'intake.json', {
+        'source': {'kind': 'task', 'task': records['B'][0].name},
+        'measurements': measures.name, 'history': history,
+        'rationale': [{'text': 'Replay the existing probe only; do not assume its state is current.',
+                       'source': 'software_inference'}],
+    })
+    iteration = write(tmp_path/'iteration.json', {
+        'stages': [{'id': 'gain', 'analysis': 'ac', 'constraint_metrics': ['low_frequency_gain_db']}],
+        'rounds': [history], 'max_rounds': 1, 'continue_after_feasible': True,
+    })
+    return intake, iteration
+
+
+def test_intake_and_iteration_preserve_input_and_completion_without_continuing_the_restored_probe(
+    rounds, workflow_requests, tmp_path, monkeypatch,
+):
+    records, _, _ = rounds
+    intake, iteration = workflow_requests
+    monkeypatch.chdir(tmp_path.parent)  # Both artifact_root and completion resolve against the request, not cwd.
+    context, draft = build_design_intake(intake)
+    history = context['history']
+    assert draft is None and any('重新定锚' in issue for issue in context['issues'])
+    assert history['input_evidence'][0]['status'] == 'verified'
+    assert history['input_artifact_root'] == str(tmp_path.resolve())
+    assert history['completion']['status'] == 'restored_to_baseline_in_record'
+    assert history['writeback']['parameter_checks'][0]['actual'] == '475.00n'
+    assert context['sources']['history_final_run']['sha256'] == sha(records['C'][1])
+    assert not history['current_remote_state_verified'] and not context['execution_authorized']
+    # No template is read or compiled, even with a tempting passed metric and exhausted round budget.
+    progress, draft = build_design_iteration(iteration, tmp_path/'not-read-template.json')
+    assert progress['status'] == 'recorded_state_requires_reanchor' and progress['next_action'] == 'reanchor'
+    assert draft is None and progress['best_feasible_anchor'] is None
+    assert progress['history'][0]['full_specification_feasible']  # Historical performance is not erased.
+    assert progress['history'][0]['completion'] == history['completion']
+    assert '重新定锚' in render_design_iteration(progress) and '已记录收尾' in render_design_intake(context)
+    # design-next --iteration must respect the same barrier without duplicate CLI completion flags.
+    report, draft = suggest_design_next(*records['B'], iteration_path=iteration)
+    assert report['status'] == 'recorded_state_requires_reanchor' and draft is None
+
+
+@pytest.mark.parametrize('case', ['receipt', 'restore_state', 'pending'])
+def test_intake_and_iteration_reconcile_bad_evidence_before_any_reanchor_or_refinement(
+    rounds, workflow_requests, tmp_path, case,
+):
+    from virtuoso_design_agent.models import ExecutionCheckpoint
+    records, _, bind = rounds
+    intake, iteration = workflow_requests
+    if case == 'receipt':
+        tmp_path.joinpath('B/input_from_oa.raw/vda-input-manifest.sha256').unlink()
+    elif case == 'restore_state':
+        raw = json.loads(records['C'][1].read_text())
+        raw['actions'][0]['details']['instance_parameters']['MN0']['l'] = '31n'
+        write(records['C'][1], raw); bind()
+    else:
+        run = RunRecord.model_validate_json(records['B'][1].read_text())
+        cp = ExecutionCheckpoint(task_id=run.task_id, plan_token=run.plan_token, adapter=run.adapter,
+            started_at=run.started_at, initial_parameters={}, expected_oa_parameters={}, complete=True,
+            next_candidate_index=2, candidates=run.candidates, pending_oa_instance_parameters={'MN0': {'w': '475n'}})
+        write(tmp_path/'pending.json', cp.model_dump(mode='json'))
+        for path, key in ((intake, 'history'), (iteration, 'rounds')):
+            raw = json.loads(path.read_text())
+            history = raw[key][0] if key == 'rounds' else raw[key]
+            history['checkpoint'] = 'pending.json'; write(path, raw)
+    context, task = build_design_intake(intake)
+    assert task is None and context['history']['next_status_for_historical_run'] == 'reconcile_execution_first'
+    progress, task = build_design_iteration(iteration)
+    assert progress['status'] == 'reconcile_execution' and progress['best_feasible_anchor'] is None
+    assert task.operation.value == 'schematic.inspect' and not task.safety.allow_remote_compute
+    assert not task.safety.allow_remote_write and not progress['task_draft']['restoration_executed']
+
+
+def test_explicit_final_record_can_reanchor_with_original_permissions_unchanged(rounds, workflow_requests):
+    records, _, _ = rounds
+    intake, iteration = workflow_requests
+    original = {path: path.read_bytes() for pair in records.values() for path in pair}
+    for path, key in ((intake, 'history'), (iteration, 'rounds')):
+        raw = json.loads(path.read_text())
+        final = {'task': records['C'][0].name, 'run': records['C'][1].name, 'artifact_root': '.'}
+        raw[key] = [final] if key == 'rounds' else final
+        if key == 'history':
+            raw['source']['task'] = records['C'][0].name
+        else:
+            raw['max_rounds'] = 2  # A new continuation needs budget; do not weaken the original stop gate.
+        write(path, raw)
+    context, task = build_design_intake(intake)
+    assert task is not None and context['history']['completion'] is None
+    assert context['history']['input_evidence'][0]['status'] == 'verified'
+    progress, next_task = build_design_iteration(iteration, records['C'][0])
+    assert progress['status'] == 'refine_objective' and progress['best_feasible_anchor'] is not None
+    for draft in (task, next_task):
+        assert not any((draft.safety.allow_remote_compute, draft.safety.allow_remote_write,
+                        draft.safety.replace_existing, draft.create_if_missing))
+        assert draft.safety.allowed_library == _task().safety.allowed_library
+        assert draft.design_context.instance_parameter_permissions == _task().design_context.instance_parameter_permissions
+    assert all(path.read_bytes() == before for path, before in original.items())
+
+
+def test_normal_cleanup_and_relative_roots_remain_distinct_at_both_entry_points(
+    rounds, workflow_requests, tmp_path, monkeypatch,
+):
+    intake, iteration = workflow_requests
+    # Only the actual job is unavailable; no source files are deleted or rewritten.
+    original = Path.is_dir
+    monkeypatch.setattr(Path, 'is_dir', lambda path: False if path == tmp_path/'B' else original(path))
+    monkeypatch.chdir(tmp_path.parent)
+    for path, key in ((intake, 'history'), (iteration, 'rounds')):
+        raw = json.loads(path.read_text()); history = raw[key][0] if key == 'rounds' else raw[key]
+        history.pop('completion'); history.pop('artifact_root'); write(path, raw)
+    context, task = build_design_intake(intake)
+    progress, _ = build_design_iteration(iteration)
+    assert task is not None and not context['execution_authorized']
+    for history in (context['history'], progress['history'][0]):
+        assert history['input_evidence'][0]['status'] == 'recorded_not_replayed'
+    assert progress['status'] != 'reconcile_execution' and not progress['current_remote_state_verified']
+
+
+def test_completion_hash_failure_never_leaves_partial_cli_outputs(rounds, workflow_requests, tmp_path):
+    _, completion, _ = rounds
+    intake, iteration = workflow_requests
+    raw = json.loads(completion.read_text()); raw['final']['run_sha256'] = '0'*64; write(completion, raw)
+    for command, request in (('design-intake', intake), ('design-iterate', iteration)):
+        output, draft = tmp_path/(command+'.json'), tmp_path/(command+'-task.json')
+        assert main([command, str(request), '--output', str(output), '--task-output', str(draft)]) == 2
+        assert not output.exists() and not draft.exists()
+
+
+@pytest.mark.parametrize('entry', ['intake', 'iteration'])
+def test_completion_references_are_not_allowed_to_change_during_composition(
+    rounds, workflow_requests, monkeypatch, entry,
+):
+    import virtuoso_design_agent.design_intake as intake_module
+    import virtuoso_design_agent.design_iteration as iteration_module
+    records, _, _ = rounds
+    module = intake_module if entry == 'intake' else iteration_module
+    original = module.build_design_review
+
+    def changed(*args, **kwargs):
+        review = original(*args, **kwargs)
+        final = records['C'][1]
+        final.write_bytes(final.read_bytes() + b'\n')
+        return review
+
+    monkeypatch.setattr(module, 'build_design_review', changed)
+    request = workflow_requests[0 if entry == 'intake' else 1]
+    build = build_design_intake if entry == 'intake' else build_design_iteration
+    with pytest.raises(ValueError, match='SHA-256|source changed'):
+        build(request)
