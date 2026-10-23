@@ -54,6 +54,11 @@ adapter port
 
 VDA 不嵌入一个新的通用 LLM。Codex 负责开放式推理，VDA 负责把高风险 EDA 动作收敛为受控命令和机器可核验结果。
 
+自主能力按[分级 v2](l5-roadmap.md)评价整个 Codex + VDA + Bridge 工作流；L5B 是给定大致
+拓扑后的模块设计细化，L5C 是模块架构探索，L6 是多模块协同。schematic/layout/post-layout
+范围与证据成熟度分别记录，不以增加工具接口或改等级名称替代实现。本次分级修订不
+改变上述架构、TaskSpec、计划 token 或真实执行授权。
+
 ## 为什么使用独立 worker
 
 `virtuoso-bridge-lite` 已有自己的 Python 虚拟环境和本机配置。主程序通过该环境中的 Python 启动 JSON worker，而不是把 Bridge 源码复制进来或强制安装成本项目依赖。这样可以保持 Bridge 独立升级、避免依赖漂移，并把跨环境协议缩小到版本化 JSON action。
