@@ -132,6 +132,8 @@ def suggest_design_next(
                            "holdout_error_percent": model.maximum_holdout_error_percent,
                            "holdout_gate_passed": model.holdout_gate_passed} for model in recomputed.models],
     }
+    if recomputed.fixed_testbench_overrides is not None:
+        report["model"]["fixed_testbench_overrides"] = recomputed.fixed_testbench_overrides.model_dump(mode="json")
     if not recomputed.gate_passed or recomputed.candidate_set is None:
         report["status"] = "model_not_validated"
         add("model_gap", "留出或模型门未通过；保留误差，不生成可执行尺寸候选。", "recomputed model gates")
@@ -209,6 +211,11 @@ def render_design_next(report: dict) -> str:
         from .design_iteration import render_design_iteration
         lines.extend(["", render_design_iteration(report["iteration"])])
     if report["model"]:
+        if report["model"].get("fixed_testbench_overrides"):
+            lines.extend(["", "## 模型使用的固定仿真条件", "",
+                          "以下原记录的源/负载 override 已逐候选保留，不改写基础 setup 或 OA；"
+                          "不证明实际 simulator input 已独立核对。", "",
+                          f"`{report['model']['fixed_testbench_overrides']}`", ""])
         if report["model"].get("parameter_bindings"):
             lines.extend(["## 显式 CDF 数值映射", "",
                           "字段单位/含义为声明，不是新的 PDK 回读；只接受显式 Spectre SI 字面量。", ""])

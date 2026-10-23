@@ -77,6 +77,11 @@ Spectre SI 字面量格式、模型单位、含义和范围，复用同一拟合
 `design-next` 无预测改善时不再生成新计算任务。此扩展不是任意 raw CDF 自动识别，
 也不证明新候选已在 OA/si/Spectre 上验收。见[使用说明](numeric-cdf-refinement.md)。
 
+固定的源/负载 override 必须随模型和每个候选保留，摘要会展示这些仿真条件；结果审计
+也比较逐候选及最终选择的 override，不能仅凭参数/指标相同接受不同条件。旧模型若曾
+丢失这些条件，应从原 run/policy 本地重算到新文件并重新编译/plan，不补改旧 token 或
+checkpoint。此一致性是记录层检查，不替代实际 simulator input、OA 或新点性能验收。
+
 ## 3. 窗口优先复用，任务完成后收拢
 
 运行前记录真实窗口/session 身份、target、PDK、归属、任务状态、dirty/running 状态及是否

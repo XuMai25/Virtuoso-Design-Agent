@@ -65,6 +65,25 @@
 原测量保留 eda_result。局部拟合不是 MOS 物理定律、跨 PDK/拓扑保证或全局最优证明。
 相同标识或“其他字段没出现在 candidate 里”也不能证明它们在当前 OA 中没有变化。
 
+## 固定偏置和负载不能在生成候选时丢失
+
+源记录各点完全相同的 typed testbench override（例如源 DC/AC 值、负载值）不是新的
+模型变量，但仍是拟合适用条件。结果在 `fixed_testbench_overrides` 保存该条件，并把
+它复制到原锚点及每个新 `AtomicCandidate.testbench_overrides`，不改写基础 setup/OA。
+`design-next` 的 JSON/中文摘要展示固定条件；模板缺少相应源或负载时由原 typed
+校验拒绝，不能静默退回基础值。没有 override 的旧路径不新增该空字段，保持原任务兼容。
+
+原 `op-relinearization-validate` 除参数/原子候选身份/指标外，现在还比较逐候选和最终
+选择的 override；相同参数和指标不能掩盖不同的偏置或负载。编译器也检查模型内候选
+与声明固定条件一致。未建模的 override 变化仍拒绝拟合，本次不支持把它当数值变量。
+这些条件来自保存记录，不是新鲜 Bridge 回读；对记录值的匹配也不是实际 simulator
+input 已应用的独立证明。真实执行仍须原 OA→si/ADE 输入与结果证据。
+
+修复前若模型在源记录含固定 override 时丢失了它，`design-next` 的确定性重算将拒绝旧
+模型；应以原 run/policy 本地重算到新文件，再审阅普通任务和新 plan。不要补改原记录、
+旧 token 或 checkpoint；低层候选编译器不能替代这一步源模型重算和上下文审查。
+本地重现与旧记录兼容检查见[修复验收](validation/2026-10-23-model-testbench-context-local.md)。
+
 ## 使用原入口，不增加一次远端调用
 
 只复算旧记录：

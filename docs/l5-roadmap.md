@@ -157,6 +157,10 @@ L5B 可以先在 schematic 范围成立。是否声明物理实现质量，仍�
 | P2 按任务规格补齐验收与人工交接 | 正式 STB 新路径、跨轮次组合运行、部分 ADE 保存/独立 Load/人工改动捕获等尚缺对应实机证据 | 下次真实任务需要哪项，就在同一设计上做该项最小验证；先复用既有 OA、setup 和结果。STB 不需要就不跑，旧 state 迁移不需要就继续延期，不把验收缺口当新实现 |
 | P3 有需求再扩展 | 深层/shared-child override、更多分析/器件/PVT、其他优化器、跨模块或物理实现 | 只有目标设计确实越过现有边界、且不能用既有配置/脚本解决时才接入；先写清收益、范围和成本。L5C/L6、BO/RAG/多 agent/完整 benchmark 都不是近期必做清单 |
 
+2026-10-23 按实际故障优先完成[模型固定仿真条件传递修复](validation/2026-10-23-model-testbench-context-local.md)：
+保留固定源/负载 override，拒绝结果条件错配；复用原 compiler/audit 和旧记录，本地验收
+不增加电路或远端 Gate，也不提升 L5B 的质量声明。后续顺序不因此扩大。
+
 成本观测贯穿 P1/P2，而不是另建监控工程：现有 design-review 有 run/action 时长，
 design-iterate 可用 action-time 预算；`agent_thinking_seconds` 当前明确为 None。
 可靠的 agent/工具调用总数、上下文/模型开销、人工操作/返工和端到端交付时长仍不完整。

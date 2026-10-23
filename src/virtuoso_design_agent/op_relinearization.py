@@ -18,6 +18,7 @@ from typing import Literal
 from pydantic import ConfigDict, Field, StrictStr, model_serializer, model_validator
 
 from .instance_path import INSTANCE_PATH_PATTERN
+from .generic_simulation import GenericTestbenchOverrides
 from .linear_network import solve_complex_linear_system
 from .metrics import evaluate_constraints
 from .models import (
@@ -236,6 +237,7 @@ class OperatingPointRelinearizationResult(_FiniteStrictModel):
     fixed_parameters: dict[StrictStr, float]
     fixed_instance_parameters: dict[StrictStr, dict[StrictStr, StrictStr]]
     parameter_bindings: dict[StrictStr, NumericInstanceParameterBinding] = Field(default_factory=dict)
+    fixed_testbench_overrides: GenericTestbenchOverrides | None = None
     constraints: list[MetricConstraint]
     objective: Objective
     models: list[LocalMetricModel]
@@ -255,6 +257,8 @@ class OperatingPointRelinearizationResult(_FiniteStrictModel):
         raw = handler(self)
         if not self.parameter_bindings:
             raw.pop("parameter_bindings", None)
+        if self.fixed_testbench_overrides is None:
+            raw.pop("fixed_testbench_overrides", None)
         return raw
 
 
@@ -309,6 +313,7 @@ class OperatingPointRelinearizationRunValidation(_FiniteStrictModel):
     candidate_execution_gate_passed: bool
     prediction_accuracy_gate_passed: bool
     candidates: list[RelinearizationRunCandidateValidation]
+    fixed_testbench_overrides: GenericTestbenchOverrides | None = None
     prediction_evidence_source: Literal[EvidenceSource.SOFTWARE_INFERENCE] = (
         EvidenceSource.SOFTWARE_INFERENCE
     )
@@ -319,6 +324,13 @@ class OperatingPointRelinearizationRunValidation(_FiniteStrictModel):
         EvidenceSource.SOFTWARE_INFERENCE
     )
     notes: list[StrictStr] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def serialize_optional_testbench(self, handler):
+        raw = handler(self)
+        if self.fixed_testbench_overrides is None:
+            raw.pop("fixed_testbench_overrides", None)
+        return raw
 
 
 def _file_sha256(path: Path) -> str:
@@ -554,6 +566,8 @@ def _atomic_proposal(proposal: RelinearizedProposal, parameters: list[Relineariz
     return AtomicCandidate(id=f"op-local-{index:03d}", parameters=semantic,
                            instance_parameter_updates=[InstanceParameterUpdate(instance=name, parameters=fields)
                                                        for name, fields in instances.items()],
+                           testbench_overrides=anchor.testbench_overrides.model_copy(deep=True)
+                           if anchor.testbench_overrides is not None else None,
                            predicted_metrics=dict(proposal.predicted_metrics))
 
 
@@ -841,6 +855,8 @@ def relinearize_operating_point(
         fixed_parameters=fixed_parameters,
         fixed_instance_parameters=fixed_instance_parameters,
         parameter_bindings={p.name: p.instance_parameter for p in policy.parameters if p.instance_parameter is not None},
+        fixed_testbench_overrides=anchor.testbench_overrides.model_copy(deep=True)
+        if anchor.testbench_overrides is not None else None,
         constraints=list(policy.constraints),
         objective=policy.objective,
         models=models,
@@ -870,6 +886,13 @@ def _merged_instance_parameters(
     for update in candidate.instance_parameter_updates:
         merged.setdefault(update.instance, {}).update(update.parameters)
     return merged
+
+
+def _validate_fixed_testbench(result: OperatingPointRelinearizationResult) -> None:
+    assert result.candidate_set is not None
+    if any(candidate.testbench_overrides != result.fixed_testbench_overrides
+           for candidate in result.candidate_set.candidates):
+        raise ValueError("relinearization candidates do not retain the fixed testbench overrides")
 
 
 def _load_bound_validation_policy(
@@ -943,6 +966,7 @@ def validate_relinearization_run(
         raise ValueError("run validation requires a passed relinearization result")
     if task.candidate_set is None:
         raise ValueError("run validation task has no atomic candidate set")
+    _validate_fixed_testbench(result)
     task_source = task.candidate_set.source
     result_source = result.candidate_set.source
     if task_source.bindings.get("relinearization_result_sha256") != result_sha256:
@@ -1052,6 +1076,7 @@ def validate_relinearization_run(
             or not measured.analysis_complete
             or not _same_numeric_mapping(measured.parameters, expected_parameters)
             or measured.instance_parameters != expected_instance_parameters
+            or measured.testbench_overrides != atomic.testbench_overrides
         ):
             raise ValueError(f"run candidate {index} atomic provenance mismatch")
 
@@ -1126,6 +1151,7 @@ def validate_relinearization_run(
         for candidate in run.candidates
         if _same_numeric_mapping(candidate.parameters, run.selected_parameters)
         and candidate.instance_parameters == selected_instance_parameters
+        and candidate.testbench_overrides == run.selected_testbench_overrides
     ]
     if (
         len(selected) != 1
@@ -1150,6 +1176,9 @@ def validate_relinearization_run(
     notes = [
         "the exact atomic domain was exhausted and final selection used EDA metrics"
     ]
+    if result.fixed_testbench_overrides is not None:
+        notes.append("candidate and selection overrides match the fixed recorded testbench; "
+                     "this is not an independent simulator-input check")
     if legacy_floor_metrics:
         notes.append(
             "legacy relative-error floors restored from the exact hash-bound "
@@ -1184,6 +1213,7 @@ def validate_relinearization_run(
         candidate_execution_gate_passed=True,
         prediction_accuracy_gate_passed=accuracy_passed,
         candidates=validations,
+        fixed_testbench_overrides=result.fixed_testbench_overrides,
         notes=notes,
     )
 
@@ -1203,6 +1233,7 @@ def build_task_from_relinearization(
         or result.candidate_set is None
     ):
         raise ValueError("only a passed relinearization result can create a task")
+    _validate_fixed_testbench(result)
     raw = json.loads(task_template_path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("relinearization task template must contain one JSON object")

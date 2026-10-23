@@ -12,6 +12,8 @@ P1-a 本地薄接线已实现：[`design-intake`](docs/design-intake-workflow.md
 P1-b 首个本地切片为[显式 CDF 数值映射](docs/numeric-cdf-refinement.md)：原局部模型
 可处理声明了单位/含义的 CDF 字面量，再编译回普通候选；拒绝混杂输入和量化越界，
 无预测改善则不建议新计算。原语义路径保持兼容，未知字段语义和新点实测仍不自动推断。
+模型使用的固定源/负载 override 现逐候选保留并参与结果审计，防止在不同偏置或负载下
+误用预测；这只是记录/任务的一致性检查，不代替实际 simulator input 核对。
 
 2026-10-23 已把 STB 的原始文件持久留存、同作业 native margin 对照、失败/中断证据及
 `stability-audit` 离线复核接入正式路径，设计复盘和跨轮次控制也会检查这些证据。
