@@ -88,31 +88,77 @@ class NumericInstanceParameterBinding(NumericInstanceParameterTarget):
         return self
 
 
+_TESTBENCH_UNIT_KINDS = {"V": "voltage", "mV": "voltage", "A": "current", "uA": "current",
+                         "F": "capacitor", "pF": "capacitor", "fF": "capacitor",
+                         "ohm": "resistor", "kohm": "resistor"}
+
+
+class NumericTestbenchParameterBinding(_FiniteStrictModel):
+    """An explicit recorded DC-source/load coordinate, not a new simulator input."""
+
+    target: Literal["source_dc", "load"]
+    name: StrictStr = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_$]*$")
+    unit: Literal["V", "mV", "A", "uA", "F", "pF", "fF", "ohm", "kohm"]
+    meaning: StrictStr = Field(min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_quantity(self) -> "NumericTestbenchParameterBinding":
+        source_unit = _TESTBENCH_UNIT_KINDS[self.unit] in {"voltage", "current"}
+        if (self.target == "source_dc") != source_unit:
+            raise ValueError("testbench target and declared unit are incompatible")
+        if not self.meaning.strip():
+            raise ValueError("numeric testbench meaning cannot be blank")
+        return self
+
+    def value_from(self, overrides: GenericTestbenchOverrides | None, label: str = "testbench") -> float:
+        value = None
+        if overrides is not None:
+            if self.target == "source_dc":
+                source = overrides.sources.get(self.name)
+                value = source.dc_value if source is not None else None
+            else:
+                value = overrides.loads.get(self.name)
+        if value is None or not math.isfinite(value) or (self.target == "load" and value <= 0):
+            raise ValueError(f"{label} lacks an explicit testbench {self.target} value for {self.name}")
+        scaled = value / _NUMERIC_UNITS[self.unit][0]
+        if not math.isfinite(scaled):
+            raise ValueError(f"{label} testbench unit conversion is nonfinite for {self.name}")
+        return scaled
+
+
 class RelinearizationParameter(_FiniteStrictModel):
     name: StrictStr = Field(
         min_length=1,
         max_length=128,
         pattern=r"^[A-Za-z_][A-Za-z0-9_]*$",
     )
-    minimum: float = Field(gt=0.0)
-    maximum: float = Field(gt=0.0)
+    minimum: float
+    maximum: float
     proposal_step: float = Field(gt=0.0)
     steps_each_side: int = Field(default=1, ge=1, le=4)
     quantization_grid: float | None = Field(default=None, gt=0.0)
     decimal_places: int = Field(default=9, ge=3, le=12)
     instance_parameter: NumericInstanceParameterBinding | None = None
+    testbench_parameter: NumericTestbenchParameterBinding | None = None
 
     @model_serializer(mode="wrap")
     def serialize_optional_binding(self, handler):
         raw = handler(self)
         if self.instance_parameter is None:
             raw.pop("instance_parameter", None)  # Preserve legacy semantic-policy hashes.
+        if self.testbench_parameter is None:
+            raw.pop("testbench_parameter", None)
         return raw
 
     @model_validator(mode="after")
     def validate_bounds(self) -> "RelinearizationParameter":
         if self.maximum <= self.minimum:
             raise ValueError("relinearization parameter maximum must exceed minimum")
+        if self.instance_parameter is not None and self.testbench_parameter is not None:
+            raise ValueError("a parameter cannot bind both CDF and testbench fields")
+        signed_dc = self.testbench_parameter is not None and self.testbench_parameter.target == "source_dc"
+        if not signed_dc and (self.minimum <= 0 or self.maximum <= 0):
+            raise ValueError("CDF, semantic and load model bounds must remain positive")
         return self
 
 
@@ -170,6 +216,10 @@ class OperatingPointRelinearizationPolicy(_FiniteStrictModel):
                        for target in p.instance_parameter.targets()]
         if len(raw_targets) != len(set(raw_targets)):
             raise ValueError("numeric CDF bindings must not alias the same instance parameter")
+        testbench_targets = [(p.testbench_parameter.target, p.testbench_parameter.name)
+                             for p in self.parameters if p.testbench_parameter is not None]
+        if len(testbench_targets) != len(set(testbench_targets)):
+            raise ValueError("numeric testbench bindings must not alias the same field")
         metric_names = [item.metric for item in self.metrics]
         if len(metric_names) != len(set(metric_names)):
             raise ValueError("relinearization metrics must be unique")
@@ -254,6 +304,7 @@ class OperatingPointRelinearizationResult(_FiniteStrictModel):
     fixed_parameters: dict[StrictStr, float]
     fixed_instance_parameters: dict[StrictStr, dict[StrictStr, StrictStr]]
     parameter_bindings: dict[StrictStr, NumericInstanceParameterBinding] = Field(default_factory=dict)
+    testbench_parameter_bindings: dict[StrictStr, NumericTestbenchParameterBinding] = Field(default_factory=dict)
     fixed_testbench_overrides: GenericTestbenchOverrides | None = None
     constraints: list[MetricConstraint]
     objective: Objective
@@ -274,6 +325,8 @@ class OperatingPointRelinearizationResult(_FiniteStrictModel):
         raw = handler(self)
         if not self.parameter_bindings:
             raw.pop("parameter_bindings", None)
+        if not self.testbench_parameter_bindings:
+            raw.pop("testbench_parameter_bindings", None)
         if self.fixed_testbench_overrides is None:
             raw.pop("fixed_testbench_overrides", None)
         return raw
@@ -414,6 +467,8 @@ def _binding_value(fields: dict[str, dict[str, str]], binding: NumericInstancePa
 
 
 def _parameter_value(candidate: CandidateEvaluation, parameter: RelinearizationParameter) -> float:
+    if parameter.testbench_parameter is not None:
+        return parameter.testbench_parameter.value_from(candidate.testbench_overrides, f"source candidate {candidate.index}")
     binding = parameter.instance_parameter
     if binding is not None:
         return _binding_value(candidate.instance_parameters, binding,
@@ -424,8 +479,25 @@ def _parameter_value(candidate: CandidateEvaluation, parameter: RelinearizationP
     return value
 
 
-def _source_context(candidate: CandidateEvaluation) -> tuple:
-    return (candidate.topology_sha256, candidate.topology_variant_id, candidate.testbench_overrides,
+def _fixed_testbench(overrides: GenericTestbenchOverrides | None,
+                     bindings: dict[str, NumericTestbenchParameterBinding]) -> GenericTestbenchOverrides | None:
+    if overrides is None or not bindings:
+        return overrides
+    raw = overrides.model_dump(mode="json", exclude_none=True)
+    for binding in bindings.values():
+        if binding.target == "load":
+            raw["loads"].pop(binding.name, None)
+        else:
+            source = raw["sources"].get(binding.name, {})
+            source.pop("dc_value", None)
+            if not source:
+                raw["sources"].pop(binding.name, None)
+    return GenericTestbenchOverrides.model_validate(raw) if raw["sources"] or raw["loads"] else None
+
+
+def _source_context(candidate: CandidateEvaluation, parameters: list[RelinearizationParameter]) -> tuple:
+    bindings = {p.name: p.testbench_parameter for p in parameters if p.testbench_parameter is not None}
+    return (candidate.topology_sha256, candidate.topology_variant_id, _fixed_testbench(candidate.testbench_overrides, bindings),
             [(c.name, c.process_corner, c.temperature_c, c.vdd_v) for c in candidate.operating_conditions])
 
 
@@ -433,11 +505,11 @@ def _constant_inputs(
     candidates: list[CandidateEvaluation],
     parameters: list[RelinearizationParameter],
 ) -> tuple[dict[str, float], dict[str, dict[str, str]]]:
-    if any(_source_context(c) != _source_context(candidates[0]) for c in candidates[1:]):
+    if any(_source_context(c, parameters) != _source_context(candidates[0], parameters) for c in candidates[1:]):
         raise ValueError("unmodeled topology, testbench or operating conditions vary across source points")
-    modeled_names = {p.name for p in parameters if p.instance_parameter is None}
-    if any(p.name in candidates[0].parameters for p in parameters if p.instance_parameter is not None):
-        raise ValueError("numeric CDF aliases must not shadow recorded semantic parameters")
+    modeled_names = {p.name for p in parameters if p.instance_parameter is None and p.testbench_parameter is None}
+    if any(p.name in candidates[0].parameters for p in parameters if p.instance_parameter is not None or p.testbench_parameter is not None):
+        raise ValueError("numeric CDF/testbench aliases must not shadow recorded semantic parameters")
     parameter_names = set(candidates[0].parameters)
     if any(set(candidate.parameters) != parameter_names for candidate in candidates[1:]):
         raise ValueError("source candidates do not expose the same parameter fields")
@@ -580,8 +652,21 @@ def _atomic_proposal(proposal: RelinearizedProposal, parameters: list[Relineariz
                      anchor: CandidateEvaluation, index: int) -> AtomicCandidate:
     semantic = {}
     instances: dict[str, dict[str, str]] = {}
+    testbench = anchor.testbench_overrides.model_dump(mode="json", exclude_none=True) if anchor.testbench_overrides is not None else None
     for p in parameters:
         value = proposal.parameters[p.name]
+        if p.testbench_parameter is not None:
+            binding = p.testbench_parameter
+            assert testbench is not None  # Every modeled coordinate was explicitly read from the anchor.
+            if not math.isclose(value, _parameter_value(anchor, p), rel_tol=1e-12, abs_tol=0.0):
+                scaled = value * _NUMERIC_UNITS[binding.unit][0]
+                if not math.isfinite(scaled):
+                    raise ValueError(f"testbench serialization is nonfinite for {p.name}")
+                if binding.target == "source_dc":
+                    testbench["sources"][binding.name]["dc_value"] = scaled
+                else:
+                    testbench["loads"][binding.name] = scaled
+            continue
         binding = p.instance_parameter
         if binding is None:
             semantic[p.name] = value
@@ -597,8 +682,7 @@ def _atomic_proposal(proposal: RelinearizedProposal, parameters: list[Relineariz
     return AtomicCandidate(id=f"op-local-{index:03d}", parameters=semantic,
                            instance_parameter_updates=[InstanceParameterUpdate(instance=name, parameters=fields)
                                                        for name, fields in instances.items()],
-                           testbench_overrides=anchor.testbench_overrides.model_copy(deep=True)
-                           if anchor.testbench_overrides is not None else None,
+                           testbench_overrides=GenericTestbenchOverrides.model_validate(testbench) if testbench is not None else None,
                            predicted_metrics=dict(proposal.predicted_metrics))
 
 
@@ -767,7 +851,7 @@ def relinearize_operating_point(
     model_by_metric = {model.metric: model for model in models}
     observed = set()
     for candidate in run.candidates:
-        if _source_context(candidate) != _source_context(anchor):
+        if _source_context(candidate, policy.parameters) != _source_context(anchor, policy.parameters):
             continue
         try:
             observed.add(_parameter_signature(candidate, policy.parameters))
@@ -872,6 +956,8 @@ def relinearize_operating_point(
 
     policy_sha256 = _canonical_sha256(policy.model_dump(mode="json"))
     gate_passed = validation_passed and candidate_set is not None
+    testbench_bindings = {p.name: p.testbench_parameter for p in policy.parameters if p.testbench_parameter is not None}
+    fixed_testbench = _fixed_testbench(anchor.testbench_overrides, testbench_bindings)
     return OperatingPointRelinearizationResult(
         policy_id=policy.id,
         policy_sha256=policy_sha256,
@@ -886,8 +972,8 @@ def relinearize_operating_point(
         fixed_parameters=fixed_parameters,
         fixed_instance_parameters=fixed_instance_parameters,
         parameter_bindings={p.name: p.instance_parameter for p in policy.parameters if p.instance_parameter is not None},
-        fixed_testbench_overrides=anchor.testbench_overrides.model_copy(deep=True)
-        if anchor.testbench_overrides is not None else None,
+        testbench_parameter_bindings=testbench_bindings,
+        fixed_testbench_overrides=fixed_testbench.model_copy(deep=True) if fixed_testbench is not None else None,
         constraints=list(policy.constraints),
         objective=policy.objective,
         models=models,
@@ -921,9 +1007,28 @@ def _merged_instance_parameters(
 
 def _validate_fixed_testbench(result: OperatingPointRelinearizationResult) -> None:
     assert result.candidate_set is not None
-    if any(candidate.testbench_overrides != result.fixed_testbench_overrides
+    for candidate in result.candidate_set.candidates:
+        for binding in result.testbench_parameter_bindings.values():
+            binding.value_from(candidate.testbench_overrides, f"atomic candidate {candidate.id}")
+    if any(_fixed_testbench(candidate.testbench_overrides, result.testbench_parameter_bindings) != result.fixed_testbench_overrides
            for candidate in result.candidate_set.candidates):
         raise ValueError("relinearization candidates do not retain the fixed testbench overrides")
+
+
+def _validate_testbench_binding_kinds(result: OperatingPointRelinearizationResult, task: TaskSpec) -> None:
+    if not result.testbench_parameter_bindings:
+        return
+    spec = task.generic_simulation
+    if spec is None:
+        raise ValueError("numeric testbench bindings require generic_simulation")
+    sources = {source.name: source for source in spec.sources}
+    loads = {load.name: load for load in spec.loads}
+    for binding in result.testbench_parameter_bindings.values():
+        target = (sources if binding.target == "source_dc" else loads).get(binding.name)
+        if target is None or target.kind != _TESTBENCH_UNIT_KINDS[binding.unit]:
+            raise ValueError(f"testbench binding {binding.name} is missing or has incompatible kind for {binding.unit}")
+        if binding.target == "source_dc" and task.operating_conditions and spec.operating_condition_supply_source == binding.name:
+            raise ValueError("an operating-condition supply cannot be modeled as a candidate DC source")
 
 
 def _validate_linked_parameters(result: OperatingPointRelinearizationResult) -> None:
@@ -1007,6 +1112,7 @@ def validate_relinearization_run(
     if task.candidate_set is None:
         raise ValueError("run validation task has no atomic candidate set")
     _validate_fixed_testbench(result)
+    _validate_testbench_binding_kinds(result, task)
     _validate_linked_parameters(result)
     task_source = task.candidate_set.source
     result_source = result.candidate_set.source
@@ -1217,7 +1323,10 @@ def validate_relinearization_run(
     notes = [
         "the exact atomic domain was exhausted and final selection used EDA metrics"
     ]
-    if result.fixed_testbench_overrides is not None:
+    if result.testbench_parameter_bindings:
+        notes.append("candidate and selection overrides match recorded full testbench tuples; unmodeled fields remain fixed; "
+                     "this is not an independent simulator-input check")
+    elif result.fixed_testbench_overrides is not None:
         notes.append("candidate and selection overrides match the fixed recorded testbench; "
                      "this is not an independent simulator-input check")
     if legacy_floor_metrics:
@@ -1330,13 +1439,16 @@ def build_task_from_relinearization(
         update={"source": source.model_copy(update={"bindings": bindings})}
     )
     raw["candidate_set"] = candidate_set.model_dump(mode="json")
-    return TaskSpec.model_validate(raw)
+    task = TaskSpec.model_validate(raw)
+    _validate_testbench_binding_kinds(result, task)
+    return task
 
 
 __all__ = [
     "LocalMetricModel",
     "NumericInstanceParameterBinding",
     "NumericInstanceParameterTarget",
+    "NumericTestbenchParameterBinding",
     "OperatingPointRelinearizationPolicy",
     "OperatingPointRelinearizationResult",
     "OperatingPointRelinearizationRunValidation",

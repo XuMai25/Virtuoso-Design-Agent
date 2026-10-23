@@ -1,8 +1,10 @@
-# P1-b 首个切片：显式 CDF 数值映射与局部微调
+# P1-b：显式数值映射与局部微调
 
 复用原 `op-relinearize` / `design-next`，让原始 CDF 字面量进入已有的局部响应模型，
 再编译回普通原子 CDF 候选；没有新求解器、执行器或 Bridge 接口。它补的是“可写
 字段与可计算变量之间的接线”，不等于任意字段已有物理模型或自动最优范围。
+现也支持将已有 generic testbench 的 DC 源/电阻或电容负载显式映射为同一模型的变量，
+与尺寸联合处理；其他激励和条件仍固定，不增加求解器、仿真器或自动补点。
 
 ## 映射由 agent/用户声明，不能按名字猜
 
@@ -85,6 +87,61 @@
 或 solver。已完成本地模型→候选→安全任务→审计回归，尚未做真实联动写入/网表验收；
 见[本地验收](validation/2026-10-23-p1b-linked-cdf-local.md)。
 
+## 偏置、负载与尺寸联合微调
+
+原 policy.parameters 的每个条目选择原语义变量、instance_parameter 或 testbench_parameter
+中的一种；不能同时映射 CDF 与 testbench。同一模型可混合这些变量，成组 CDF 仍只占
+一个自由度。以下两个条目可与前面的尺寸条目放入同一 parameters 列表：
+
+```json
+[
+  {
+    "name": "bias_mv", "minimum": 350, "maximum": 450, "proposal_step": 10,
+    "testbench_parameter": {
+      "target": "source_dc", "name": "VIN_SRC", "unit": "mV",
+      "meaning": "本地合成示例的输入偏置源 DC，不是器件 VGS 或推荐偏置。"
+    }
+  },
+  {
+    "name": "load_ff", "minimum": 3, "maximum": 7, "proposal_step": 0.5,
+    "testbench_parameter": {
+      "target": "load", "name": "CL0", "unit": "fF",
+      "meaning": "本地合成示例的显式电容负载，不是任意设计的默认负载。"
+    }
+  }
+]
+```
+
+这只是经过本地回归的语法片段，不是完整任务、真实校准或新规格。字段/含义、范围和
+步长仍由当前设计的理论与已有证据决定；不能照抄这些示例值执行。
+
+- source_dc 只映射已记录源的 dc_value：支持 V/mV 或 A/uA。零/负 DC 可显式声明，
+  表示源端子方向下的数值，不自动解释成器件 VGS、过驱或安全电压。原语义/CDF/负载
+  模型的正值范围要求不放宽。load 映射已记录负载的 value：支持 F/pF/fF 或 ohm/kohm。
+- GenericTestbenchOverrides 内仍用 SI 数值，模型按声明单位换算；建议选择 mV/uA/fF/
+  kohm 等适当量级，原量化/范围规则不变。编译时还会与 generic_simulation 的实际
+  voltage/current/capacitor/resistor 类型核对；名字不存在或单位维度不匹配则拒绝。
+- 每个训练/留出点必须显式记录全部变量；缺 dc_value 或 load value 时不能从基础
+  setup 猜补。source 的 AC 幅相、未建模的 DC/负载、其他参数、拓扑和工况仍固定。
+  会被 operating_conditions 覆盖的供电源不允许作为这一模型的 DC 坐标。
+- 候选从锚点复制完整 typed override，只替换明确建模的值，不改写基础 setup/OA。
+  结果的 testbench_parameter_bindings 记录映射；fixed_testbench_overrides 只记录
+  剩余固定字段。没有 testbench 映射时，该字段仍按旧路径表示完整固定 override。
+- design-next 展示尺寸和源/负载各自的前后值及模型单位，输出普通零权限 TaskSpec；
+  原编译器/审计检查变量没有丢失、其余字段固定，并对账逐候选与最终选择的完整元组。
+  这是记录/任务一致性，不是对实际 simulator input 的独立解析。
+- 只覆盖原 generic_simulation 中的源和负载，不自动修改 OA 中的偏置源 CDF、ADE
+  变量或模型 include；这些仍走各自已有显式路径，不受此数值模型限制。
+
+“联合”仍是局部一阶响应的多个独立项，不新增交叉项、全局最优或任意拓扑物理模型。
+d 个独立变量至少需要锚点加 d 个独立训练点，并保留互不重叠的 holdout；点数够还不
+等于满秩、误差合格或适用整个范围。偏置总随尺寸一起变化，或负载从未变化时，不能
+硬归因、把无数据的灵敏度设为零，或放宽原误差门来生成候选。
+
+现有 PMOS 三点仅有尺寸/偏置变化、负载固定，不足以建立带独立留出的联合模型；本轮
+没有拟合它、没有新任务或远端补点。实现/数据缺口详见
+[本地验收](validation/2026-10-23-p1b-joint-testbench-local.md)。
+
 ## 先解释，再拟合；模型不足就停
 
 先用已有器件表、实际连接和 OP/MNA 解释偏置、gm/gds、负载和摆幅瓶颈。已有
@@ -95,7 +152,7 @@
    匹配；明确且互不重叠的 training/holdout，保持满秩和各参数留出方向覆盖。
 2. 只允许声明的变量变化。保存记录中可见的其他语义/CDF 参数、拓扑标识、候选 testbench override、
    corner/温度/电源条件必须保持一致；条件内的测量值可以不同。否则拒绝归因。
-   当前没有 testbench 变量的数值映射，不把 VBP/CL 改动默认为尺寸效果。
+   只有明确映射的 testbench DC/负载可变化，不把未声明的 VBP/CL 改动默认为尺寸效果。
 3. 复用现有一阶局部拟合、误差规则和排序。独立留出/训练门未过则没有可执行候选；
    不用增大容差、混入 holdout 或随机补点把它变成通过。
 4. 格点量化后再次检查上下界，不能因四舍五入把 CDF 候选推到声明域外。
@@ -110,14 +167,15 @@
 ## 固定偏置和负载不能在生成候选时丢失
 
 源记录各点完全相同的 typed testbench override（例如源 DC/AC 值、负载值）不是新的
-模型变量，但仍是拟合适用条件。结果在 `fixed_testbench_overrides` 保存该条件，并把
-它复制到原锚点及每个新 `AtomicCandidate.testbench_overrides`，不改写基础 setup/OA。
+模型变量，但仍是拟合适用条件。未映射时，结果在 `fixed_testbench_overrides` 保存完整
+条件，并把它复制到每个新候选；使用 testbench 映射时只剔除明确建模的字段，保留
+其余固定条件，完整候选仍在 `AtomicCandidate.testbench_overrides`，不改基础 setup/OA。
 `design-next` 的 JSON/中文摘要展示固定条件；模板缺少相应源或负载时由原 typed
 校验拒绝，不能静默退回基础值。没有 override 的旧路径不新增该空字段，保持原任务兼容。
 
 原 `op-relinearization-validate` 除参数/原子候选身份/指标外，现在还比较逐候选和最终
 选择的 override；相同参数和指标不能掩盖不同的偏置或负载。编译器也检查模型内候选
-与声明固定条件一致。未建模的 override 变化仍拒绝拟合，本次不支持把它当数值变量。
+与声明固定条件一致。未建模的 override 变化仍拒绝拟合，须先显式声明对应的数值映射。
 这些条件来自保存记录，不是新鲜 Bridge 回读；对记录值的匹配也不是实际 simulator
 input 已应用的独立证明。真实执行仍须原 OA→si/ADE 输入与结果证据。
 
@@ -158,7 +216,7 @@ no_predicted_improvement，不生成下一轮任务。它只排除数值舍入�
 
 ## 尚未闭合
 
-新 CDF 数值建议真实执行、callback 后实际值/si 一致性、新点性能和新模块泛化本轮
-均未验证；仅完成本地编译/防误归因，以及旧保存记录的复算。更多隐含单位、表达式、
-testbench 数值变量和未知物理语义按真实需求接入，不新增一套优化框架或为此造电路。
+新 CDF/源/负载数值建议的真实执行、callback 后实际值/si 一致性、新点性能和新模块
+泛化仍未验证；仅完成本地编译/防误归因，以及旧保存记录复算。更多隐含单位、表达式、
+尚未覆盖的 testbench 量和未知物理语义按需接入，不新增优化框架或为此造电路。
 详见[本地验证记录](validation/2026-10-23-p1b-numeric-cdf-local.md)。

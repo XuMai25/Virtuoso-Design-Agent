@@ -163,7 +163,11 @@ L5B 可以先在 schematic 范围成立。是否声明物理实现质量，仍�
 
 同日 P1-b 继续补齐[显式等值 CDF 联动](validation/2026-10-23-p1b-linked-cdf-local.md)：
 多个受控字段共用一个已有模型变量，避免把匹配支路误列为独立自由度；本地展开为原
-候选并审计，保留旧记录与单字段兼容。未知比例、偏置/负载联合模型及真实写入仍按需。
+候选并审计，保留旧记录与单字段兼容。未知比例及真实写入仍按需。
+
+随后补齐[DC 偏置/负载与尺寸联合映射](validation/2026-10-23-p1b-joint-testbench-local.md)，
+仍用原局部模型，未声明条件继续固定；有代码接线不等于有可用校准数据。既有 PMOS
+三点不足以训练并独立留出两变量，负载方向也没有变化，保留缺口而不新建/补跑电路。
 
 成本观测贯穿 P1/P2，而不是另建监控工程：现有 design-review 有 run/action 时长，
 design-iterate 可用 action-time 预算；`agent_thinking_seconds` 当前明确为 None。

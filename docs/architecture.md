@@ -92,6 +92,12 @@ P1-b 首个本地切片直接扩展 `op_relinearization.py`：可选
 不等值或成员权限不足则拒绝。锚点逐成员保留字符串，原 post-run audit 逐字段对账。
 不增加矩阵求解器、匹配识别器或任意比例关系，不改变原 OA 写入/恢复与授权规则。
 
+同一局部模型还可通过 NumericTestbenchParameterBinding 显式映射已记录的 source_dc
+或 load 数值，与语义/CDF 变量混合；源 DC 可有符号，CDF/语义/负载仍保持正值范围。
+typed override 仍使用 SI，编译核对源/负载类型和单位，拒绝工况会覆盖的供电源坐标。
+只有已建模字段从固定上下文中剔除，fixed_testbench_overrides 保存剩余部分，完整候选
+仍保留全部值。原满秩/holdout、普通任务/完整元组审计不变；不改 worker 或 Bridge API。
+
 ## 为什么使用独立 worker
 
 `virtuoso-bridge-lite` 已有自己的 Python 虚拟环境和本机配置。主程序通过该环境中的 Python 启动 JSON worker，而不是把 Bridge 源码复制进来或强制安装成本项目依赖。这样可以保持 Bridge 独立升级、避免依赖漂移，并把跨环境协议缩小到版本化 JSON action。

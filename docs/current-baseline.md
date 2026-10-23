@@ -24,6 +24,9 @@ VDA 是 Bridge 之上的设计与验证编排层。按[分级 v2.1](l5-roadmap.m
   保存记录的一致性修复，不是实际 simulator input 的独立复核。见[修复记录](validation/2026-10-23-model-testbench-context-local.md)。
   已补显式等值字段联动，复用一个局部模型变量输出多个受原权限检查的 CDF updates；
   不猜匹配/比例，真实整组写入和 callback/si 一致性仍待按实际任务验收。
+  已有 generic DC 源/电阻电容负载可显式映射，与尺寸联合进入原局部模型；单位/类型、
+  固定残余条件及原数据门不放宽。PMOS 三点无独立留出余量且负载不变，仍无可校准的
+  联合模型，不因此补点。见[实现与数据边界](validation/2026-10-23-p1b-joint-testbench-local.md)。
 - **部分缺的是实机证据。** 正式 STB 新路径、若干 ADE/跨轮次组合路径在需要时用原设计
   验收，不因此再写一套功能或强制重复全部分析。完整 agent/人工返工成本仍未可靠计量，
   不以 action 时长冒充。

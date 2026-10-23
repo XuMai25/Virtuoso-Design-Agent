@@ -134,6 +134,9 @@ def suggest_design_next(
     }
     if recomputed.fixed_testbench_overrides is not None:
         report["model"]["fixed_testbench_overrides"] = recomputed.fixed_testbench_overrides.model_dump(mode="json")
+    if recomputed.testbench_parameter_bindings:
+        report["model"]["testbench_parameter_bindings"] = {name: binding.model_dump(mode="json")
+            for name, binding in recomputed.testbench_parameter_bindings.items()}
     if not recomputed.gate_passed or recomputed.candidate_set is None:
         report["status"] = "model_not_validated"
         add("model_gap", "留出或模型门未通过；保留误差，不生成可执行尺寸候选。", "recomputed model gates")
@@ -192,6 +195,12 @@ def suggest_design_next(
                 for name, value in candidate.predicted_metrics.items()},
             "evidence_source": "software_inference",
         })
+        if recomputed.testbench_parameter_bindings:
+            comparisons[-1]["testbench_changes"] = {name: {
+                "before": binding.value_from(anchor.testbench_overrides),
+                "proposed": binding.value_from(candidate.testbench_overrides), "unit": binding.unit,
+            } for name, binding in recomputed.testbench_parameter_bindings.items()
+                if binding.value_from(anchor.testbench_overrides) != binding.value_from(candidate.testbench_overrides)}
     report["status"] = "local_model_draft_ready"
     report["model"]["proposals"] = comparisons
     report["task_draft"] = {"id": draft.id, "plan_token": build_plan(draft).confirmation_token,
@@ -216,6 +225,11 @@ def render_design_next(report: dict) -> str:
                           "以下原记录的源/负载 override 已逐候选保留，不改写基础 setup 或 OA；"
                           "不证明实际 simulator input 已独立核对。", "",
                           f"`{report['model']['fixed_testbench_overrides']}`", ""])
+        if report["model"].get("testbench_parameter_bindings"):
+            lines.extend(["## 源/负载数值映射", "", "仅显式声明的 DC/负载值参与模型；其他 override 保持固定。", ""])
+            for name, binding in report["model"]["testbench_parameter_bindings"].items():
+                field = "dc_value" if binding["target"] == "source_dc" else "value"
+                lines.append(f"- {name} → {binding['name']}.{field}；模型单位 {binding['unit']}；{binding['meaning']}")
         if report["model"].get("parameter_bindings"):
             lines.extend(["## 显式 CDF 数值映射", "",
                           "字段单位/含义为声明，不是新的 PDK 回读；只接受显式 Spectre SI 字面量。", ""])
@@ -238,6 +252,7 @@ def render_design_next(report: dict) -> str:
         for proposal in report["model"].get("proposals", []):
             lines.extend(["", f"### {proposal['id']}", "", f"修改：`{proposal['changes']}`", "",
                           f"CDF 修改：`{proposal.get('instance_changes', {})}`", "",
+                          *([f"源/负载修改（所列模型单位）：`{proposal['testbench_changes']}`", ""] if "testbench_changes" in proposal else []),
                           "| 指标 | 锚点 | 预测 | 变化 |", "| --- | ---: | ---: | ---: |"])
             for name, values in proposal["predicted_metric_changes"].items():
                 lines.append(f"| {name} | {values['anchor']} | {values['predicted']} | {values['delta']} |")
