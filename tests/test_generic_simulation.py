@@ -601,7 +601,7 @@ def test_generic_task_rejects_missing_context_bad_binding_and_dynamic_analysis()
     unsupported = _task().model_dump(mode="json")
     unsupported["analysis"] = "psrr"
     unsupported["ac_sweep"] = None
-    with pytest.raises(ValidationError, match="dc, ac, transient, or noise"):
+    with pytest.raises(ValidationError, match="dc, ac, transient, noise, or stability"):
         TaskSpec.model_validate(unsupported)
 
 
@@ -3128,21 +3128,48 @@ def test_subprocess_adapter_routes_generic_task_and_preserves_contract(
     assert result.evidence_source is EvidenceSource.EDA_RESULT
 
 
+@pytest.mark.parametrize("analysis,required_gm,native_case", [
+    ("ac", False, "matched"), ("stability", False, "matched"), ("stability", True, "matched"),
+    ("stability", False, "missing"), ("stability", False, "wrong_probe"),
+    ("stability", False, "mismatch"), ("stability", False, "shared"),
+])
 def test_generic_worker_returns_oa_si_dc_ac_and_manifest_evidence(
-    monkeypatch,
+    monkeypatch, tmp_path, analysis, required_gm, native_case,
 ) -> None:
     frequency_hz = [10.0 ** (2.0 + index / 10.0) for index in range(61)]
     transfer = [
         -10.0 / (1.0 + 1j * frequency / 1e6) for frequency in frequency_hz
     ]
     runner_module = ModuleType("virtuoso_bridge.spectre.runner")
+    calls = {"netlist": 0, "simulation": 0}
 
     class Simulator:
         @classmethod
         def from_env(cls, **kwargs):
-            return cls()
+            instance = cls()
+            instance.work_dir = kwargs["work_dir"]
+            return instance
 
         def run_simulation(self, netlist, parameters):
+            calls["simulation"] += 1
+            output_dir = tmp_path
+            if analysis == "stability":
+                from stability_fixtures import write_stb_pair
+                from test_stability import response, contract
+                from virtuoso_design_agent.stability import extract_stability_metrics
+                output_dir = self.work_dir / "input_from_oa.raw"
+                f, gain = response()
+                expected, _ = extract_stability_metrics(f, gain, contract())
+                _, margin = write_stb_pair(output_dir, expected)
+                if native_case == "missing":
+                    margin.unlink()
+                elif native_case == "wrong_probe":
+                    margin.write_text(margin.read_text().replace('"probe" "VLOOP"', '"probe" "OTHER"'))
+                elif native_case == "mismatch":
+                    margin.write_text(margin.read_text().replace(str(expected["phase_margin_deg"]), "12"))
+                for name in ("dcOp.dc", "dcOpInfo.info"):
+                    (output_dir / name).write_text("software DC fixture only", encoding="utf-8")
+                (self.work_dir / "spectre.out").write_text("software simulator log fixture", encoding="utf-8")
             return SimpleNamespace(
                 ok=True,
                 data={
@@ -3153,7 +3180,7 @@ def test_generic_worker_returns_oa_si_dc_ac_and_manifest_evidence(
                     "ac_IN": [1.0 + 0.0j] * len(frequency_hz),
                     "ac_OUT": transfer,
                 },
-                metadata={},
+                metadata={"output_dir": str(output_dir)},
                 tool_version="test-spectre-generic",
                 warnings=[],
             )
@@ -3170,15 +3197,18 @@ def test_generic_worker_returns_oa_si_dc_ac_and_manifest_evidence(
         "_schematic_geometry_bundle",
         lambda *args: (geometry, {"sha256": "c" * 64}),
     )
-    monkeypatch.setattr(
-        bridge_worker,
-        "_generate_oa_netlist",
-        lambda *args, **kwargs: {
+    def generate_netlist(client, payload, work_dir, **kwargs):
+        calls["netlist"] += 1
+        import hashlib
+        for name in ("si.env", "si_batch_stdout.log", "oa_netlist.scs", "oa_netlist_spectre.scs"):
+            (work_dir / name).write_text("software netlist fixture", encoding="utf-8")
+        digest = hashlib.sha256(b"software netlist fixture").hexdigest()
+        return {
             "remote_run_dir": "/data/xum/virtuoso_bridge_smoke/vda_generic",
             "remote_netlist_path": (
                 "/data/xum/virtuoso_bridge_smoke/vda_generic/netlist"
             ),
-            "netlist_sha256": "a" * 64,
+            "netlist_sha256": digest,
             "parsed": {
                 "instances": [],
                 "topology_consistency": "matched",
@@ -3187,8 +3217,8 @@ def test_generic_worker_returns_oa_si_dc_ac_and_manifest_evidence(
                 "flat_primitive_scope": True,
             },
             "si_log_tail": ["End netlisting"],
-        },
-    )
+        }
+    monkeypatch.setattr(bridge_worker, "_generate_oa_netlist", generate_netlist)
     monkeypatch.setattr(bridge_worker, "_upload_file", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         bridge_worker,
@@ -3213,7 +3243,36 @@ def test_generic_worker_returns_oa_si_dc_ac_and_manifest_evidence(
     )
 
     task = _task()
+    if analysis == "stability":
+        from test_stability import response, stability_task
+        task = stability_task()
+        frequencies, loop_gain = response()
+        (tmp_path / "stb.stb").write_text("software fixture", encoding="utf-8")
+        monkeypatch.setattr(bridge_worker, "_read_psf_ascii_data",
+                            lambda *a, **kw: {"freq": frequencies, "loopGain": loop_gain})
+    from virtuoso_design_agent.measurements import (
+        MeasurementDefinition, MeasurementPlan, canonical_sha256, measurement_context,
+    )
+    definitions = [MeasurementDefinition.model_validate({
+        "metric": "phase_margin_deg" if analysis == "stability" else "low_frequency_gain_db",
+        "analysis": analysis, "quantity": "phase_margin" if analysis == "stability" else "gain",
+        "unit": "deg" if analysis == "stability" else "dB", "definition": "software fixture only",
+        "signals": ["loopGain(VLOOP)"] if analysis == "stability" else ["V(IN,0)", "V(OUT,0)"],
+        "source": "user_input",
+    })]
+    if required_gm:
+        definitions.append(MeasurementDefinition.model_validate({
+            "metric": "gain_margin_db", "analysis": "stability", "quantity": "gain_margin", "unit": "dB",
+            "definition": "software fixture requires a finite measured gain margin",
+            "signals": ["loopGain(VLOOP)"], "source": "user_input",
+        }))
+    raw = task.model_dump(mode="json", exclude_none=True)
+    raw["measurement_plan"] = MeasurementPlan(context_sha256=canonical_sha256(measurement_context(task)),
+                                              measurements=definitions).model_dump(mode="json")
+    task = TaskSpec.model_validate(raw)
     payload = SubprocessBridgeAdapter._task_payload(task)
+    if analysis == "stability":
+        payload["simulation_output_root"] = str(tmp_path / "retained")
     canonical_summary = bridge_worker._existing_schematic_summary(
         _raw_schematic(),
         pin_geometry=geometry,
@@ -3224,11 +3283,36 @@ def test_generic_worker_returns_oa_si_dc_ac_and_manifest_evidence(
             bridge_worker.snapshot_from_inspection(canonical_summary)
         )
     )
-    result = bridge_worker.simulate_existing_schematic(payload)
+    if native_case == "shared":
+        payload["analysis_stages"] = [
+            {"id": "bias", "analysis": "dc", "constraint_metrics": ["output_dc_v"]},
+            {"id": "loop", "analysis": "stability", "constraint_metrics": ["phase_margin_deg"]},
+        ]
+        payload["constraints"].append({"metric": "output_dc_v", "relation": ">=", "value": .1})
+        batch = bridge_worker.simulate_existing_schematic_stages(payload)
+        assert batch["shared_netlist"]["netlist_generation_count"] == 1
+        assert batch["shared_netlist"]["executed_stages"] == ["bias", "loop"]
+        result = batch["stage_results"][-1]["result"]
+    else:
+        result = bridge_worker.simulate_existing_schematic(payload)
 
-    assert result["analysis_complete"] is True
+    assert calls == {"netlist": 1, "simulation": 2 if native_case == "shared" else 1}
+    assert result["analysis_complete"] == (not required_gm and native_case in {"matched", "shared"})
+    if required_gm:
+        assert "required measurements: gain_margin_db" in " ".join(result["analysis_issues"])
+    assert result["evidence"]["testbench"]["measurement_context_sha256"] == task.measurement_plan.context_sha256
     assert result["metrics"]["output_dc_v"] == pytest.approx(0.5)
-    assert result["metrics"]["bandwidth_3db_hz"] == pytest.approx(1e6, rel=0.03)
+    if analysis == "stability":
+        assert result["metrics"]["phase_margin_deg"] > 60
+        assert result["evidence"]["simulation"]["stability_response"]["raw_file"]["sha256"]
+        retained = result["evidence"]["simulation"]["stability_artifacts"]
+        assert retained["persistent"] and retained["core_artifacts_complete"] == (native_case != "missing")
+        assert Path(retained["evidence_file"]).is_file()
+        assert (Path(retained["local_root"]) / "spectre-submission.json").is_file()
+        assert (Path(retained["local_root"]) / "spectre-execution-receipt.json").is_file()
+        assert result["evidence"]["simulation"]["stability_response"]["native_comparison"]["passed"] == (native_case in {"matched", "shared"})
+    else:
+        assert result["metrics"]["bandwidth_3db_hz"] == pytest.approx(1e6, rel=0.03)
     assert result["evidence"]["side_effects"]["oa_write_performed"] is False
     assert result["evidence"]["design_context_binding"]["source"] == (
         "software_inference"

@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "measurements": [
+    {
+      "metric": "output_dc_v", "analysis": "dc", "quantity": "voltage", "unit": "V",
+      "definition": "OUT 相对 VSS 的 DC 电压；沿用既有任务的上下界，不重新设定规格。",
+      "signals": ["V(OUT,VSS)"], "source": "user_input"
+    },
+    {
+      "metric": "mn0_vds_v", "analysis": "dc", "quantity": "operating_point", "unit": "V",
+      "definition": "既有 MN0 的 Spectre OP vds；符号不取绝对值。",
+      "signals": ["OP(MN0,vds)"], "source": "user_input"
+    },
+    {
+      "metric": "mp0_vds_v", "analysis": "dc", "quantity": "operating_point", "unit": "V",
+      "definition": "既有 MP0 的 Spectre OP vds；PMOS 负号保留。",
+      "signals": ["OP(MP0,vds)"], "source": "user_input"
+    },
+    {
+      "metric": "low_frequency_gain_v_per_v", "analysis": "ac", "quantity": "gain", "unit": "V/V",
+      "definition": "V(OUT,VSS)/V(IN,VSS) 幅度的既有低频参考窗口，不是带符号 DC 斜率。",
+      "signals": ["V(IN,VSS)", "V(OUT,VSS)"], "source": "user_input"
+    },
+    {
+      "metric": "bandwidth_3db_hz", "analysis": "ac", "quantity": "bandwidth", "unit": "Hz",
+      "definition": "相对合格低频参考增益向下 3 dB 的首个有效交点；未覆盖交点不外推。",
+      "signals": ["V(IN,VSS)", "V(OUT,VSS)"], "source": "user_input"
+    },
+    {
+      "metric": "gain_bandwidth_product_hz", "analysis": "ac", "quantity": "gain_bandwidth_product", "unit": "Hz",
+      "definition": "低频线性幅度增益乘以 3 dB 带宽；并非实际单位增益交越频率 UGB。",
+      "signals": ["V(IN,VSS)", "V(OUT,VSS)"], "source": "user_input"
+    }
+  ],
+  "uncertainties": []
+}

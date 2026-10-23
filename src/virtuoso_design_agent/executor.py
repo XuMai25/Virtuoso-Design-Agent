@@ -20,6 +20,7 @@ from .characterization import normalize_mos_characterization
 from .design_context import audit_design_context
 from .generic_simulation import GenericTestbenchOverrides
 from .metrics import evaluate_constraints
+from .measurements import missing_required_measurements
 from .models import (
     ActionRecord,
     AnalysisStageExecution,
@@ -346,6 +347,10 @@ class TaskExecutor:
         analysis_warnings = [
             str(value) for value in simulation.data.get("analysis_warnings", [])
         ]
+        missing_measurements = missing_required_measurements(task.measurement_plan, metrics, task.resolved_analysis().value)
+        if missing_measurements:
+            analysis_complete = False
+            analysis_issues.append("analysis omitted required measurements: " + ", ".join(missing_measurements))
         if not analysis_complete and not analysis_issues:
             analysis_issues = ["analysis did not produce its required core metrics"]
         raw_sources = simulation.data.get("metric_sources", {})
@@ -476,6 +481,10 @@ class TaskExecutor:
         missing_constraint_metrics = [
             item.metric for item in constraints if item.actual is None
         ]
+        missing_measurements = missing_required_measurements(task.measurement_plan, metrics, stage.analysis.value)
+        if missing_measurements:
+            analysis_complete = False
+            analysis_issues.append("analysis omitted required measurements: " + ", ".join(missing_measurements))
         if missing_constraint_metrics:
             analysis_complete = False
             analysis_issues.append(
@@ -563,6 +572,10 @@ class TaskExecutor:
             analysis_complete = bool(result.get("analysis_complete", True))
             issues = [str(value) for value in result.get("analysis_issues", [])]
             missing = [item.metric for item in constraints if item.actual is None]
+            missing_measurements = missing_required_measurements(task.measurement_plan, metrics, stage.analysis.value)
+            if missing_measurements:
+                analysis_complete = False
+                issues.append("analysis omitted required measurements: " + ", ".join(missing_measurements))
             if missing:
                 analysis_complete = False
                 issues.append(
@@ -1086,6 +1099,10 @@ class TaskExecutor:
             analysis_warnings = [
                 str(value) for value in result.get("analysis_warnings", [])
             ]
+            missing_measurements = missing_required_measurements(task.measurement_plan, metrics, task.resolved_analysis().value)
+            if missing_measurements:
+                analysis_complete = False
+                analysis_issues.append("analysis omitted required measurements: " + ", ".join(missing_measurements))
             if not analysis_complete and not analysis_issues:
                 analysis_issues = [
                     "analysis did not produce its required core metrics"
@@ -3706,6 +3723,9 @@ class TaskExecutor:
                 "noise_sweep": (
                     task.noise_sweep if stage.analysis.value == "noise" else None
                 ),
+                "stability_sweep": (
+                    task.stability_sweep if stage.analysis.value == "stability" else None
+                ),
                 "constraints": cls._constraints_for_analysis_stage(task, stage),
                 "objective": None,
             }
@@ -4391,6 +4411,7 @@ class TaskExecutor:
                 "ac_sweep": verification.ac_sweep,
                 "linearity_sweep": verification.linearity_sweep,
                 "noise_sweep": verification.noise_sweep,
+                "stability_sweep": verification.stability_sweep,
                 "constraints": list(verification.constraints),
                 "objective": None,
                 "operating_conditions": list(
@@ -5712,6 +5733,11 @@ class TaskExecutor:
         )
         status = RunStatus.SUCCEEDED
         notes = list(resume_checkpoint.notes) if resume_checkpoint is not None else []
+        if task.circuit is CircuitKind.SCHEMATIC_DRAWING:
+            notes.append(
+                "schematic_drawing success is structural/parameter/conductive-wire verification only; "
+                "native visual review, actual netlist verification and simulation performance are separate gates"
+            )
         candidates = (
             list(resume_checkpoint.candidates)
             if resume_checkpoint is not None

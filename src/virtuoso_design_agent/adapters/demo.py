@@ -227,6 +227,8 @@ class DeterministicDemoAdapter:
         return applied
 
     def create_schematic(self, task: TaskSpec) -> AdapterResult:
+        if task.circuit is CircuitKind.SCHEMATIC_DRAWING:
+            raise ValueError("schematic_drawing uses local schematic-compile fixtures; demo must not fake OA readback")
         key = self._key(task)
         existing = key in self._schematics
         if not existing:
@@ -391,6 +393,8 @@ class DeterministicDemoAdapter:
         )
 
     def inspect_schematic(self, task: TaskSpec) -> AdapterResult:
+        if task.circuit is CircuitKind.SCHEMATIC_DRAWING:
+            raise ValueError("demo cannot verify an image-derived native schematic")
         if task.include_param_evidence:
             raise RuntimeError(
                 "stored/CDF parameter evidence requires the Bridge adapter; "

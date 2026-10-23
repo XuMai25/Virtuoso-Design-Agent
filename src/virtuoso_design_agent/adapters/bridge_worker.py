@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,12 @@ from virtuoso_design_agent.model_includes import (
     resolve_spectre_model_includes,
 )
 from virtuoso_design_agent.spectre_values import spectre_values_equal
+from virtuoso_design_agent.stability import extract_stability_metrics
+from virtuoso_design_agent.stability_evidence import (
+    audit_stability_artifacts, canonical_sha256, compare_native_stb_margin,
+    read_native_stb_margin,
+)
+from virtuoso_design_agent.measurements import MeasurementPlan, missing_required_measurements
 from virtuoso_design_agent.calculator_expressions import calculator_expressions_equal
 from virtuoso_design_agent.topology_delta import (
     AddInstanceOperation,
@@ -6376,6 +6383,26 @@ def probe_spectre_environment(payload: dict[str, Any]) -> dict[str, Any]:
         "oa_access_performed": False,
         "oa_write_performed": False,
     }
+
+
+def create_schematic_drawing(payload: dict[str, Any]) -> dict[str, Any]:
+    from virtuoso_design_agent.schematic_drawing import DrawingRequest, require_executable_source
+    from virtuoso_design_agent.adapters.schematic_drawing_bridge import create_drawing
+    request = DrawingRequest.model_validate(payload["schematic_drawing"])
+    require_executable_source(request)
+    if payload.get("replace_existing") or request.description.pdk_profile != payload["profile"]["name"]:
+        raise ValueError("drawing replacement/profile mismatch rejected before connection")
+    return create_drawing(_client(), request, *_target(payload),
+                          set_parameters=_set_target_instance_params,
+                          timeout=payload["timeout_seconds"])
+
+
+def inspect_schematic_drawing(payload: dict[str, Any]) -> dict[str, Any]:
+    from virtuoso_design_agent.schematic_drawing import DrawingRequest, require_executable_source
+    from virtuoso_design_agent.adapters.schematic_drawing_bridge import inspect_drawing
+    request = DrawingRequest.model_validate(payload["schematic_drawing"])
+    require_executable_source(request)
+    return inspect_drawing(_client(), request, *_target(payload))
 
 
 def create_inverter(payload: dict[str, Any]) -> dict[str, Any]:
@@ -16663,6 +16690,46 @@ def _generic_transient_voltage(
     return [left - right for left, right in zip(positive, negative, strict=True)]
 
 
+def _generic_stability_metrics_from_result(
+    result: Any, settings: GenericOaSimulationSpec, sweep: dict[str, Any],
+) -> tuple[dict[str, float], dict[str, Any]]:
+    if settings.stability is None:
+        raise RuntimeError("STB result requires an explicit stability contract")
+    output_dir = getattr(result, "metadata", {}).get("output_dir")
+    if not output_dir:
+        raise RuntimeError("Spectre stability result is missing its downloaded PSF path")
+    path = _select_shallow_psf_file(Path(str(output_dir)), ("stb.stb",), label="STB")
+    data = _read_psf_ascii_data(path, label="STB")
+    frequency = _frequency_signal(data, "freq")
+    if not frequency:
+        raise RuntimeError("STB frequency vector is empty")
+    for actual, expected in ((frequency[0], sweep["start_hz"]),
+                             (frequency[-1], sweep["stop_hz"])):
+        if not math.isclose(actual, float(expected), rel_tol=1e-6, abs_tol=1e-9):
+            raise RuntimeError("STB frequency endpoints do not match the declared sweep")
+    if sum(str(key).lower() == "loopgain" for key in data) > 1:
+        raise RuntimeError("STB loopGain signal is ambiguous")
+    loop_gain = _complex_signal(data, "loopGain")
+    metrics, diagnostics = extract_stability_metrics(frequency, loop_gain, settings.stability)
+    diagnostics["raw_file"] = {"name": path.name, "size_bytes": path.stat().st_size,
+                               "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    diagnostics["_decoded_samples"] = {"frequency_hz": frequency,
+                                       "raw_loop_gain": [[v.real, v.imag] for v in loop_gain]}
+    try:
+        margin_path = path.with_name("stb.margin.stb")
+        native = read_native_stb_margin(path, margin_path, settings.stability)
+        comparison = compare_native_stb_margin(metrics, native, settings.stability, sweep)
+        comparison["raw_file"] = {"name": margin_path.name, "size_bytes": margin_path.stat().st_size,
+                                  "sha256": hashlib.sha256(margin_path.read_bytes()).hexdigest()}
+    except (OSError, ValueError) as exc:
+        comparison = {"source": "software_inference", "status": "incomplete", "passed": False,
+                      "issues": ["native STB margin unavailable/invalid: " + str(exc)]}
+    diagnostics["native_comparison"] = comparison
+    diagnostics["issues"].extend(comparison["issues"])
+    diagnostics["analysis_complete"] = diagnostics["analysis_complete"] and comparison["passed"]
+    return metrics, diagnostics
+
+
 def _generic_linearity_metrics_from_result(
     metadata: dict[str, Any],
     settings: GenericOaSimulationSpec,
@@ -16742,16 +16809,103 @@ def _generic_linearity_metrics_from_result(
     return metrics, diagnostics
 
 
+@contextmanager
+def _generic_simulation_work_directory(payload: dict[str, Any]):
+    """Persist STB batches; retain failures without changing Bridge cleanup policy."""
+    raw_root = payload.get("simulation_output_root")
+    if raw_root is None:
+        with tempfile.TemporaryDirectory(prefix="vda_existing_schematic_") as name:
+            yield Path(name)
+        return
+    root = Path(str(raw_root))
+    if not root.is_absolute():
+        raise RuntimeError("simulation_output_root must be an absolute local path")
+    root.mkdir(parents=True, exist_ok=True)
+    work_dir = Path(tempfile.mkdtemp(prefix=str(payload["analysis"]) + "_", dir=root))
+    start = {"schema_version": 1, "task_id": payload.get("task_id"), "target": payload.get("target"),
+             "analysis": payload["analysis"], "source": "system_event", "status": "started",
+             "started_epoch": time.time(), "automatic_replay_authorized": False}
+    (work_dir / "lifecycle-start.json").write_text(json.dumps(start, indent=2), encoding="utf-8")
+    try:
+        yield work_dir
+    except BaseException as exc:
+        (work_dir / "lifecycle-finish.json").write_text(json.dumps({
+            "status": "interrupted_or_failed", "error_type": type(exc).__name__,
+            "must_reconcile_before_retry": True, "source": "system_event",
+        }, indent=2), encoding="utf-8")
+        if isinstance(exc, Exception):
+            raise RuntimeError(f"{exc}; local evidence retained at {work_dir}; reconcile before retry") from exc
+        raise
+    else:
+        (work_dir / "lifecycle-finish.json").write_text(json.dumps({
+            "status": "returned", "source": "system_event",
+            "statement": "completion/quality is determined by the structured result, not this marker",
+        }, indent=2), encoding="utf-8")
+
+
+def _retain_stability_artifacts(
+    work_dir: Path, result: Any, payload: dict[str, Any], settings: GenericOaSimulationSpec,
+    sweep: dict[str, Any], netlist: dict[str, Any], diagnostics: dict[str, Any], wrapper: Path,
+) -> dict[str, Any]:
+    """Bind immutable inputs/raw files and Bridge-decoded samples for offline replay."""
+    samples = diagnostics.pop("_decoded_samples")
+    binding = {"task_id": payload.get("task_id"), "target": payload["target"],
+               "profile_sha256": canonical_sha256(payload["profile"]),
+               "design_context_sha256": canonical_sha256(payload["design_context"]),
+               "testbench_sha256": canonical_sha256(settings.model_dump(mode="json")),
+               "operating_condition": payload.get("operating_condition"),
+               "netlist_sha256": netlist["netlist_sha256"],
+               "spectre_include_sha256": netlist.get("spectre_netlist_sha256", netlist["netlist_sha256"]),
+               "wrapper_sha256": _sha256_path(wrapper),
+               "stability": settings.stability.model_dump(mode="json"), "sweep": sweep}
+    snapshot = {"binding": binding, "spec": binding["stability"], "sweep": sweep, **samples,
+                "source": "eda_result", "decoder": "virtuoso_bridge.spectre.psf.read_psf_ascii"}
+    (work_dir / "stability-response.json").write_text(
+        json.dumps(snapshot, indent=2, allow_nan=False), encoding="utf-8")
+    output_dir = Path(str(result.metadata["output_dir"])).resolve()
+    if not output_dir.is_relative_to(work_dir.resolve()):
+        raise RuntimeError("STB downloaded result path escapes the owned persistent directory")
+    raw_dir = _select_shallow_psf_file(output_dir, ("stb.stb",), label="STB").parent
+    core = {
+        "loop_file": raw_dir / "stb.stb", "margin_file": raw_dir / "stb.margin.stb",
+        "dc_file": _select_shallow_psf_file(raw_dir, ("dcOp.dc", "dc.dc", "spectre.dc"), label="DC"),
+        "op_file": raw_dir / "dcOpInfo.info", "log_file": work_dir / "spectre.out",
+        "netlist_file": work_dir / "oa_netlist.scs", "spectre_include_file": work_dir / "oa_netlist_spectre.scs",
+        "wrapper_file": wrapper, "si_env_file": work_dir / "si.env",
+        "si_log_file": work_dir / "si_batch_stdout.log", "response_snapshot": work_dir / "stability-response.json",
+    }
+    # Missing raw files are evidence failure, not permission to resubmit a job.
+    roles = {key: path.relative_to(work_dir).as_posix() for key, path in core.items()}
+    manifest, manifest_sha256 = _spectre_artifact_manifest(work_dir)
+    bundle = {"schema_version": 1, "kind": "stability_artifacts", "source": "eda_result",
+              "binding_sha256": canonical_sha256(binding), "core_artifacts": roles,
+              "artifact_manifest": manifest, "artifact_manifest_sha256": manifest_sha256,
+              **roles}
+    bundle_path = work_dir / "stability-evidence.json"
+    bundle_path.write_text(json.dumps(bundle, indent=2, allow_nan=False), encoding="utf-8")
+    audit = audit_stability_artifacts(bundle_path)
+    return {"source": "software_inference", "persistent": True, "local_root": str(work_dir),
+            "evidence_file": str(bundle_path), "evidence_sha256": _sha256_path(bundle_path),
+            "artifact_manifest_sha256": manifest_sha256, "core_artifacts_complete": audit.get("manifest_verified", False),
+            "audit": {key: audit[key] for key in ("status", "issues", "analysis_complete")},
+            "remote_retention": "unchanged Bridge cleanup policy; local copies retained",
+            "automatic_replay_authorized": False}
+
+
 def simulate_existing_schematic(
     payload: dict[str, Any], *, _bundle_cache: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Run a typed wrapper around one user-provided OA schematic."""
 
+    analysis = str(payload.get("analysis", ""))
+    if analysis == "stability" and not payload.get("simulation_output_root"):
+        raise RuntimeError("STB requires a persistent simulation_output_root before remote work")
+    if payload.get("simulation_output_root") and not Path(str(payload["simulation_output_root"])).is_absolute():
+        raise RuntimeError("simulation_output_root must be an absolute local path")
     from virtuoso_bridge.spectre.runner import SpectreSimulator
 
     profile = payload["profile"]
     timeout = int(payload.get("timeout_seconds", 600))
-    analysis = str(payload.get("analysis", ""))
     raw_conditions = payload.get("operating_conditions")
     if raw_conditions is not None and payload.get("operating_condition") is None:
         return _simulate_existing_schematic_operating_conditions(
@@ -16804,6 +16958,9 @@ def simulate_existing_schematic(
     ac_sweep = payload.get("ac_sweep")
     linearity_sweep = payload.get("linearity_sweep")
     noise_sweep = payload.get("noise_sweep")
+    stability_sweep = payload.get("stability_sweep")
+    if analysis == "stability" and not isinstance(stability_sweep, dict):
+        raise RuntimeError("generic existing-schematic stability requires stability_sweep")
     if analysis == "ac" and not isinstance(ac_sweep, dict):
         raise RuntimeError("generic existing-schematic AC requires ac_sweep")
     if analysis == "transient" and not isinstance(linearity_sweep, dict):
@@ -16816,6 +16973,7 @@ def simulate_existing_schematic(
         "ac": ac_sweep,
         "transient": linearity_sweep,
         "noise": noise_sweep,
+        "stability": stability_sweep,
     }
     if any(
         value is not None and name != analysis
@@ -16879,10 +17037,13 @@ def simulate_existing_schematic(
                     "schematic_readback_count": 1,
                 }
             )
-    with tempfile.TemporaryDirectory(prefix="vda_existing_schematic_") as temp_dir:
-        work_dir = Path(temp_dir)
+    with _generic_simulation_work_directory(payload) as work_dir:
         if _bundle_cache is not None and "netlist_evidence" in _bundle_cache:
             netlist_evidence = _bundle_cache["netlist_evidence"]
+            if payload.get("simulation_output_root"):
+                source_dir = _bundle_cache["local_netlist_dir"]
+                for name in ("si.env", "si_batch_stdout.log", "oa_netlist.scs", "oa_netlist_spectre.scs"):
+                    shutil.copyfile(source_dir / name, work_dir / name)
         else:
             netlist_evidence = _generate_oa_netlist(
                 client,
@@ -16894,6 +17055,7 @@ def simulate_existing_schematic(
             if _bundle_cache is not None:
                 _bundle_cache["netlist_evidence"] = netlist_evidence
                 _bundle_cache["netlist_generation_count"] = 1
+                _bundle_cache["local_netlist_dir"] = work_dir
         model_configuration, _ = _common_source_model_configuration(
             profile,
             operating_condition if isinstance(operating_condition, dict) else None,
@@ -16911,6 +17073,7 @@ def simulate_existing_schematic(
                 linearity_sweep if isinstance(linearity_sweep, dict) else None
             ),
             noise_sweep=noise_sweep if isinstance(noise_sweep, dict) else None,
+            **({"stability_sweep": stability_sweep} if analysis == "stability" else {}),
         )
         condition_slug = _operating_condition_slug(
             operating_condition if isinstance(operating_condition, dict) else None
@@ -16946,7 +17109,23 @@ def simulate_existing_schematic(
             keep_remote_files=False,
             remote_run_dir=netlist_evidence["remote_run_dir"],
         )
+        if payload.get("simulation_output_root"):
+            (work_dir / "spectre-submission.json").write_text(json.dumps({
+                "source": "system_event", "status": "submission_may_have_occurred",
+                "remote_netlist_run_dir": netlist_evidence["remote_run_dir"],
+                "remote_wrapper": remote_wrapper, "wrapper_sha256": _sha256_path(local_wrapper),
+                "timeout_seconds": timeout, "automatic_replay_authorized": False,
+                "instruction": "reconcile the existing Bridge job before any resubmission",
+            }, indent=2), encoding="utf-8")
         result = simulator.run_simulation(local_wrapper, {})
+        if payload.get("simulation_output_root"):
+            # Deliberately omit stdout, command, environment and credentials.
+            metadata = getattr(result, "metadata", {})
+            (work_dir / "spectre-execution-receipt.json").write_text(json.dumps({
+                "source": "system_event", "bridge_result_ok": bool(result.ok),
+                "metadata": {key: metadata[key] for key in ("returncode", "output_dir", "remote_host", "timings")
+                             if key in metadata}, "automatic_replay_authorized": False,
+            }, indent=2, allow_nan=False), encoding="utf-8")
         if not result.ok:
             detail = _spectre_failure_detail(result, work_dir)
             raise RuntimeError(f"Spectre simulation failed: {detail}")
@@ -16975,6 +17154,7 @@ def simulate_existing_schematic(
         ac_diagnostics: dict[str, Any] | None = None
         linearity_diagnostics: dict[str, Any] | None = None
         noise_diagnostics: dict[str, Any] | None = None
+        stability_diagnostics: dict[str, Any] | None = None
         if analysis == "ac":
             assert settings.transfer is not None
             assert isinstance(ac_sweep, dict)
@@ -17055,6 +17235,32 @@ def simulate_existing_schematic(
                 noise_diagnostics.get("analysis_complete", False)
             ) and not analysis_issues
 
+        if analysis == "stability":
+            assert isinstance(stability_sweep, dict)
+            update, stability_diagnostics = _generic_stability_metrics_from_result(
+                result, settings, stability_sweep,
+            )
+            metrics.update(update)
+            analysis_issues.extend(stability_diagnostics["issues"])
+            analysis_warnings.extend(stability_diagnostics["warnings"])
+            analysis_complete = stability_diagnostics["analysis_complete"]
+
+        measurement_plan = (MeasurementPlan.model_validate(payload["measurement_plan"])
+                            if payload.get("measurement_plan") is not None else None)
+        missing_measurements = missing_required_measurements(measurement_plan, metrics, analysis)
+        if missing_measurements:
+            analysis_complete = False
+            analysis_issues.append("analysis omitted required measurements: " + ", ".join(missing_measurements))
+
+        retained_stability = None
+        if analysis == "stability":
+            retained_stability = _retain_stability_artifacts(
+                work_dir, result, payload, settings, stability_sweep, netlist_evidence,
+                stability_diagnostics, local_wrapper,
+            )
+            if not retained_stability["audit"]["analysis_complete"]:
+                analysis_complete = False
+                analysis_issues.extend(retained_stability["audit"]["issues"])
         manifest, manifest_sha256 = _spectre_artifact_manifest(work_dir)
         return {
             "parameters": (
@@ -17114,11 +17320,14 @@ def simulate_existing_schematic(
                 },
                 "testbench": {
                     "contract_source": "user_input",
+                    **({"measurement_context_sha256": measurement_plan.context_sha256}
+                       if measurement_plan is not None else {}),
                     "rendering_source": "software_inference",
                     "remote_path": remote_wrapper,
                     "sha256": hashlib.sha256(deck.encode("utf-8")).hexdigest(),
                     "analysis": analysis,
                     "settings": settings.model_dump(mode="json"),
+                    **({"stability_sweep": stability_sweep} if stability_sweep is not None else {}),
                     "operating_condition": operating_condition,
                     "operating_condition_source": (
                         "user_input"
@@ -17140,6 +17349,11 @@ def simulate_existing_schematic(
                     "source": "eda_result",
                     "tool_version": tool_version,
                     "dc_raw_files": dc_raw_files,
+                    **({"stability_artifacts": retained_stability} if retained_stability is not None else {}),
+                    **({"stability_response": {
+                        "source": "eda_result", "extraction_source": "software_inference",
+                        **stability_diagnostics,
+                    }} if stability_diagnostics is not None else {}),
                     "ac_response": (
                         {
                             "source": "eda_result",
@@ -17210,6 +17424,7 @@ def simulate_existing_schematic_stages(payload: dict[str, Any]) -> dict[str, Any
             ("ac_sweep", "ac"),
             ("linearity_sweep", "transient"),
             ("noise_sweep", "noise"),
+            ("stability_sweep", "stability"),
         ):
             if stage.analysis.value != owner:
                 member_payload.pop(sweep_name, None)
@@ -19294,6 +19509,8 @@ def simulate_differential_pair(
 
 
 _ACTIONS = {
+    "create_schematic_drawing": create_schematic_drawing,
+    "inspect_schematic_drawing": inspect_schematic_drawing,
     "audit_resources": audit_resources,
     "probe": probe,
     "probe_spectre_environment": probe_spectre_environment,
@@ -19354,6 +19571,16 @@ def main() -> int:
         action = request.get("action")
         if action not in _ACTIONS:
             raise ValueError(f"unsupported worker action: {action}")
+        # An isolated Virtuoso session must not fall back to the user's default
+        # Bridge connection. Keep selection explicit and fail before dispatch.
+        bridge_env = os.getenv("VDA_BRIDGE_ENV_FILE")
+        if bridge_env:
+            from virtuoso_bridge.env import set_runtime_env_file
+
+            env_path = Path(bridge_env)
+            if not env_path.is_absolute() or not env_path.is_file():
+                raise ValueError("VDA_BRIDGE_ENV_FILE must name an existing absolute file")
+            set_runtime_env_file(env_path)
         data = _ACTIONS[action](request.get("payload", {}))
         result = {"ok": True, "data": data}
         return_code = 0

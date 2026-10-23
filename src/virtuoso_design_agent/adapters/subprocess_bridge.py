@@ -24,6 +24,10 @@ _PROCESS_TREE_GRACE_SECONDS = 3.0
 _WORKER_COOPERATIVE_CLEANUP_SECONDS = 30.0
 
 _WORKER_ACTIONS = {
+    CircuitKind.SCHEMATIC_DRAWING: {
+        "create": "create_schematic_drawing",
+        "inspect": "inspect_schematic_drawing",
+    },
     CircuitKind.NETLIST_PREVIEW: {
         "simulate": "simulate_netlist_preview",
     },
@@ -237,6 +241,10 @@ class SubprocessBridgeAdapter:
             if artifact_root is not None
             else Path(__file__).resolve().parents[3] / "artifacts" / "ade-captures"
         )
+        self.simulation_artifact_root = (
+            Path(artifact_root) / "simulations" if artifact_root is not None
+            else Path(__file__).resolve().parents[3] / "artifacts" / "simulations"
+        )
 
     def _request(
         self, action: str, payload: dict[str, Any], *, timeout: int
@@ -404,8 +412,12 @@ class SubprocessBridgeAdapter:
         }
         if task.target is not None:
             payload["target"] = task.target.model_dump(mode="json")
+        if task.schematic_drawing is not None:
+            payload["schematic_drawing"] = task.schematic_drawing.model_dump(mode="json")
         if task.include_param_evidence is not None:
             payload["include_param_evidence"] = task.include_param_evidence
+        if task.measurement_plan is not None:
+            payload["measurement_plan"] = task.measurement_plan.model_dump(mode="json")
         if task.device_characterization is not None:
             payload["device_characterization"] = (
                 task.device_characterization.model_dump(mode="json")
@@ -416,7 +428,7 @@ class SubprocessBridgeAdapter:
             payload["parameter_binding_discovery"] = (
                 task.parameter_binding_discovery.model_dump(mode="json")
             )
-        if task.operation not in {
+        if task.circuit is not CircuitKind.SCHEMATIC_DRAWING and task.operation not in {
             Operation.DEVICE_CHARACTERIZE,
             Operation.ADE_PREPARE,
             Operation.ADE_CAPTURE,
@@ -448,6 +460,8 @@ class SubprocessBridgeAdapter:
             payload["noise_sweep_user_fields"] = sorted(
                 task.noise_sweep.model_fields_set
             )
+        if task.stability_sweep is not None:
+            payload["stability_sweep"] = task.stability_sweep.model_dump(mode="json")
         if task.operating_conditions:
             payload["operating_conditions"] = [
                 condition.model_dump(mode="json")
@@ -656,6 +670,10 @@ class SubprocessBridgeAdapter:
     ) -> AdapterResult:
         payload = self._task_payload(task)
         payload["parameters"] = parameters
+        if task.circuit is CircuitKind.EXISTING_SCHEMATIC and AnalysisKind.STABILITY in task.resolved_analyses():
+            payload["simulation_output_root"] = str(
+                (self.simulation_artifact_root / task.id / uuid.uuid4().hex).resolve()
+            )
         data = self._request(
             _WORKER_ACTIONS[task.circuit]["simulate"],
             payload,
@@ -673,6 +691,10 @@ class SubprocessBridgeAdapter:
     ) -> AdapterResult:
         payload = self._task_payload(task)
         payload["parameters"] = parameters
+        if AnalysisKind.STABILITY in task.resolved_analyses():
+            payload["simulation_output_root"] = str(
+                (self.simulation_artifact_root / task.id / uuid.uuid4().hex).resolve()
+            )
         data = self._request(
             "simulate_existing_schematic_stages",
             payload,

@@ -31,6 +31,9 @@ from .instance_path import (
 )
 from .netlist_preview import NetlistPreviewSpec
 from .topology_delta import TopologyDeltaExecutionSpec
+from .schematic_drawing import DrawingRequest, require_executable_source
+from .stability import StabilitySweep
+from .measurements import MeasurementPlan, validate_measurement_plan
 
 # The default is the currently verified foundry-CMOS environment. Packaging,
 # TSV, and hybrid-bonding profiles must always be selected explicitly.
@@ -61,6 +64,7 @@ class Operation(str, Enum):
 
 
 class CircuitKind(str, Enum):
+    SCHEMATIC_DRAWING = "schematic_drawing"
     MOS_DEVICE = "mos_device"
     NETLIST_PREVIEW = "netlist_preview"
     EXISTING_SCHEMATIC = "existing_schematic"
@@ -95,6 +99,7 @@ class AnalysisKind(str, Enum):
     NOISE = "noise"
     PSRR = "psrr"
     QUALITY = "quality"
+    STABILITY = "stability"
 
 
 class AnalysisStageExecution(str, Enum):
@@ -555,9 +560,10 @@ class AnalysisStageSpec(StrictModel):
             AnalysisKind.AC,
             AnalysisKind.TRANSIENT,
             AnalysisKind.NOISE,
+            AnalysisKind.STABILITY,
         }:
             raise ValueError(
-                "analysis stages support only dc, ac, transient, or noise"
+                "analysis stages support only dc, ac, transient, noise, or stability"
             )
         return self
 
@@ -793,15 +799,16 @@ class NoiseSweep(StrictModel):
 class ExistingSchematicWinnerVerificationSpec(StrictModel):
     """Optional expensive checks run only after nominal candidate selection."""
 
-    analysis_stages: list[AnalysisStageSpec] = Field(min_length=1, max_length=4)
+    analysis_stages: list[AnalysisStageSpec] = Field(min_length=1, max_length=5)
     constraints: list[MetricConstraint] = Field(min_length=1, max_length=128)
     operating_conditions: list[OperatingCondition] = Field(
         default_factory=list,
-        max_length=5,
+        max_length=32,
     )
     ac_sweep: AcSweep | None = None
     linearity_sweep: LinearitySweep | None = None
     noise_sweep: NoiseSweep | None = None
+    stability_sweep: StabilitySweep | None = None
 
     @model_validator(mode="after")
     def validate_verification(self) -> "ExistingSchematicWinnerVerificationSpec":
@@ -853,6 +860,7 @@ class ExistingSchematicWinnerVerificationSpec(StrictModel):
             AnalysisKind.AC: ("ac_sweep", self.ac_sweep),
             AnalysisKind.TRANSIENT: ("linearity_sweep", self.linearity_sweep),
             AnalysisKind.NOISE: ("noise_sweep", self.noise_sweep),
+            AnalysisKind.STABILITY: ("stability_sweep", self.stability_sweep),
         }
         for analysis, (name, value) in required_settings.items():
             if (analysis in requested) != (value is not None):
@@ -2195,6 +2203,7 @@ class TaskSpec(StrictModel):
     id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
     operation: Operation
     include_param_evidence: StrictBool | None = None
+    schematic_drawing: DrawingRequest | None = None
     circuit: CircuitKind
     target: DesignTarget | None = None
     expected_target_topology_variant: StrictStr | None = Field(
@@ -2206,7 +2215,7 @@ class TaskSpec(StrictModel):
     analysis: AnalysisKind | None = None
     analysis_stages: list[AnalysisStageSpec] = Field(
         default_factory=list,
-        max_length=4,
+        max_length=5,
     )
     analysis_stage_execution: AnalysisStageExecution = (
         AnalysisStageExecution.ISOLATED
@@ -2214,6 +2223,7 @@ class TaskSpec(StrictModel):
     ac_sweep: AcSweep | None = None
     linearity_sweep: LinearitySweep | None = None
     noise_sweep: NoiseSweep | None = None
+    stability_sweep: StabilitySweep | None = None
     ade_capture: AdeCaptureSpec | None = None
     ade_prepare: AdePrepareSpec | None = None
     ade_run: AdeRunSpec | None = None
@@ -2229,10 +2239,11 @@ class TaskSpec(StrictModel):
     netlist_preview: NetlistPreviewSpec | None = None
     design_context: DesignContext | None = None
     generic_simulation: GenericOaSimulationSpec | None = None
+    measurement_plan: MeasurementPlan | None = None
     parameter_binding_discovery: ParameterBindingDiscoverySpec | None = None
     operating_conditions: list[OperatingCondition] = Field(
         default_factory=list,
-        max_length=5,
+        max_length=32,
     )
     parameters: dict[str, float] = Field(default_factory=dict)
     instance_parameter_updates: list[InstanceParameterUpdate] = Field(
@@ -2275,6 +2286,32 @@ class TaskSpec(StrictModel):
 
     @model_validator(mode="after")
     def validate_operation_inputs(self) -> "TaskSpec":
+        if self.stability_sweep is not None and (
+            self.circuit is not CircuitKind.EXISTING_SCHEMATIC
+            or self.operation not in _SIMULATION_OPERATIONS
+        ):
+            raise ValueError("stability_sweep requires existing_schematic simulation or tuning")
+        if self.schematic_drawing is not None or self.circuit is CircuitKind.SCHEMATIC_DRAWING:
+            if (self.circuit is not CircuitKind.SCHEMATIC_DRAWING
+                    or self.schematic_drawing is None
+                    or self.operation not in {Operation.SCHEMATIC_CREATE, Operation.SCHEMATIC_INSPECT}):
+                raise ValueError("schematic_drawing requires its circuit and create/inspect operation")
+            allowed_fields = {"schema_version", "id", "operation", "circuit", "target", "pdk_profile",
+                              "schematic_drawing", "safety", "limits"}
+            # Default-valued unrelated fields remain backward-compatible, but no
+            # caller-supplied simulation/search/patch intent is silently ignored.
+            extras = {name for name in self.model_fields_set - allowed_fields
+                      if getattr(self, name) not in (None, False, [], {}, "isolated")}
+            if extras:
+                raise ValueError(f"schematic_drawing does not accept fields: {sorted(extras)}")
+            if self.target is None or self.target.view != "schematic":
+                raise ValueError("schematic_drawing requires a schematic target")
+            if self.pdk_profile != self.schematic_drawing.description.pdk_profile:
+                raise ValueError("task PDK differs from schematic drawing")
+            if self.safety.replace_existing or self.safety.allow_remote_compute:
+                raise ValueError("schematic_drawing forbids replacement and simulation")
+            require_executable_source(self.schematic_drawing)
+            return self
         if (
             self.include_param_evidence is not None
             and self.operation is not Operation.SCHEMATIC_INSPECT
@@ -2692,10 +2729,11 @@ class TaskSpec(StrictModel):
                     AnalysisKind.AC,
                     AnalysisKind.TRANSIENT,
                     AnalysisKind.NOISE,
+                    AnalysisKind.STABILITY,
                 }:
                     raise ValueError(
                         "existing_schematic simulation/tuning requires explicit "
-                        "dc, ac, transient, or noise analysis, or analysis_stages"
+                        "dc, ac, transient, noise, or stability analysis, or analysis_stages"
                     )
                 self.generic_simulation.validate_analysis(self.analysis.value)
             if self.target.view != "schematic":
@@ -3153,11 +3191,17 @@ class TaskSpec(StrictModel):
             if self.circuit not in {
                 CircuitKind.COMMON_SOURCE,
                 CircuitKind.DIFFERENTIAL_PAIR,
+                CircuitKind.EXISTING_SCHEMATIC,
             }:
                 raise ValueError(
                     "operating_conditions currently support only common_source "
-                    "and differential_pair"
+                    "and differential_pair or existing_schematic"
                 )
+            if self.circuit is CircuitKind.EXISTING_SCHEMATIC and (
+                self.generic_simulation is None
+                or self.generic_simulation.operating_condition_supply_source is None
+            ):
+                raise ValueError("generic operating conditions require an explicit supply source")
             names = [condition.name for condition in self.operating_conditions]
             if len(names) != len(set(names)):
                 raise ValueError("operating_conditions require unique names")
@@ -3192,7 +3236,8 @@ class TaskSpec(StrictModel):
                         "operating_conditions with per-condition supplies must not "
                         "also tune vdd_v"
                     )
-            if not any(condition_vdds) and "vdd_v" not in self.parameters:
+            if (not any(condition_vdds) and "vdd_v" not in self.parameters
+                    and self.circuit is not CircuitKind.EXISTING_SCHEMATIC):
                 raise ValueError(
                     "operating_conditions without per-condition supplies require "
                     "one explicit task-level vdd_v"
@@ -3203,6 +3248,7 @@ class TaskSpec(StrictModel):
             or self.ac_sweep is not None
             or self.linearity_sweep is not None
             or self.noise_sweep is not None
+            or self.stability_sweep is not None
         )
         if self.operation not in _SIMULATION_OPERATIONS:
             if analysis_settings:
@@ -3357,6 +3403,7 @@ class TaskSpec(StrictModel):
                         self.linearity_sweep,
                     ),
                     AnalysisKind.NOISE: ("noise_sweep", self.noise_sweep),
+                    AnalysisKind.STABILITY: ("stability_sweep", self.stability_sweep),
                 }
                 for requested, (name, value) in required_settings.items():
                     if (requested in requested_analyses) != (value is not None):
@@ -4005,6 +4052,11 @@ class TaskSpec(StrictModel):
                     self.design_context,
                     self.topology_delta,
                 )
+        return self
+
+    @model_validator(mode="after")
+    def validate_measurements(self) -> "TaskSpec":
+        validate_measurement_plan(self)
         return self
 
     def resolved_analysis(self) -> AnalysisKind:

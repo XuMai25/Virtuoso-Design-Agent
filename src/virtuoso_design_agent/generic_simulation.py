@@ -23,6 +23,7 @@ from pydantic import (
 
 from .instance_path import INSTANCE_PATH_PATTERN
 from .spectre_values import spectre_values_equal
+from .stability import STABILITY_METRICS, StabilitySpec
 
 
 _IDENTIFIER_PATTERN = r"^[A-Za-z_][A-Za-z0-9_$]*$"
@@ -80,7 +81,7 @@ GENERIC_NOISE_METRICS = frozenset(
 )
 
 _GENERIC_DERIVED_METRICS = (
-    GENERIC_AC_METRICS | GENERIC_TRANSIENT_METRICS | GENERIC_NOISE_METRICS
+    GENERIC_AC_METRICS | GENERIC_TRANSIENT_METRICS | GENERIC_NOISE_METRICS | STABILITY_METRICS
 )
 
 
@@ -405,6 +406,7 @@ class GenericOaSimulationSpec(_StrictModel):
     )
     transfer: GenericTransferSpec | None = None
     dynamic_analysis: GenericDynamicAnalysisSpec | None = None
+    stability: StabilitySpec | None = None
     netlist_parameter_bindings: list[GenericNetlistParameterBinding] = Field(
         default_factory=list,
         max_length=128,
@@ -459,7 +461,7 @@ class GenericOaSimulationSpec(_StrictModel):
                 "generic simulation custom metrics use reserved derived names: "
                 + ", ".join(reserved)
             )
-        if not metric_names and self.transfer is None:
+        if not metric_names and self.transfer is None and self.stability is None:
             raise ValueError(
                 "generic simulation requires a DC/OP metric or an AC transfer"
             )
@@ -505,6 +507,13 @@ class GenericOaSimulationSpec(_StrictModel):
                     "voltage source"
                 )
 
+        if self.stability is not None:
+            probe = next((source for source in self.sources
+                          if source.name == self.stability.probe_source), None)
+            if probe is None or probe.kind != "voltage" or probe.dc_value != 0:
+                raise ValueError("stability probe must be a declared zero-volt voltage source")
+            if "0" in {probe.positive_node, probe.negative_node}:
+                raise ValueError("stability probe must join two explicit feedback nodes, not ground")
         if self.dynamic_analysis is not None:
             sources = {item.name: item for item in self.sources}
             stimulus = sources.get(self.dynamic_analysis.stimulus_source)
@@ -541,9 +550,9 @@ class GenericOaSimulationSpec(_StrictModel):
         return self
 
     def validate_analysis(self, analysis: str) -> None:
-        if analysis not in {"dc", "ac", "transient", "noise"}:
+        if analysis not in {"dc", "ac", "transient", "noise", "stability"}:
             raise ValueError(
-                "generic OA simulation supports dc, ac, transient, or noise"
+                "generic OA simulation supports dc, ac, transient, noise, or stability"
             )
         if analysis == "ac":
             if self.transfer is None:
@@ -557,6 +566,8 @@ class GenericOaSimulationSpec(_StrictModel):
                 raise ValueError(
                     f"generic OA {analysis} simulation requires transfer and dynamic_analysis"
                 )
+        if analysis == "stability" and self.stability is None:
+            raise ValueError("generic OA stability simulation requires an explicit stability contract")
 
     def metric_names_for_analysis(self, analysis: str) -> set[str]:
         self.validate_analysis(analysis)
@@ -575,6 +586,8 @@ class GenericOaSimulationSpec(_StrictModel):
             names.update(GENERIC_TRANSIENT_METRICS)
         elif analysis == "noise":
             names.update(GENERIC_NOISE_METRICS)
+        elif analysis == "stability":
+            names.update(STABILITY_METRICS)
         return names
 
     def referenced_nodes(self) -> set[str]:
@@ -607,12 +620,13 @@ def _number(value: float) -> str:
 def render_generic_oa_testbench(
     spec: GenericOaSimulationSpec,
     *,
-    analysis: Literal["dc", "ac", "transient", "noise"],
+    analysis: Literal["dc", "ac", "transient", "noise", "stability"],
     remote_netlist_path: str,
     model_configuration: str,
     ac_sweep: dict[str, Any] | None = None,
     linearity_sweep: dict[str, Any] | None = None,
     noise_sweep: dict[str, Any] | None = None,
+    stability_sweep: dict[str, Any] | None = None,
 ) -> str:
     """Render a deterministic wrapper around one Bridge-generated OA netlist."""
 
@@ -625,10 +639,13 @@ def render_generic_oa_testbench(
         raise ValueError("generic OA transient simulation requires linearity_sweep")
     if analysis == "noise" and noise_sweep is None:
         raise ValueError("generic OA noise simulation requires noise_sweep")
+    if analysis == "stability" and stability_sweep is None:
+        raise ValueError("generic OA stability simulation requires stability_sweep")
     provided_sweeps = {
         "ac": ac_sweep,
         "transient": linearity_sweep,
         "noise": noise_sweep,
+        "stability": stability_sweep,
     }
     unexpected = [
         name
@@ -708,6 +725,14 @@ def render_generic_oa_testbench(
             f"  tran tran stop={_number(stop_s)} maxstep={_number(sample_step_s)} "
             f"strobeperiod={_number(sample_step_s)} strobeoutput=all annotate=status\n"
             "}"
+        )
+    elif analysis == "stability":
+        assert stability_sweep is not None and spec.stability is not None
+        analysis_line = (
+            f"stb stb start={_number(float(stability_sweep['start_hz']))} "
+            f"stop={_number(float(stability_sweep['stop_hz']))} "
+            f"dec={int(stability_sweep.get('points_per_decade', 40))} "
+            f"probe={spec.stability.probe_source} annotate=status"
         )
     elif analysis == "noise":
         assert noise_sweep is not None

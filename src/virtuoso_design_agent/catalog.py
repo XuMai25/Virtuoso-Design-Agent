@@ -84,6 +84,20 @@ def task_semantic_parameter_names(task: TaskSpec) -> set[str]:
 
 
 CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
+    CircuitKind.SCHEMATIC_DRAWING: CircuitCapability(
+        circuit=CircuitKind.SCHEMATIC_DRAWING,
+        stage=("Explicit schematic drawing; one N28 structure/wire/netlist acceptance with scoped completion; "
+               "fresh-create single-pass, human readability and performance acceptance pending"),
+        executable=True,
+        operations=(Operation.SCHEMATIC_CREATE, Operation.SCHEMATIC_INSPECT),
+        parameters=(),
+        explicit_instance_parameters=False,
+        evidence_gate=("Agent-reviewed image description and named PDK symbol geometry; "
+                       "explicit wires/junctions, no unresolved topology or guessed parameters. "
+                       "Bridge execution must freshly revalidate geometry, refuse existing views, "
+                       "and independently compare topology, parameters and physical wires. "
+                       "Local tests do not prove native readability, netlist or performance."),
+    ),
     CircuitKind.MOS_DEVICE: CircuitCapability(
         circuit=CircuitKind.MOS_DEVICE,
         stage=(
@@ -246,7 +260,13 @@ CIRCUIT_CATALOG: dict[CircuitKind, CircuitCapability] = {
             "recovery and pin/placement replay are live, while controller-internal "
             "post-save injection remains pending; PMOS master migration, human capture, "
             "Maestro real-PVT corner mapping, and multi-test/multi-analysis mapping remain "
-            "pending"
+            "pending. Explicit single-loop STB, measurement binding and finite 3x3 "
+            "temperature/supply contracts are locally tested. One nominal N28 OA-si-STB "
+            "native-margin comparison is live verified; persistent artifacts, native "
+            "checks and offline replay are integrated locally into the formal STB path. "
+            "The modified worker's new remote run, ADE GUI comparison and new-module "
+            "multi-round closure remain pending. Local design-iterate "
+            "reuses source-bound records and never executes restoration"
         ),
     ),
     CircuitKind.INVERTER: CircuitCapability(

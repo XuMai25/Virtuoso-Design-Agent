@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "id": "explicit_diffpair_local",
+  "pdk_profile": "nics4304_tsmc18",
+  "source": {
+    "kind": "local_example",
+    "reference": "Hand-authored local mechanism example; no user image supplied",
+    "interpretation_notes": "Synthetic differential branches and a resistor tail. These are not TSMC18 symbols or verified circuit values. Main signal/tail paths use wires; only bulk ground uses explicit labels."
+  },
+  "electrical": {
+    "instances": [
+      {"name": "M0", "master": "example_nmos", "terminals": {"D": "OUTP", "G": "INP", "S": "TAIL", "B": "VSS"}, "parameters": {"w": "2u", "l": "180n"}, "parameters_complete": true, "parameter_review": "Explicit fixture values only; not a design recommendation."},
+      {"name": "M1", "master": "example_nmos", "terminals": {"D": "OUTN", "G": "INN", "S": "TAIL", "B": "VSS"}, "parameters": {"w": "2u", "l": "180n"}, "parameters_complete": true, "parameter_review": "Explicit fixture values only; not a design recommendation."},
+      {"name": "RTAIL", "master": "example_resistor", "terminals": {"PLUS": "TAIL", "MINUS": "VSS"}, "parameters": {"r": "10k"}, "parameters_complete": true, "parameter_review": "Explicit ideal resistor fixture; no implied PDK resistor model."}
+    ],
+    "nets": [
+      {"name": "INP"}, {"name": "INN"}, {"name": "OUTP"}, {"name": "OUTN"}, {"name": "TAIL"},
+      {"name": "VSS", "role": "ground", "label_connection_reason": "Explicit bulk ground connections in separate regions; main tail current path stays physically wired."}
+    ],
+    "pins": [
+      {"name": "INP", "net": "INP", "direction": "input"},
+      {"name": "INN", "net": "INN", "direction": "input"},
+      {"name": "OUTP", "net": "OUTP", "direction": "output"},
+      {"name": "OUTN", "net": "OUTN", "direction": "output"},
+      {"name": "VSS", "net": "VSS", "direction": "inputOutput"}
+    ]
+  },
+  "drawing": {
+    "grid": 0.0625,
+    "placements": {
+      "M0": {"at": [-4, 1], "orient": "R0", "group": "left_input"},
+      "M1": {"at": [4, 1], "orient": "MY", "group": "right_input"},
+      "RTAIL": {"at": [0, -2], "orient": "R90", "group": "shared_tail"}
+    },
+    "pin_placements": {
+      "INP": {"at": [-6, 1]}, "INN": {"at": [6, 1], "orient": "R180"},
+      "OUTP": {"at": [-3, 4], "orient": "R90"}, "OUTN": {"at": [3, 4], "orient": "R90"},
+      "VSS": {"at": [0, -4], "orient": "R270"}
+    },
+    "routes": [
+      {"id": "input_left", "net": "INP", "points": [{"pin": "INP"}, {"instance": "M0", "terminal": "G"}]},
+      {"id": "input_right", "net": "INN", "points": [{"pin": "INN"}, {"instance": "M1", "terminal": "G"}]},
+      {"id": "output_left", "net": "OUTP", "points": [{"instance": "M0", "terminal": "D"}, {"pin": "OUTP"}]},
+      {"id": "output_right", "net": "OUTN", "points": [{"instance": "M1", "terminal": "D"}, {"pin": "OUTN"}]},
+      {"id": "shared_source", "net": "TAIL", "points": [{"instance": "M0", "terminal": "S"}, [0, 0], {"instance": "M1", "terminal": "S"}]},
+      {"id": "tail_branch", "net": "TAIL", "points": [[0, 0], {"instance": "RTAIL", "terminal": "PLUS"}]},
+      {"id": "tail_ground", "net": "VSS", "points": [{"instance": "RTAIL", "terminal": "MINUS"}, {"pin": "VSS"}]},
+      {"id": "bulk_left", "net": "VSS", "points": [{"instance": "M0", "terminal": "B"}, [-2.5, 1]]},
+      {"id": "bulk_right", "net": "VSS", "points": [{"instance": "M1", "terminal": "B"}, [2.5, 1]]}
+    ],
+    "junctions": [{"net": "TAIL", "at": [0, 0]}],
+    "labels": [{"net": "TAIL", "at": [0, 0]}, {"net": "VSS", "at": [-2.5, 1]}, {"net": "VSS", "at": [2.5, 1]}]
+  },
+  "uncertainties": []
+}

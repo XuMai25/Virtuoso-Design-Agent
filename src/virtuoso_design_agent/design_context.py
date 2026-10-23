@@ -46,7 +46,7 @@ _METRIC_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 
 ParameterMode = Literal["fixed", "search"]
-AnalysisName = Literal["dc", "ac", "transient", "noise", "psrr"]
+AnalysisName = Literal["dc", "ac", "transient", "noise", "psrr", "stability"]
 TopologyOperationName = Literal[
     "add_instance",
     "remove_instance",

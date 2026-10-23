@@ -94,6 +94,18 @@ def _with_design_context_binding(
 
 
 def _steps_for(task: TaskSpec) -> list[PlanStep]:
+    if task.circuit is CircuitKind.SCHEMATIC_DRAWING:
+        steps = [_step("01-probe", "bridge.probe", "只读核对 Bridge 与声明的 PDK；不运行仿真", SideEffect.READ_ONLY)]
+        if task.operation is Operation.SCHEMATIC_CREATE:
+            steps.append(_step("02-create", "schematic.create",
+                "重新读取真实 master 端子/符号几何并匹配已审阅描述；拒绝已有 view；"
+                "按显式布局放置器件、应用 CDF 参数并核对实际端子位置后画实体导线；"
+                "失败保留部分状态，禁止自动重放/覆盖；不含仿真或全标签降级", SideEffect.REMOTE_WRITE))
+        steps.extend([
+            _step("03-inspect", "schematic.inspect", "独立读回 instances/masters/terminal→net/pins/参数与实体导线；图面人工审阅和网表验收另列", SideEffect.READ_ONLY),
+            _step("04-persist", "evidence.persist", "保存 bridge_readback 与 software_inference 比较；不宣称仿真或图面验收完成", SideEffect.LOCAL_WRITE),
+        ])
+        return steps
     if task.operation is Operation.DEVICE_CHARACTERIZE:
         settings = task.device_characterization
         if settings is None:  # TaskSpec validation owns the user-facing error.
@@ -559,6 +571,19 @@ def _steps_for(task: TaskSpec) -> list[PlanStep]:
                 "；worker 只负责按同一约束公式提前停，executor 会独立重算并核对终止"
                 "位置；checkpoint 粒度为候选边界，中断后重跑当前候选而不复用半批结果"
             )
+    if existing_generic and AnalysisKind.STABILITY in task.resolved_analyses():
+        simulation_description += (
+            "；STB 仅使用显式声明的零伏反馈探针，不改 OA 连接；读取实际 loopGain，"
+            "按声明符号和单环假设提取 PM/GM，不把普通 AC 相位当相位裕量"
+        )
+        evaluation_description += (
+            "；STB 保留原始频率/复环路响应及文件哈希；交点不唯一、范围不足或"
+            "符号假设不匹配时不宣称稳定；单环裕量不证明任意多环全局稳定"
+        )
+    if task.measurement_plan is not None:
+        evaluation_description += (
+            "；核对测量契约的 analysis、单位、节点/探针及上下文指纹，明确区分 UGB 与 GBW"
+        )
     if task.operating_conditions:
         condition_names = ", ".join(
             condition.name for condition in task.operating_conditions

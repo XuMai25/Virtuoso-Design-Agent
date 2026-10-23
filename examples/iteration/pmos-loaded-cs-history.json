@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "stages": [
+    {
+      "id": "bias-and-region", "analysis": "dc",
+      "constraint_metrics": ["output_dc_v", "mn0_vds_v", "mp0_vds_v"]
+    },
+    {
+      "id": "gain-and-bandwidth", "analysis": "ac",
+      "constraint_metrics": ["low_frequency_gain_v_per_v", "bandwidth_3db_hz"]
+    }
+  ],
+  "rounds": [
+    {
+      "task": "../tasks/pmos-loaded-common-source-onboarding-tune.bridge.json",
+      "run": "../../artifacts/runs/vda-pmos-loaded-cs-onboarding/13-onboarding-tune-resume2-20260731.json"
+    }
+  ],
+  "max_rounds": 4,
+  "continue_after_feasible": false
+}

@@ -35,6 +35,13 @@ from .executor import (
     save_run_record,
 )
 from .execution_scope import compile_execution_scope
+from .design_review import build_design_review, read_json, render_design_review
+from .design_next import suggest_design_next, render_design_next
+from .design_iteration import build_design_iteration, render_design_iteration
+from .measurements import compile_measurement_task
+from .stability_evidence import audit_stability_artifacts, render_stability_audit
+from .window_lifecycle import EdaWindowInventory, plan_window_lifecycle
+from .schematic_drawing import DrawingRequest, compile_drawing, render_preview, compare_readback
 from .models import (
     DEFAULT_PDK_PROFILE,
     ExecutionPlan,
@@ -123,6 +130,59 @@ def _run_path(root: Path, task_id: str) -> Path:
     return root / task_id / f"run-{stamp}.json"
 
 
+def _cmd_schematic_compile(args: argparse.Namespace) -> int:
+    request = DrawingRequest.model_validate({
+        "description": read_json(args.description), "symbols": read_json(args.symbols)})
+    if args.output.exists():
+        raise ValueError("output directory already exists; choose a fresh path")
+    if bool(args.library) != bool(args.cell):
+        raise ValueError("--library and --cell must be provided together")
+    try:
+        compiled = compile_drawing(request)
+    except ValueError as exc:
+        args.output.mkdir(parents=True)
+        (args.output / "review.json").write_text(json.dumps({
+            "status": "blocked", "evidence_source": "software_inference",
+            "error": str(exc), "executable_task_emitted": False,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"Blocked: {exc}; review: {args.output / 'review.json'}")
+        return 2
+    task = None
+    if args.library and compiled["executable_source"]:
+        task = TaskSpec.model_validate({
+            "id": request.description.id, "operation": "schematic.create",
+            "circuit": "schematic_drawing", "pdk_profile": request.description.pdk_profile,
+            "target": {"library": args.library, "cell": args.cell, "view": "schematic"},
+            "schematic_drawing": request.model_dump(mode="json"),
+            "safety": {"allow_remote_write": False, "allow_remote_compute": False,
+                       "allowed_library": args.library, "required_cell_prefix": "vda_", "replace_existing": False},
+        })
+    args.output.mkdir(parents=True)
+    compiled["executable_task_emitted"] = task is not None
+    (args.output / "review.json").write_text(json.dumps(compiled, ensure_ascii=False, indent=2), encoding="utf-8")
+    (args.output / "preview.svg").write_text(render_preview(request, compiled), encoding="utf-8")
+    if task:
+        (args.output / "task.json").write_text(task.model_dump_json(indent=2, exclude_none=True), encoding="utf-8")
+    print(f"Local review: {args.output / 'review.json'}")
+    print(f"Non-native layout preview: {args.output / 'preview.svg'}")
+    print("Task emitted with writes disabled; review and authorize separately." if task else
+          "No executable task emitted (example/inferred geometry or no target).")
+    return 0
+
+
+def _cmd_schematic_compare(args: argparse.Namespace) -> int:
+    request = DrawingRequest.model_validate({
+        "description": read_json(args.description), "symbols": read_json(args.symbols)})
+    data = read_json(args.readback)
+    source = data.get("evidence_source", "software_inference")
+    if source not in {"software_inference", "bridge_readback"}:
+        raise ValueError("readback requires an explicit evidence source")
+    report = compare_readback(request, data["schematic"], data.get("wire_polylines"),
+                              evidence_source=source, wire_records=data.get("wire_records"))
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report["passed"] else 2
+
+
 def _cmd_catalog(args: argparse.Namespace) -> int:
     data = catalog_as_dicts()
     if args.json:
@@ -158,6 +218,81 @@ def _cmd_catalog(args: argparse.Namespace) -> int:
 def _cmd_plan(args: argparse.Namespace) -> int:
     task = _load_task(args.task)
     _print_plan(build_plan(task), as_json=args.json)
+    return 0
+
+
+def _write_review_outputs(outputs: list[tuple[Path | None, str]]) -> None:
+    present = [(path, text) for path, text in outputs if path is not None]
+    paths = [path.resolve() for path, _ in present]
+    if len(paths) != len(set(paths)) or any(path.exists() for path in paths):
+        raise ValueError("review outputs must be distinct, new files; existing files are never overwritten")
+    for path, text in present:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("x", encoding="utf-8") as stream:
+            stream.write(text)
+
+
+def _cmd_design_review(args: argparse.Namespace) -> int:
+    report = build_design_review(args.task, args.run_record, args.checkpoint, args.binding_audit)
+    payload = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    _write_review_outputs([(args.output, payload), (args.markdown, render_design_review(report))])
+    print(payload if args.json else render_design_review(report))
+    return 0
+
+
+def _cmd_stability_audit(args: argparse.Namespace) -> int:
+    report = audit_stability_artifacts(args.evidence, expected_sha256=args.expected_sha256)
+    payload = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    _write_review_outputs([(args.output, payload), (args.markdown, render_stability_audit(report))])
+    print(payload if args.json else render_stability_audit(report))
+    return 0 if report["analysis_complete"] else 2
+
+
+def _cmd_design_next(args: argparse.Namespace) -> int:
+    report, draft = suggest_design_next(
+        args.task, args.run_record, checkpoint_path=args.checkpoint,
+        model_path=args.model, policy_path=args.policy, template_path=args.task_template,
+        binding_audit_path=args.binding_audit,
+        small_signal_policy_path=args.small_signal_policy,
+        iteration_path=args.iteration,
+    )
+    if args.task_output and draft is None:
+        raise ValueError("no validated task draft available; omit --task-output to retain diagnostic suggestions")
+    payload = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    _write_review_outputs([(args.output, payload), (args.markdown, render_design_next(report)),
+                          (args.task_output, draft.model_dump_json(indent=2) + "\n" if draft else "")])
+    print(payload if args.json else render_design_next(report))
+    return 0
+
+
+def _cmd_measurement_compile(args: argparse.Namespace) -> int:
+    report, draft = compile_measurement_task(args.task_template, args.request)
+    if args.task_output and draft is None:
+        raise ValueError("no complete measurement task; omit --task-output to inspect unresolved definitions")
+    payload = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    _write_review_outputs([(args.output, payload),
+                          (args.task_output, draft.model_dump_json(indent=2, exclude_none=True) + "\n" if draft else "")])
+    print(payload)
+    return 0
+
+
+def _cmd_design_iterate(args: argparse.Namespace) -> int:
+    report, draft = build_design_iteration(args.request, args.task_template)
+    if args.task_output and draft is None:
+        raise ValueError("no next task draft; omit --task-output to inspect the stop decision")
+    payload = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    _write_review_outputs([(args.output, payload), (args.markdown, render_design_iteration(report)),
+                          (args.task_output, draft.model_dump_json(indent=2, exclude_none=True) + "\n" if draft else "")])
+    print(payload if args.json else render_design_iteration(report))
+    return 0
+
+
+def _cmd_windows_plan(args: argparse.Namespace) -> int:
+    inventory = EdaWindowInventory.model_validate(read_json(args.inventory))
+    report = plan_window_lifecycle(inventory, args.task_id)
+    payload = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    _write_review_outputs([(args.output, payload)])
+    print(payload)
     return 0
 
 
@@ -1307,6 +1442,19 @@ def build_parser() -> argparse.ArgumentParser:
     onboarding_promote.add_argument("--record-output", type=Path, required=True)
     onboarding_promote.set_defaults(handler=_cmd_onboarding_promote)
 
+    drawing = subparsers.add_parser("schematic-compile", help="locally validate reviewed image intent, explicit wires and PDK symbol geometry")
+    drawing.add_argument("description", type=Path)
+    drawing.add_argument("--symbols", type=Path, required=True)
+    drawing.add_argument("--output", type=Path, required=True)
+    drawing.add_argument("--library")
+    drawing.add_argument("--cell")
+    drawing.set_defaults(handler=_cmd_schematic_compile)
+    drawing_compare = subparsers.add_parser("schematic-compare", help="locally compare independent structural/wire readback with reviewed intent")
+    drawing_compare.add_argument("description", type=Path)
+    drawing_compare.add_argument("--symbols", type=Path, required=True)
+    drawing_compare.add_argument("--readback", type=Path, required=True)
+    drawing_compare.set_defaults(handler=_cmd_schematic_compare)
+
     run = subparsers.add_parser("run", help="plan or execute a task")
     run.add_argument("task", type=Path)
     run.add_argument("--adapter", choices=("demo", "bridge"), default="demo")
@@ -1326,6 +1474,50 @@ def build_parser() -> argparse.ArgumentParser:
         help="resume an incomplete tuning checkpoint after probing and OA readback",
     )
     run.set_defaults(handler=_cmd_run)
+
+    for name, handler in (("design-review", _cmd_design_review), ("design-next", _cmd_design_next)):
+        review = subparsers.add_parser(name, help="review saved evidence locally; no Bridge or remote execution")
+        review.add_argument("task", type=Path)
+        review.add_argument("run_record", type=Path)
+        review.add_argument("--checkpoint", type=Path)
+        review.add_argument("--binding-audit", type=Path, help="existing exact-byte relinearization execution audit for historical plan versions")
+        review.add_argument("--output", type=Path)
+        review.add_argument("--markdown", type=Path)
+        review.add_argument("--json", action="store_true")
+        review.set_defaults(handler=handler)
+        if name == "design-next":
+            review.add_argument("--model", type=Path, help="existing OP relinearization result")
+            review.add_argument("--policy", type=Path, help="original hash-bound relinearization policy")
+            review.add_argument("--task-template", type=Path)
+            review.add_argument("--task-output", type=Path)
+            review.add_argument("--small-signal-policy", type=Path, help="recompute the existing OP/MNA analysis locally")
+            review.add_argument("--iteration", type=Path, help="apply source-bound multi-round specification and stop guards")
+    stb_audit = subparsers.add_parser("stability-audit", help="verify retained STB bytes and replay margins locally; never invokes Bridge")
+    stb_audit.add_argument("evidence", type=Path, help="stability-evidence.json retained by an STB run")
+    stb_audit.add_argument("--expected-sha256", help="evidence JSON hash from the original run record")
+    stb_audit.add_argument("--output", type=Path)
+    stb_audit.add_argument("--markdown", type=Path)
+    stb_audit.add_argument("--json", action="store_true")
+    stb_audit.set_defaults(handler=_cmd_stability_audit)
+    measurement = subparsers.add_parser("measurement-compile", help="compile explicit measurements and finite operating ranges locally")
+    measurement.add_argument("task_template", type=Path)
+    measurement.add_argument("request", type=Path)
+    measurement.add_argument("--output", type=Path)
+    measurement.add_argument("--task-output", type=Path)
+    measurement.set_defaults(handler=_cmd_measurement_compile)
+    iterate = subparsers.add_parser("design-iterate", help="replay bound rounds and generate a guarded next-task draft; never executes")
+    iterate.add_argument("request", type=Path)
+    iterate.add_argument("--task-template", type=Path)
+    iterate.add_argument("--output", type=Path)
+    iterate.add_argument("--markdown", type=Path)
+    iterate.add_argument("--task-output", type=Path)
+    iterate.add_argument("--json", action="store_true")
+    iterate.set_defaults(handler=_cmd_design_iterate)
+    windows = subparsers.add_parser("windows-plan", help="plan reuse/save/close from an observed inventory; never operates UI")
+    windows.add_argument("inventory", type=Path)
+    windows.add_argument("--task-id", required=True)
+    windows.add_argument("--output", type=Path)
+    windows.set_defaults(handler=_cmd_windows_plan)
 
     doctor = subparsers.add_parser("doctor", help="probe an adapter without writing OA")
     doctor.add_argument("--adapter", choices=("demo", "bridge"), default="bridge")
@@ -1391,6 +1583,7 @@ def main(argv: list[str] | None = None) -> int:
         UnsupportedCapability,
         BridgeWorkerError,
         BridgeLifecycleError,
+        OSError,
     ) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
