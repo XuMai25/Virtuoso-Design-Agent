@@ -4,7 +4,7 @@
 
 本项目是位于 `virtuoso-bridge-lite` 之上的设计与验证编排层，不复制 Bridge 的 SSH、SKILL、Spectre 或文件传输实现。Bridge 负责可靠执行；本项目负责任务契约、规划、受控写入、有限搜索、结果判定和证据记录。
 
-当前阶段是 L5A：只在已知 PDK、固定电路模板和显式搜索边界内执行。不得把一次命令成功、OA 对象存在或仿真退出码为 0 单独表述成“设计完成”。
+当前基线是 L5A 执行基础，L5B 通用化能力开发中、尚未闭合：只在已接入 PDK、明确拓扑/参数契约和显式搜索边界内执行。不得把一次命令成功、OA 对象存在或仿真退出码为 0 单独表述成“设计完成”。
 
 ## PDK 默认策略
 
@@ -33,7 +33,7 @@
 
 - Python 代码放在 `src/virtuoso_design_agent/`；测试放在 `tests/`。
 - 任务能力保持正交：建图、读图、应用参数、ADE 准备/人工捕获/变量或 setup 微调/后台运行、仿真、调优、完整闭环均可单独调用。
-- 首版只实现反相器真实 adapter；共源/源极退化和差分对先作为明确的后续验收门，不写空壳执行器。
+- 复用已有反相器、共源/源极退化、差分对和受控 existing_schematic 路径；不把某个模板的验收推广到任意拓扑。新增 PDK、器件映射或分析仍须明确验证范围，不写空壳执行器。
 - 不引入 Web UI、数据库、多智能体框架或云端 LLM 依赖，除非真实工作流证明有必要。
 
 ## 默认快速筛选工作流
@@ -44,6 +44,12 @@
 - preview 只做排序和明显工作区证伪；最终规格、winner、写回与质量复核只服从 OA→`si`/ADE 的真实结果。PVT、noise、linearity 等昂贵分析默认只对真实 winner 且按任务需要运行。
 - 执行前先用最近同路径 action time 检查 `Tpreview < (N-k)*Toa_per_candidate`；无法证明节省时直接走 OA。详细步骤见 `docs/fast-preview-shortlist-workflow.md`。
 
+## 温度与电源验证取点
+
+- 只有温度、电源范围要求而未指定采样密度时，默认温度取最低、标称、最高，电源取最低、标称、最高，交叉组合为 3×3 共 9 点。标称值按当前 PDK 和任务确定，不把 27°C、1.8 V 固化为所有工艺的默认值；单变量验证优先取标称值和两个边界。
+- 这 9 点以外的中间点可不取或少取；仅在接近指标、工作区异常、怀疑内部存在更差条件，或需要解释趋势时，有依据地少量补点。不默认铺密温度×电源网格，也不自动逐级加密；任务明确要求完整扫描时按要求执行。
+- 报告列明实际验证点及最差采样结果，区分边界／有限点检查与连续范围的严格保证，不用扩大采样数量代替物理分析。
+
 ## ADE 人工交接
 
 - VDA 的自动规划、搜索和选优不得取消人工打开、调整、运行和保存 ADE setup/history 的能力。
@@ -53,7 +59,26 @@
 - `ade.variables.apply` 只能在声明的 tests、可选 enabled corners 和逐 scope 变量旧值都匹配时保存；已有 Maestro session 时拒绝，保存后必须独立重开逐 scope 回读。不得把声明 scope 的写回包装成未声明 override 已排除或仿真生效。
 - `ade.setup.apply` 只能对声明 analysis 做旧状态 CAS，并新增明确不存在的命名 output/spec；已有 output、并发 Maestro session 或任一旧状态不匹配时拒绝。全部目标写后立即回读，只保存一次，再独立重开复核；不得把配置持久化表述成 analysis 已运行或 output 已产生结果。
 - ADE setup 属于 `bridge_readback`，实际 Spectre 输入/结果属于 `eda_result`；捕获成功不等于规格闭环。
-- 当前只把 Bridge 已公开的 Maestro 接口称为已实现；旧 ADE L state 在完成备份、非覆盖迁移和 live smoke 前不得宣称已打通。
+- 用户熟悉 ADE L：常规单测试原理图仿真优先使用 ADE L。确需 Maestro/Explorer/Assembler 时说明具体原因，不静默更换界面。ViVA 的窗口标题含 XL 不代表 ADE 会话是 ADE XL。
+- ADE L 原生会话、保存、独立重开和 DC 重跑已通过 TSMC18 NMOS 实例验证，见 `docs/ade-l-native-workflow.md`。ADE state 与 Parametric Analysis 参数文件须分别保存、回读和绑定；仿真输入、PSF、日志及数据另存证据。不得据此声称所有 PDK、分析或旧 state 迁移均已验证。
+- 正式 `ade.*` operations 仍仅覆盖 Bridge 已公开的 Maestro 接口；本次 ADE L 使用现有公开 Bridge 传输执行受控任务脚本，不扩展 Bridge 公共 API。旧 ADE L state 的自动迁移在完成备份、非覆盖迁移和 live smoke 前仍不得宣称打通。
+
+## Virtuoso 基本工具用法
+
+- 按图片复现采用 `docs/schematic-image-reproduction.md` 的 electrical/drawing/uncertainties 契约；agent 解图，代码确定性编译。真实 PDK 端子几何必须读回，疑点/缺参未解决不得生成执行任务。主要 signal net 使用连续导线；首版不同网络交叉必须显式绕开或审阅为 cross_region 标签，不静默全标签降级。新 `schematic_drawing` 仅支持非覆盖 create/inspect；部分失败保留、先回读，不自动重放。N28 图片锁存器经显式补完已通过结构/导线与 OA→si 验收，见 `docs/validation/2026-10-19-n28-image-latch-native.md`；原生图面人工确认、修复后的 fresh-create 单次全链及性能仍分别列为未验证。
+
+- 窗口生命周期默认“先盘点、优先复用、完成后收拢”：新建 ADE/原理图/ViVA/Print/参数窗口前，核对已有窗口的 library/cell/view、PDK、会话归属与当前用途；同一任务可复用时不重复启动。
+- 需要保留的 ADE L 配置优先另存为同一设计的非覆盖 state cellview；保存后核对模型、变量、analysis、outputs/Plot/Save、结果路径和指纹，并验证独立 Load。Parametric Analysis 文件与依赖单独保存/加载，不能假定 state 包含它们。保存/回读/Load 失败时保持窗口，不自动 discard。
+- IC618 的 ADE L state cellview 保存→独立 Load→关闭已在既有 TSMC18 IVGS 配置上验收（`docs/validation/2026-10-19-ade-l-cellview-save-load-close.md`）。使用现场确认的 `asiSaveState`/`asiLoadState`、`?option 'cellview`，不依赖保存弹窗；保存/Load 前绑定源 projectDir，短暂全局设置必须恢复。该范围不代表所有旧 state 或 ADE L→Maestro 迁移已验证；其他配置仍须逐项回读。
+- 对仍在计算、用户明确保留、归属不明或任务状态不明的窗口不关闭；先询问该任务是否完成。任务已确认完成后，只关闭已妥善保存或明确不需保留的本任务窗口，不终止用户 Virtuoso 会话。无用“参数窗口”可关闭，不代表允许删除设计变量/CDF 参数。
+- `vda windows-plan` 可从已观察的清单给出复用/保存/询问/关闭前复核建议；它不操作 UI、不证明保存已经发生。实际关闭前必须再次核对现场身份和未保存状态，不能照搬历史窗口号。
+
+- 原理图、ADE、Calculator、Print、ViVA 和人工交接按 `docs/virtuoso-basic-operations.md` 的通用操作经验执行；ADE L 保存/重开细节见 `docs/ade-l-native-workflow.md`。这些是操作指南，不增加新的正式 operation。
+- 沉淀跨电路工具用法，不把某次单管实验的器件、尺寸、扫描点、计算公式、误差门限或报告数量固化成默认任务。历史 `tsmc18_*` 实验脚本已随作业资料归档（位置见 `docs/validation/2026-09-21-virtuoso-basic-operations.md`），仅作追溯，不直接批量重放其固定路径和窗口号。
+- 原理图写入核对真实 master、CDF callback 后参数、pins/nets 和实际网表；参数名、端子顺序及内部模型路径不跨 PDK 猜测。
+- ADE 配置保存、实际仿真结果、独立重开可用性分别验证。表达式存在不等于 Plot/Save 开启或求值成功；外层参数扫描与分析横轴分别确认。
+- Print 绑定确切结果、器件和实际偏置；原生参数表、参数摘要、OP 曲线分别注明。用户要求 Print 时不能只交 OP 曲线；多会话不得依赖未核实的“当前结果”。
+- 用户要求 Virtuoso 原图时，采用原生图导出或实际窗口截图，检查图例、单位、偏置与关键字段可读。内部 GUI 回调和临时句柄须现场识别，失败及未验证边界保留。
 
 ## 验证入口
 

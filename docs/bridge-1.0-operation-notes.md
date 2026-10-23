@@ -136,3 +136,12 @@ token 不变。该字段仅用于 `schematic.inspect`，其他 operation 拒绝�
   发送后 reset/timeout 不新增自动重试。
 
 实测、失败记录和测试边界见[新功能验收](validation/2026-10-18-bridge-feature-workflow.md)。
+
+## 6. Windows TCP reset 暂缓排查（2026-10-19）
+
+用户决定先使用 VDA，连接重置保留为 open/deferred，不再为诊断关闭 TUN 或修改网络配置。
+正常有人监督的设计可以继续，长时间无人值守可靠性仍未完全验收。写入或仿真提交后断线
+必须先查询原请求/作业并独立回读，不能把“没收到回执”当作“没执行”而从头重跑任务。
+当前各高层 operation 尚未全部集成自动 receipt 持久化；继续沿用其已有 checkpoint 和
+前置指纹校验。详细证据、失败位置、恢复注意事项及重新开启条件见
+[Windows TCP reset 遗留记录](validation/2026-10-19-windows-tcp-reset-deferred.md)。

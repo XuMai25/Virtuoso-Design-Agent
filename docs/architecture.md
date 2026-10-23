@@ -1,5 +1,31 @@
 # 架构
 
+## 图片驱动显式图面入口（2026-10-19，N28 结构/网表真实验收）
+
+`schematic_drawing.py` 定义分开的 electrical / drawing / uncertainties 契约和 PDK symbol
+目录；agent 负责图片理解，确定性编译器负责方向变换、显式导线/分支和一致性检查。
+新 `circuit=schematic_drawing` 复用 TaskSpec、planner、executor、授权与 run record，只允许
+`schematic.create/inspect`，不替换旧模板，不隐含仿真。`schematic-compile/compare` 是离线入口。
+
+`adapters/schematic_drawing_bridge.py` 复用 Bridge 的 symbol reader、公开 schematic builders、
+CDF setter、batch 生命周期和结构读回。仅补充 placed terminal 几何 CAS 与 conductive wire
+net/layer 只读查询；没有复制连接/传输实现或修改第三方库。新建严格非覆盖，部分失败保留
+目标，不能 create 重放；既有调优 checkpoint 不变。真实图面、实际网表和性能分别验收。
+详细契约、示例、已核实的 Bridge 缺口和未验证边界见[图片复现工作流](schematic-image-reproduction.md)。
+
+N28 实图 Gate 以隔离回环会话保留原有 RF/7X2R 人工环境，在批准的 5X2Y2Z/LVT 库非覆盖创建。
+15 个实例、13 个网络、8 个 pins、81 个 OA wire 对象与计划的 83 段几何覆盖一致；
+OA→si 的 15 个实例连接和 54 项占位参数比较通过，不运行 Spectre。
+首次创建在坐标 guard 停止，先回读并冻结部分状态，再单独补 pins/线/标签，未重放 create。
+修复 SKILL 数字括号语法，回读不再把原生 netless ellipse junction glyph 误当导线；
+ellipse/label 都不构成导电证据，未知形状仍拒绝。原生图、两处跨接标签、四个同网四向
+junction 警告和人工图面边界见[验收](validation/2026-10-19-n28-image-latch-native.md)。
+
+子进程可通过显式绝对路径 `VDA_BRIDGE_ENV_FILE` 调用 Bridge 现有 runtime env 选择接口。
+路径缺失/相对路径在 action dispatch 前拒绝，不降级连接默认会话；不打印配置、不修改
+用户默认配置。它仅选择执行端点，不改变任务 token、写入白名单、实际 PDK/目标核对要求。
+未设置时保持原行为。第三方 Bridge 未改动。
+
 ## 核心分工
 
 ```text
@@ -959,3 +985,50 @@ Windows direct/receipt-only client 与 standalone 工具补齐 no-half-close/签
 compact CAS 不覆盖省略的 nil/空值/长字段；rich evidence 不自动改变写入范围。本轮只运行
 三次 netlisting、不重复电气扫描。VDA 937 项通过；Windows 更广 TCP 测试仍有三项 reset，
 详见[验收与耗时](validation/2026-10-18-bridge-feature-workflow.md)。
+
+### 本地设计复盘与决策层（2026-10-19）
+
+`design_review` 消费现有 task/run/可选 checkpoint，并复用规格判定；历史 token 变化仅能由
+显式的精确字节执行审计绑定。`design_next` 先分开执行故障、预算和电路约束，再按需调用
+既有 OP/MNA、重线性化及候选编译器；输出无远端权限的普通任务，不复制 Bridge 或 executor。
+`window_lifecycle` 是真实盘点输入上的保守决策函数，不是新 GUI 后端。所有报告属于
+software_inference，来源记录保持原 evidence 标签；历史回读不冒充当前状态。具体边界见
+[设计复盘与窗口管理](design-review-workflow.md)。
+
+### 显式测量与跨轮次控制（2026-10-22 实现，2026-10-23 单点 STB 实测）
+
+沿用 TaskSpec→planner→executor→Bridge，不新增执行器或数据库：
+
+- `measurements.py` 把可审阅 measurement request 编译为普通 TaskSpec 的可选
+  `measurement_plan`，包含 metric/analysis/quantity/unit/definition、准确 signals、来源和
+  context SHA。UGB 是真实单位幅度交点，GBW 是低频线性增益×3 dB 带宽；不互换。
+  有疑问时只出诊断。改变测量条件后必须重新编译；参数搜索仍由既有契约约束。
+- 范围采样只在任务要求时生成温度和电源 min/nom/max 的 9 个交叉点；单轴检查需显式
+  提供另一轴标称值，退化轴去重。普通 generic 与 winner-only conditions 均容纳 9 点；
+  不暗中更换 PDK、不稠密扫描、不把有限点当连续保证。
+- `stability.py` 的 typed sweep/spec 由现有 generic wrapper 生成 Spectre `stb` 语句，
+  使用已经声明的 0 V testbench 电压源。OA 仍通过原 `si` 路径，不重连内部器件。
+  既有 Bridge Spectre runner/PSF reader 负责执行与解析文件；VDA 做符号归一、相位展开、
+  交点检查及裕量判定，不复制 SSH、Spectre 或传输。结果保存原向量、原文件 hash、
+  显式假设和异常。多交点、触点、频段不足不产出伪 PM；未覆盖 -180° 不伪造无穷 GM。
+  2026-10-23 在既有 N28/5X2Y2Z 差分对完成一次不写 OA 的 DC＋STB，实际 PSF、
+  `feedback_transfer` 符号及同作业 native margin 已对照，见[验收记录](validation/2026-10-23-n28-stb-native-acceptance.md)。
+  随后 `stability_evidence.py` 接入正式 STB 路径：窄范围 native scalar/metadata 读取、
+  提取一致性门、持久文件清单与离线 `stability-audit`。同批含 STB 的阶段保留独占目录，
+  复制已有 si 输入而非重跑；中断前后回执不赋予重提权限。`design-review` 核对原 action
+  绑定的本地文件与原生对照，`design-iterate` 在证据缺失/漂移时阻止形成可行锚点。
+  完整本地回归及旧实测文件重放见[接入验收](validation/2026-10-23-stb-evidence-integration-local.md)。
+  修改后的正式 worker 新远端全链、ADE GUI、其他 PDK/条件和多环仍未验证；
+  不将单点测量或离线重放称为完整稳定性或设计闭环。
+- `design_iteration.py` 从显式 round 列表确定性重建阶段状态，复用 `design_review` 的来源
+  验证与规格公式。不沿用前轮指标完成本轮规格。参数/拓扑/PDK/testbench/条件/analysis
+  指纹分开记录；PDK、testbench、条件或验收定义变化后清除旧合格锚点的当前适用性。
+  可行锚点只是历史引用，非当前 OA。前级退化或未决写入只能生成 `schematic.inspect`，
+  不自动回退。停滞/预算不等于物理不可行；另一个 PDK 的性能不移植。
+- `design-next --iteration` 先执行上述保护，再允许既有模型建议；生成草案保留全部规格、
+  objective、阶段门、编辑范围与白名单，并关闭 compute/write/replace 权限。
+
+测量定义是 `user_input` 或明确标注的 `software_inference`；实际 STB/已有 run 数值仍按
+`eda_result`，OA 回读仍按 `bridge_readback`。报告本身是软件复判，不提升来源证据等级。
+没有 STB 的旧任务不引入原生对照策略；旧 STB 任务须重新计算含一致性容差的计划/测量 context。详见
+[使用与边界](measurement-and-iteration-workflow.md)及[本地验收记录](validation/2026-10-22-measurement-iteration-local.md)。

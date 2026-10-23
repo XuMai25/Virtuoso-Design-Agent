@@ -1,5 +1,17 @@
 # Virtuoso Design Agent
 
+当前入口与能力边界见[可用基线](docs/current-baseline.md)：先复用已有任务和证据，按真实设计需求选择操作，不把所有分析或新增电路 Gate 作为日常必经流程。本地收口记录见[2026-10-23 验收](docs/validation/2026-10-23-baseline-closeout.md)。
+
+2026-10-23 已把 STB 的原始文件持久留存、同作业 native margin 对照、失败/中断证据及
+`stability-audit` 离线复核接入正式路径，设计复盘和跨轮次控制也会检查这些证据。
+复用旧 N28 真实文件完成新代码离线重放，本轮没有远端计算或 OA 写入；不是新的正式
+worker live smoke 或完整 L5B closure。见[使用流程](docs/stability-evidence-workflow.md)和
+[本地接入验收](docs/validation/2026-10-23-stb-evidence-integration-local.md)。
+
+2026-10-19 新增[参考图片原理图复现入口](docs/schematic-image-reproduction.md)：agent 先整理电气意图、布局/实体导线路径和待确认疑点，`schematic-compile` 做离线检查与预览，接入原有 `schematic.create/inspect`。N28 图片锁存器已在隔离会话非覆盖创建，经一次显式部分状态补完后，15 个实例、实体线网及 OA→si 网表通过；原生图已取得，但两处反馈跨接标签、局部文字拥挤和人工图面复核仍单独列明。没有性能仿真，也未重复新建来宣称修复后的单次 create 全链已验证。见[真实验收记录](docs/validation/2026-10-19-n28-image-latch-native.md)。旧模板及人工原理图不会自动重排。
+
+2026-09-21 已将实操经验整理为可跨电路复用的 [Virtuoso 基本操作与交接](docs/virtuoso-basic-operations.md)：原理图/参数回读、Maestro 配置、[ADE L 保存和重开](docs/ade-l-native-workflow.md)、Calculator 结果上下文、原生 Print 与 ViVA 截图。常规单测试优先 ADE L；正式 `ade.*` 仍沿用已有 Maestro 接口。单管任务的扫点、尺寸和数值处理不作为默认流程。已验证范围与 GUI 边界见[操作验证记录](docs/validation/2026-09-21-virtuoso-basic-operations.md)。
+
 2026-09-18 新增 TSMC18 固定规格共源级设计尝试：先用 PDK 实测 OP/KCL 定首值，只做一次
 RD 局部修正，在同一新 OA cell 中得到 **20.827 dB / 125.834 MHz / 68.322 µW**，
 输出0.908 V，全部通过仿真前固定的 DC/AC 约束。外部 `si` 改由 Bridge 已有 OA-host SSH
@@ -9,7 +21,7 @@ runner 执行，避免通过 CIW 等待批处理；安全与网表一致性门�
 
 Virtuoso Design Agent 是 `virtuoso-bridge-lite` 之上的受控设计编排层。它把“建原理图、读回、应用参数、跑仿真、判定规格、有限调优”组织成可单独执行、可组合、可审计的任务，而不是再造一套 Bridge。
 
-当前受测 Bridge 执行底座为上游 `0.8.0`/main `c64461c` 加 VDA 私有安全与稳定性 merge `106c61e`，以及 Windows managed-daemon restart 修正 `40ff891`（文档 tip `0156579`）。升级保留 RAMIC/SSH 回环、Windows 隐藏 tunnel、完整 JSON framing、有限重试、pre-send 恢复、用户/绑定核验与退出清理，同时接入上游 split-host、Paramiko/SOCKS5、scoped Spectre pools、严格 PSF、schematic netlist/planner 和 Maestro 修复。逐文件差异、备份、测试与未验证边界见[第三方补丁记录](docs/third-party/virtuoso-bridge-local-patch.md)和[升级验证](docs/validation/2026-09-04-bridge-upstream-0.8-upgrade.md)。
+2026-10-23 只读核对的本地 Bridge 底座为 `1.0.0`，独立分支 `codex/vda-upstream-main-20261018`、tip `3688192`；上游 main `ecaf5a5c` 经 `e214d3a` 集成后保留了私有安全与稳定性修复。这是本地 checkout/package 身份，不代表当前远端 daemon 已重新验收。回环监听、隐藏 tunnel、有限恢复及退出清理继续保留；备份、逐文件差异和历史实测边界见[第三方补丁记录](docs/third-party/virtuoso-bridge-local-patch.md)、[1.0 升级验收](docs/validation/2026-10-18-bridge-main-upgrade.md)和[调用工作流验收](docs/validation/2026-10-18-bridge-feature-workflow.md)。本次收口没有修改 Bridge 或重跑远端。
 
 当前版本从 **L5A** 起步：在已知 PDK、固定电路模板、显式规格和有限搜索空间内完成闭环。TSMC28 反相器 Gate 1，以及电阻负载 NMOS 共源/源极退化的 DC、复数 AC、W/L/RD/RS、bias/load、相干 transient 线性度、真实 VDD 功耗、ordinary noise 和固定三分析 `quality` 均有真实 OA/`si`/Spectre 证据。2026-07-22 又完成共源 L/VDD 质量搜索、最佳 OA 写回和固定设计 TT/SS/FF 三条件验证；PVT 作为显式可选项接入 testbench 调优，但不会默认附加。2026-07-23 依次闭合理想尾源差分对 Gate 3、真实 `MNTAIL/BIAS` Gate 4、可逆对称 `RS0/RS1` Gate 5，以及 PMOS 电流镜有源负载 Gate 6。Gate 6 在全新 `vda_diffpair_active_gate6_001` 上完成 RD→`MP0/MP1` exact-delta、OA→`si` 参数一致性、DC 镜像/KCL/工作区、差模与共模 AC/CMRR、10 点 ICMR、相干 transient、ordinary noise、bias/load 与 Wn/Wp 有限搜索、预算耗尽、全不可行恢复、checkpoint/resume、最佳 OA 写回、精确恢复和最终有源负载重建。最终同源网表得到增益 `3.7421 V/V`、带宽 `2.9756 GHz`、GBW `11.1351 GHz`、CMRR `34.8451 dB`；这些只是 nominal `top_tt` 和声明网格内的结果。2026-07-24 先完成 PSRR+/PSRR− 三次同网表 AC 单点，随后完成 `tail_bias_v × load_ff` 四点只读搜索、`1 kHz–100 MHz` 带限指标、12 份根 AC 文件哈希和两次 transport 中断恢复。四点均通过饱和/摆幅/增益/带宽/功耗护栏，但带内最差 PSRR 只有 `11.4275–11.5125 dB`，未达到明确标为临时证伪门的 `20 dB`；因此 bias/load-only 改善已被当前网格证伪。随后获授权的 `input/PMOS-load/tail L = 0.03/0.06 µm` 八点 OA 搜索完成 8 份不同同源网表和 24 次 AC；输入对与 PMOS L 同为 `0.06 µm` 时达到 `19.712–19.744 dB`，但仍无点通过临时门。一次候选写后回读 transport reset 经基线恢复和 checkpoint 续跑闭合，零可行点时最终 OA 精确恢复到三组 `L=0.03 µm`，没有提交“最接近”点。可选差分对 PVT、mismatch/Monte Carlo、PSRR 最终规格与完整多分析复核、slew/settling、ADE multi-test/multi-analysis、人工打开/修改/重跑和旧 ADE L 非覆盖迁移仍未闭合，因此不能称为完整 L5B 设计质量闭环。
 
@@ -765,6 +777,40 @@ direct `si`/Spectre 路径还会在每个唯一 `/data/xum/.../vda_<task>_<nonce
 
 ## 文档
 
+本地设计复盘、下一步建议与窗口复用检查（不启动 Bridge）：
+
+```powershell
+.\.venv\Scripts\vda.exe design-review <task.json> <run.json> --output <new-review.json> --markdown <new-review.md>
+.\.venv\Scripts\vda.exe design-next <task.json> <run.json> --output <new-next.json> --markdown <new-next.md>
+.\.venv\Scripts\vda.exe windows-plan <observed-windows.json> --task-id <task-id> --output <new-window-plan.json>
+```
+
+`design-next` 可选接入已有 OP/MNA policy 或局部重线性化 model/policy/template；有效模型才
+输出关闭 compute/write 权限的普通任务草案。窗口检查只建议复用/保存/询问，不自动操纵 UI。
+详见[设计复盘与窗口管理](docs/design-review-workflow.md)。
+
+第一、第二批 L5B 本地升级（2026-10-22）：
+
+```powershell
+.\.venv\Scripts\vda.exe measurement-compile examples/tasks/pmos-loaded-common-source-onboarding-tune.bridge.json examples/measurements/pmos-loaded-cs.json
+.\.venv\Scripts\vda.exe design-iterate examples/iteration/pmos-loaded-cs-history.json
+```
+
+`measurement-compile` 将显式测量定义绑定到实际节点/器件/探针、analysis、单位和上下文；
+可选温度/电源范围编译为 min/nom/max 的有限交叉点。`design-iterate` 重放 hash 绑定的已存
+记录，保护前级规格、维护历史可行锚点、判断复验/中断/预算/停滞，必要时只出检查草案；
+可通过 `design-next --iteration <request.json>` 接入既有理论建议。以上命令均不执行远端。
+历史示例需要本地保留对应 run；缺文件时不能据此补造结果。
+
+通用任务新增显式 `analysis: stability`，以声明的零伏反馈探针生成 STB 并解析 loopGain；
+不是普通 AC 相位换名。既有 N28/5X2Y2Z 已完成一次真实 DC＋STB 和同作业原生 margin 对照；
+随后正式路径接入持久证据、原生一致性门及 `stability-audit`，完成本地集成和旧真实文件重放。
+修改后正式 worker 的新远端全链及 ADE GUI 仍未因此验收，见
+[测量与迭代工作流](docs/measurement-and-iteration-workflow.md)和[STB 证据流程](docs/stability-evidence-workflow.md)。
+
+- [Virtuoso 基本操作与人工交接](docs/virtuoso-basic-operations.md)
+- [ADE L 原生配置、保存与重开](docs/ade-l-native-workflow.md)
+- [2026-09-21 基本工具操作的证据与验证范围](docs/validation/2026-09-21-virtuoso-basic-operations.md)
 - [L5 路线与定义](docs/l5-roadmap.md)
 - [系统架构](docs/architecture.md)
 - [三类起步电路与验收门](docs/initial-circuits.md)
