@@ -74,6 +74,14 @@ onboarding draft+resolution、可选测量/历史引用及带来源的理由。�
 宣称解决未知 CDF 语义/自动角色识别。见[流程](design-intake-workflow.md)及
 [本地验收](validation/2026-10-23-p1a-design-intake-local.md)。
 
+P1-b 首个本地切片直接扩展 `op_relinearization.py`：可选
+`NumericInstanceParameterBinding` 将显式 Spectre SI CDF 字面量换算为有单位的模型
+变量；原 solver/holdout/排序复用，输出仍为 AtomicCandidate.instance_parameter_updates。
+原语义 policy/result 不新增空映射字段，保持旧 policy 哈希；其他原参数和原 executor
+不变。拟合拒绝未建模的拓扑/testbench/条件变化，量化后检查范围；design-next 增加
+无预测改善则不出任务的停止判断，并展示 CDF 前后值。它不复制 Bridge、推断 PDK
+单位或绕过目标/计划/权限检查。见[边界与使用](numeric-cdf-refinement.md)。
+
 ## 为什么使用独立 worker
 
 `virtuoso-bridge-lite` 已有自己的 Python 虚拟环境和本机配置。主程序通过该环境中的 Python 启动 JSON worker，而不是把 Bridge 源码复制进来或强制安装成本项目依赖。这样可以保持 Bridge 独立升级、避免依赖漂移，并把跨环境协议缩小到版本化 JSON action。

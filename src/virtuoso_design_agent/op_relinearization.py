@@ -15,8 +15,9 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Literal
 
-from pydantic import ConfigDict, Field, StrictStr, model_validator
+from pydantic import ConfigDict, Field, StrictStr, model_serializer, model_validator
 
+from .instance_path import INSTANCE_PATH_PATTERN
 from .linear_network import solve_complex_linear_system
 from .metrics import evaluate_constraints
 from .models import (
@@ -26,6 +27,7 @@ from .models import (
     CandidateSetSource,
     ConstraintEvaluation,
     EvidenceSource,
+    InstanceParameterUpdate,
     MetricConstraint,
     Objective,
     ObjectiveGoal,
@@ -36,10 +38,36 @@ from .models import (
     TaskSpec,
 )
 from .planner import build_plan
+from .spectre_values import spectre_scalar
 
 
 class _FiniteStrictModel(StrictModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+
+_NUMERIC_UNITS = {
+    "m": (1.0, ""), "um": (1e-6, "u"), "nm": (1e-9, "n"),
+    "ohm": (1.0, ""), "kohm": (1e3, "k"),
+    "F": (1.0, ""), "pF": (1e-12, "p"), "fF": (1e-15, "f"),
+    "V": (1.0, ""), "mV": (1e-3, "m"), "A": (1.0, ""), "uA": (1e-6, "u"),
+    "1": (1.0, ""),
+}
+
+
+class NumericInstanceParameterBinding(_FiniteStrictModel):
+    """Explicit literal CDF meaning; never inferred from a PDK field name."""
+
+    instance: StrictStr = Field(pattern=INSTANCE_PATH_PATTERN)
+    parameter: StrictStr = Field(min_length=1, max_length=128)
+    unit: Literal["m", "um", "nm", "ohm", "kohm", "F", "pF", "fF", "V", "mV", "A", "uA", "1"]
+    literal_format: Literal["spectre_si"]
+    meaning: StrictStr = Field(min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_meaning(self) -> "NumericInstanceParameterBinding":
+        if not self.meaning.strip():
+            raise ValueError("numeric CDF meaning cannot be blank")
+        return self
 
 
 class RelinearizationParameter(_FiniteStrictModel):
@@ -54,6 +82,14 @@ class RelinearizationParameter(_FiniteStrictModel):
     steps_each_side: int = Field(default=1, ge=1, le=4)
     quantization_grid: float | None = Field(default=None, gt=0.0)
     decimal_places: int = Field(default=9, ge=3, le=12)
+    instance_parameter: NumericInstanceParameterBinding | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_optional_binding(self, handler):
+        raw = handler(self)
+        if self.instance_parameter is None:
+            raw.pop("instance_parameter", None)  # Preserve legacy semantic-policy hashes.
+        return raw
 
     @model_validator(mode="after")
     def validate_bounds(self) -> "RelinearizationParameter":
@@ -92,7 +128,7 @@ class OperatingPointRelinearizationPolicy(_FiniteStrictModel):
     objective: Objective
     maximum_candidates: int = Field(default=6, ge=2, le=32)
     include_measured_anchor: bool = True
-    evidence_source: Literal[EvidenceSource.USER_INPUT] = EvidenceSource.USER_INPUT
+    evidence_source: Literal[EvidenceSource.USER_INPUT, EvidenceSource.SOFTWARE_INFERENCE] = EvidenceSource.USER_INPUT
 
     @model_validator(mode="after")
     def validate_declared_model(self) -> "OperatingPointRelinearizationPolicy":
@@ -112,6 +148,10 @@ class OperatingPointRelinearizationPolicy(_FiniteStrictModel):
         parameter_names = [item.name for item in self.parameters]
         if len(parameter_names) != len(set(parameter_names)):
             raise ValueError("relinearization parameters must be unique")
+        raw_targets = [(p.instance_parameter.instance, p.instance_parameter.parameter)
+                       for p in self.parameters if p.instance_parameter is not None]
+        if len(raw_targets) != len(set(raw_targets)):
+            raise ValueError("numeric CDF bindings must not alias the same instance parameter")
         metric_names = [item.metric for item in self.metrics]
         if len(metric_names) != len(set(metric_names)):
             raise ValueError("relinearization metrics must be unique")
@@ -195,6 +235,7 @@ class OperatingPointRelinearizationResult(_FiniteStrictModel):
     holdout_parameter_coverage: dict[StrictStr, bool] = Field(default_factory=dict)
     fixed_parameters: dict[StrictStr, float]
     fixed_instance_parameters: dict[StrictStr, dict[StrictStr, StrictStr]]
+    parameter_bindings: dict[StrictStr, NumericInstanceParameterBinding] = Field(default_factory=dict)
     constraints: list[MetricConstraint]
     objective: Objective
     models: list[LocalMetricModel]
@@ -208,6 +249,13 @@ class OperatingPointRelinearizationResult(_FiniteStrictModel):
         EvidenceSource.SOFTWARE_INFERENCE
     )
     notes: list[StrictStr] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def serialize_optional_bindings(self, handler):
+        raw = handler(self)
+        if not self.parameter_bindings:
+            raw.pop("parameter_bindings", None)
+        return raw
 
 
 class RelinearizationRunMetricComparison(_FiniteStrictModel):
@@ -317,18 +365,37 @@ def _validate_source_candidate(
                 "eda_result"
             )
     for parameter in policy.parameters:
+        _parameter_value(candidate, parameter)
+
+
+def _parameter_value(candidate: CandidateEvaluation, parameter: RelinearizationParameter) -> float:
+    binding = parameter.instance_parameter
+    if binding is None:
         value = candidate.parameters.get(parameter.name)
-        if value is None or not math.isfinite(value) or value <= 0.0:
-            raise ValueError(
-                f"source candidate {candidate.index} lacks positive parameter "
-                f"{parameter.name}"
-            )
+    else:
+        literal = candidate.instance_parameters.get(binding.instance, {}).get(binding.parameter)
+        value = spectre_scalar(literal) if literal is not None else None
+        if value is not None:
+            value /= _NUMERIC_UNITS[binding.unit][0]
+    if value is None or not math.isfinite(value) or value <= 0.0:
+        raise ValueError(f"source candidate {candidate.index} lacks positive literal parameter {parameter.name}")
+    return value
+
+
+def _source_context(candidate: CandidateEvaluation) -> tuple:
+    return (candidate.topology_sha256, candidate.topology_variant_id, candidate.testbench_overrides,
+            [(c.name, c.process_corner, c.temperature_c, c.vdd_v) for c in candidate.operating_conditions])
 
 
 def _constant_inputs(
     candidates: list[CandidateEvaluation],
-    modeled_names: set[str],
+    parameters: list[RelinearizationParameter],
 ) -> tuple[dict[str, float], dict[str, dict[str, str]]]:
+    if any(_source_context(c) != _source_context(candidates[0]) for c in candidates[1:]):
+        raise ValueError("unmodeled topology, testbench or operating conditions vary across source points")
+    modeled_names = {p.name for p in parameters if p.instance_parameter is None}
+    if any(p.name in candidates[0].parameters for p in parameters if p.instance_parameter is not None):
+        raise ValueError("numeric CDF aliases must not shadow recorded semantic parameters")
     parameter_names = set(candidates[0].parameters)
     if any(set(candidate.parameters) != parameter_names for candidate in candidates[1:]):
         raise ValueError("source candidates do not expose the same parameter fields")
@@ -343,9 +410,19 @@ def _constant_inputs(
                 f"unmodeled parameter {name!r} varies across training/holdout points"
             )
         fixed[name] = float(values[0])
-    instance_parameters = candidates[0].instance_parameters
+    def fixed_raw(candidate: CandidateEvaluation) -> dict[str, dict[str, str]]:
+        values = {name: dict(fields) for name, fields in candidate.instance_parameters.items()}
+        for p in parameters:
+            if p.instance_parameter is not None:
+                name = p.instance_parameter.instance
+                values.get(name, {}).pop(p.instance_parameter.parameter, None)
+                if name in values and not values[name]:
+                    values.pop(name)
+        return values
+
+    instance_parameters = fixed_raw(candidates[0])
     if any(
-        candidate.instance_parameters != instance_parameters
+        fixed_raw(candidate) != instance_parameters
         for candidate in candidates[1:]
     ):
         raise ValueError(
@@ -364,7 +441,7 @@ def _features(
     parameters: list[RelinearizationParameter],
 ) -> list[float]:
     return [
-        (candidate.parameters[item.name] - anchor.parameters[item.name])
+        (_parameter_value(candidate, item) - _parameter_value(anchor, item))
         / item.proposal_step
         for item in parameters
     ]
@@ -438,6 +515,8 @@ def _proposal_values(
         <= anchor_value + offset * parameter.proposal_step
         <= parameter.maximum
     }
+    # Rounding to a manufacturing/model grid must not expand explicit bounds.
+    values = {value for value in values if parameter.minimum <= value <= parameter.maximum}
     if not any(
         math.isclose(value, anchor_value, rel_tol=1e-12, abs_tol=1e-15)
         for value in values
@@ -449,10 +528,33 @@ def _proposal_values(
 
 
 def _parameter_signature(
-    values: dict[str, float],
+    candidate: CandidateEvaluation,
     parameters: list[RelinearizationParameter],
 ) -> tuple[float, ...]:
-    return tuple(_quantize(values[item.name], item) for item in parameters)
+    return tuple(_quantize(_parameter_value(candidate, item), item) for item in parameters)
+
+
+def _atomic_proposal(proposal: RelinearizedProposal, parameters: list[RelinearizationParameter],
+                     anchor: CandidateEvaluation, index: int) -> AtomicCandidate:
+    semantic = {}
+    instances: dict[str, dict[str, str]] = {}
+    for p in parameters:
+        value = proposal.parameters[p.name]
+        binding = p.instance_parameter
+        if binding is None:
+            semantic[p.name] = value
+            continue
+        literal = f"{value:.12g}{_NUMERIC_UNITS[binding.unit][1]}"
+        if math.isclose(value, _parameter_value(anchor, p), rel_tol=1e-12, abs_tol=0.0):
+            literal = anchor.instance_parameters[binding.instance][binding.parameter]
+        decoded = spectre_scalar(literal)
+        if decoded is None or not math.isclose(decoded / _NUMERIC_UNITS[binding.unit][0], value, rel_tol=1e-12, abs_tol=0.0):
+            raise ValueError(f"numeric CDF serialization loses precision for {p.name}")
+        instances.setdefault(binding.instance, {})[binding.parameter] = literal
+    return AtomicCandidate(id=f"op-local-{index:03d}", parameters=semantic,
+                           instance_parameter_updates=[InstanceParameterUpdate(instance=name, parameters=fields)
+                                                       for name, fields in instances.items()],
+                           predicted_metrics=dict(proposal.predicted_metrics))
 
 
 def _proposal_rank(
@@ -502,7 +604,7 @@ def relinearize_operating_point(
     anchor = by_index[policy.anchor_candidate_index]
     parameter_names = [item.name for item in policy.parameters]
     fixed_parameters, fixed_instance_parameters = _constant_inputs(
-        selected, set(parameter_names)
+        selected, policy.parameters
     )
     training = [by_index[index] for index in policy.training_candidate_indices]
     holdout = [by_index[index] for index in policy.holdout_candidate_indices]
@@ -618,14 +720,17 @@ def relinearize_operating_point(
         )
 
     model_by_metric = {model.metric: model for model in models}
-    observed = {
-        _parameter_signature(candidate.parameters, policy.parameters)
-        for candidate in run.candidates
-        if all(name in candidate.parameters for name in parameter_names)
-    }
-    anchor_signature = _parameter_signature(anchor.parameters, policy.parameters)
+    observed = set()
+    for candidate in run.candidates:
+        if _source_context(candidate) != _source_context(anchor):
+            continue
+        try:
+            observed.add(_parameter_signature(candidate, policy.parameters))
+        except ValueError:
+            continue  # Unused points with missing inputs are not model evidence.
+    anchor_signature = _parameter_signature(anchor, policy.parameters)
     proposal_axes = [
-        _proposal_values(anchor.parameters[item.name], item)
+        _proposal_values(_parameter_value(anchor, item), item)
         for item in policy.parameters
     ]
     proposals: list[RelinearizedProposal] = []
@@ -634,10 +739,7 @@ def relinearize_operating_point(
         if signature in observed and signature != anchor_signature:
             continue
         parameters = dict(zip(parameter_names, signature, strict=True))
-        synthetic = anchor.model_copy(
-            update={"parameters": dict(anchor.parameters) | parameters}
-        )
-        features = _features(synthetic, anchor, policy.parameters)
+        features = [(parameters[p.name] - _parameter_value(anchor, p)) / p.proposal_step for p in policy.parameters]
         predicted_metrics = {
             metric.metric: _predict_metric(
                 model_by_metric[metric.metric], features, parameter_names
@@ -708,11 +810,7 @@ def relinearize_operating_point(
                 evidence_source=EvidenceSource.SOFTWARE_INFERENCE,
             ),
             candidates=[
-                AtomicCandidate(
-                    id=f"op-local-{index:03d}",
-                    parameters=dict(proposal.parameters),
-                    predicted_metrics=dict(proposal.predicted_metrics),
-                )
+                _atomic_proposal(proposal, policy.parameters, anchor, index)
                 for index, proposal in enumerate(selected, start=1)
             ],
         )
@@ -742,6 +840,7 @@ def relinearize_operating_point(
         holdout_parameter_coverage=holdout_parameter_coverage,
         fixed_parameters=fixed_parameters,
         fixed_instance_parameters=fixed_instance_parameters,
+        parameter_bindings={p.name: p.instance_parameter for p in policy.parameters if p.instance_parameter is not None},
         constraints=list(policy.constraints),
         objective=policy.objective,
         models=models,
@@ -1163,6 +1262,7 @@ def build_task_from_relinearization(
 
 __all__ = [
     "LocalMetricModel",
+    "NumericInstanceParameterBinding",
     "OperatingPointRelinearizationPolicy",
     "OperatingPointRelinearizationResult",
     "OperatingPointRelinearizationRunValidation",

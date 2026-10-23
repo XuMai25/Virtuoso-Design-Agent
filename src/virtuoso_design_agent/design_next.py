@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from .design_review import build_design_review, file_reference, load_bound_run, read_json
@@ -123,6 +124,8 @@ def suggest_design_next(
         "gate_passed": recomputed.gate_passed, "anchor_candidate_index": policy.anchor_candidate_index,
         "scope": "local first-order EDA response; not a global physical law",
         "evidence_source": "software_inference",
+        "parameter_bindings": {name: binding.model_dump(mode="json")
+                               for name, binding in recomputed.parameter_bindings.items()},
         "constraints_without_prediction": [c.metric for c in task.constraints
                                             if c.metric not in {m.metric for m in recomputed.models}],
         "sensitivities": [{"metric": model.metric, "normalized_sensitivities": model.normalized_sensitivities,
@@ -136,6 +139,23 @@ def suggest_design_next(
     if review["selected_candidate_index"] != policy.anchor_candidate_index:
         report["status"] = "anchor_not_selected"
         add("anchor", "模型锚点不是本轮已选设计；先明确起点，不能把旧锚点预测当当前局部优化。", "selected candidate / model anchor")
+        return report, None
+    anchor = next(c for c in run.candidates if c.index == policy.anchor_candidate_index)
+    anchor_objective = anchor.metrics[policy.objective.metric]
+    feasible = [p for p in recomputed.proposals if p.predicted_feasible and not p.previously_evaluated]
+    improving = [p for p in feasible if not math.isclose(p.predicted_objective_value, anchor_objective, rel_tol=1e-12, abs_tol=0.0)
+                 and ((p.predicted_objective_value > anchor_objective) if policy.objective.goal.value == "maximize"
+                      else (p.predicted_objective_value < anchor_objective))]
+    report["model"]["objective_improvement"] = {
+        "metric": policy.objective.metric, "goal": policy.objective.goal.value,
+        "recorded_anchor_value": anchor_objective, "prospective_feasible_count": len(feasible),
+        "predicted_improving_count": len(improving), "source": "software_inference",
+    }
+    if not improving:
+        report["status"] = "no_predicted_improvement"
+        add("stop_or_revisit_model", "当前受控范围内没有预测更优且满足模型约束的新点；停止生成下一轮任务。"
+            "这不是全局最优证明；确需诊断时先说明物理假设或缺量，不为模型验收重复计算。",
+            "model.objective_improvement / source-bound local proposals")
         return report, None
     draft = build_task_from_relinearization(model_path, template_path)
     # The existing compiler owns numerical proposal generation. This layer adds
@@ -155,12 +175,16 @@ def suggest_design_next(
     raw["safety"].update(allow_remote_compute=False, allow_remote_write=False,
                          replace_existing=False)
     draft = TaskSpec.model_validate(raw)
-    anchor = next(c for c in run.candidates if c.index == policy.anchor_candidate_index)
     comparisons = []
     for candidate in recomputed.candidate_set.candidates:
         comparisons.append({
             "id": candidate.id, "changes": {name: {"before": anchor.parameters.get(name), "proposed": value}
                 for name, value in candidate.parameters.items() if anchor.parameters.get(name) != value},
+            "instance_changes": {instance: {name: {"before": anchor.instance_parameters.get(instance, {}).get(name),
+                                                       "proposed": value}
+                                             for name, value in fields.items()
+                                             if anchor.instance_parameters.get(instance, {}).get(name) != value}
+                                 for instance, fields in candidate.instance_parameters().items()},
             "predicted_metric_changes": {name: {"anchor": anchor.metrics.get(name), "predicted": value,
                 "delta": value - anchor.metrics[name] if name in anchor.metrics else None}
                 for name, value in candidate.predicted_metrics.items()},
@@ -185,6 +209,17 @@ def render_design_next(report: dict) -> str:
         from .design_iteration import render_design_iteration
         lines.extend(["", render_design_iteration(report["iteration"])])
     if report["model"]:
+        if report["model"].get("parameter_bindings"):
+            lines.extend(["## 显式 CDF 数值映射", "",
+                          "字段单位/含义为声明，不是新的 PDK 回读；只接受显式 Spectre SI 字面量。", ""])
+            for name, binding in report["model"]["parameter_bindings"].items():
+                lines.append(f"- {name} → {binding['instance']}.{binding['parameter']}；"
+                             f"模型单位 {binding['unit']}；{binding['meaning']}")
+        if report["model"].get("objective_improvement"):
+            improvement = report["model"]["objective_improvement"]
+            lines.extend(["", f"目标 {improvement['metric']} ({improvement['goal']})："
+                          f"记录锚点 {improvement['recorded_anchor_value']}；"
+                          f"预测更优的新点 {improvement['predicted_improving_count']} 个。不是实测收益。", ""])
         lines.extend(["", "## 局部模型依据", "",
                       "仅适用于当前 PDK、拓扑、条件和锚点附近；预测是 software_inference。", "",
                       "| 指标 | 归一化局部灵敏度 | 留出误差 % |",
@@ -193,6 +228,7 @@ def render_design_next(report: dict) -> str:
             lines.append(f"| {model['metric']} | {model['normalized_sensitivities']} | {model['holdout_error_percent']} |")
         for proposal in report["model"].get("proposals", []):
             lines.extend(["", f"### {proposal['id']}", "", f"修改：`{proposal['changes']}`", "",
+                          f"CDF 修改：`{proposal.get('instance_changes', {})}`", "",
                           "| 指标 | 锚点 | 预测 | 变化 |", "| --- | ---: | ---: | ---: |"])
             for name, values in proposal["predicted_metric_changes"].items():
                 lines.append(f"| {name} | {values['anchor']} | {values['predicted']} | {values['delta']} |")
