@@ -1,0 +1,2301 @@
+diff --git a/LOCAL_VDA_PATCH.md b/LOCAL_VDA_PATCH.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..b6d5b179182f0107101bfcd53b8fb3a0f3a08134
+--- /dev/null
++++ b/LOCAL_VDA_PATCH.md
+@@ -0,0 +1,532 @@
++# Local VDA transport-recovery patch
++
++This checkout contains a deliberately isolated local compatibility patch for
++Virtuoso Design Agent (VDA). Do not push this branch to the third-party
++`Arcadia-1/virtuoso-bridge-lite` origin.
++
++Current integration: `codex/vda-upstream-main-20261018`, upstream main pinned to
++`ecaf5a5c5499051ea4c4796a480e278a3e9c0da8` (1.0.0 plus post-release fixes).
++The dated entries below remain historical; the final 2026-10-18 section describes
++which old implementations were retained or superseded.
++
++## Provenance and recovery points
++
++- Third-party origin: `https://github.com/Arcadia-1/virtuoso-bridge-lite`
++- Unmodified base commit: `dc9a4ec5acb1971f683e4717ff9e5a635ba588cf`
++- Local backup ref: `codex/backup-vda-transport-dc9a4ec`
++- Pre-window-fix backup ref: `codex/backup-vda-window-hide-e74379a`
++- Local integration branch: `codex/vda-transport-recovery`
++- Pre-loopback-hardening backup ref: `codex/backup-vda-loopback-e1f248d`
++- Loopback-hardening branch: `codex/vda-loopback-only`
++- Loopback-hardening patch: `48b44e6`
++- Pre-framing-fix backup ref: `codex/backup-vda-framing-afd7346`
++- Windows request-framing patch: `b1194ca`
++- Stale-state/auto-warm patch: `9e52844463cceaf12bbc39966a7b2db5c7238357`
++- Bounded transient-retry patch: `f8fdb9ed7e91c3194675876dcc4b16a06b77a7eb`
++- Pre-send tunnel-recovery patch: `2f41293aa8c4f297470298e27ccd7747046b3913`
++- Hidden Windows tunnel patch: `cd9aa97b631aa6b9d5db5927cc0e1953124ec658`
++
++The backup ref was created before any source edit. Code and documentation use
++separate commits so each behavioral change can be reviewed,
++rebased, cherry-picked, or dropped without carrying project notes with it.
++
++## Exact behavioral changes
++
++1. `src/virtuoso_bridge/transport/tunnel.py`, `SSHClient.is_running`
++   - A reachable forwarded port remains the primary liveness evidence.
++   - Windows no longer calls the POSIX-style `os.kill(pid, 0)` fallback after
++     the saved port is unreachable. The state is treated as stale so startup
++     can replace it.
++   - POSIX PID probing defensively treats `SystemError` as a failed probe.
++2. `src/virtuoso_bridge/transport/ssh.py`, `SSHRunner.stop_port_forward` and
++   `SSHRunner.is_tunnel_alive`
++   - Stale/invalid Windows PID operations now also catch `SystemError`, matching
++     the observed Python-on-Windows failure shape.
++3. `src/virtuoso_bridge/virtuoso/basic/bridge.py`, `VirtuosoClient.from_env`
++   - The documented no-running-tunnel branch now actually calls `SSHClient.warm()`
++     before returning a client bound to its selected local port.
++4. `src/virtuoso_bridge/transport/ssh.py`, idempotent transport retries
++   - Existing SSH command/upload/download retries now wait 1 second and 3 seconds
++     between transient failures instead of retrying three times immediately.
++   - Generic connect timeout is transient; authentication, host-key, DNS, and
++     other deterministic configuration errors still fail without retry.
++5. `src/virtuoso_bridge/virtuoso/basic/bridge.py`, pre-send recovery
++   - A private exception marks only `connect()` refusal before `sendall()`.
++   - A managed client may warm its tunnel and retry exactly once at that point.
++     Errors after any SKILL payload could have been sent are never replayed.
++6. Tests
++   - `tests/test_tunnel_recovery.py` covers unreachable Windows state, defensive
++     POSIX probe handling, and runner PID cleanup.
++   - `tests/test_profile_resolver.py` verifies that `from_env` warms a newly
++     created tunnel and uses the warmed port.
++   - `tests/test_ssh_retry.py` covers paced transient retries, immediate failure
++     for non-transient errors, and the existing ControlMaster fallback.
++   - `tests/test_virtuoso_tunnel_recovery.py` proves pre-send-only tagging,
++     one recovery attempt, no replay for unmarked errors, and warm failure.
++7. `src/virtuoso_bridge/transport/ssh.py`, Windows tunnel creation flags
++   - The persistent tunnel keeps `CREATE_NO_WINDOW`, `SW_HIDE`, and
++     `CREATE_NEW_PROCESS_GROUP`.
++   - It no longer adds `DETACHED_PROCESS`; Windows ignores
++     `CREATE_NO_WINDOW` when those two flags are combined, which caused the
++     native OpenSSH tunnel to open a Windows Terminal tab.
++   - Normal Windows child lifetime already lets the tunnel survive the
++     short-lived Bridge/VDA launcher. No SSH command, jump-host rule, or
++     tunnel state behavior changed.
++8. `tests/test_windows_process_flags.py`
++   - Portably asserts the exact hidden tunnel flags, including the absence of
++     `DETACHED_PROCESS`.
++
++No environment variable, state-file schema, JSON protocol, remote directory,
++SSH authentication rule, SKILL payload, Spectre implementation, or VDA worker
++protocol was changed. No keepalive setting was added. A reset after payload
++send remains checkpoint territory and is not claimed as safe to replay.
++
++This paragraph describes the transport patches through `cd9aa97`. The later
++`b1194ca` request-framing addendum below deliberately changes only how the same
++single JSON request boundary is detected on Windows SSH forwards.
++
++## Verification on 2026-07-19
++
++- Pre-patch isolated Bridge baseline: `78 passed, 1 deselected`.
++- Post-patch targeted recovery/profile tests: `18 passed`.
++- Post-patch isolated Bridge suite: `82 passed, 1 deselected`.
++- After bounded retry: `86 passed, 1 deselected`.
++- After pre-send recovery: `91 passed, 1 deselected`.
++- Hidden-window targeted transport suite: `8 passed`.
++- Hidden-window full isolated suite: all non-baseline tests passed. The known
++  Windows legacy-`HOME` test was deselected; the profile scratch-path test was
++  run separately and passed because the combined suite otherwise retains a
++  real user `.env` value from an earlier test.
++- The one deselected upstream test is
++  `test_tunnel_state_reads_legacy_cache_path`; it assumes POSIX `HOME` path
++  behavior and already failed on this Windows checkout before the patch.
++- VDA read-only target: `vb_pdk_smoke/vda_inv_l5a_001/schematic`.
++- Initial no-tunnel inspect succeeded and created a tunnel on local port 65347.
++- The exact listener PID 69580 was verified as Windows OpenSSH, then terminated
++  while its state file was intentionally retained.
++- Patched `SSHClient.is_running()` returned `False` without the previous
++  `WinError 87` / `SystemError` crash.
++- A second VDA inspect automatically created a new tunnel (PID 86280) and
++  returned identical `bridge_readback`: instances `MN0/MP0`, nets/pins
++  `IN/OUT/VDD/VSS`, and `Wn/Wp/L = 0.6/0.8/0.03 um`.
++- Bridge `stop` then removed the state and the new process.
++- A nine-point VDA stress run with bounded retry completed candidates 1-7, then
++  hit local RAMIC connection refusal at `parameters.stage.8`. VDA restored the
++  original OA parameters, preserved the failure, and resumed from candidate 8
++  without repeating candidates 1-7. The resumed run completed 9/9 and finalized
++  `Wn/Wp/L = 0.6/0.8/0.03 um`.
++- A deterministic same-client smoke then stopped its owned tunnel while keeping
++  stale state. The pre-send patch warmed a new tunnel (PID 126188 -> 136176),
++  returned `3` for read-only SKILL `1+2`, and cleaned state/process afterward.
++- The stress interruption proves bounded SSH retry alone does not prevent every
++  tunnel death. The deterministic smoke verifies the exact safe recovery window;
++  a fresh uninterrupted nine-point run after the pre-send patch was not run.
++- Before the hidden-window patch, live tunnel PID 110912 spawned jump-proxy PID
++  102764 while `WindowsTerminal.exe` and `OpenConsole.exe` were present; the
++  user also observed the corresponding OpenSSH-titled tab.
++- After the patch, `vda bridge start` reported `tunnel.warm = 3.969s` and
++  returned in 5.2 seconds. Its launcher parent had exited, local port 65347 was
++  reachable, and both `WindowsTerminal.exe` and `OpenConsole.exe` counts were
++  zero. Read-only `vda bridge status` connected to CIW and found Spectre
++  21.1.0. `vda bridge stop` then left zero `ssh.exe` processes and removed the
++  state file. A background `conhost.exe` with no window handle may support
++  OpenSSH proxy plumbing; it is not the eliminated Windows Terminal tab.
++
++VDA evidence records:
++
++- `artifacts/runs/inverter-inspect-bridge/bridge-recovery-prekill-20260719.json`
++- `artifacts/runs/inverter-inspect-bridge/bridge-recovery-postkill-20260719.json`
++- `artifacts/runs/inverter-tune-energy-bridge/bridge-backoff-stress-20260719.json`
++- `artifacts/runs/inverter-tune-energy-bridge/bridge-backoff-stress-resume1-20260719.json`
++- `artifacts/runs/inverter-tune-energy-bridge/bridge-backoff-stress-20260719.checkpoint.json`
++
++These paths are relative to the VDA repository, not this Bridge checkout.
++
++## Updating from upstream
++
++1. Fetch the third-party origin without pushing local branches.
++2. Check whether upstream already fixed Windows stale-state detection, missing
++   `from_env().warm()`, transient retry pacing, and pre-send-only recovery. Prefer
++   upstream for every equivalent behavior and drop the matching local commit.
++3. Otherwise create a fresh local `codex/` branch from the updated upstream and
++   cherry-pick, in order, `9e52844`, `f8fdb9e`, `2f41293`, and `cd9aa97`.
++   Resolve only conflicts in the source/test files listed above.
++4. Run the isolated Bridge suite, VDA tests, then the same forced-disconnect
++   read-only and pre-send recovery smokes before using the updated checkout for
++   OA writes or Spectre.
++5. Keep the original backup ref until the upgraded branch and live smoke are
++   both verified.
++
++## Loopback hardening addendum (2026-09-03)
++
++### Scope and compatibility
++
++- Backup ref `codex/backup-vda-loopback-e1f248d` preserves the exact pre-change
++  state `e1f248dab69aa0e3504d8249613a096e4030673d`. The isolated implementation
++  branch is `codex/vda-loopback-only`; code commit is `48b44e6`.
++- `ramic_bridge.il` now defaults `RBLocal` to `t`, so a newly loaded daemon
++  binds `127.0.0.1`. The existing monitor control is retained: a Bridge user
++  can still make an explicit non-local choice, but it is no longer the default.
++- `SSHRunner.start_port_forward` now uses the explicit local forward
++  `127.0.0.1:<local>:127.0.0.1:<remote>` plus `GatewayPorts=no`. Hidden-window,
++  jump-host, state-file, retry, and cleanup behavior are unchanged.
++- `daemon_guard.py` queries the daemon-reported `RBLastBind`; `bridge status`
++  prints it and returns failure when a responsive daemon is non-loopback or
++  cannot provide bind evidence. The wire protocol and arbitrary SKILL
++  capability were not changed.
++- VDA adds its own stricter fail-closed check before every RAMIC-backed OA or
++  compute operation. VDA does not expose a bypass for non-loopback listeners.
++
++### Verification
++
++- Bridge collected 100 tests. `98 passed, 2 deselected`; the two deselected
++  tests are the same documented Windows legacy-`HOME` and real-profile
++  scratch-root baseline failures. Running all 100 produced only those two
++  known failures.
++- The live legacy process was independently verified as PID 114251, owned by
++  Unix UID 1068, running this checkout's daemon as `0.0.0.0 65346`. It did not
++  answer read-only `1+2`; exact-command validation preceded SIGTERM. The
++  Virtuoso parent process and OA were not touched, and `:65346` then had no
++  listener.
++- The patched file was uploaded only under
++  `/data/xum/virtuoso_bridge_xum/Aurora_s_Echo/virtuoso_bridge`; its remote
++  `ramic_bridge.il` SHA-256 was
++  `ce446a0886fc4c5a8e16ac284767a17d0768bc5c7325dafd1a337e5291cba7df`.
++- A bounded standalone daemon smoke on port 65490 reported
++  `bind=127.0.0.1:65490`; `ss` agreed. The exact temporary process, socket,
++  and log were gone after the command.
++- The restarted Windows SSH tunnel listened only on `127.0.0.1:65347`; owner
++  PID 91348 was `ssh.exe` with `MainWindowHandle=0`, and no Windows Terminal
++  or OpenConsole process was created.
++- With the old daemon removed and before CIW reload, VDA doctor stopped at the
++  new guard with `Empty response from daemon`; no OA or Spectre action ran.
++  A final CIW-attached `1+2` smoke remains pending until the generated setup
++  is loaded in the existing interactive Virtuoso session.
++
++### Security boundary
++
++Loopback binding closes the administrator-reported external-network exposure.
++It does not add application-layer authentication between Unix users already on
++the same multi-user server. Stronger per-user isolation would require a
++separate, protocol-changing design such as an authenticated channel or a
++permissioned Unix-domain socket and is intentionally not hidden inside this
++compatibility patch. Native Cadence listeners are also outside this patch and
++must be assessed by the server administrator or Cadence guidance.
++
++### Upstream upgrade addition
++
++After the four transport commits listed above, cherry-pick `48b44e6` only if
++the new upstream still defaults RAMIC or local forwarding to a wildcard
++address, or lacks actual-bind reporting. Re-run the 100 Bridge tests, VDA
++tests, remote `ss` checks, a CIW-attached read-only SKILL probe, and process
++cleanup checks before retiring `codex/backup-vda-loopback-e1f248d`.
++
++## Windows SSH request-framing addendum (2026-09-04)
++
++### Trigger and bounded diagnosis
++
++- After the loopback daemon was loaded in a fresh headless IC6.1.8 session,
++  server-local TCP returned the standard `STX + 3` response for `1+2`.
++- The same request through Windows OpenSSH returned an empty response both with
++  explicit `-L 127.0.0.1:65347:127.0.0.1:65346` and with the legacy omitted
++  local bind address. Both tunnels still used `GatewayPorts=no` and were
++  verified to listen only on local loopback.
++- The failing client called `shutdown(SHUT_WR)` after sending JSON. On this
++  current Windows OpenSSH path the forwarded channel could be closed before the
++  daemon reply returned. The A/B excludes loopback binding itself as the cause.
++
++### Exact changes and compatibility
++
++1. `src/virtuoso_bridge/virtuoso/basic/bridge.py`
++   - A Windows client with an SSH tunnel keeps its write side open while waiting
++     for the reply.
++   - Local-mode Windows and all non-Windows paths retain the legacy half-close,
++     minimizing compatibility impact with an older daemon.
++2. `ramic_bridge_daemon_3.py` and `ramic_bridge_daemon_27.py`
++   - Each daemon parses and dispatches as soon as one complete JSON value has
++     arrived instead of requiring EOF.
++   - Fragmented TCP and UTF-8 input is accumulated until complete. EOF and
++     malformed-input error behavior remain available for legacy clients.
++3. Tests
++   - `test_daemon_request_framing.py` loads the actual parser functions from
++     both standalone daemon resources and verifies fragmented UTF-8 JSON without
++     EOF plus malformed legacy EOF.
++   - `test_virtuoso_tunnel_recovery.py` proves Windows tunneled requests do not
++     half-close and that the legacy path still does.
++   - `test_runtime_paths.py` now sets `USERPROFILE` together with `HOME` in its
++     Windows legacy-cache fixture; runtime path behavior was not changed.
++
++The modified Windows client must be paired with a freshly deployed/reloaded
++daemon. A stale old daemon can still wait for EOF; the supported upgrade path
++is `virtuoso-bridge start` followed by reloading its generated setup. The new
++daemon remains compatible with clients that still half-close. No SKILL body,
++return marker, authentication, OA, Spectre, retry, or replay semantics changed.
++
++### Recovery points and verification
++
++- Backup ref `codex/backup-vda-framing-afd7346` preserves exact pre-change
++  commit `afd7346`; implementation commit is `b1194ca` on the unpushed private
++  branch `codex/vda-loopback-only`.
++- Framing/tunnel targeted suite: `11 passed`.
++- Full Bridge suite in an isolated cwd, empty test `.env`, and explicit
++  basetemp: `106 passed`.
++- Full VDA suite: `910 passed`.
++- Two obsolete headless Virtuoso sessions dating from 2026-07-05 were verified
++  by UID, executable, cwd, restore file, parent tree, and DISPLAY, then exited
++  normally after SIGTERM. No force kill or file deletion was needed.
++- One replacement session loaded the uploaded setup from
++  `/data/xum/virtuoso_bridge_xum/Aurora_s_Echo/virtuoso_bridge`. Remote `ss` and
++  the CIW log both reported `127.0.0.1:65346`.
++- Final Windows-tunnel `1+2` returned `3`; VDA doctor returned
++  `connected=true`, `skill_probe=3`, `daemon_bind=127.0.0.1:65346`, and profile
++  `nics4304_tsmc28`.
++- This smoke did not open, read, or write OA and did not run a Spectre analysis.
++
++### Upstream upgrade addition
++
++After applying the loopback patch, cherry-pick `b1194ca` only if upstream still
++uses TCP half-close for Windows SSH-forwarded requests or its standalone daemon
++still requires EOF before parsing one JSON object. Prefer an upstream equivalent
++and drop this local commit when available. Re-deploy and reload the daemon, then
++repeat loopback `ss`, two sequential SKILL calls, VDA doctor, the isolated
++Bridge suite, and the VDA suite before retiring
++`codex/backup-vda-framing-afd7346`.
++
++## Upstream 0.8.0/main integration (2026-09-04)
++
++### Provenance and isolation
++
++- The third-party origin was fetched, not written: `Arcadia-1/virtuoso-bridge-lite`.
++- The previous private tip was preserved first as
++  `codex/backup-pre-upstream-20260904-ebf7e50` at
++  `ebf7e5018a886f79403e55aaef1c5805a9d38302`.
++- The new private integration branch is
++  `codex/vda-upstream-main-20260904`.
++- Its upstream parent is `c64461c0bdc44330c143d386a8aaf3342088a59e`;
++  the annotated `v0.8.0` release is also present locally.
++- The preserved private parent is
++  `ebf7e5018a886f79403e55aaef1c5805a9d38302`.
++- Integration merge commit: `106c61ee0d65bae1b1d20c86a7c4151ffe95c3e0`.
++- Managed Windows daemon-restart fix:
++  `40ff8919b8d79aff3b58aa2167ad28be9a395a92`.
++- Neither this branch nor any VDA patch was pushed to the third-party origin.
++
++### Upstream functionality adopted
++
++The VDA worker now runs against the upstream 0.8 code line, including scoped
++Spectre pools and parallel-run isolation, split GUI/deploy/daemon/Spectre host
++roles, the Paramiko session backend and optional SOCKS5 transport, strict PSF
++accessors, schematic netlist import/export, the deterministic schematic
++constraint planner, and current Maestro timeout/output handling. These are
++Bridge execution capabilities; their presence alone is not VDA design
++evidence and does not bypass VDA task authorization, OA policy, or result
++validation.
++
++### Private behavior preserved or reconciled
++
++1. RAMIC still defaults to loopback and records the actual bind. VDA refuses
++   non-loopback or missing bind evidence.
++2. OpenSSH forwards still use `GatewayPorts=no` and an explicit
++   `127.0.0.1:<local>:127.0.0.1:<remote>` mapping. The CLI's printed manual
++   fallback now uses the same safe command.
++3. Windows tunnels keep `CREATE_NO_WINDOW`, `SW_HIDE`, and a new process group,
++   without the incompatible `DETACHED_PROCESS` flag. Normal stop removes the
++   listener and managed SSH child.
++4. Stale-state recovery, `from_env().warm()`, bounded 1 s/3 s retries, and the
++   pre-send-only tunnel recovery remain. The merge additionally caps warm and
++   retry delay by the caller's total deadline so recovery cannot overrun a
++   short timeout.
++5. Windows managed tunnels retain the complete-JSON framing fix. Both Python 3
++   and 2.7 daemon resources dispatch one complete JSON value without requiring
++   EOF while remaining compatible with legacy EOF clients.
++6. Cross-user and bind checks remain. The two idempotent identity/bind queries
++   now retry once after a transport failure, an empty daemon USER is rejected,
++   and `status` returns failure for no response or unresolved security evidence.
++7. `VirtuosoClient.from_env()` now accepts upstream's split-host settings even
++   when legacy `VB_REMOTE_HOST` is absent; the earlier legacy-only precheck no
++   longer masks the 0.8 feature.
++8. Existing Paramiko behavior is retained; its OpenSSH port-forward fallback
++   test was aligned with the private loopback-only command.
++9. `restart` now constructs its daemon client with the managed tunnel context,
++   so Windows does not re-enter the unsupported half-close path while sending
++   `RBStop()` plus the generated setup load. The SSH runner is closed in a
++   `finally` block without killing the persistent forward; identity mismatch
++   and expected old-daemon disconnect behavior remain fail-closed and tested.
++
++No credential, host key, license, `.env` value, OA cellview, Spectre model, or
++VDA authorization token is stored in this patch. The monitor's explicit
++manual non-loopback option remains available to upstream users, but VDA will
++not consume such a daemon.
++
++### Verification
++
++- Untouched upstream Windows baseline before merging the private parent:
++  `883 passed, 35 failed, 11 skipped`. Failures were concentrated in Unix
++  shell/symlink/Windows path assumptions.
++- Final transport/security/split-host/Paramiko set: `132 passed`.
++- Final complete Bridge run after the restart fix, with fixed short basetemp
++  `C:\vbt\full-final-20260904`: `914 passed, 34 failed, 11 skipped` out of 959.
++  Every remaining failure is in a test file unchanged from upstream main:
++  docs-search Unix commands plus one Windows remote-index cache reuse assertion,
++  GDS streamout shell/symlink/path cases, two schematic-netlist Windows/POSIX
++  path fixtures, one privileged symlink PSF test, and one deliberate
++  260-character download path. The added docs assertion failure was reproduced
++  alone. These are recorded, not relabelled as passes and not patched merely to
++  improve the count.
++- Full VDA suite through its separate Bridge worker boundary: `910 passed`;
++  `vda catalog` and the inverter close-loop demo plan also completed.
++- The tested source checkout reported version `0.8.0`, then `restart` uploaded
++  its generated runtime only below
++  `/data/xum/virtuoso_bridge_xum/Aurora_s_Echo/virtuoso_bridge` and reloaded the
++  current daemon. The old daemon's expected connection close was handled as a
++  restart acknowledgement; no OA or Spectre command was part of the reload.
++- Post-reload read-only acceptance on profile `nics4304_tsmc28`: daemon user
++  `xum` matched tunnel user `xum`, actual daemon bind `127.0.0.1:65346`,
++  Virtuoso 6.1.8, Spectre 21.1.0, and VDA SKILL probe `1+2 -> 3`.
++- `vda bridge stop` removed the local `127.0.0.1:65347` listener; both the
++  post-stop listener count and the matching managed `ssh.exe` count were zero.
++
++The 34 platform failures are not a claim that upstream GDS/docs/local-netlist
++features are Windows-validated. Those paths remain outside this VDA upgrade
++Gate until a real VDA requirement justifies a dedicated portability fix.
++
++## 2026-10-18: authenticated 1.0 main integration
++
++### Backups and provenance
++
++- Before changes: clean private `01565791fb261c73552e3e80590a389d2a6b7003`.
++- Backup branch: `codex/backup-pre-main-20261018-0156579`.
++- Integration branch: `codex/vda-upstream-main-20261018`, merging the complete
++  upstream main `ecaf5a5c5499051ea4c4796a480e278a3e9c0da8` (119 newer commits
++  than the previous upstream base `c64461c`). No private branch was pushed to
++  the third-party origin.
++- Verified git bundles, original source archive, original complete `.venv`,
++  and VDA's pre-existing modified/untracked documents were backed up under
++  VDA's ignored `artifacts/upgrades/bridge-main-20261018`.
++- The user configuration was privately backed up outside Git. Original
++  remote runtime files were archived before deployment under the approved
++  `/data/xum/virtuoso_bridge_smoke/vda_bridge_upgrade_20261018` work area.
++  No token, password, license text or `.env` content belongs in this repository.
++
++### File-level private delta against ecaf5a5c
++
++| File | Retained or adapted private behavior |
++| --- | --- |
++| `transport/ssh.py` | Explicit loopback forwarding plus `GatewayPorts=no`; hidden Windows creation without `DETACHED_PROCESS`; `SystemError` stale PID handling; 1 s/3 s transient backoff consumes the existing total timeout budget. |
++| `transport/tunnel.py` | Optional validated absolute `VB_REMOTE_TOKEN_PATH[_profile]`, atomic token creation with private directory/file modes, and corresponding `RB_TOKEN_PATH` in generated setup. Without the option, upstream defaults remain unchanged. |
++| `daemon_guard.py` | Reintroduced VDA's actual `RBLastBind` query and fail-closed loopback guard, now also rejecting missing/invalid/out-of-range ports; kept upstream signed-PID owner verification. |
++| `virtuoso/basic/bridge.py` | Before-send-only refused-connect recovery, bounded jump-host connect grace, lazy token acquisition on first real SKILL request, Windows managed-tunnel no-half-close, and authenticated complete-response framing. |
++| `ramic_bridge_daemon_3.py`, `_27.py` | Dispatch a complete JSON request without waiting for EOF; retain size/deadline bounds, fragmented UTF-8 handling, old EOF compatibility and current auth/recovery/owner implementations. |
++| `cli.py` | Safe printed manual forward, managed context and `finally` cleanup for status/restart, nonzero status on unverified user/bind/unresponsive daemon. |
++| `resources/.env_template` | Documents the optional workspace token path without embedding any site secret. |
++| `examples/_pdk.py` | Removed one upstream trailing empty line so the complete staged merge passes `git diff --check`; no functional change. |
++
++Tests retained/updated: `test_ssh_retry`, `test_tunnel_recovery`,
++`test_virtuoso_tunnel_recovery`, `test_windows_process_flags`,
++`test_daemon_request_framing`, `test_daemon_reply_budget`,
++`test_tunnel_profiles`, `test_profile_resolver`, `test_paramiko_ssh_backend`
++and `test_runtime_paths`. New `test_vda_upgrade_compatibility.py` checks the
++bind policy, workspace token provisioning/unsafe path rejection, and fragmented
++signed responses including tampering. Fixture changes isolate site env/owner
++checks, preserve upstream lazy construction, and account for complete-JSON
++dispatch; they do not suppress real security or execution failures.
++
++### Reconciled rather than copied
++
++Upstream's native Windows process-liveness checks, stale state/target cache,
++default daemon loopback, signed capabilities/owner checks, IPC resynchronization,
++bounded Busy handling and durable recovery implementation are retained. The old
++extra USER-query retry is superseded by signed owner identity/cache; it is not
++layered on top as an additional SKILL replay. `VirtuosoClient.from_env()` keeps
++upstream's lazy no-tunnel construction (including daemon-independent docs use);
++the first actual EDA request acquires auth and may perform the same safe
++pre-send warm recovery. No post-send reset/timeout may rebuild and replay SKILL.
++The explicit shared-CIW guard's `retry_connect=False` remains respected.
++
++During live acceptance, a native Windows forward delivered a valid full signed
++hello but not EOF. The client now finishes receiving only after verification of
++the MAC over the entire accumulated body and that request's nonce. Partial or
++tampered replies still fail. This is not the old unsigned legacy fallback;
++production authentication remains enabled and no signature check is skipped.
++
++### Verified boundaries
++
++- Untouched upstream on proper Linux/POSIX temp storage: 2,286 passed,
++  89 skipped. Integrated final Linux suite: 2,325 passed, 89 skipped.
++- Final private/core Windows set: 165 passed, 2 skipped. Full native Windows
++  runs retain upstream's separately recorded platform failures; see VDA's
++  dated upgrade record for exact baseline/final counts and failure-set diff.
++- VDA: 929 passed; catalog and inverter demo plan pass. A default-temp run
++  initially hit a pre-existing Windows temp-directory ACL issue; an explicit
++  isolated basetemp passes without modifying tests or system permissions.
++- Read-only OA-to-si-to-Spectre TSMC18 DC/AC on the existing common-source cell:
++  identical netlist SHA-256 and all 28 raw metrics versus the previous run;
++  gain 20.826709 dB, BW 125.833557 MHz, power 68.322394 uW. The two-variant
++  TSMC N28 standalone AC preview also passes with parsed PSF evidence.
++- Both original interactive Virtuoso processes were preserved. The selected
++  existing PID 94710 was upgraded in place without OA writes; the new signed
++  handshake identifies that same PID. Actual daemon bind is loopback and
++  VDA doctor works for both profiles. The old 0.8 wire required an isolated
++  one-time adapter accepting only independently known exact read-only owner/
++  PID/bind replies before a single public Bridge reload request; it is not
++  part of production source or an auth-disabled fallback.
++- An owned headless test session and all its verified process groups were
++  stopped. One-shot UI migration loaders were retired to no-ops after keeping
++  audit originals, preventing delayed UI input from restarting anything.
++  Temporary ports are not the final default. User `cds.lib` hash is unchanged.
++
++This is a dependency/execution compatibility Gate, not new PVT, layout, SOS,
++Maestro GUI, arbitrary parameter-write or L5B design-quality validation.
++
++## 2026-10-18 focused feature acceptance follow-up
++
++Before this follow-up, `codex/backup-pre-feature-validation-20261018` was created
++at `e214d3a6e153a036d422b5453412365b8172cd06`. The verified post-upgrade bundle
++and original venv/source backups remain available in VDA's ignored artifacts.
++Changes stay on `codex/vda-upstream-main-20261018`; do not push to third-party origin.
++
++### Exact additional delta
++
++- `virtuoso/basic/bridge.py`: skip `SHUT_WR` for all Windows clients, not just
++  managed-tunnel instances. A native Windows socketpair reproduced reply loss
++  after half-close independently of SSH. Receipt-only direct clients need the
++  same complete-JSON framing. POSIX retains half-close. No post-send retry added.
++- `tools/skill_exec.py`: use the same Windows request framing and only finish
++  early when the entire response verifies against the request nonce/HMAC;
++  carry one monotonic deadline through receiving. Authentication stays enabled.
++- `test_daemon_auth.py` and `test_recoverable_daemon.py`: fake/raw clients follow
++  the paired daemon's complete-JSON protocol; Windows fixtures no longer require
++  half-close. Security assertions remain intact.
++- `test_vda_upgrade_compatibility.py` and `test_virtuoso_tunnel_recovery.py`:
++  cover Windows direct and standalone signed fragmented responses, rejection of
++  tampering, and retained POSIX behavior. `test_request_recovery_transport.py`
++  adds diagnostics to the existing pending-receipt assertion, without relaxing it.
++
++### Evidence and remaining boundaries
++
++- Focused Linux auth/recovery/framing/reader suite: 281 passed, 2 skipped.
++  Final private compatibility/platform matrix: 29 passed.
++- Final focused Windows deterministic private/recovery/framing set: 96 passed.
++  Broader localhost TCP set: 271 passed, 3 failed, 6 skipped; intermittent
++  `WinError 10054` remains in negative capability, explicit auth-off, and busy
++  transport tests. No repeated-to-green acceptance or claim of all-Windows success.
++- VDA full suite: 936 passed, including the seven new opt-in parameter-evidence
++  contract tests. The compact reader and old task approval token remain unchanged.
++- On an isolated owned Virtuoso session, an injected lost acknowledgement was
++  reconciled through the original receipt after replacing only the local tunnel;
++  both submission count and SKILL counter were exactly one. A real client budget
++  exhaustion during an 8-second SKILL sleep likewise recovered the original
++  completion with counter one. Its guard phase was indeterminate/awaiting_user,
++  not evidence that every timeout or dialog branch is covered.
++- Rich stored/CDF evidence was read live without changing compact values. VDA
++  integration and OA/si binding results, timings, owned process cleanup, and
++  failed first-use PDK/session attempts are recorded in VDA's
++  `docs/validation/2026-10-18-bridge-feature-workflow.md`.
++- When manually rebuilding a forward with `ensure_tunnel()`, also call
++  `save_state()` so another process can manage/stop it. The one-off test harness
++  initially omitted that call; its exact orphaned forward was identified and
++  terminated, and the harness corrected. This does not change production warm
++  lifecycle semantics or justify broad process termination.
++
++These are reliability and targeted inspection changes, not an automatic request
++handle/checkpoint integration for every VDA operation or new electrical metrics.
+diff --git a/examples/_pdk.py b/examples/_pdk.py
+index 1667928eb4a62b556d4a63a3b74168be0b869ab9..f08f79c97916105b01b92c3b5cbc6df1a412a03c 100644
+--- a/examples/_pdk.py
++++ b/examples/_pdk.py
+@@ -80,4 +80,3 @@ def require_cell(client: Any, lib: str, cell: str, view: str = "layout") -> None
+     found = client.execute_skill(f"ddGetObj({_quote(lib)} {_quote(cell)} {_quote(view)}) != nil").output
+     if (found or "").strip() != "t":
+         raise SystemExit(f"{lib}/{cell}/{view} does not exist; check the library and cell (see --help).")
+-
+diff --git a/src/virtuoso_bridge/cli.py b/src/virtuoso_bridge/cli.py
+index 59b05a66bc9387905cd7dfc760a8411d61f8668c..2f3f12df7023307dde37b901b0f709bd5dddf00a 100644
+--- a/src/virtuoso_bridge/cli.py
++++ b/src/virtuoso_bridge/cli.py
+@@ -288,8 +288,8 @@ def _start_one_profile(profile: str | None) -> int:
+             local_port = ssh.port
+             remote_port = ssh.remote_port
+             manual_cmd = (
+-                "ssh -o BatchMode=yes -o ExitOnForwardFailure=yes -N "
+-                f"-L {local_port}:127.0.0.1:{remote_port}"
++                "ssh -o BatchMode=yes -o ExitOnForwardFailure=yes -o GatewayPorts=no -N "
++                f"-L 127.0.0.1:{local_port}:127.0.0.1:{remote_port}"
+             )
+             if ssh_env.jump_host:
+                 jump = f"{ssh_env.jump_user or ssh_env.remote_user}@{ssh_env.jump_host}" if (ssh_env.jump_user or ssh_env.remote_user) else ssh_env.jump_host
+@@ -384,42 +384,41 @@ def _restart_daemon_one(profile: str | None) -> bool:
+         skill = "RBStop()\nRBStart()"
+ 
+     print(f"Restarting daemon{label}...")
++    tunnel = SSHClient.from_env(keep_remote_files=True, profile=profile)
+     client = VirtuosoClient(
+         host="127.0.0.1",
+         port=int(state["port"]),
+         timeout=5,
+         log_to_ciw=False,
++        tunnel=tunnel,
+     )
+-    client.daemon_token = _state_or_local_daemon_token(state, profile)
+     try:
+-        user_check = check_daemon_user(client, profile=profile, timeout=5)
+-    except Exception as exc:
+-        print(f"[warning] Could not check daemon before restart{label}: {exc}")
+-        return False
+-    if not user_check.ok:
+-        print(f"[warning] Refusing to restart daemon{label}: {user_check.error}")
++        client.daemon_token = _state_or_local_daemon_token(state, profile)
++        try:
++            user_check = check_daemon_user(client, profile=profile, timeout=5)
++        except Exception as exc:
++            print(f"[warning] Could not check daemon before restart{label}: {exc}")
++            return False
++        if not user_check.ok:
++            print(f"[warning] Refusing to restart daemon{label}: {user_check.error}")
++            return False
++        result = client.execute_skill(skill, timeout=5)
++        if result.status == ExecutionStatus.SUCCESS:
++            print(f"Daemon restart requested{label}.")
++            return True
++        details = "; ".join(result.errors) or result.output or "unknown error"
++        if any(fragment in details for fragment in (
++            "Empty response from daemon", "Connection reset", "Broken pipe",
++        )):
++            print(
++                f"Daemon restart requested{label} "
++                "(old daemon closed the connection while restarting)."
++            )
++            return True
++        print(f"[warning] Could not restart daemon{label}: {details}")
+         return False
+-
+-    result = client.execute_skill(skill, timeout=5)
+-    if result.status == ExecutionStatus.SUCCESS:
+-        print(f"Daemon restart requested{label}.")
+-        return True
+-
+-    details = "; ".join(result.errors) or result.output or "unknown error"
+-    expected_disconnect = (
+-        "Empty response from daemon",
+-        "Connection reset",
+-        "Broken pipe",
+-    )
+-    if any(fragment in details for fragment in expected_disconnect):
+-        print(
+-            f"Daemon restart requested{label} "
+-            "(old daemon closed the connection while restarting)."
+-        )
+-        return True
+-
+-    print(f"[warning] Could not restart daemon{label}: {details}")
+-    return False
++    finally:
++        tunnel.close()
+ 
+ 
+ def _restart_one() -> int:
+@@ -624,19 +623,25 @@ def _print_status() -> int:
+     # Daemon (Virtuoso CIW)
+     # For local mode, check daemon if we have state (don't require 'running')
+     daemon_user_ok = True
++    daemon_probe_ok = False
+     can_check_daemon = (is_local and state) or (running and state)
+     if can_check_daemon:
+         if state is None:
+             print("\n[daemon] cannot check (state missing)")
+             return 1
+         port = state["port"]
++        status_tunnel = None
+         try:
+             from virtuoso_bridge.models import ExecutionStatus
+ 
+-            vc = VirtuosoClient(host="127.0.0.1", port=port, timeout=5)
++            status_tunnel = None if is_local else SSHClient.from_env(
++                keep_remote_files=True, profile=profile,
++            )
++            vc = VirtuosoClient(host="127.0.0.1", port=port, timeout=5, tunnel=status_tunnel)
+             vc.daemon_token = _state_or_local_daemon_token(state, profile)
+             probe = vc.execute_skill("1+1", timeout=5)
+             ok = probe.status == ExecutionStatus.SUCCESS
++            daemon_probe_ok = ok
+             busy = not ok and any("BusyError" in err for err in probe.errors or [])
+             if not ok and any(
+                 "authentication" in err.lower() for err in probe.errors or []
+@@ -662,8 +667,21 @@ def _print_status() -> int:
+                         daemon_user_ok = False
+                         _print_cross_user_daemon_failure(user_check.error)
+                 except Exception as exc:
++                    daemon_user_ok = False
+                     print(f"  daemon user: unavailable ({exc})")
+ 
++                try:
++                    from virtuoso_bridge.daemon_guard import check_daemon_bind
++                    bind_check = check_daemon_bind(vc, timeout=5)
++                    if bind_check.daemon_bind:
++                        print(f"  daemon bind: {bind_check.daemon_bind}")
++                    if not bind_check.ok:
++                        daemon_user_ok = False
++                        print(f"  daemon network safety: FAILED ({bind_check.error})")
++                except Exception as exc:
++                    daemon_user_ok = False
++                    print(f"  daemon network safety: FAILED ({exc})")
++
+                 try:
+                     r = vc.execute_skill(
+                         "if(boundp('RBLastHost) RBLastHost \"\")",
+@@ -701,6 +719,9 @@ def _print_status() -> int:
+                 _print_stale_daemon_hint()
+         except Exception as e:
+             print(f"\n[daemon] error: {e}")
++        finally:
++            if status_tunnel is not None:
++                status_tunnel.close()
+     elif not is_local and not running:
+         print("\n[daemon] cannot check (tunnel not running)")
+         if setup_path:
+@@ -735,8 +756,8 @@ def _print_status() -> int:
+ 
+     print("\n========================================================================")
+     if is_local:
+-        return 0 if daemon_user_ok else 1
+-    return 0 if running and daemon_user_ok else 1
++        return 0 if daemon_probe_ok and daemon_user_ok else 1
++    return 0 if running and daemon_probe_ok and daemon_user_ok else 1
+ 
+ 
+ def _print_spectre_status(profile: str | None, suffix: str) -> None:
+diff --git a/src/virtuoso_bridge/daemon_guard.py b/src/virtuoso_bridge/daemon_guard.py
+index a859072175bb8296204d1feed58852338f859717..ed0ea788a9532e9d4a126d770c8524528ad999c7 100644
+--- a/src/virtuoso_bridge/daemon_guard.py
++++ b/src/virtuoso_bridge/daemon_guard.py
+@@ -26,6 +26,7 @@ from SSH ``whoami`` on the tunnel — so ssh-config-only setups are checked too.
+ from __future__ import annotations
+ 
+ import logging
++import ipaddress
+ import os
+ from dataclasses import dataclass
+ from typing import Any
+@@ -76,6 +77,42 @@ class DaemonHostCheck:
+     error: str = ""
+ 
+ 
++@dataclass(frozen=True)
++class DaemonBindCheck:
++    ok: bool
++    daemon_bind: str = ""
++    error: str = ""
++
++
++def query_daemon_bind(client: Any, *, timeout: int = 5) -> str:
++    result = client.execute_skill(
++        "if(boundp('RBLastBind) RBLastBind \"\")", timeout=timeout,
++    )
++    if result.status != ExecutionStatus.SUCCESS:
++        raise RuntimeError("; ".join(result.errors) or "daemon bind query failed")
++    return clean_skill_output(result.output)
++
++
++def check_daemon_bind(client: Any, *, timeout: int = 5) -> DaemonBindCheck:
++    daemon_bind = query_daemon_bind(client, timeout=timeout)
++    if not daemon_bind:
++        return DaemonBindCheck(False, error="daemon did not report its actual bind address")
++    try:
++        host, separator, port = daemon_bind.rpartition(":")
++        if not separator or not port.isascii() or not port.isdigit() or not 1 <= int(port) <= 65535:
++            raise ValueError("invalid bind port")
++        host = host.strip("[]")
++        loopback = ipaddress.ip_address(host).is_loopback
++    except ValueError:
++        loopback = False
++    if not loopback:
++        return DaemonBindCheck(
++            False, daemon_bind,
++            f"daemon is not bound to loopback: {daemon_bind}",
++        )
++    return DaemonBindCheck(True, daemon_bind)
++
++
+ def cross_user_override_enabled() -> bool:
+     return os.getenv(OVERRIDE_ENV, "").strip().lower() in _TRUTHY
+ 
+diff --git a/src/virtuoso_bridge/resources/.env_template b/src/virtuoso_bridge/resources/.env_template
+index 6b209ae025d132f0c4771494929e3d3e8c4d26a1..391b8c003f62bf786e552676453fc50478004932 100644
+--- a/src/virtuoso_bridge/resources/.env_template
++++ b/src/virtuoso_bridge/resources/.env_template
+@@ -34,6 +34,12 @@ VB_REMOTE_USER=
+ # path when CIW or a split daemon host cannot see the SSH host's /tmp.
+ # VB_REMOTE_SCRATCH_ROOT=/home/username/.virtuoso-bridge
+ 
++# Optional VDA private patch: keep the authenticated daemon token in an approved
++# workspace instead of ~/.virtuoso-bridge/bridge_token. Absolute POSIX filename;
++# parent is private (700), token is 600. Also supports _<profile> suffix.
++# Never commit the token or rotate it independently of an active daemon.
++# VB_REMOTE_TOKEN_PATH=/data/username/work/.auth/bridge_token
++
+ # Local client identity used as a remote scratch path segment.
+ # Defaults to the local account running bridge (for example Windows USERNAME).
+ # Set this when multiple local machines share one remote account/scratch root.
+diff --git a/src/virtuoso_bridge/transport/ssh.py b/src/virtuoso_bridge/transport/ssh.py
+index 6a2bd0748af99e6f3c43138b9d9fb886609094a8..a8cc0aab303c16d16c7b10674e7a2ad5c89bf72d 100644
+--- a/src/virtuoso_bridge/transport/ssh.py
++++ b/src/virtuoso_bridge/transport/ssh.py
+@@ -109,13 +109,12 @@ def _pid_is_alive(pid: Any) -> bool:
+             kernel32.CloseHandle(handle)
+     except PermissionError:
+         return True
+-    except (TypeError, ValueError, OverflowError, OSError):
++    except (TypeError, ValueError, OverflowError, OSError, SystemError):
+         return False
+ 
+ 
+ def _windows_no_window_kwargs(
+     *,
+-    detached: bool = False,
+     new_process_group: bool = False,
+ ) -> dict[str, Any]:
+     """Best-effort Windows process flags for CLI tools like ssh/scp/tar."""
+@@ -126,8 +125,6 @@ def _windows_no_window_kwargs(
+     startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # type: ignore[attr-defined]
+     startupinfo.wShowWindow = 0  # SW_HIDE
+     creationflags = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+-    if detached:
+-        creationflags |= subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+     if new_process_group:
+         creationflags |= subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+     return {
+@@ -509,8 +506,9 @@ class SSHRunner:
+         ]
+         cmd += [
+             "-o", "ExitOnForwardFailure=yes",
++            "-o", "GatewayPorts=no",
+             "-N",
+-            "-L", f"{port}:127.0.0.1:{remote_port}",
++            "-L", f"127.0.0.1:{port}:127.0.0.1:{remote_port}",
+         ]
+         if self._user:
+             cmd.append(f"{self._user}@{self._host}")
+@@ -535,7 +533,7 @@ class SSHRunner:
+                 stdin=subprocess.DEVNULL,
+                 stdout=subprocess.DEVNULL,
+                 stderr=open(tunnel_stderr_path, "wb"),
+-                **_windows_no_window_kwargs(detached=True, new_process_group=True),
++                **_windows_no_window_kwargs(new_process_group=True),
+             )
+             # Jump-host cold handshakes can exceed 10 s (slow PAM,
+             # flaky banner exchange).  The previous 3 s budget was
+@@ -588,11 +586,10 @@ class SSHRunner:
+             "start_new_session": True,
+             "stderr": subprocess.PIPE,
+         }
+-        # On Windows, suppress the console window the long-lived tunnel
+-        # ssh.exe would otherwise pop up.  Detached + new process group
+-        # so the tunnel survives the parent's exit.
++        # DETACHED_PROCESS defeats CREATE_NO_WINDOW on Windows.
++        # A child already outlives a normally exiting launcher.
+         popen_kwargs.update(_windows_no_window_kwargs(
+-            detached=True, new_process_group=True
++            new_process_group=True
+         ))
+         proc = subprocess.Popen(cmd, **popen_kwargs)
+ 
+@@ -635,7 +632,7 @@ class SSHRunner:
+             logger.info("Terminating SSH tunnel (PID %d)", pid)
+             try:
+                 os.kill(pid, signal.SIGTERM)
+-            except (OSError, PermissionError):
++            except (OSError, PermissionError, SystemError):
+                 pass
+         self._tunnel_proc = None
+         self._tunnel_pid = None
+@@ -751,8 +748,9 @@ class SSHRunner:
+     # path and jump-host PAM stack are now warm.  We deliberately
+     # exclude "permission denied" / "host key" / "could not resolve" —
+     # those are real configuration errors and must not be masked.
++    _TRANSIENT_RETRY_DELAYS_SECONDS = (1.0, 3.0)
+     _TRANSIENT_SSH_ERROR_FRAGMENTS = (
+-        "connection timed out during banner exchange",
++        "connection timed out",
+         "kex_exchange_identification",
+         "connection reset by peer",
+         "connection closed by",
+@@ -766,6 +764,17 @@ class SSHRunner:
+         low = stderr.lower()
+         return any(fragment in low for fragment in cls._TRANSIENT_SSH_ERROR_FRAGMENTS)
+ 
++    def _wait_before_transient_retry(
++        self, *, attempt: int, budget: _TimeoutBudget, command: object,
++    ) -> None:
++        delay = self._TRANSIENT_RETRY_DELAYS_SECONDS[
++            min(attempt, len(self._TRANSIENT_RETRY_DELAYS_SECONDS) - 1)
++        ]
++        # Backoff consumes the same total budget as the transport attempts.
++        remaining = budget.remaining(command)
++        time.sleep(min(delay, remaining))
++        budget.remaining(command)
++
+     # Stderr patterns that mean ControlMaster itself is broken on this
+     # platform (Windows OpenSSH variants, non-ASCII ControlPath, old WSL
+     # without Unix-socket support, NTFS-illegal chars in the socket name,
+@@ -845,9 +854,8 @@ class SSHRunner:
+                 continue
+             if self._is_transient_ssh_error(rc, err_text):
+                 if attempt + 1 < max_attempts:
+-                    logger.info(
+-                        "Transient SSH error on %s (rc=%d); retrying",
+-                        self._host, rc,
++                    self._wait_before_transient_retry(
++                        attempt=attempt, budget=budget, command=command,
+                     )
+                 continue
+             break
+@@ -908,11 +916,8 @@ class SSHRunner:
+                 continue
+             if self._is_transient_ssh_error(last.returncode, stderr_text):
+                 if attempt + 1 < attempts:
+-                    logger.info(
+-                        "Transient SSH error on %s (rc=%d); retrying once: %s",
+-                        self._host,
+-                        last.returncode,
+-                        stderr_first,
++                    self._wait_before_transient_retry(
++                        attempt=attempt, budget=budget, command=command,
+                     )
+                 continue
+             break
+diff --git a/src/virtuoso_bridge/transport/tunnel.py b/src/virtuoso_bridge/transport/tunnel.py
+index e965893fc501722a754a51c4a62edc3caf71786d..e9f550a98fa8ca40f396ccdc6bd6c5cb679713b0 100644
+--- a/src/virtuoso_bridge/transport/tunnel.py
++++ b/src/virtuoso_bridge/transport/tunnel.py
+@@ -17,7 +17,7 @@ import shutil
+ import socket
+ import sys
+ import time
+-from pathlib import Path
++from pathlib import Path, PurePosixPath
+ from typing import Any
+ 
+ from virtuoso_bridge import daemon_auth
+@@ -178,6 +178,18 @@ def _find_ramic_helper(filename: str) -> Path:
+ 
+ 
+ 
++def _remote_token_override(profile: str | None) -> str:
++    key = f"VB_REMOTE_TOKEN_PATH_{profile}" if profile else "VB_REMOTE_TOKEN_PATH"
++    value = os.getenv(key, os.getenv("VB_REMOTE_TOKEN_PATH", "")).strip()
++    if value and (
++        not value.startswith("/") or ".." in PurePosixPath(value).parts
++        or any(char in value for char in ('\x00', '\n', '\r', '"', '\\'))
++        or value.endswith("/") or PurePosixPath(value).parent == PurePosixPath("/")
++    ):
++        raise ValueError("VB_REMOTE_TOKEN_PATH must be an absolute file below a private directory")
++    return value
++
++
+ def _generate_virtuoso_setup_il(
+     daemon_path: str,
+     il_path: str,
+@@ -185,6 +197,7 @@ def _generate_virtuoso_setup_il(
+     port: int = 65432,
+     identity_path: str | None = None,
+     listen_all: bool = False,
++    token_path: str = "",
+ ) -> str:
+     identity_line = (
+         f'setShellEnvVar("RB_IDENTITY_PATH" "{identity_path}")\n'
+@@ -201,6 +214,7 @@ def _generate_virtuoso_setup_il(
+         f'setShellEnvVar("RB_PYTHON_PATH" "{python_cmd}")\n'
+         f'setShellEnvVar("RB_PORT" "{port}")\n'
+         f'setShellEnvVar("RB_LISTEN_ALL" "{1 if listen_all else 0}")\n'
++        f'setShellEnvVar("RB_TOKEN_PATH" "{token_path}")\n'
+         f"{identity_line}"
+         "\n"
+         "; Load RAMIC Bridge IL script\n"
+@@ -620,9 +634,11 @@ class SSHClient:
+             self._daemon_token_from_cache = True
+             return self._daemon_token
+         runner = self._ssh_runner
++        token_override = _remote_token_override(self._profile)
++        read_path = shlex.quote(token_override) if token_override else "~/.virtuoso-bridge/bridge_token"
+         try:
+             result = runner.run_command(
+-                "cat ~/.virtuoso-bridge/bridge_token 2>/dev/null"
++                f"cat {read_path} 2>/dev/null"
+             )
+             existing = (result.stdout or "").strip()
+             if result.returncode == 0 and daemon_auth.is_valid_token(existing):
+@@ -632,16 +648,19 @@ class SSHClient:
+             # target is still absent.  Every concurrent starter reads back
+             # and adopts the winner instead of overwriting it with mv -f.
+             token = daemon_auth.generate_token()
+-            home = (
+-                runner.run_command('printf %s "$HOME"').stdout or ""
+-            ).strip()
+-            if not home:
+-                self._token_unavailable("Cannot resolve remote $HOME for bridge token")
+-                return None
+-            token_dir = f"{home}/.virtuoso-bridge"
+-            token_path = f"{token_dir}/bridge_token"
++            if token_override:
++                token_path = token_override
++                token_dir = str(PurePosixPath(token_path).parent)
++            else:
++                home = (runner.run_command('printf %s "$HOME"').stdout or "").strip()
++                if not home:
++                    self._token_unavailable("Cannot resolve remote $HOME for bridge token")
++                    return None
++                token_dir = f"{home}/.virtuoso-bridge"
++                token_path = f"{token_dir}/bridge_token"
+             mkdir = runner.run_command(
+-                f"mkdir -p '{token_dir}' && chmod 700 '{token_dir}'"
++                f"test ! -L {shlex.quote(token_dir)} && "
++                f"mkdir -p {shlex.quote(token_dir)} && chmod 700 {shlex.quote(token_dir)}"
+             )
+             if mkdir.returncode != 0:
+                 self._token_unavailable(
+@@ -871,6 +890,7 @@ class SSHClient:
+             port=self._port,
+             identity_path=remote_identity,
+             listen_all=self._listen_all,
++            token_path=_remote_token_override(self._profile),
+         )
+         previous = runner.run_command(f"cat {shlex.quote(remote_setup)} 2>/dev/null || true")
+         self._note_replaced_setup(remote_setup, previous.stdout if previous.returncode == 0 else "")
+diff --git a/src/virtuoso_bridge/virtuoso/basic/bridge.py b/src/virtuoso_bridge/virtuoso/basic/bridge.py
+index 20722e33437d41015a3e3850f6dc318c0bfa78e1..27bd131921df9f28fa5cdb7f730f1667a3581883 100644
+--- a/src/virtuoso_bridge/virtuoso/basic/bridge.py
++++ b/src/virtuoso_bridge/virtuoso/basic/bridge.py
+@@ -58,6 +58,10 @@ _INSTALL_ROOT_QUERY_TIMEOUT = 5.0
+ _UNSET: Any = object()
+ 
+ 
++class _PreSendConnectionRefused(ConnectionRefusedError):
++    """The socket refused connect before any request bytes were sent."""
++
++
+ def _default_remote_port(
+     username: str | None = None, *, environ: Mapping[str, str] | None = None,
+ ) -> int:
+@@ -675,6 +679,7 @@ class VirtuosoClient(VirtuosoInterface):
+ 
+         busy_retries = 0
+         busy_delay = _BUSY_RETRY_FIRST_DELAY
++        recovered_tunnel = False
+         try:
+             while True:
+                 if time.monotonic() >= deadline:
+@@ -701,24 +706,36 @@ class VirtuosoClient(VirtuosoInterface):
+                         result.metadata["busy_retries"] = busy_retries
+                     logger.debug("execute_skill OK (%.3fs)", elapsed)
+                     return result
+-                except ConnectionRefusedError:
++                except _PreSendConnectionRefused:
+                     now = time.monotonic()
+-                    if now >= deadline:
+-                        raise socket.timeout
+-                    if now >= connect_deadline:
+-                        raise
+-                    logger.debug("Connection refused, retrying (deadline in %.1fs)",
+-                                 connect_deadline - now)
+-                    time.sleep(min(_TUNNEL_CONNECT_RETRY_DELAY, connect_deadline - now))
++                    if (
++                        retry_connect and callable(getattr(self._tunnel, "warm", None))
++                        and not recovered_tunnel and now < deadline
++                    ):
++                        recovered_tunnel = True
++                        try:
++                            self._tunnel.warm(timeout=min(15, self._remaining_timeout(deadline)))
++                            self._port = self._tunnel.port
++                            token = getattr(self._tunnel, "daemon_token", None)
++                            if token is not None:
++                                self.daemon_token = token
++                            self._daemon_caps = None
++                        except Exception as exc:
++                            raise OSError(f"Tunnel recovery failed: {exc}") from exc
++                        continue
++                    if now < connect_deadline:
++                        time.sleep(min(_TUNNEL_CONNECT_RETRY_DELAY, connect_deadline - now))
++                        continue
++                    raise
++                except ConnectionRefusedError:
++                    raise
+                 except OSError as exc:
+                     now = time.monotonic()
+                     if now >= deadline:
+                         raise socket.timeout from exc
+-                    if not self._should_retry_tunnel_connect(exc, now, connect_deadline):
+-                        raise
+-                    logger.debug("OSError %s, retrying (deadline in %.1fs)",
+-                                 exc, connect_deadline - now)
+-                    time.sleep(min(_TUNNEL_CONNECT_RETRY_DELAY, connect_deadline - now))
++                    # A reset after send is uncertain. Only connect() refusals
++                    # explicitly tagged above may rebuild/replay a request.
++                    raise
+ 
+         except daemon_auth.DaemonAuthError as exc:
+             elapsed = time.monotonic() - start_time
+@@ -2020,12 +2037,19 @@ let((result winName ciwNum)
+         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+             s.settimeout(self._remaining_timeout(deadline))
+             logger.debug("TCP connect %s:%d", self._host, self._port)
+-            s.connect((self._host, self._port))
++            try:
++                s.connect((self._host, self._port))
++            except ConnectionRefusedError as exc:
++                raise _PreSendConnectionRefused(*exc.args) from exc
+             logger.debug("TCP connected, sending %d-byte payload",
+                          len(json.dumps(payload)))
+             s.settimeout(self._remaining_timeout(deadline))
+             s.sendall(json.dumps(payload).encode("utf-8"))
+-            s.shutdown(socket.SHUT_WR)
++            # Windows can drop replies after SHUT_WR even on direct loopback
++            # sockets (including receipt-only clients without a tunnel object).
++            # The paired daemon recognizes one complete JSON value.
++            if os.name != "nt":
++                s.shutdown(socket.SHUT_WR)
+             chunks: list[bytes] = []
+             received = 0
+             while True:
+@@ -2037,6 +2061,19 @@ let((result winName ciwNum)
+                 if max_response_bytes is not None and received > max_response_bytes:
+                     raise OSError("Daemon response exceeds the recoverable receipt size bound")
+                 chunks.append(chunk)
++                if self._daemon_token and isinstance(payload.get("nonce"), str):
++                    # Native Windows forwards can deliver all response bytes
++                    # without forwarding EOF. A valid MAC over this nonce and
++                    # the entire body is a complete authenticated frame;
++                    # partial/corrupt frames cannot pass this check.
++                    try:
++                        daemon_auth.verify_response_bytes(
++                            b"".join(chunks), self._daemon_token, payload["nonce"],
++                        )
++                    except daemon_auth.DaemonAuthError:
++                        pass
++                    else:
++                        break
+             raw = b"".join(chunks)
+             logger.debug("TCP received %d bytes", len(raw))
+             return raw
+@@ -2194,6 +2231,10 @@ let((result winName ciwNum)
+     ) -> str:
+         # Handshake first: authentication failures must never cost an
+         # execution on a foreign or outdated daemon.
++        if self._daemon_token is None and self._tunnel is not None:
++            acquire = getattr(self._tunnel, "ensure_daemon_token", None)
++            if callable(acquire):
++                self.daemon_token = acquire()
+         self._ensure_daemon_capabilities(deadline)
+         request_timeout = min(timeout, self._remaining_timeout(deadline))
+         payload: dict[str, Any] = {
+diff --git a/src/virtuoso_bridge/virtuoso/basic/resources/ramic_bridge_daemon_27.py b/src/virtuoso_bridge/virtuoso/basic/resources/ramic_bridge_daemon_27.py
+index ae0232e930ce25f03df2e23353b9f3c968cff2d6..4349a38748f511399993f0d5bc70dafe82c8d4db 100644
+--- a/src/virtuoso_bridge/virtuoso/basic/resources/ramic_bridge_daemon_27.py
++++ b/src/virtuoso_bridge/virtuoso/basic/resources/ramic_bridge_daemon_27.py
+@@ -575,9 +575,15 @@ def _recv_request(conn):
+         if total > _MAX_REQUEST_BYTES:
+             raise ValueError("request exceeds the size limit")
+         chunks.append(chunk)
++        data = b"".join(chunks) if isinstance(chunks[0], bytes) else "".join(chunks)
++        try:
++            json.loads(data.decode("utf-8") if isinstance(data, bytes) else data)
++        except (UnicodeDecodeError, ValueError):
++            continue
++        return data
+     if not chunks:
+         raise ValueError("empty request")
+-    return "".join(chunks)
++    return b"".join(chunks) if isinstance(chunks[0], bytes) else "".join(chunks)
+ 
+ 
+ def _signed_response(request_nonce, raw):
+diff --git a/src/virtuoso_bridge/virtuoso/basic/resources/ramic_bridge_daemon_3.py b/src/virtuoso_bridge/virtuoso/basic/resources/ramic_bridge_daemon_3.py
+index ed8f7b6a5ef870dbc57a11566062e7e399571de5..8815eee5606e670baca5478eb03f10044c9ab909 100644
+--- a/src/virtuoso_bridge/virtuoso/basic/resources/ramic_bridge_daemon_3.py
++++ b/src/virtuoso_bridge/virtuoso/basic/resources/ramic_bridge_daemon_3.py
+@@ -514,6 +514,11 @@ def _recv_request(conn):
+         if total > _MAX_REQUEST_BYTES:
+             raise ValueError("request exceeds the size limit")
+         chunks.append(chunk)
++        try:
++            json.loads(b"".join(chunks).decode("utf-8"))
++        except (UnicodeDecodeError, ValueError):
++            continue
++        return b"".join(chunks)
+     if not chunks:
+         raise ValueError("empty request")
+     return b"".join(chunks)
+diff --git a/tests/test_daemon_auth.py b/tests/test_daemon_auth.py
+index d1a0f9613fcc1610d7690cc1d925d9ce58b58656..43acc60ab9acbbbc966a2cbd9e7e49197145f724 100644
+--- a/tests/test_daemon_auth.py
++++ b/tests/test_daemon_auth.py
+@@ -115,6 +115,13 @@ class _AuthDaemon:
+                 if not chunk:
+                     break
+                 chunks.append(chunk)
++                # Match the paired daemon's complete-JSON framing. Windows
++                # clients must not half-close, even on direct loopback TCP.
++                try:
++                    json.loads(b"".join(chunks).decode("utf-8"))
++                except (json.JSONDecodeError, UnicodeDecodeError):
++                    continue
++                break
+             req = json.loads(b"".join(chunks).decode("utf-8"))
+             self.requests.append(req)
+ 
+@@ -491,7 +498,8 @@ def test_server_rejects_replayed_nonce(authed_daemon) -> None:
+     def exchange() -> str:
+         s = socket.create_connection(("127.0.0.1", authed_daemon.port), timeout=5)
+         s.sendall(raw)
+-        s.shutdown(socket.SHUT_WR)
++        if os.name != "nt":
++            s.shutdown(socket.SHUT_WR)
+         data = b""
+         while True:
+             chunk = s.recv(65536)
+@@ -734,7 +742,8 @@ def _resources_dir() -> Path:
+ def _raw_exchange(port: int, payload: dict) -> str:
+     s = socket.create_connection(("127.0.0.1", port), timeout=10)
+     s.sendall(json.dumps(payload).encode())
+-    s.shutdown(socket.SHUT_WR)
++    if os.name != "nt":
++        s.shutdown(socket.SHUT_WR)
+     data = b""
+     while True:
+         chunk = s.recv(65536)
+diff --git a/tests/test_daemon_reply_budget.py b/tests/test_daemon_reply_budget.py
+index 17b54b6a6b4a07f45e691f97640289df9ab6d367..4cc6548079ec11110b6b2ef0db3a5f7d3cd8fd68 100644
+--- a/tests/test_daemon_reply_budget.py
++++ b/tests/test_daemon_reply_budget.py
+@@ -102,7 +102,8 @@ def test_auth_error_reply_replaces_remaining_request_read_timeout(
+     module.handle_external_connection(connection, ("local", 0))
+ 
+     assert module._CONNECTION_TIMEOUT == 5.0
+-    assert connection.timeouts[:2] == pytest.approx([5.0, 0.1])
++    assert connection.timeouts[:2] == pytest.approx([5.0, 5.0])
++    assert connection._reads == 1  # complete JSON needs no EOF read
+     assert connection.sent
+     write_timeout, response = connection.sent[0]
+     assert write_timeout == module._RESPONSE_WRITE_TIMEOUT == 5.0
+diff --git a/tests/test_daemon_request_framing.py b/tests/test_daemon_request_framing.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..34c156042f79bb6c111d89fd9bf3f0bb74da0af5
+--- /dev/null
++++ b/tests/test_daemon_request_framing.py
+@@ -0,0 +1,76 @@
++from __future__ import annotations
++
++import ast
++import json
++import socket
++import time
++from pathlib import Path
++
++import pytest
++
++
++_RESOURCES = (
++    "ramic_bridge_daemon_3.py",
++    "ramic_bridge_daemon_27.py",
++)
++
++
++class _ChunkedConnection:
++    def __init__(self, chunks: list[bytes]):
++        self._chunks = list(chunks)
++
++    def settimeout(self, timeout):
++        assert timeout > 0
++
++    def recv(self, size: int) -> bytes:
++        if not self._chunks:
++            raise AssertionError("parser waited for EOF after complete JSON")
++        return self._chunks.pop(0)
++
++
++def _load_receive_json_request(resource_name: str):
++    path = (
++        Path(__file__).parents[1]
++        / "src"
++        / "virtuoso_bridge"
++        / "virtuoso"
++        / "basic"
++        / "resources"
++        / resource_name
++    )
++    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
++    function = next(
++        node
++        for node in tree.body
++        if isinstance(node, ast.FunctionDef) and node.name == "_recv_request"
++    )
++    module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
++    namespace = {"json": json, "socket": socket, "time": time,
++                 "_CONNECTION_TIMEOUT": 30, "_MAX_REQUEST_BYTES": 8 * 1024 * 1024}
++    exec(compile(module, str(path), "exec"), namespace)
++    return lambda conn: json.loads(namespace["_recv_request"](conn).decode("utf-8"))
++
++
++@pytest.mark.parametrize("resource_name", _RESOURCES)
++def test_daemon_parses_fragmented_json_without_waiting_for_eof(resource_name: str) -> None:
++    receive_json_request = _load_receive_json_request(resource_name)
++    payload = json.dumps(
++        {"skill": "宽度+1", "timeout": 30},
++        ensure_ascii=False,
++    ).encode("utf-8")
++    split = payload.index("宽".encode("utf-8")) + 1
++    connection = _ChunkedConnection([payload[:split], payload[split:]])
++
++    assert receive_json_request(connection) == {
++        "skill": "宽度+1",
++        "timeout": 30,
++    }
++
++
++@pytest.mark.parametrize("resource_name", _RESOURCES)
++def test_daemon_reports_malformed_json_after_legacy_eof(resource_name: str) -> None:
++    receive_json_request = _load_receive_json_request(resource_name)
++    connection = _ChunkedConnection([b'{"skill":', b""])
++
++    with pytest.raises((UnicodeDecodeError, ValueError)):
++        receive_json_request(connection)
+diff --git a/tests/test_paramiko_ssh_backend.py b/tests/test_paramiko_ssh_backend.py
+index 0fc69170f4657adb109c7ccced75aac26ca28233..755991b348c4c4037f0afb2ec0c802340d4e84dd 100644
+--- a/tests/test_paramiko_ssh_backend.py
++++ b/tests/test_paramiko_ssh_backend.py
+@@ -208,7 +208,7 @@ def test_paramiko_proxy_does_not_change_openssh_port_forward_command(
+ 
+     command = captured["command"]
+     assert isinstance(command, list)
+-    assert ["-L", "65080:127.0.0.1:65081"] == command[
++    assert ["-L", "127.0.0.1:65080:127.0.0.1:65081"] == command[
+         command.index("-L") : command.index("-L") + 2
+     ]
+     assert "socks5://127.0.0.1:10800" not in command
+diff --git a/tests/test_profile_resolver.py b/tests/test_profile_resolver.py
+index a63e3a624b4cf4efebf3562d92a5c5064065bf2c..c1be38b3d6600a4a7e41de54eecd68cd5222229b 100644
+--- a/tests/test_profile_resolver.py
++++ b/tests/test_profile_resolver.py
+@@ -134,6 +134,7 @@ def test_venv_profile_path_falls_back_to_sys_prefix(monkeypatch, tmp_path) -> No
+ 
+ 
+ def test_virtuoso_client_from_env_uses_resolved_profile(monkeypatch, tmp_path) -> None:
++    monkeypatch.setattr(VirtuosoClient, "_reject_cross_user_daemon_if_reachable", lambda *a, **k: None)
+     _isolate_profile_env(monkeypatch, tmp_path)
+     monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / ".venv"))
+     bind_venv_profile("t28_digital")
+diff --git a/tests/test_recoverable_daemon.py b/tests/test_recoverable_daemon.py
+index 7cf53bbddb81bf2f586ab74bad66b51c1b209508..256990d2d0d6fe06939f28e1a7d9ed25416874d3 100644
+--- a/tests/test_recoverable_daemon.py
++++ b/tests/test_recoverable_daemon.py
+@@ -101,7 +101,8 @@ def _exchange(module, payload: dict, *, disconnect: bool = False) -> bytes:
+     )
+     thread.start()
+     client.sendall(json.dumps(payload).encode("utf-8"))
+-    client.shutdown(socket.SHUT_WR)
++    if os.name != "nt":
++        client.shutdown(socket.SHUT_WR)
+     if disconnect:
+         client.close()
+         thread.join(2)
+diff --git a/tests/test_request_recovery_transport.py b/tests/test_request_recovery_transport.py
+index 65b2f6d9b329a104086e2b88e5a7128ccf756d42..84a3329e8ce4071fc239e32f8642a778c41f361d 100644
+--- a/tests/test_request_recovery_transport.py
++++ b/tests/test_request_recovery_transport.py
+@@ -87,7 +87,8 @@ def test_popup_returns_handle_then_recovers_original_result_over_tcp(
+         assert result.metadata["phase"] == "awaiting_user"
+         assert result.metadata["waiting_for_user"] is True
+         handle = result.metadata["request_handle"]
+-        assert client.requests.receipt(handle).metadata["request_state"] == "running"
++        pending = client.requests.receipt(handle)
++        assert pending.metadata["request_state"] == "running", pending.model_dump()
+         legacy = VirtuosoClient(host="127.0.0.1", port=port, daemon_token=TOKEN)
+         refused = legacy.execute_skill("second()", timeout=1, retry_connect=False)
+         assert not refused.ok and "busy" in refused.errors[0].lower()
+diff --git a/tests/test_runtime_paths.py b/tests/test_runtime_paths.py
+index 54f44b1f47e0a0696f6b35a6809954ec7e319861..74310a594bb6e28c6c64a86241b728ea7e040cb4 100644
+--- a/tests/test_runtime_paths.py
++++ b/tests/test_runtime_paths.py
+@@ -62,6 +62,7 @@ def test_command_log_is_created_lazily(monkeypatch, tmp_path) -> None:
+ 
+ def test_tunnel_state_reads_legacy_cache_path(monkeypatch, tmp_path) -> None:
+     monkeypatch.setenv("HOME", str(tmp_path))
++    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+     monkeypatch.setenv("VB_STATE_DIR", str(tmp_path / "new-state"))
+     legacy = tmp_path / ".cache" / "virtuoso_bridge" / "state.json"
+     legacy.parent.mkdir(parents=True)
+diff --git a/tests/test_ssh_retry.py b/tests/test_ssh_retry.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..78bf1e96cc7e542b07fa10d50fb878ee9caa4027
+--- /dev/null
++++ b/tests/test_ssh_retry.py
+@@ -0,0 +1,120 @@
++from __future__ import annotations
++
++from virtuoso_bridge.transport import ssh as ssh_module
++from virtuoso_bridge.transport.ssh import SSHRunner
++
++
++def _runner(monkeypatch) -> SSHRunner:
++    monkeypatch.setattr(ssh_module, "load_vb_env", lambda: None)
++    monkeypatch.setattr(ssh_module, "_setup_command_log", lambda: None)
++    monkeypatch.delenv("VB_DISABLE_CONTROL_MASTER", raising=False)
++    monkeypatch.delenv("VB_FORCE_CONTROL_MASTER", raising=False)
++    return SSHRunner(host="example.invalid")
++
++
++def _attempt_with_budget(runner: SSHRunner, run_one):
++    return runner._attempt_with_cm_fallback(
++        run_one,
++        budget=ssh_module._TimeoutBudget.start(10, 10),
++        command="test",
++    )
++
++
++def test_idempotent_transport_retries_use_bounded_backoff(monkeypatch) -> None:
++    runner = _runner(monkeypatch)
++    sleeps: list[float] = []
++    monkeypatch.setattr(ssh_module.time, "sleep", sleeps.append)
++    outcomes = iter(
++        [
++            (255, b"", b"Connection closed by UNKNOWN port 65535"),
++            (255, b"", b"ssh: connect to host design port 22: Connection timed out"),
++            (0, b"ok", b""),
++        ]
++    )
++    calls = 0
++
++    def run_one():
++        nonlocal calls
++        calls += 1
++        return next(outcomes)
++
++    result = _attempt_with_budget(runner, run_one)
++
++    assert result == (0, b"ok", b"")
++    assert calls == 3
++    assert sleeps == [1.0, 3.0]
++    assert runner._use_control_master is True
++
++
++def test_controlmaster_failure_disables_mux_without_backoff(monkeypatch) -> None:
++    runner = _runner(monkeypatch)
++    sleeps: list[float] = []
++    monkeypatch.setattr(ssh_module.time, "sleep", sleeps.append)
++    outcomes = iter(
++        [
++            (255, b"", b"mux_client_request_session: session request failed"),
++            (0, b"ok", b""),
++        ]
++    )
++
++    result = _attempt_with_budget(runner, lambda: next(outcomes))
++
++    assert result == (0, b"ok", b"")
++    assert runner._use_control_master is False
++    assert sleeps == []
++
++
++def test_non_transient_transport_failure_is_not_retried(monkeypatch) -> None:
++    runner = _runner(monkeypatch)
++    sleeps: list[float] = []
++    monkeypatch.setattr(ssh_module.time, "sleep", sleeps.append)
++    calls = 0
++
++    def run_one():
++        nonlocal calls
++        calls += 1
++        return 255, b"", b"Permission denied (publickey)"
++
++    result = _attempt_with_budget(runner, run_one)
++
++    assert result == (255, b"", b"Permission denied (publickey)")
++    assert calls == 1
++    assert sleeps == []
++
++
++def test_remote_command_reuses_bounded_backoff(monkeypatch) -> None:
++    runner = _runner(monkeypatch)
++    sleeps: list[float] = []
++    monkeypatch.setattr(ssh_module.time, "sleep", sleeps.append)
++    monkeypatch.setattr(ssh_module, "_windows_no_window_kwargs", lambda **kwargs: {})
++    outcomes = iter(
++        [
++            ssh_module.subprocess.CompletedProcess(
++                args=[],
++                returncode=255,
++                stdout=b"",
++                stderr=b"Connection reset by peer",
++            ),
++            ssh_module.subprocess.CompletedProcess(
++                args=[],
++                returncode=0,
++                stdout=b"done",
++                stderr=b"",
++            ),
++        ]
++    )
++    calls = 0
++
++    def fake_run(*args, **kwargs):
++        nonlocal calls
++        calls += 1
++        return next(outcomes)
++
++    monkeypatch.setattr(ssh_module.subprocess, "run", fake_run)
++
++    result = runner._run_command_once("true", timeout=10)
++
++    assert result.returncode == 0
++    assert result.stdout == "done"
++    assert calls == 2
++    assert sleeps == [1.0]
+diff --git a/tests/test_tunnel_profiles.py b/tests/test_tunnel_profiles.py
+index b03fc55492ba4cc07fde457e71a0babbd1c38934..9e021712175083a5d64dce040ad1b3705a86ff58 100644
+--- a/tests/test_tunnel_profiles.py
++++ b/tests/test_tunnel_profiles.py
+@@ -14,6 +14,25 @@ from virtuoso_bridge.transport.tunnel import (
+ from virtuoso_bridge import cli
+ 
+ 
++class _FakeLifecycle:
++    @classmethod
++    def from_env(cls, **kwargs):
++        return cls()
++
++    def close(self):
++        self.closed = True
++
++
++@pytest.fixture(autouse=True)
++def _isolate_site_settings(monkeypatch):
++    monkeypatch.setattr("virtuoso_bridge.transport.ssh.load_vb_env", lambda: None)
++    monkeypatch.setattr("virtuoso_bridge.transport.remote_paths.load_vb_env", lambda: None)
++    monkeypatch.setattr("virtuoso_bridge.transport.tunnel.load_vb_env", lambda: None)
++    monkeypatch.delenv("VB_REMOTE_SCRATCH_ROOT", raising=False)
++    monkeypatch.delenv("VB_REMOTE_TOKEN_PATH", raising=False)
++    monkeypatch.setattr(cli, "_state_or_local_daemon_token", lambda *args: None)
++
++
+ class _FakeRunner:
+     def __init__(self) -> None:
+         self.commands: list[str] = []
+@@ -79,7 +98,7 @@ def test_status_infers_profile_scoped_setup_path(monkeypatch, capsys) -> None:
+     monkeypatch.setenv("VB_REMOTE_HOST_t28_io", "thu-wei")
+     monkeypatch.setenv("VB_REMOTE_USER_t28_io", "designer")
+ 
+-    class _FakeSSHClient:
++    class _FakeSSHClient(_FakeLifecycle):
+         @staticmethod
+         def read_state(profile=None):
+             return None
+@@ -110,7 +129,7 @@ def test_status_no_response_prints_stale_daemon_hint(monkeypatch, capsys, tmp_pa
+     monkeypatch.setenv("VB_REMOTE_HOST_t28_io", "thu-wei")
+     monkeypatch.setenv("VB_REMOTE_USER_t28_io", "designer")
+ 
+-    class _FakeSSHClient:
++    class _FakeSSHClient(_FakeLifecycle):
+         @staticmethod
+         def read_state(profile=None):
+             return {
+@@ -123,7 +142,7 @@ def test_status_no_response_prints_stale_daemon_hint(monkeypatch, capsys, tmp_pa
+             return True
+ 
+     class _FakeVirtuosoClient:
+-        def __init__(self, host, port, timeout):
++        def __init__(self, host, port, timeout, tunnel=None):
+             pass
+ 
+         daemon_token = None
+@@ -145,7 +164,7 @@ def test_status_no_response_prints_stale_daemon_hint(monkeypatch, capsys, tmp_pa
+     rc = cli._print_status()
+ 
+     out = capsys.readouterr().out
+-    assert rc == 0
++    assert rc == 1
+     assert "[daemon] NO RESPONSE" in out
+     assert "load() did not replace the existing daemon" in out
+     assert "RBStop()" in out
+@@ -153,7 +172,7 @@ def test_status_no_response_prints_stale_daemon_hint(monkeypatch, capsys, tmp_pa
+ 
+ 
+ def test_restart_daemon_loads_current_setup_and_accepts_disconnect(monkeypatch, capsys) -> None:
+-    class _FakeSSHClient:
++    class _FakeSSHClient(_FakeLifecycle):
+         @staticmethod
+         def read_state(profile=None):
+             assert profile == "t28_io"
+@@ -165,7 +184,7 @@ def test_restart_daemon_loads_current_setup_and_accepts_disconnect(monkeypatch,
+     class _FakeVirtuosoClient:
+         instances: list["_FakeVirtuosoClient"] = []
+ 
+-        def __init__(self, host, port, timeout, log_to_ciw=True):
++        def __init__(self, host, port, timeout, log_to_ciw=True, tunnel=None):
+             self.host = host
+             self.port = port
+             self.timeout = timeout
+@@ -200,13 +219,13 @@ def test_restart_daemon_loads_current_setup_and_accepts_disconnect(monkeypatch,
+ 
+ 
+ def test_restart_daemon_refuses_cross_user_daemon(monkeypatch, capsys) -> None:
+-    class _FakeSSHClient:
++    class _FakeSSHClient(_FakeLifecycle):
+         @staticmethod
+         def read_state(profile=None):
+             return {"port": 65271, "setup_path": "/tmp/virtuoso_setup.il"}
+ 
+     class _FakeVirtuosoClient:
+-        def __init__(self, host, port, timeout, log_to_ciw=True):
++        def __init__(self, host, port, timeout, log_to_ciw=True, tunnel=None):
+             pass
+ 
+         def execute_skill(self, skill: str, timeout=5):
+@@ -239,7 +258,7 @@ def test_status_fails_when_daemon_user_differs_from_tunnel_user(monkeypatch, cap
+     monkeypatch.setenv("VB_REMOTE_USER_t28_io", "designer")
+     monkeypatch.delenv("VB_ALLOW_CROSS_USER_DAEMON", raising=False)
+ 
+-    class _FakeSSHClient:
++    class _FakeSSHClient(_FakeLifecycle):
+         @staticmethod
+         def read_state(profile=None):
+             return {"port": 65271, "setup_path": "/tmp/virtuoso_setup.il"}
+@@ -249,7 +268,7 @@ def test_status_fails_when_daemon_user_differs_from_tunnel_user(monkeypatch, cap
+             return True
+ 
+     class _FakeVirtuosoClient:
+-        def __init__(self, host, port, timeout):
++        def __init__(self, host, port, timeout, tunnel=None):
+             pass
+ 
+         def test_connection(self, timeout=5):
+@@ -258,6 +277,7 @@ def test_status_fails_when_daemon_user_differs_from_tunnel_user(monkeypatch, cap
+         def execute_skill(self, expr, timeout=5):
+             values = {
+                 'getShellEnvVar("USER")': "other_user",
++                "if(boundp('RBLastBind) RBLastBind \"\")": "127.0.0.1:65271",
+                 "getHostName()": "thu-wei",
+                 "getCurrentTime()": "now",
+                 "getVersion()": "ICADVM",
+@@ -285,7 +305,7 @@ def test_status_allows_cross_user_with_explicit_override(monkeypatch, capsys) ->
+     monkeypatch.setenv("VB_REMOTE_USER_t28_io", "designer")
+     monkeypatch.setenv("VB_ALLOW_CROSS_USER_DAEMON", "1")
+ 
+-    class _FakeSSHClient:
++    class _FakeSSHClient(_FakeLifecycle):
+         @staticmethod
+         def read_state(profile=None):
+             return {"port": 65271, "setup_path": "/tmp/virtuoso_setup.il"}
+@@ -295,7 +315,7 @@ def test_status_allows_cross_user_with_explicit_override(monkeypatch, capsys) ->
+             return True
+ 
+     class _FakeVirtuosoClient:
+-        def __init__(self, host, port, timeout):
++        def __init__(self, host, port, timeout, tunnel=None):
+             pass
+ 
+         def test_connection(self, timeout=5):
+@@ -304,6 +324,7 @@ def test_status_allows_cross_user_with_explicit_override(monkeypatch, capsys) ->
+         def execute_skill(self, expr, timeout=5):
+             values = {
+                 'getShellEnvVar("USER")': "other_user",
++                "if(boundp('RBLastBind) RBLastBind \"\")": "127.0.0.1:65271",
+                 "getHostName()": "thu-wei",
+                 "getCurrentTime()": "now",
+                 "getVersion()": "ICADVM",
+@@ -330,7 +351,7 @@ def test_status_diagnoses_banner_host_when_tunnel_endpoint_is_wrong(monkeypatch,
+     monkeypatch.setenv("VB_DAEMON_HOST_split", "gui-a")
+     monkeypatch.setenv("VB_REMOTE_USER_split", "designer")
+ 
+-    class _FakeSSHClient:
++    class _FakeSSHClient(_FakeLifecycle):
+         @staticmethod
+         def read_state(profile=None):
+             return {
+@@ -357,7 +378,7 @@ def test_status_diagnoses_banner_host_when_tunnel_endpoint_is_wrong(monkeypatch,
+             pass
+ 
+     class _FakeVirtuosoClient:
+-        def __init__(self, host, port, timeout):
++        def __init__(self, host, port, timeout, tunnel=None):
+             pass
+ 
+         daemon_token = None
+@@ -379,7 +400,7 @@ def test_status_diagnoses_banner_host_when_tunnel_endpoint_is_wrong(monkeypatch,
+     rc = cli._print_status()
+ 
+     out = capsys.readouterr().out
+-    assert rc == 0
++    assert rc == 1
+     assert "[daemon host]" in out
+     assert "compute-b" in out
+     assert "gui-a.example.edu" in out
+@@ -688,7 +709,7 @@ def test_save_state_records_remote_daemon_port(monkeypatch, tmp_path) -> None:
+ 
+ 
+ def test_start_hint_uses_distinct_local_and_remote_ports(monkeypatch, capsys) -> None:
+-    class _FakeSSHClient:
++    class _FakeSSHClient(_FakeLifecycle):
+         port = 65061
+         remote_port = 65062
+ 
+@@ -728,14 +749,14 @@ def test_start_hint_uses_distinct_local_and_remote_ports(monkeypatch, capsys) ->
+     rc = cli._start_one_profile("t28")
+ 
+     assert rc == 1
+-    assert "-L 65061:127.0.0.1:65062" in capsys.readouterr().out
++    assert "-L 127.0.0.1:65061:127.0.0.1:65062" in capsys.readouterr().out
+ 
+ 
+ @pytest.mark.parametrize("daemon_host", ["eda-host", "localhost"])
+ def test_start_prints_the_ciw_load_line(monkeypatch, capsys, daemon_host) -> None:
+     setup_path = "/tmp/virtuoso_bridge_designer/virtuoso_bridge/virtuoso_setup.il"
+ 
+-    class _FakeSSHClient:
++    class _FakeSSHClient(_FakeLifecycle):
+         port = 65061
+         remote_port = 65062
+ 
+@@ -772,7 +793,7 @@ def test_start_prints_the_ciw_load_line(monkeypatch, capsys, daemon_host) -> Non
+ def test_wait_for_tunnel_running_retries_during_startup(monkeypatch) -> None:
+     checks = iter([False, True])
+ 
+-    class _FakeSSHClient:
++    class _FakeSSHClient(_FakeLifecycle):
+         @staticmethod
+         def is_running(profile=None):
+             assert profile == "t28"
+@@ -828,7 +849,7 @@ def test_deploy_reports_a_replaced_setup_that_used_another_port(monkeypatch, pre
+ 
+ 
+ def test_start_warns_when_it_replaced_a_setup_for_another_port(monkeypatch, capsys) -> None:
+-    class _FakeSSHClient:
++    class _FakeSSHClient(_FakeLifecycle):
+         port = remote_port = 65177
+         setup_path = "/tmp/virtuoso_bridge_designer/virtuoso_bridge/virtuoso_setup.il"
+         replaced_setup_port = 65158
+diff --git a/tests/test_tunnel_recovery.py b/tests/test_tunnel_recovery.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..46d3dd8953ea28a31230d31638e35e1a60d2bf5e
+--- /dev/null
++++ b/tests/test_tunnel_recovery.py
+@@ -0,0 +1,68 @@
++from __future__ import annotations
++
++from virtuoso_bridge.transport import ssh as ssh_module
++from virtuoso_bridge.transport import tunnel as tunnel_module
++from virtuoso_bridge.transport.ssh import SSHRunner
++from virtuoso_bridge.transport.tunnel import SSHClient
++
++
++def test_is_running_treats_unreachable_windows_port_as_stale(monkeypatch) -> None:
++    monkeypatch.setattr(
++        SSHClient,
++        "read_state",
++        classmethod(
++            lambda cls, profile=None: {
++                "mode": "remote",
++                "port": 65347,
++                "tunnel_pid": 987654,
++            }
++        ),
++    )
++
++    def refuse_connection(*args, **kwargs):
++        raise ConnectionRefusedError
++
++    def unexpected_pid_probe(*args, **kwargs):
++        raise AssertionError("Windows stale-state detection must not probe the PID")
++
++    monkeypatch.setattr(tunnel_module.socket, "create_connection", refuse_connection)
++    monkeypatch.setattr(tunnel_module, "_pid_is_alive", lambda pid: False)
++    monkeypatch.setattr(tunnel_module.os, "name", "nt")
++    monkeypatch.setattr(tunnel_module.os, "kill", unexpected_pid_probe)
++
++    assert SSHClient.is_running("nics4304_tsmc28") is False
++
++
++def test_is_running_handles_system_error_from_posix_pid_probe(monkeypatch) -> None:
++    monkeypatch.setattr(
++        SSHClient,
++        "read_state",
++        classmethod(lambda cls, profile=None: {"tunnel_pid": 987654}),
++    )
++
++    # Restore the process-wide ``os.name`` before fixture finalizers use
++    # pathlib; monkeypatching it for the whole test breaks WindowsPath.
++    with monkeypatch.context() as patch:
++        patch.setattr(tunnel_module.os, "name", "posix")
++        patch.setattr(
++            tunnel_module.os,
++            "kill",
++            lambda *args, **kwargs: (_ for _ in ()).throw(SystemError("stale PID")),
++        )
++        assert SSHClient.is_running() is False
++
++
++def test_ssh_runner_pid_helpers_handle_system_error(monkeypatch) -> None:
++    runner = SSHRunner(host="example.invalid")
++    runner._use_control_master = False
++    runner.tunnel_pid = 987654
++    runner._tunnel_using_external = True
++    monkeypatch.setattr(
++        ssh_module.os,
++        "kill",
++        lambda *args, **kwargs: (_ for _ in ()).throw(SystemError("stale PID")),
++    )
++
++    assert runner.is_tunnel_alive is False
++    runner.stop_port_forward()
++    assert runner.tunnel_pid is None
+diff --git a/tests/test_vda_upgrade_compatibility.py b/tests/test_vda_upgrade_compatibility.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f7034541b27b65ec10ccd93b46069b76c079e7b
+--- /dev/null
++++ b/tests/test_vda_upgrade_compatibility.py
+@@ -0,0 +1,116 @@
++from types import SimpleNamespace
++
++import pytest
++
++from virtuoso_bridge.daemon_guard import check_daemon_bind
++from virtuoso_bridge.models import ExecutionStatus, VirtuosoResult
++from virtuoso_bridge.transport import tunnel
++
++
++@pytest.mark.parametrize("address,ok", [
++    ("127.0.0.1:65432", True), ("[::1]:65432", True),
++    ("0.0.0.0:65432", False), ("", False), ("bad:65432", False),
++    ("127.0.0.1", False), ("127.0.0.1:bad", False),
++    ("127.0.0.1:0", False), ("127.0.0.1:65536", False),
++])
++def test_actual_bind_guard_remains_fail_closed(address, ok):
++    client = SimpleNamespace(execute_skill=lambda *args, **kwargs: VirtuosoResult(
++        status=ExecutionStatus.SUCCESS, output=address,
++    ))
++    assert check_daemon_bind(client).ok is ok
++
++
++def test_remote_token_override_provisions_only_the_selected_workspace(monkeypatch):
++    from tests.test_daemon_auth import _FakeRunner
++
++    monkeypatch.setattr(tunnel, "load_vb_env", lambda: None)
++    monkeypatch.setattr("virtuoso_bridge.transport.ssh.load_vb_env", lambda: None)
++    selected = "/data/designer/work/.auth/bridge_token"
++    monkeypatch.setenv("VB_REMOTE_TOKEN_PATH", selected)
++    client = tunnel.SSHClient(remote_host="example.invalid", remote_user="designer", port=65001)
++    runner = _FakeRunner()
++    client._ssh_runner = runner
++    assert client.ensure_daemon_token() is not None
++    assert not any("$HOME" in command or "~/" in command for command in runner.commands)
++    assert all(path.startswith(selected + ".tmp.") for _, path in runner.uploads)
++    assert "chmod 600" in runner.commands[-1]
++    setup = tunnel._generate_virtuoso_setup_il("/data/work/daemon.py", "/data/work/bridge.il", token_path=selected)
++    assert f'setShellEnvVar("RB_TOKEN_PATH" "{selected}")' in setup
++
++
++@pytest.mark.parametrize("path", ["relative/token", "/data/../token", "/token", '/data/unsafe"/token', "/data/unsafe\n/token"])
++def test_remote_token_override_rejects_unsafe_paths(monkeypatch, path):
++    monkeypatch.setenv("VB_REMOTE_TOKEN_PATH", path)
++    with pytest.raises(ValueError, match="absolute file"):
++        tunnel._remote_token_override(None)
++
++
++@pytest.mark.parametrize("corrupt", [False, True])
++@pytest.mark.parametrize("api", ["client", "standalone"])
++def test_signed_fragmented_reply_needs_no_eof_but_rejects_tampering(monkeypatch, corrupt, api):
++    import json
++    import os
++    from virtuoso_bridge import daemon_auth, VirtuosoClient
++    from virtuoso_bridge.virtuoso.basic import bridge
++
++    token = "ab" * 32
++    requests = []
++
++    class WireSocket:
++        def __enter__(self):
++            return self
++
++        def __exit__(self, *args):
++            pass
++
++        def close(self):
++            pass
++
++        def settimeout(self, timeout):
++            pass
++
++        def connect(self, endpoint):
++            pass
++
++        def shutdown(self, mode):
++            raise AssertionError("Windows direct clients must not half-close")
++
++        def sendall(self, data):
++            request = json.loads(data)
++            requests.append(request)
++            hello = request.get("op") == "hello"
++            body = json.dumps({"proto": 1, "auth": "on", "virtuoso_pid": 1234}) if hello else "宽度+1"
++            raw = ("\x02" + daemon_auth.response_mac(
++                token, nonce=request["nonce"], marker="\x02", body=body,
++            ) + body).encode("utf-8")
++            self.corrupted = corrupt and not hello
++            if self.corrupted:
++                raw = raw[:-1] + b"0"
++            self.parts = [raw[:68], raw[68:]]
++
++        def recv(self, size):
++            if self.parts:
++                return self.parts.pop(0)
++            if self.corrupted:
++                return b""
++            raise AssertionError("complete authenticated reply must not wait for EOF")
++
++    monkeypatch.setattr(bridge.socket, "socket", lambda *args: WireSocket())
++    monkeypatch.setattr(bridge, "os", SimpleNamespace(name="nt", getenv=os.getenv))
++    if api == "client":
++        client = VirtuosoClient(daemon_token=token)
++        result = client.execute_skill("1+2", timeout=5)
++        assert result.status == (ExecutionStatus.ERROR if corrupt else ExecutionStatus.SUCCESS)
++        output = result.output
++    else:
++        import importlib.util
++        from pathlib import Path
++        spec = importlib.util.spec_from_file_location("vda_skill_exec", Path(__file__).parents[1] / "tools/skill_exec.py")
++        tool = importlib.util.module_from_spec(spec)
++        spec.loader.exec_module(tool)
++        monkeypatch.setattr(tool, "os", SimpleNamespace(name="nt", urandom=os.urandom))
++        output, error = tool.execute("1+2", timeout=5, token=token)
++        assert (error is not None) is corrupt
++    assert len(requests) == 2
++    if not corrupt:
++        assert output == "宽度+1"
+diff --git a/tests/test_virtuoso_tunnel_recovery.py b/tests/test_virtuoso_tunnel_recovery.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d9de027452a7533f0d959b4cc0842b5bc392c0c3
+--- /dev/null
++++ b/tests/test_virtuoso_tunnel_recovery.py
+@@ -0,0 +1,247 @@
++from __future__ import annotations
++
++import json
++
++import pytest
++
++from virtuoso_bridge.models import ExecutionStatus
++from virtuoso_bridge.virtuoso.basic import bridge as bridge_module
++from virtuoso_bridge.virtuoso.basic.bridge import VirtuosoClient
++
++
++class _FakeTunnel:
++    def __init__(self, *, port: int = 65433, warm_error: Exception | None = None):
++        self.port = port
++        self.warm_error = warm_error
++        self.warm_calls: list[int] = []
++
++    def warm(self, timeout: int = 15) -> None:
++        self.warm_calls.append(timeout)
++        if self.warm_error is not None:
++            raise self.warm_error
++
++
++def test_execute_skill_warms_once_after_pre_send_refusal(monkeypatch) -> None:
++    tunnel = _FakeTunnel()
++    client = VirtuosoClient(port=65432, tunnel=tunnel)
++    outcomes = iter(
++        [
++            bridge_module._PreSendConnectionRefused(10061, "refused"),
++            bridge_module._STX + "3",
++        ]
++    )
++    calls = 0
++
++    def execute_once(skill_code: str, timeout: float, deadline: float) -> str:
++        nonlocal calls
++        calls += 1
++        outcome = next(outcomes)
++        if isinstance(outcome, Exception):
++            raise outcome
++        return outcome
++
++    monkeypatch.setattr(client, "_execute_skill_once", execute_once)
++
++    result = client.execute_skill("1+2", timeout=30)
++
++    assert result.status == ExecutionStatus.SUCCESS
++    assert result.output == "3"
++    assert calls == 2
++    assert tunnel.warm_calls == [15]
++    assert client.port == 65433
++
++
++def test_execute_skill_does_not_warm_unmarked_connection_error(monkeypatch) -> None:
++    tunnel = _FakeTunnel()
++    client = VirtuosoClient(port=65432, tunnel=tunnel)
++    monkeypatch.setattr(
++        client,
++        "_execute_skill_once",
++        lambda skill_code, timeout, deadline: (_ for _ in ()).throw(
++            ConnectionRefusedError(10061, "after connect")
++        ),
++    )
++
++    result = client.execute_skill("sideEffect()", timeout=30)
++
++    assert result.status == ExecutionStatus.ERROR
++    assert tunnel.warm_calls == []
++
++
++@pytest.mark.parametrize("error", [ConnectionRefusedError(111, "after send"), ConnectionResetError(104, "after send")])
++def test_jump_host_never_replays_an_unmarked_post_send_failure(monkeypatch, error):
++    tunnel = _FakeTunnel()
++    client = VirtuosoClient(port=65432, tunnel=tunnel)
++    client._has_jump_host = True
++    calls = []
++
++    def uncertain(*args, **kwargs):
++        calls.append(1)
++        raise error
++
++    monkeypatch.setattr(client, "_execute_skill_once", uncertain)
++    result = client.execute_skill("sideEffect()", timeout=30)
++    assert result.status == ExecutionStatus.ERROR
++    assert calls == [1]
++    assert tunnel.warm_calls == []
++
++
++def test_execute_skill_attempts_pre_send_recovery_only_once(monkeypatch) -> None:
++    tunnel = _FakeTunnel()
++    client = VirtuosoClient(port=65432, tunnel=tunnel)
++    calls = 0
++
++    def refuse_once_per_call(skill_code: str, timeout: float, deadline: float) -> str:
++        nonlocal calls
++        calls += 1
++        raise bridge_module._PreSendConnectionRefused(10061, "refused")
++
++    monkeypatch.setattr(client, "_execute_skill_once", refuse_once_per_call)
++
++    result = client.execute_skill("1+2", timeout=30)
++
++    assert result.status == ExecutionStatus.ERROR
++    assert calls == 2
++    assert tunnel.warm_calls == [15]
++
++
++def test_execute_skill_reports_warm_failure_without_looping(monkeypatch) -> None:
++    tunnel = _FakeTunnel(warm_error=RuntimeError("cannot rebuild"))
++    client = VirtuosoClient(port=65432, tunnel=tunnel)
++    calls = 0
++
++    def refuse(skill_code: str, timeout: float, deadline: float) -> str:
++        nonlocal calls
++        calls += 1
++        raise bridge_module._PreSendConnectionRefused(10061, "refused")
++
++    monkeypatch.setattr(client, "_execute_skill_once", refuse)
++
++    result = client.execute_skill("1+2", timeout=30)
++
++    assert result.status == ExecutionStatus.ERROR
++    assert calls == 1
++    assert tunnel.warm_calls == [15]
++
++
++def test_execute_skill_once_marks_connect_refusal_before_send(monkeypatch) -> None:
++    class _RefusingSocket:
++        def __init__(self):
++            self.send_called = False
++
++        def __enter__(self):
++            return self
++
++        def __exit__(self, *args):
++            return None
++
++        def settimeout(self, timeout: int) -> None:
++            pass
++
++        def connect(self, address) -> None:
++            raise ConnectionRefusedError(10061, "refused")
++
++        def sendall(self, payload: bytes) -> None:
++            self.send_called = True
++            raise AssertionError("payload must not be sent after refused connect")
++
++    fake_socket = _RefusingSocket()
++    monkeypatch.setattr(
++        bridge_module.socket,
++        "socket",
++        lambda *args, **kwargs: fake_socket,
++    )
++    client = VirtuosoClient(port=65432)
++
++    with pytest.raises(bridge_module._PreSendConnectionRefused):
++        client._execute_skill_once("sideEffect()", timeout=30, deadline=bridge_module.time.monotonic() + 30)
++
++    assert fake_socket.send_called is False
++
++
++def test_execute_skill_once_keeps_write_side_open_for_reply(monkeypatch) -> None:
++    monkeypatch.setattr(VirtuosoClient, "_ensure_daemon_capabilities", lambda *a, **k: {})
++    class _ReplySocket:
++        def __init__(self):
++            self.address = None
++            self.payload = b""
++            self.replies = iter([b"\x023", b""])
++
++        def __enter__(self):
++            return self
++
++        def __exit__(self, *args):
++            return None
++
++        def settimeout(self, timeout: int) -> None:
++            assert 0 < timeout <= 30
++
++        def connect(self, address) -> None:
++            self.address = address
++
++        def sendall(self, payload: bytes) -> None:
++            self.payload = payload
++
++        def recv(self, size: int) -> bytes:
++            return next(self.replies)
++
++    fake_socket = _ReplySocket()
++    monkeypatch.setattr(
++        bridge_module.socket,
++        "socket",
++        lambda *args, **kwargs: fake_socket,
++    )
++    client = VirtuosoClient(host="127.0.0.1", port=65432, tunnel=object())
++    with monkeypatch.context() as patch:
++        patch.setattr(bridge_module.os, "name", "nt")
++        raw = client._execute_skill_once("1+2", timeout=30, deadline=bridge_module.time.monotonic() + 30)
++
++    assert raw == "\x023"
++    assert fake_socket.address == ("127.0.0.1", 65432)
++    request = json.loads(fake_socket.payload.decode("utf-8"))
++    assert request["skill"] == "1+2"
++    assert 0 < request["timeout"] <= 30
++
++
++@pytest.mark.parametrize("platform", ["nt", "posix"])
++def test_direct_client_half_close_is_platform_specific(monkeypatch, platform) -> None:
++    monkeypatch.setattr(VirtuosoClient, "_ensure_daemon_capabilities", lambda *a, **k: {})
++    class _ReplySocket:
++        def __init__(self):
++            self.shutdown_modes = []
++            self.replies = iter([b"\x023", b""])
++
++        def __enter__(self):
++            return self
++
++        def __exit__(self, *args):
++            return None
++
++        def settimeout(self, timeout: int) -> None:
++            pass
++
++        def connect(self, address) -> None:
++            pass
++
++        def sendall(self, payload: bytes) -> None:
++            pass
++
++        def shutdown(self, mode: int) -> None:
++            self.shutdown_modes.append(mode)
++
++        def recv(self, size: int) -> bytes:
++            return next(self.replies)
++
++    fake_socket = _ReplySocket()
++    monkeypatch.setattr(
++        bridge_module.socket,
++        "socket",
++        lambda *args, **kwargs: fake_socket,
++    )
++    client = VirtuosoClient(host="127.0.0.1", port=65432)
++
++    with monkeypatch.context() as patch:
++        patch.setattr(bridge_module.os, "name", platform)
++        assert client._execute_skill_once("1+2", timeout=30, deadline=bridge_module.time.monotonic() + 30) == "\x023"
++    expected = [] if platform == "nt" else [bridge_module.socket.SHUT_WR]
++    assert fake_socket.shutdown_modes == expected
+diff --git a/tests/test_windows_process_flags.py b/tests/test_windows_process_flags.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..11f22d6f52afc7187be27a69dd5149cdaeda7f0e
+--- /dev/null
++++ b/tests/test_windows_process_flags.py
+@@ -0,0 +1,72 @@
++from __future__ import annotations
++
++from virtuoso_bridge.transport import ssh as ssh_module
++from virtuoso_bridge.transport.ssh import SSHRunner
++
++
++class _FakeStartupInfo:
++    def __init__(self) -> None:
++        self.dwFlags = 0
++        self.wShowWindow = None
++
++
++def test_hidden_tunnel_flags_do_not_request_detached_process(monkeypatch) -> None:
++    monkeypatch.setattr(ssh_module.os, "name", "nt")
++    monkeypatch.setattr(
++        ssh_module.subprocess, "STARTUPINFO", _FakeStartupInfo, raising=False
++    )
++    monkeypatch.setattr(
++        ssh_module.subprocess, "STARTF_USESHOWWINDOW", 0x00000001, raising=False
++    )
++    monkeypatch.setattr(
++        ssh_module.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200, raising=False
++    )
++    monkeypatch.setattr(
++        ssh_module.subprocess, "DETACHED_PROCESS", 0x00000008, raising=False
++    )
++    monkeypatch.setattr(
++        ssh_module.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False
++    )
++
++    kwargs = ssh_module._windows_no_window_kwargs(new_process_group=True)
++    creationflags = kwargs["creationflags"]
++
++    assert creationflags & ssh_module.subprocess.CREATE_NO_WINDOW
++    assert creationflags & ssh_module.subprocess.CREATE_NEW_PROCESS_GROUP
++    assert not creationflags & ssh_module.subprocess.DETACHED_PROCESS
++    assert kwargs["close_fds"] is True
++    assert kwargs["startupinfo"].dwFlags & ssh_module.subprocess.STARTF_USESHOWWINDOW
++    assert kwargs["startupinfo"].wShowWindow == 0
++
++
++def test_tunnel_command_binds_only_local_loopback(monkeypatch) -> None:
++    monkeypatch.setattr(ssh_module, "_setup_command_log", lambda: None)
++    monkeypatch.setattr(ssh_module, "load_vb_env", lambda: None)
++    monkeypatch.setenv("VB_DISABLE_CONTROL_MASTER", "1")
++    captured: dict[str, object] = {}
++
++    class _FakeProcess:
++        pid = 4242
++
++        @staticmethod
++        def poll():
++            return None
++
++    def fake_popen(command, **kwargs):
++        captured["command"] = command
++        stderr = kwargs.get("stderr")
++        if hasattr(stderr, "close"):
++            stderr.close()
++        return _FakeProcess()
++
++    runner = SSHRunner(host="compute.example", user="designer", verbose=False)
++    monkeypatch.setattr(ssh_module.subprocess, "Popen", fake_popen)
++    monkeypatch.setattr(runner, "can_reach_port", lambda _port: True)
++
++    process = runner.start_port_forward(65001, remote_port=65002)
++
++    assert process is not None
++    command = captured["command"]
++    assert "GatewayPorts=no" in command
++    forward_index = command.index("-L")
++    assert command[forward_index + 1] == "127.0.0.1:65001:127.0.0.1:65002"
+diff --git a/tools/skill_exec.py b/tools/skill_exec.py
+index a2fd7162398e2389d26c2c8b5baac7bd86e168b5..5dc59c6a8e0b04c4477738e6ccc7312b844128f7 100755
+--- a/tools/skill_exec.py
++++ b/tools/skill_exec.py
+@@ -26,6 +26,7 @@ import os
+ import binascii
+ import hashlib
+ import hmac
++import time
+ 
+ # IPC protocol markers — must match src/virtuoso_bridge/virtuoso/basic/resources/ramic_bridge_daemon_3.py
+ STX = b'\x02'  # start-of-result (success)
+@@ -74,20 +75,30 @@ def _default_token_path():
+     return os.path.join(home, '.virtuoso-bridge', 'bridge_token')
+ 
+ 
+-def _exchange(payload, host, port, timeout):
++def _exchange(payload, host, port, timeout, token=None):
+     """Send one JSON request; return (raw_bytes, None) or (None, error)."""
+     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
++    deadline = time.monotonic() + timeout
+     s.settimeout(timeout)
+     try:
+         s.connect((host, port))
+         s.sendall(json.dumps(payload).encode("utf-8"))
+-        s.shutdown(socket.SHUT_WR)
++        if os.name != "nt":
++            s.shutdown(socket.SHUT_WR)
+         data = b""
+         while True:
++            remaining = deadline - time.monotonic()
++            if remaining <= 0:
++                raise socket.timeout()
++            s.settimeout(remaining)
+             chunk = s.recv(65536)
+             if not chunk:
+                 break
+             data += chunk
++            if token and payload.get("nonce"):
++                marker, _ = _verify_response(data, token, payload["nonce"])
++                if marker in (STX, NAK):
++                    break
+         return data, None
+     except socket.timeout:
+         return None, "timeout waiting for response"
+@@ -166,7 +177,7 @@ def handshake(host, port, timeout, token):
+     request = {"proto": PROTO, "nonce": nonce, "op": "hello"}
+     if token:
+         request["mac"] = _mac(token.encode('utf-8'), HELLO_DOMAIN, str(PROTO), nonce)
+-    data, error = _exchange(request, host, port, timeout)
++    data, error = _exchange(request, host, port, timeout, token)
+     if error:
+         return None, error
+     if data[:1] == NAK:
+@@ -224,7 +235,7 @@ def execute(skill, host="127.0.0.1", port=65432, timeout=60, token=None,
+             token.encode('utf-8'), REQ_DOMAIN, str(PROTO), nonce,
+             '%.6f' % float(timeout), skill,
+         )
+-    data, error = _exchange(request, host, port, timeout)
++    data, error = _exchange(request, host, port, timeout, token)
+     if error:
+         return None, error
+ 
+

@@ -1,5 +1,9 @@
 # 当前可用基线（更新至 2026-10-26）
 
+新用户先看[安装与离线入门](getting-started.md)、[Agent 接手](agent-start-here.md)和
+[换机适配清单](environment-porting.md)。下面是维护者已验证范围，不是新环境默认事实；
+Bridge 修改另提供[可校验参考包](../references/bridge-compat/README.md)，不自动部署。
+
 VDA 是 Bridge 之上的设计与验证编排层。按[分级 v2.1](l5-roadmap.md)，当前已有 L2–L4
 执行/有限优化、部分 L5A 设计切片及 L5B 通用化能力；完整 L5B 质量闭环仍未成立。
 不是任意电路自主设计器；重新定义不增加实测证据。包版本仍为 `0.1.0`；本地基线

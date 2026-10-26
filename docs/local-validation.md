@@ -1,5 +1,10 @@
 # 双环境本地软件验收
 
+新 clone 首先按 [安装与离线入门](getting-started.md)验证公开示例；这不要求维护者的
+Bridge 或历史 artifacts。完整交付的本入口仍保持严格：缺 Bridge／旧资料／未知 skip
+应报告 incomplete，不能把“离线入门通过”或“能 import”当作完整验收。
+换机所需解释器、profile 与目录适配见[移植清单](environment-porting.md)。
+
 在 VDA checkout 的本地环境运行一个入口：
 
 ```powershell
@@ -15,10 +20,11 @@ VDA_BRIDGE_PYTHON。不会读取 .env 全文、自动安装依赖或修复网络
 
 ```powershell
 .\.venv\Scripts\python.exe -X utf8 -m virtuoso_design_agent.local_validation `
-  --bridge-python 'C:\Users\aknigsesl\tools\virtuoso-bridge-lite\.venv\Scripts\python.exe' `
+  --bridge-python 'ABSOLUTE/PATH/TO/YOUR/BRIDGE/python.exe' `
   --output artifacts/local-validation/my-new-run
 ```
 
+上述 ABSOLUTE/PATH 是占位符，须替换为本机已安装 Bridge 的真实解释器，不要原样执行。
 也有 --main-python 与 --timeout（每阶段秒数，默认180）。两个 Python 必须是不同路径；
 保留配置的虚拟环境启动路径，不把其符号链接解析成底层系统 Python。
 这是 checkout/可编辑安装的开发入口，需要仓库的 tests/ 与 pyproject.toml，不是服务器
