@@ -1,5 +1,10 @@
 # virtuoso-bridge-lite 本地兼容补丁
 
+2026-10-26：为外部接入导出[参考包](../../references/bridge-compat/README.md)，含精确
+上游/来源 commit、完整差异 patch、Git blob/SHA-256 清单和上游许可证。它包括两个
+远端 daemon 资源的请求 framing 修改；本轮仅导出/本地校验，不修改 Bridge 或远端。
+新环境按[移植清单](../environment-porting.md)配置，不能照抄下文维护者路径与历史命令。
+
 当前集成更新于 **2026-10-18**：Bridge `1.0.0`，上游 main `ecaf5a5c`，集成提交 `e214d3a`，本地独立分支
 `codex/vda-upstream-main-20261018`。2026-10-23 只读复核本地 package 为 `1.0.0`、分支 tip 为 `3688192`（Windows direct receipt framing 修复及聚焦验收记录）；本次未修改第三方代码，也未重新验证远端 daemon。下文旧分支和结果均是历史记录，不代表当前 tip。
 当前逐项差异见本文件末节；操作影响见[1.0 操作说明](../bridge-1.0-operation-notes.md)，

@@ -1,0 +1,201 @@
+{
+  "schema_version": 1,
+  "kind": "bridge_compatibility_reference",
+  "exported_at": "2026-10-26",
+  "evidence_source": "software_inference",
+  "upstream_url": "https://github.com/Arcadia-1/virtuoso-bridge-lite",
+  "upstream_commit": "ecaf5a5c5499051ea4c4796a480e278a3e9c0da8",
+  "source_commit": "3688192f438833d8da7565b69a311547177128ac",
+  "auto_deploy": false,
+  "patch": {
+    "path": "upstream-ecaf5a5c-to-vda-3688192.patch",
+    "sha256": "5bc32969acb8dbe59bb2970adb67fd34d49fbba3d1753f59c23fca79dafaf042",
+    "size_bytes": 105679
+  },
+  "license": {
+    "path": "UPSTREAM-LICENSE.txt",
+    "sha256": "327b6bb80a9ac80fd998c8493af520393c291126e60b68718be7ff1faeb5fedd"
+  },
+  "files": [
+    {
+      "path": "LOCAL_VDA_PATCH.md",
+      "status": "A",
+      "upstream_git_blob": null,
+      "patched_git_blob": "b6d5b179182f0107101bfcd53b8fb3a0f3a08134",
+      "mode": "100644"
+    },
+    {
+      "path": "examples/_pdk.py",
+      "status": "M",
+      "upstream_git_blob": "1667928eb4a62b556d4a63a3b74168be0b869ab9",
+      "patched_git_blob": "f08f79c97916105b01b92c3b5cbc6df1a412a03c",
+      "mode": "100644"
+    },
+    {
+      "path": "src/virtuoso_bridge/cli.py",
+      "status": "M",
+      "upstream_git_blob": "59b05a66bc9387905cd7dfc760a8411d61f8668c",
+      "patched_git_blob": "2f3f12df7023307dde37b901b0f709bd5dddf00a",
+      "mode": "100644"
+    },
+    {
+      "path": "src/virtuoso_bridge/daemon_guard.py",
+      "status": "M",
+      "upstream_git_blob": "a859072175bb8296204d1feed58852338f859717",
+      "patched_git_blob": "ed0ea788a9532e9d4a126d770c8524528ad999c7",
+      "mode": "100644"
+    },
+    {
+      "path": "src/virtuoso_bridge/resources/.env_template",
+      "status": "M",
+      "upstream_git_blob": "6b209ae025d132f0c4771494929e3d3e8c4d26a1",
+      "patched_git_blob": "391b8c003f62bf786e552676453fc50478004932",
+      "mode": "100644"
+    },
+    {
+      "path": "src/virtuoso_bridge/transport/ssh.py",
+      "status": "M",
+      "upstream_git_blob": "6a2bd0748af99e6f3c43138b9d9fb886609094a8",
+      "patched_git_blob": "a8cc0aab303c16d16c7b10674e7a2ad5c89bf72d",
+      "mode": "100644"
+    },
+    {
+      "path": "src/virtuoso_bridge/transport/tunnel.py",
+      "status": "M",
+      "upstream_git_blob": "e965893fc501722a754a51c4a62edc3caf71786d",
+      "patched_git_blob": "e9f550a98fa8ca40f396ccdc6bd6c5cb679713b0",
+      "mode": "100644"
+    },
+    {
+      "path": "src/virtuoso_bridge/virtuoso/basic/bridge.py",
+      "status": "M",
+      "upstream_git_blob": "20722e33437d41015a3e3850f6dc318c0bfa78e1",
+      "patched_git_blob": "27bd131921df9f28fa5cdb7f730f1667a3581883",
+      "mode": "100644"
+    },
+    {
+      "path": "src/virtuoso_bridge/virtuoso/basic/resources/ramic_bridge_daemon_27.py",
+      "status": "M",
+      "upstream_git_blob": "ae0232e930ce25f03df2e23353b9f3c968cff2d6",
+      "patched_git_blob": "4349a38748f511399993f0d5bc70dafe82c8d4db",
+      "mode": "100644"
+    },
+    {
+      "path": "src/virtuoso_bridge/virtuoso/basic/resources/ramic_bridge_daemon_3.py",
+      "status": "M",
+      "upstream_git_blob": "ed8f7b6a5ef870dbc57a11566062e7e399571de5",
+      "patched_git_blob": "8815eee5606e670baca5478eb03f10044c9ab909",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/test_daemon_auth.py",
+      "status": "M",
+      "upstream_git_blob": "d1a0f9613fcc1610d7690cc1d925d9ce58b58656",
+      "patched_git_blob": "43acc60ab9acbbbc966a2cbd9e7e49197145f724",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/test_daemon_reply_budget.py",
+      "status": "M",
+      "upstream_git_blob": "17b54b6a6b4a07f45e691f97640289df9ab6d367",
+      "patched_git_blob": "4cc6548079ec11110b6b2ef0db3a5f7d3cd8fd68",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/test_daemon_request_framing.py",
+      "status": "A",
+      "upstream_git_blob": null,
+      "patched_git_blob": "34c156042f79bb6c111d89fd9bf3f0bb74da0af5",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/test_paramiko_ssh_backend.py",
+      "status": "M",
+      "upstream_git_blob": "0fc69170f4657adb109c7ccced75aac26ca28233",
+      "patched_git_blob": "755991b348c4c4037f0afb2ec0c802340d4e84dd",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/test_profile_resolver.py",
+      "status": "M",
+      "upstream_git_blob": "a63e3a624b4cf4efebf3562d92a5c5064065bf2c",
+      "patched_git_blob": "c1be38b3d6600a4a7e41de54eecd68cd5222229b",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/test_recoverable_daemon.py",
+      "status": "M",
+      "upstream_git_blob": "7cf53bbddb81bf2f586ab74bad66b51c1b209508",
+      "patched_git_blob": "256990d2d0d6fe06939f28e1a7d9ed25416874d3",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/test_request_recovery_transport.py",
+      "status": "M",
+      "upstream_git_blob": "65b2f6d9b329a104086e2b88e5a7128ccf756d42",
+      "patched_git_blob": "84a3329e8ce4071fc239e32f8642a778c41f361d",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/test_runtime_paths.py",
+      "status": "M",
+      "upstream_git_blob": "54f44b1f47e0a0696f6b35a6809954ec7e319861",
+      "patched_git_blob": "74310a594bb6e28c6c64a86241b728ea7e040cb4",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/test_ssh_retry.py",
+      "status": "A",
+      "upstream_git_blob": null,
+      "patched_git_blob": "78bf1e96cc7e542b07fa10d50fb878ee9caa4027",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/test_tunnel_profiles.py",
+      "status": "M",
+      "upstream_git_blob": "b03fc55492ba4cc07fde457e71a0babbd1c38934",
+      "patched_git_blob": "9e021712175083a5d64dce040ad1b3705a86ff58",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/test_tunnel_recovery.py",
+      "status": "A",
+      "upstream_git_blob": null,
+      "patched_git_blob": "46d3dd8953ea28a31230d31638e35e1a60d2bf5e",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/test_vda_upgrade_compatibility.py",
+      "status": "A",
+      "upstream_git_blob": null,
+      "patched_git_blob": "6f7034541b27b65ec10ccd93b46069b76c079e7b",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/test_virtuoso_tunnel_recovery.py",
+      "status": "A",
+      "upstream_git_blob": null,
+      "patched_git_blob": "d9de027452a7533f0d959b4cc0842b5bc392c0c3",
+      "mode": "100644"
+    },
+    {
+      "path": "tests/test_windows_process_flags.py",
+      "status": "A",
+      "upstream_git_blob": null,
+      "patched_git_blob": "11f22d6f52afc7187be27a69dd5149cdaeda7f0e",
+      "mode": "100644"
+    },
+    {
+      "path": "tools/skill_exec.py",
+      "status": "M",
+      "upstream_git_blob": "a2fd7162398e2389d26c2c8b5baac7bd86e168b5",
+      "patched_git_blob": "5dc59c6a8e0b04c4477738e6ccc7312b844128f7",
+      "mode": "100755"
+    }
+  ],
+  "limitations": [
+    "Pinned-source patch export, not new remote deployment or latest-upstream compatibility evidence.",
+    "Git blob identifiers bind committed file contents; private configurations, PDKs and credentials are excluded.",
+    "Historical LOCAL_VDA_PATCH.md is source documentation, not authorization or a new-user configuration."
+  ]
+}

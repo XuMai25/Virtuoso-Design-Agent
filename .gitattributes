@@ -6,3 +6,5 @@
 *.json text eol=lf
 *.toml text eol=lf
 *.cmd text eol=crlf
+references/bridge-compat/*.patch text eol=lf whitespace=-blank-at-eol,-blank-at-eof
+references/bridge-compat/UPSTREAM-LICENSE.txt text eol=lf
