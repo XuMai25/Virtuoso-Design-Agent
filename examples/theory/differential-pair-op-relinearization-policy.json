@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-local-op-20260725",
+  "expected_source_task_id": "differential-pair-current-mirror-theory-seed-gate8-bridge",
+  "expected_source_run_sha256": "7be715fe80c299ae6a250f50582e30d6ae31fe3acfab3bf539e77ab22e6d517f",
+  "anchor_candidate_index": 2,
+  "training_candidate_indices": [1, 2, 3, 4],
+  "holdout_candidate_indices": [5, 6],
+  "parameters": [
+    {
+      "name": "input_width_um",
+      "minimum": 1.1,
+      "maximum": 1.5,
+      "proposal_step": 0.1,
+      "quantization_grid": 0.005,
+      "decimal_places": 6
+    },
+    {
+      "name": "pmos_load_width_um",
+      "minimum": 1.0,
+      "maximum": 1.4,
+      "proposal_step": 0.1,
+      "quantization_grid": 0.005,
+      "decimal_places": 6
+    },
+    {
+      "name": "tail_width_um",
+      "minimum": 0.5,
+      "maximum": 0.8,
+      "proposal_step": 0.05,
+      "quantization_grid": 0.005,
+      "decimal_places": 6
+    }
+  ],
+  "metrics": [
+    {"metric": "branch_n_current_ua", "role": "operating_point", "maximum_training_error_percent": 15.0, "maximum_holdout_error_percent": 15.0, "relative_error_floor": 0.001},
+    {"metric": "branch_n_gm_us", "role": "operating_point", "maximum_training_error_percent": 15.0, "maximum_holdout_error_percent": 15.0, "relative_error_floor": 0.001},
+    {"metric": "branch_n_gds_us", "role": "operating_point", "maximum_training_error_percent": 15.0, "maximum_holdout_error_percent": 15.0, "relative_error_floor": 0.001},
+    {"metric": "load_n_gm_us", "role": "operating_point", "maximum_training_error_percent": 15.0, "maximum_holdout_error_percent": 15.0, "relative_error_floor": 0.001},
+    {"metric": "load_n_gds_us", "role": "operating_point", "maximum_training_error_percent": 15.0, "maximum_holdout_error_percent": 15.0, "relative_error_floor": 0.001},
+    {"metric": "tail_device_current_ua", "role": "operating_point", "maximum_training_error_percent": 15.0, "maximum_holdout_error_percent": 15.0, "relative_error_floor": 0.001},
+    {"metric": "tail_device_gm_us", "role": "operating_point", "maximum_training_error_percent": 15.0, "maximum_holdout_error_percent": 15.0, "relative_error_floor": 0.001},
+    {"metric": "tail_device_gds_us", "role": "operating_point", "maximum_training_error_percent": 15.0, "maximum_holdout_error_percent": 15.0, "relative_error_floor": 0.001},
+    {"metric": "max_load_current_mismatch_percent", "role": "performance", "maximum_training_error_percent": 20.0, "maximum_holdout_error_percent": 20.0, "relative_error_floor": 1.0},
+    {"metric": "minimum_output_swing_margin_v", "role": "performance", "maximum_training_error_percent": 20.0, "maximum_holdout_error_percent": 20.0, "relative_error_floor": 0.01},
+    {"metric": "dc_supply_power_uw", "role": "performance", "maximum_training_error_percent": 20.0, "maximum_holdout_error_percent": 20.0, "relative_error_floor": 1.0},
+    {"metric": "differential_low_frequency_gain_v_per_v", "role": "performance", "maximum_training_error_percent": 20.0, "maximum_holdout_error_percent": 20.0, "relative_error_floor": 0.1},
+    {"metric": "differential_bandwidth_3db_hz", "role": "performance", "maximum_training_error_percent": 20.0, "maximum_holdout_error_percent": 20.0, "relative_error_floor": 1000000.0},
+    {"metric": "differential_gain_bandwidth_product_hz", "role": "performance", "maximum_training_error_percent": 20.0, "maximum_holdout_error_percent": 20.0, "relative_error_floor": 1000000.0},
+    {"metric": "differential_gain_peaking_db", "role": "performance", "maximum_training_error_percent": 20.0, "maximum_holdout_error_percent": 20.0, "relative_error_floor": 0.1}
+  ],
+  "constraints": [
+    {"metric": "max_load_current_mismatch_percent", "relation": "<=", "value": 1.0},
+    {"metric": "minimum_output_swing_margin_v", "relation": ">=", "value": 0.1},
+    {"metric": "dc_supply_power_uw", "relation": "<=", "value": 25.0},
+    {"metric": "differential_low_frequency_gain_v_per_v", "relation": ">=", "value": 3.0},
+    {"metric": "differential_bandwidth_3db_hz", "relation": ">=", "value": 2500000000.0},
+    {"metric": "differential_gain_bandwidth_product_hz", "relation": ">=", "value": 9000000000.0},
+    {"metric": "differential_gain_peaking_db", "relation": "<=", "value": 3.0}
+  ],
+  "objective": {
+    "metric": "dc_supply_power_uw",
+    "goal": "minimize"
+  },
+  "maximum_candidates": 6
+}

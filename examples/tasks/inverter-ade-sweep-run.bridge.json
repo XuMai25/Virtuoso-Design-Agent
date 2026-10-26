@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "id": "inverter-ade-sweep-run",
+  "operation": "ade.run",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_ade_sweep_inv_001",
+    "view": "maestro"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "ade_run": {
+    "backend": "maestro",
+    "require_structured_outputs": true,
+    "require_artifact_manifest": true,
+    "require_simulator_input_consistency": true,
+    "sweep_verification": {
+      "expected_tests": ["VDA"],
+      "variables": [
+        {
+          "name": "CL",
+          "scope": "global",
+          "expected_value": "1f,2f,4f"
+        }
+      ],
+      "points": [
+        {"point": 1, "values": {"CL": "1f"}},
+        {"point": 2, "values": {"CL": "2f"}},
+        {"point": 3, "values": {"CL": "4f"}}
+      ],
+      "input_bindings": [
+        {
+          "test": "VDA",
+          "variable": "CL",
+          "instance": "CL0",
+          "oa_parameter": "c"
+        }
+      ]
+    }
+  },
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}

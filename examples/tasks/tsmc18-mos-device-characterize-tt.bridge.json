@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "id": "tsmc18-mos-device-characterize-tt",
+  "operation": "device.characterize",
+  "circuit": "mos_device",
+  "pdk_profile": "nics4304_tsmc18",
+  "device_characterization": {
+    "polarities": [
+      "nmos",
+      "pmos"
+    ],
+    "width_um": 2.0,
+    "lengths_um": [
+      0.18,
+      0.36
+    ],
+    "vgs_magnitudes_v": [
+      0.3,
+      0.45,
+      0.6,
+      0.75,
+      0.9
+    ],
+    "vds_magnitudes_v": [
+      0.1,
+      0.9,
+      1.5
+    ],
+    "vsb_magnitudes_v": [
+      0.0
+    ],
+    "holdout_points": [
+      {
+        "polarity": "nmos",
+        "length_um": 0.18,
+        "vgs_magnitude_v": 0.525,
+        "vds_magnitude_v": 0.5,
+        "vsb_magnitude_v": 0.0
+      },
+      {
+        "polarity": "nmos",
+        "length_um": 0.36,
+        "vgs_magnitude_v": 0.675,
+        "vds_magnitude_v": 1.2,
+        "vsb_magnitude_v": 0.0
+      },
+      {
+        "polarity": "pmos",
+        "length_um": 0.18,
+        "vgs_magnitude_v": 0.525,
+        "vds_magnitude_v": 0.5,
+        "vsb_magnitude_v": 0.0
+      },
+      {
+        "polarity": "pmos",
+        "length_um": 0.36,
+        "vgs_magnitude_v": 0.675,
+        "vds_magnitude_v": 1.2,
+        "vsb_magnitude_v": 0.0
+      }
+    ],
+    "temperature_c": 27.0,
+    "maximum_holdout_normalized_error": 0.35
+  },
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "replace_existing": false
+  },
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 900
+  }
+}

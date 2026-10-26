@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "tsmc18-inverter-create-bridge",
+  "operation": "schematic.create",
+  "circuit": "inverter",
+  "target": {
+    "library": "Analog_VLSI",
+    "cell": "vda_tsmc18_inv_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc18",
+  "parameters": {
+    "nmos_width_um": 2.0,
+    "pmos_width_um": 4.0,
+    "length_um": 0.18
+  },
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": true,
+    "allowed_library": "Analog_VLSI",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 180}
+}

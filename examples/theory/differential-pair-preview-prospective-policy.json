@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-preview-prospective-selection-20260727",
+  "assessment_mode": "prospective_validation",
+  "expected_preview_task_id": "differential-pair-preview-prospective",
+  "expected_preview_task_sha256": "8458d14b105b03bddc90db0ba4d1784c5d5ff85285cb9ccc451bfc4e225dd878",
+  "expected_reference_task_id": "differential-pair-preview-prospective-oa-reference",
+  "expected_reference_task_sha256": "68058022939ca3f78901299a75376588b77f54ae1283769180817b1a51798f5d",
+  "expected_analysis": "ac",
+  "expected_pdk_profile": "nics4304_tsmc28",
+  "expected_candidate_generator": "vda.op_relinearization",
+  "expected_candidate_source_id": "differential-pair-preview-prospective-local-op-20260727",
+  "candidate_source_sha256": "2936e7d401aa4efcc2ab24cc499e7fc4055bf4d9ba0969afd58812322f9848e1",
+  "reference_candidate_source_binding": "relinearization_result_sha256",
+  "constraints": [
+    {
+      "metric": "all_mos_saturation_region",
+      "relation": ">=",
+      "value": 1.0,
+      "expected_evidence_source": "software_inference"
+    },
+    {
+      "metric": "low_frequency_gain_v_per_v",
+      "relation": ">=",
+      "value": 2.0,
+      "expected_evidence_source": "eda_result"
+    },
+    {
+      "metric": "bandwidth_3db_hz",
+      "relation": ">=",
+      "value": 1500000000.0,
+      "expected_evidence_source": "eda_result"
+    },
+    {
+      "metric": "gain_bandwidth_product_hz",
+      "relation": ">=",
+      "value": 6000000000.0,
+      "expected_evidence_source": "eda_result"
+    },
+    {
+      "metric": "dc_supply_power_uw",
+      "relation": "<=",
+      "value": 25.0,
+      "expected_evidence_source": "eda_result"
+    }
+  ],
+  "objective": {
+    "preview_metric": "dc_supply_power_uw",
+    "reference_metric": "dc_supply_power_uw",
+    "goal": "minimize"
+  },
+  "comparison_metrics": [
+    {
+      "preview_metric": "low_frequency_gain_v_per_v",
+      "reference_metric": "differential_low_frequency_gain_v_per_v"
+    },
+    {
+      "preview_metric": "bandwidth_3db_hz",
+      "reference_metric": "differential_bandwidth_3db_hz"
+    },
+    {
+      "preview_metric": "gain_bandwidth_product_hz",
+      "reference_metric": "differential_gain_bandwidth_product_hz"
+    },
+    {
+      "preview_metric": "dc_supply_power_uw",
+      "reference_metric": "dc_supply_power_uw"
+    }
+  ],
+  "shortlist_size": 3,
+  "minimum_artifact_count_per_variant": 8,
+  "minimum_ac_sample_count": 181,
+  "minimum_feasibility_agreement": 0.75,
+  "minimum_reference_feasible_recall": 1.0,
+  "minimum_spearman_rank_correlation": 0.5,
+  "require_reference_winner_in_shortlist": true,
+  "require_preview_winner_match": false,
+  "evidence_source": "user_input"
+}

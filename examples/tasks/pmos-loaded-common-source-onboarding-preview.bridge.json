@@ -1,0 +1,319 @@
+{
+  "schema_version": 1,
+  "id": "vda_pmos_loaded_cs_onboarding_001_preview",
+  "operation": "simulation.run",
+  "circuit": "netlist_preview",
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis": "ac",
+  "ac_sweep": {
+    "start_hz": 1000.0,
+    "stop_hz": 1000000000000.0,
+    "points_per_decade": 20,
+    "reference_points": 5,
+    "max_reference_variation_db": 0.5
+  },
+  "netlist_preview": {
+    "schema_version": 1,
+    "id": "pmos-loaded-common-source-onboarding-preview",
+    "temperature_c": 27.0,
+    "input_source": "VIN_SRC",
+    "supply_sources": ["VDD_SRC"],
+    "voltage_sources": [
+      {
+        "name": "VDD_SRC",
+        "positive": "VDD",
+        "negative": "0",
+        "dc_v": 0.9
+      },
+      {
+        "name": "VIN_SRC",
+        "positive": "IN",
+        "negative": "0",
+        "dc_v": 0.35,
+        "ac_magnitude_v": 1.0
+      }
+    ],
+    "source_bindings": {
+      "theory_seed_sha256": "6f79b1afaa621fa00f27912681ef53dda8a2c4e802b0ccdfc57ccfd6b662478b"
+    },
+    "source_bindings_evidence_source": "software_inference",
+    "variant_source_ids": {
+      "seed_center_l30": "seed_center_l30",
+      "seed_wp_low": "seed_wp_low",
+      "seed_wp_high": "seed_wp_high",
+      "seed_vbp_strong": "seed_vbp_strong",
+      "seed_vbp_weak": "seed_vbp_weak",
+      "seed_center_l60": "seed_center_l60"
+    },
+    "variant_source_ids_evidence_source": "software_inference",
+    "variants": [
+      {
+        "id": "seed_center_l30",
+        "output_positive": "OUT",
+        "output_negative": "0",
+        "voltage_sources": [
+          {
+            "name": "VBP_SRC",
+            "positive": "VBP",
+            "negative": "0",
+            "dc_v": 0.57
+          }
+        ],
+        "capacitors": [
+          {
+            "name": "CLOAD",
+            "positive": "OUT",
+            "negative": "0",
+            "capacitance_f": 2e-15
+          }
+        ],
+        "mosfets": [
+          {
+            "name": "MN0",
+            "polarity": "nmos",
+            "drain": "OUT",
+            "gate": "IN",
+            "source": "0",
+            "bulk": "0",
+            "width_um": 0.5,
+            "length_um": 0.03
+          },
+          {
+            "name": "MP0",
+            "polarity": "pmos",
+            "drain": "OUT",
+            "gate": "VBP",
+            "source": "VDD",
+            "bulk": "VDD",
+            "width_um": 1.9,
+            "length_um": 0.03
+          }
+        ]
+      },
+      {
+        "id": "seed_wp_low",
+        "output_positive": "OUT",
+        "output_negative": "0",
+        "voltage_sources": [
+          {
+            "name": "VBP_SRC",
+            "positive": "VBP",
+            "negative": "0",
+            "dc_v": 0.57
+          }
+        ],
+        "capacitors": [
+          {
+            "name": "CLOAD",
+            "positive": "OUT",
+            "negative": "0",
+            "capacitance_f": 2e-15
+          }
+        ],
+        "mosfets": [
+          {
+            "name": "MN0",
+            "polarity": "nmos",
+            "drain": "OUT",
+            "gate": "IN",
+            "source": "0",
+            "bulk": "0",
+            "width_um": 0.5,
+            "length_um": 0.03
+          },
+          {
+            "name": "MP0",
+            "polarity": "pmos",
+            "drain": "OUT",
+            "gate": "VBP",
+            "source": "VDD",
+            "bulk": "VDD",
+            "width_um": 1.7,
+            "length_um": 0.03
+          }
+        ]
+      },
+      {
+        "id": "seed_wp_high",
+        "output_positive": "OUT",
+        "output_negative": "0",
+        "voltage_sources": [
+          {
+            "name": "VBP_SRC",
+            "positive": "VBP",
+            "negative": "0",
+            "dc_v": 0.57
+          }
+        ],
+        "capacitors": [
+          {
+            "name": "CLOAD",
+            "positive": "OUT",
+            "negative": "0",
+            "capacitance_f": 2e-15
+          }
+        ],
+        "mosfets": [
+          {
+            "name": "MN0",
+            "polarity": "nmos",
+            "drain": "OUT",
+            "gate": "IN",
+            "source": "0",
+            "bulk": "0",
+            "width_um": 0.5,
+            "length_um": 0.03
+          },
+          {
+            "name": "MP0",
+            "polarity": "pmos",
+            "drain": "OUT",
+            "gate": "VBP",
+            "source": "VDD",
+            "bulk": "VDD",
+            "width_um": 2.1,
+            "length_um": 0.03
+          }
+        ]
+      },
+      {
+        "id": "seed_vbp_strong",
+        "output_positive": "OUT",
+        "output_negative": "0",
+        "voltage_sources": [
+          {
+            "name": "VBP_SRC",
+            "positive": "VBP",
+            "negative": "0",
+            "dc_v": 0.56
+          }
+        ],
+        "capacitors": [
+          {
+            "name": "CLOAD",
+            "positive": "OUT",
+            "negative": "0",
+            "capacitance_f": 2e-15
+          }
+        ],
+        "mosfets": [
+          {
+            "name": "MN0",
+            "polarity": "nmos",
+            "drain": "OUT",
+            "gate": "IN",
+            "source": "0",
+            "bulk": "0",
+            "width_um": 0.5,
+            "length_um": 0.03
+          },
+          {
+            "name": "MP0",
+            "polarity": "pmos",
+            "drain": "OUT",
+            "gate": "VBP",
+            "source": "VDD",
+            "bulk": "VDD",
+            "width_um": 1.9,
+            "length_um": 0.03
+          }
+        ]
+      },
+      {
+        "id": "seed_vbp_weak",
+        "output_positive": "OUT",
+        "output_negative": "0",
+        "voltage_sources": [
+          {
+            "name": "VBP_SRC",
+            "positive": "VBP",
+            "negative": "0",
+            "dc_v": 0.58
+          }
+        ],
+        "capacitors": [
+          {
+            "name": "CLOAD",
+            "positive": "OUT",
+            "negative": "0",
+            "capacitance_f": 2e-15
+          }
+        ],
+        "mosfets": [
+          {
+            "name": "MN0",
+            "polarity": "nmos",
+            "drain": "OUT",
+            "gate": "IN",
+            "source": "0",
+            "bulk": "0",
+            "width_um": 0.5,
+            "length_um": 0.03
+          },
+          {
+            "name": "MP0",
+            "polarity": "pmos",
+            "drain": "OUT",
+            "gate": "VBP",
+            "source": "VDD",
+            "bulk": "VDD",
+            "width_um": 1.9,
+            "length_um": 0.03
+          }
+        ]
+      },
+      {
+        "id": "seed_center_l60",
+        "output_positive": "OUT",
+        "output_negative": "0",
+        "voltage_sources": [
+          {
+            "name": "VBP_SRC",
+            "positive": "VBP",
+            "negative": "0",
+            "dc_v": 0.57
+          }
+        ],
+        "capacitors": [
+          {
+            "name": "CLOAD",
+            "positive": "OUT",
+            "negative": "0",
+            "capacitance_f": 2e-15
+          }
+        ],
+        "mosfets": [
+          {
+            "name": "MN0",
+            "polarity": "nmos",
+            "drain": "OUT",
+            "gate": "IN",
+            "source": "0",
+            "bulk": "0",
+            "width_um": 0.5,
+            "length_um": 0.06
+          },
+          {
+            "name": "MP0",
+            "polarity": "pmos",
+            "drain": "OUT",
+            "gate": "VBP",
+            "source": "VDD",
+            "bulk": "VDD",
+            "width_um": 1.9,
+            "length_um": 0.06
+          }
+        ]
+      }
+    ]
+  },
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "replace_existing": false
+  },
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 1200
+  }
+}

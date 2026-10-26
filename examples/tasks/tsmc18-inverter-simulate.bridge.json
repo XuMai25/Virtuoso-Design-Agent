@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "tsmc18-inverter-simulate-bridge",
+  "operation": "simulation.run",
+  "circuit": "inverter",
+  "target": {
+    "library": "Analog_VLSI",
+    "cell": "vda_tsmc18_inv_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc18",
+  "parameters": {
+    "load_ff": 10.0,
+    "vdd_v": 1.8
+  },
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "allowed_library": "Analog_VLSI",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}

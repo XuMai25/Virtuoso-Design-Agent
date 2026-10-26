@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-current-mirror-transform-final-bridge",
+  "operation": "schematic.transform",
+  "circuit": "differential_pair",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_diffpair_active_gate6_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "schematic_transform": {"action": "replace_resistive_load_with_current_mirror"},
+  "parameters": {"pmos_load_width_um": 1.5, "pmos_load_length_um": 0.03},
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}

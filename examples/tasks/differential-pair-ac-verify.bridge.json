@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-ac-verify-bridge",
+  "operation": "simulation.run",
+  "circuit": "differential_pair",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_diffpair_gate3_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis": "ac",
+  "ac_sweep": {
+    "start_hz": 1000.0,
+    "stop_hz": 1000000000000.0,
+    "points_per_decade": 20,
+    "reference_points": 5,
+    "max_reference_variation_db": 0.5
+  },
+  "parameters": {
+    "input_width_um": 2.0,
+    "length_um": 0.03,
+    "load_resistance_ohm": 8000.0,
+    "tail_current_ua": 50.0,
+    "common_mode_v": 0.45,
+    "vdd_v": 0.9
+  },
+  "constraints": [
+    {"metric": "tail_current_mismatch_percent", "relation": "<=", "value": 1.0},
+    {"metric": "supply_current_mismatch_percent", "relation": "<=", "value": 1.0},
+    {"metric": "max_load_current_mismatch_percent", "relation": "<=", "value": 1.0},
+    {"metric": "both_saturation_region", "relation": ">=", "value": 1.0},
+    {"metric": "minimum_output_swing_margin_v", "relation": ">=", "value": 0.1},
+    {"metric": "dc_supply_power_uw", "relation": "<=", "value": 50.0},
+    {"metric": "differential_low_frequency_gain_v_per_v", "relation": ">=", "value": 1.5},
+    {"metric": "differential_bandwidth_3db_hz", "relation": ">=", "value": 1000000.0},
+    {"metric": "differential_gain_bandwidth_product_hz", "relation": ">=", "value": 1000000.0},
+    {"metric": "differential_unity_gain_frequency_hz", "relation": ">=", "value": 1000000.0},
+    {"metric": "differential_gain_peaking_db", "relation": "<=", "value": 3.0}
+  ],
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}

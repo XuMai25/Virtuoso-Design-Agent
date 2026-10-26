@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "id": "inverter-ratio-calibration-inspect-bridge",
+  "operation": "schematic.inspect",
+  "circuit": "inverter",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_inv_ratio_calibration_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": false,
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 120}
+}

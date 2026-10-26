@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-preview-prospective",
+  "operation": "simulation.run",
+  "circuit": "netlist_preview",
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis": "ac",
+  "ac_sweep": {
+    "start_hz": 1000.0,
+    "stop_hz": 1000000000000.0,
+    "points_per_decade": 20,
+    "reference_points": 5,
+    "max_reference_variation_db": 0.5
+  },
+  "netlist_preview": {
+    "schema_version": 1,
+    "id": "differential-pair-preview-prospective",
+    "temperature_c": 27.0,
+    "input_source": "VIN_DIFF",
+    "supply_sources": ["VDD_SRC"],
+    "voltage_sources": [
+      {
+        "name": "VDD_SRC",
+        "positive": "VDD",
+        "negative": "0",
+        "dc_v": 0.9
+      },
+      {
+        "name": "VCM_SRC",
+        "positive": "INN",
+        "negative": "0",
+        "dc_v": 0.55
+      },
+      {
+        "name": "VIN_DIFF",
+        "positive": "INP",
+        "negative": "INN",
+        "dc_v": 0.0,
+        "ac_magnitude_v": 1.0
+      },
+      {
+        "name": "VBIAS_SRC",
+        "positive": "BIAS",
+        "negative": "0",
+        "dc_v": 0.32
+      }
+    ],
+    "capacitors": [
+      {
+        "name": "CLOAD",
+        "positive": "OUTN",
+        "negative": "0",
+        "capacitance_f": 5e-16
+      }
+    ],
+    "variants": [
+      {
+        "id": "diffpair_template",
+        "output_positive": "OUTN",
+        "output_negative": "0",
+        "mosfets": [
+          {
+            "name": "MN0",
+            "polarity": "nmos",
+            "drain": "OUTP",
+            "gate": "INP",
+            "source": "TAIL",
+            "bulk": "0",
+            "width_um": 1.2,
+            "length_um": 0.03
+          },
+          {
+            "name": "MN1",
+            "polarity": "nmos",
+            "drain": "OUTN",
+            "gate": "INN",
+            "source": "TAIL",
+            "bulk": "0",
+            "width_um": 1.2,
+            "length_um": 0.03
+          },
+          {
+            "name": "MNTAIL",
+            "polarity": "nmos",
+            "drain": "TAIL",
+            "gate": "BIAS",
+            "source": "0",
+            "bulk": "0",
+            "width_um": 0.555,
+            "length_um": 0.03
+          },
+          {
+            "name": "MP0",
+            "polarity": "pmos",
+            "drain": "OUTP",
+            "gate": "OUTP",
+            "source": "VDD",
+            "bulk": "VDD",
+            "width_um": 1.1,
+            "length_um": 0.03
+          },
+          {
+            "name": "MP1",
+            "polarity": "pmos",
+            "drain": "OUTN",
+            "gate": "OUTP",
+            "source": "VDD",
+            "bulk": "VDD",
+            "width_um": 1.1,
+            "length_um": 0.03
+          }
+        ]
+      }
+    ]
+  },
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "replace_existing": false
+  },
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 1200
+  }
+}

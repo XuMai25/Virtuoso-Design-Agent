@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-gmid-synthetic",
+  "topology": "nmos_differential_pair_pmos_current_mirror_load_with_tail_device",
+  "pdk_profile": "nics4304_tsmc28",
+  "vdd_v": 0.9,
+  "mirror_diode_node_v": 0.45,
+  "output_common_mode_v": 0.45,
+  "tail_node_v": 0.12,
+  "load_capacitance_f": 2e-14,
+  "sizing_margin_fraction": 0.05,
+  "input_width": {
+    "minimum_um": 0.2,
+    "maximum_um": 10.0
+  },
+  "load_width": {
+    "minimum_um": 0.2,
+    "maximum_um": 10.0
+  },
+  "tail_width": {
+    "minimum_um": 0.2,
+    "maximum_um": 10.0
+  },
+  "device_characterization": {
+    "source": "synthetic_example",
+    "process_corner": "synthetic_tt",
+    "temperature_c": 27.0,
+    "input_nmos_vds_v": 0.33,
+    "load_pmos_vsd_v": 0.45,
+    "tail_nmos_vds_v": 0.12,
+    "nmos_input_points": [
+      {
+        "id": "n-in-efficient",
+        "length_um": 0.12,
+        "gm_over_id_per_v": 18.0,
+        "drain_current_density_a_per_um": 2e-05,
+        "gds_over_id_per_v": 0.05,
+        "output_capacitance_f_per_um": 4e-16,
+        "vdsat_v": 0.12
+      },
+      {
+        "id": "n-in-fast",
+        "length_um": 0.06,
+        "gm_over_id_per_v": 12.0,
+        "drain_current_density_a_per_um": 5e-05,
+        "gds_over_id_per_v": 0.08,
+        "output_capacitance_f_per_um": 3.5e-16,
+        "vdsat_v": 0.16
+      }
+    ],
+    "pmos_load_points": [
+      {
+        "id": "p-load-long",
+        "length_um": 0.12,
+        "gm_over_id_per_v": 15.0,
+        "drain_current_density_a_per_um": 1.5e-05,
+        "gds_over_id_per_v": 0.04,
+        "output_capacitance_f_per_um": 4.5e-16,
+        "vdsat_v": 0.13
+      },
+      {
+        "id": "p-load-short",
+        "length_um": 0.06,
+        "gm_over_id_per_v": 10.0,
+        "drain_current_density_a_per_um": 4e-05,
+        "gds_over_id_per_v": 0.07,
+        "output_capacitance_f_per_um": 3.5e-16,
+        "vdsat_v": 0.17
+      }
+    ],
+    "nmos_tail_points": [
+      {
+        "id": "n-tail-long",
+        "length_um": 0.12,
+        "gm_over_id_per_v": 15.0,
+        "drain_current_density_a_per_um": 3e-05,
+        "gds_over_id_per_v": 0.03,
+        "output_capacitance_f_per_um": 4e-16,
+        "vdsat_v": 0.08
+      }
+    ]
+  },
+  "constraints": [
+    {
+      "metric": "estimated_differential_gain_v_per_v",
+      "relation": ">=",
+      "value": 100.0
+    },
+    {
+      "metric": "estimated_bandwidth_hz",
+      "relation": ">=",
+      "value": 50000000.0
+    },
+    {
+      "metric": "estimated_gain_bandwidth_product_hz",
+      "relation": ">=",
+      "value": 5000000000.0
+    },
+    {
+      "metric": "estimated_minimum_headroom_v",
+      "relation": ">=",
+      "value": 0.03
+    },
+    {
+      "metric": "estimated_power_w",
+      "relation": "<=",
+      "value": 0.00015
+    }
+  ],
+  "objective": {
+    "metric": "estimated_power_w",
+    "goal": "minimize"
+  }
+}

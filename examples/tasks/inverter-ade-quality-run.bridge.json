@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "id": "inverter-ade-quality-run",
+  "operation": "ade.run",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_ade_sweep_inv_001",
+    "view": "maestro"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "ade_run": {
+    "backend": "maestro",
+    "require_structured_outputs": true,
+    "require_artifact_manifest": true,
+    "require_simulator_input_consistency": true,
+    "sweep_verification": {
+      "expected_tests": ["VDA"],
+      "variables": [
+        {
+          "name": "CL",
+          "scope": "global",
+          "expected_value": "1f,2f,4f"
+        }
+      ],
+      "points": [
+        {"point": 1, "values": {"CL": "1f"}},
+        {"point": 2, "values": {"CL": "2f"}},
+        {"point": 3, "values": {"CL": "4f"}}
+      ],
+      "input_bindings": [
+        {
+          "test": "VDA",
+          "variable": "CL",
+          "instance": "CL0",
+          "oa_parameter": "c"
+        }
+      ]
+    },
+    "result_mapping": {
+      "parameters": [
+        {
+          "source": "CL",
+          "parameter": "load_ff",
+          "scale": 1000000000000000.0,
+          "unit": "fF"
+        }
+      ],
+      "metrics": [
+        {
+          "test": "VDA",
+          "output": "Delay",
+          "expected_expression": "((cross(clip(VT(\"/OUT\") 80p 130p) 0.45 1 \"falling\" nil nil nil) - cross(clip(VT(\"/IN\") 80p 130p) 0.45 1 \"rising\" nil nil nil)) + (cross(clip(VT(\"/OUT\") 130p 180p) 0.45 1 \"rising\" nil nil nil) - cross(clip(VT(\"/IN\") 130p 180p) 0.45 1 \"falling\" nil nil nil))) / 2",
+          "metric": "delay_ps",
+          "scale": 1000000000000.0,
+          "unit": "ps"
+        },
+        {
+          "test": "VDA",
+          "output": "RiseFallSkew",
+          "expected_expression": "abs((cross(clip(VT(\"/OUT\") 130p 180p) 0.81 1 \"rising\" nil nil nil) - cross(clip(VT(\"/OUT\") 130p 180p) 0.09 1 \"rising\" nil nil nil)) - (cross(clip(VT(\"/OUT\") 80p 130p) 0.09 1 \"falling\" nil nil nil) - cross(clip(VT(\"/OUT\") 80p 130p) 0.81 1 \"falling\" nil nil nil)))",
+          "metric": "rise_fall_skew_ps",
+          "scale": 1000000000000.0,
+          "unit": "ps"
+        },
+        {
+          "test": "VDA",
+          "output": "SupplyEnergyCycle",
+          "expected_expression": "-0.9 * integ(IT(\"/VDD0/PLUS\") cross(VT(\"/IN\") 0.45 2 \"rising\" nil nil nil) cross(VT(\"/IN\") 0.45 3 \"rising\" nil nil nil))",
+          "metric": "supply_energy_per_cycle_fj",
+          "scale": 1000000000000000.0,
+          "unit": "fJ"
+        }
+      ]
+    }
+  },
+  "constraints": [
+    {"metric": "delay_ps", "relation": "<=", "value": 6.0},
+    {"metric": "rise_fall_skew_ps", "relation": "<=", "value": 5.0},
+    {
+      "metric": "supply_energy_per_cycle_fj",
+      "relation": "<=",
+      "value": 5.0
+    }
+  ],
+  "objective": {
+    "metric": "supply_energy_per_cycle_fj",
+    "goal": "minimize"
+  },
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 3, "timeout_seconds": 600}
+}

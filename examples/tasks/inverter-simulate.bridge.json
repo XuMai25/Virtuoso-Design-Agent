@@ -10,9 +10,6 @@
   },
   "pdk_profile": "nics4304_tsmc28",
   "parameters": {
-    "nmos_width_um": 0.5,
-    "pmos_width_um": 1.0,
-    "length_um": 0.03,
     "load_ff": 2.0,
     "vdd_v": 0.9
   },

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "source": {"kind": "task", "task": "../tasks/existing-schematic-generic-common-source-ac.bridge.json"},
+  "physical_refinement": "../theory/physical-refinement.synthetic.json",
+  "rationale": [{
+    "text": "仅展示有单位的电流、gm/ID、偏置和负载如何进入原候选格式；合成表和缺失材料阻止任务生成，不是实际尺寸建议。",
+    "source": "software_inference"
+  }]
+}

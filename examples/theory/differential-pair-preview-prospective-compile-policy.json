@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-preview-prospective-compile-20260727",
+  "expected_candidate_generator": "vda.op_relinearization",
+  "expected_candidate_source_id": "differential-pair-preview-prospective-local-op-20260727",
+  "expected_pdk_profile": "nics4304_tsmc28",
+  "candidate_ids": [
+    "op-local-001",
+    "op-local-002",
+    "op-local-003",
+    "op-local-004",
+    "op-local-005",
+    "op-local-006",
+    "op-local-007",
+    "op-local-008"
+  ],
+  "template_variant_id": "diffpair_template",
+  "variant_id_prefix": "diffpair_candidate",
+  "fixed_parameters": {},
+  "bindings": [
+    {
+      "parameter": "input_width_um",
+      "element_kind": "mosfet",
+      "element": "MN0",
+      "field": "width_um"
+    },
+    {
+      "parameter": "input_width_um",
+      "element_kind": "mosfet",
+      "element": "MN1",
+      "field": "width_um"
+    },
+    {
+      "parameter": "pmos_load_width_um",
+      "element_kind": "mosfet",
+      "element": "MP0",
+      "field": "width_um"
+    },
+    {
+      "parameter": "pmos_load_width_um",
+      "element_kind": "mosfet",
+      "element": "MP1",
+      "field": "width_um"
+    }
+  ]
+}

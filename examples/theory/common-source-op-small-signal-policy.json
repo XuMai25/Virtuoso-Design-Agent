@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "common-source-op-small-signal",
+  "simulation_action": "simulation.candidate.1",
+  "expected_topology_variant": "common_source",
+  "expected_pdk_profile": "nics4304_tsmc28",
+  "expected_process_corner": "top_tt",
+  "expected_temperature_c": 27.0,
+  "device_polarities": {
+    "MN0": "nmos"
+  },
+  "boundary_voltages": [
+    {"node": "IN", "voltage": {"real": 1.0}},
+    {"node": "VDD", "voltage": {}},
+    {"node": "VSS", "voltage": {}}
+  ],
+  "input_expression": {"terms": {"IN": 1.0}},
+  "output_expression": {"terms": {"OUT": 1.0}},
+  "frequencies_hz": [1000.0, 10000.0],
+  "reference_points": 2,
+  "maximum_reference_variation_db": 0.01,
+  "analysis_mode": "low_frequency",
+  "require_gmb_when_body_effect_active": false,
+  "require_complete_intrinsic_capacitance": false
+}

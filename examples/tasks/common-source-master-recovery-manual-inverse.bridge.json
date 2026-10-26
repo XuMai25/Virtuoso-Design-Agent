@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "id": "common-source-master-recovery-manual-inverse",
+  "operation": "schematic.transform",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_master_recovery_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "topology_delta": {
+    "direction": "inverse",
+    "expected_output_placement_sha256": "b59661b2047674c4a7da81b56fe745a76bac56082e08bdd92d0e7d2f6433ea35",
+    "contract": {
+      "schema_version": 1,
+      "id": "common-source-master-recovery-fault-v1",
+      "expected_before_sha256": "a0bb019a7c81a0d4422e90dca0b5ade814d265cd41544ef245104cb3c7856a41",
+      "expected_after_sha256": "41a41dc9195c7958cb835223726767459eb0058a67f5eaa7cd31e34385cab038",
+      "operations": [
+        {"operation": "replace_master", "instance": "MN0", "expected_master": {"library": "tsmcN28", "cell": "nch_lvt_mac", "view": "symbol"}, "master": {"library": "tsmcN28", "cell": "nch_mac", "view": "symbol"}}
+      ],
+      "inverse_operations": [
+        {"operation": "replace_master", "instance": "MN0", "expected_master": {"library": "tsmcN28", "cell": "nch_mac", "view": "symbol"}, "master": {"library": "tsmcN28", "cell": "nch_lvt_mac", "view": "symbol"}}
+      ],
+      "master_parameter_migrations": [
+        {"instance": "MN0", "expected_parameters": {"Wfg": "1u", "l": "30n", "m": "1"}, "parameters": {"Wfg": "1u", "l": "30n", "m": "2"}, "undeclared_parameter_policy": "record_only"}
+      ]
+    }
+  },
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}

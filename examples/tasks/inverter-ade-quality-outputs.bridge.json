@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "inverter-ade-quality-outputs",
+  "operation": "ade.setup.apply",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_ade_sweep_inv_001",
+    "view": "maestro"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "ade_setup": {
+    "backend": "maestro",
+    "expected_tests": ["VDA"],
+    "outputs": [
+      {
+        "test": "VDA",
+        "name": "Tphl",
+        "output_type": "point",
+        "expression": "cross(clip(VT(\"/OUT\") 80p 130p) 0.45 1 \"falling\" nil nil nil) - cross(clip(VT(\"/IN\") 80p 130p) 0.45 1 \"rising\" nil nil nil)"
+      },
+      {
+        "test": "VDA",
+        "name": "Tplh",
+        "output_type": "point",
+        "expression": "cross(clip(VT(\"/OUT\") 130p 180p) 0.45 1 \"rising\" nil nil nil) - cross(clip(VT(\"/IN\") 130p 180p) 0.45 1 \"falling\" nil nil nil)"
+      },
+      {
+        "test": "VDA",
+        "name": "Delay",
+        "output_type": "point",
+        "expression": "((cross(clip(VT(\"/OUT\") 80p 130p) 0.45 1 \"falling\" nil nil nil) - cross(clip(VT(\"/IN\") 80p 130p) 0.45 1 \"rising\" nil nil nil)) + (cross(clip(VT(\"/OUT\") 130p 180p) 0.45 1 \"rising\" nil nil nil) - cross(clip(VT(\"/IN\") 130p 180p) 0.45 1 \"falling\" nil nil nil))) / 2"
+      },
+      {
+        "test": "VDA",
+        "name": "Rise",
+        "output_type": "point",
+        "expression": "cross(clip(VT(\"/OUT\") 130p 180p) 0.81 1 \"rising\" nil nil nil) - cross(clip(VT(\"/OUT\") 130p 180p) 0.09 1 \"rising\" nil nil nil)"
+      },
+      {
+        "test": "VDA",
+        "name": "Fall",
+        "output_type": "point",
+        "expression": "cross(clip(VT(\"/OUT\") 80p 130p) 0.09 1 \"falling\" nil nil nil) - cross(clip(VT(\"/OUT\") 80p 130p) 0.81 1 \"falling\" nil nil nil)"
+      },
+      {
+        "test": "VDA",
+        "name": "RiseFallSkew",
+        "output_type": "point",
+        "expression": "abs((cross(clip(VT(\"/OUT\") 130p 180p) 0.81 1 \"rising\" nil nil nil) - cross(clip(VT(\"/OUT\") 130p 180p) 0.09 1 \"rising\" nil nil nil)) - (cross(clip(VT(\"/OUT\") 80p 130p) 0.09 1 \"falling\" nil nil nil) - cross(clip(VT(\"/OUT\") 80p 130p) 0.81 1 \"falling\" nil nil nil)))"
+      },
+      {
+        "test": "VDA",
+        "name": "SupplyEnergyCycle",
+        "output_type": "point",
+        "expression": "-0.9 * integ(IT(\"/VDD0/PLUS\") cross(VT(\"/IN\") 0.45 2 \"rising\" nil nil nil) cross(VT(\"/IN\") 0.45 3 \"rising\" nil nil nil))"
+      }
+    ]
+  },
+  "safety": {
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}

@@ -1,0 +1,147 @@
+# 2026-09-04 virtuoso-bridge-lite 上游 0.8 升级与兼容验证
+
+## 结论
+
+第三方 Bridge 已从旧 `0.7` 基线升级到 GitHub 上游 main `c64461c`（含 `v0.8.0`），并在私有分支保留 VDA 已验证的安全、Windows 和 transport 修复。当前状态可称为：**Bridge 0.8 execution substrate integrated with VDA private hardening; existing workflow compatibility, read-only connectivity, strict PSF adoption and scoped preview batching verified; unrelated upstream Windows portability gaps remain**。
+
+这不是新的电路设计 Gate，也没有把任何上游 API 的存在包装成 L5B 设计证据。
+
+## 上游核对与版本隔离
+
+- 上游仓库：`https://github.com/Arcadia-1/virtuoso-bridge-lite`。
+- 拉取后最新 main：`c64461c0bdc44330c143d386a8aaf3342088a59e`。
+- 新 tag：`v0.8.0`。
+- 升级前本地私有 tip：`ebf7e5018a886f79403e55aaef1c5805a9d38302`。
+- 源码改动前先建立备份：`codex/backup-pre-upstream-20260904-ebf7e50`。
+- 集成分支：`codex/vda-upstream-main-20260904`。
+- 两父 merge：`106c61ee0d65bae1b1d20c86a7c4151ffe95c3e0`，父提交为上游 `c64461c` 和私有 `ebf7e50`。
+- managed daemon restart 修正：`40ff8919b8d79aff3b58aa2167ad28be9a395a92`。
+- Bridge 内说明提交：`01565791fb261c73552e3e80590a389d2a6b7003`。
+- 没有向第三方 origin 推送任何私有分支或提交。
+
+## 采用的上游变化
+
+本次不复制实现，而是让 VDA 继续通过 Bridge 独立 `.venv` 使用上游 0.8 代码：
+
+1. scoped Spectre pools、并行仿真目录隔离和 operating-point 失败处理；
+2. GUI/deploy/daemon/Spectre 分主机角色及 safe bootstrap；
+3. Paramiko session multiplexing 与可选 SOCKS5 transport；
+4. strict PSF accessor 与 `ocnPrint` 格式控制；
+5. schematic netlist import/export、semantic cleanup、确定性 constraint planner；
+6. Maestro API、corner netlist、output escaping 和 run-timeout 修复；
+7. library/category、symbol、layout/GDS、docs search 等上游接口保持可用，但不自动进入 VDA 产品声明。
+
+## 保留和合并后的私有修改
+
+- RAMIC 新 daemon 默认 `127.0.0.1`，并回读真实 `RBLastBind`。
+- OpenSSH 自动与手工 fallback 均为 `GatewayPorts=no` 和显式本地 loopback forward。
+- Windows tunnel 使用 `CREATE_NO_WINDOW`、`SW_HIDE`、`CREATE_NEW_PROCESS_GROUP`，不组合 `DETACHED_PROCESS`。
+- Windows managed tunnel 使用 complete-JSON request framing；Python 3/2.7 daemon 收到完整 JSON 即派发，同时兼容 EOF 客户端。
+- stale state、auto-warm、1 s/3 s 瞬态退避和仅限发送前连接拒绝的一次恢复保留；恢复等待现受总 deadline 限制。
+- user/bind guard 保留；只读查询允许一次立即 retry，空 USER、缺少 bind、非回环、wrong endpoint 或 daemon 无响应均不会被 status 标为健康。
+- `VirtuosoClient.from_env()` 支持只设置新式 split-host roles 的 cold start。
+- `restart` 与 `status` 一样把 managed tunnel context 交给 Windows daemon client，并在所有退出路径关闭 runner；不重现裸 client half-close，也不因一次 CLI 调用遗留 SSH runner。
+- VDA 自身的远端写入/计算授权、安全 token、library/cell 约束和证据分类没有改变。
+
+Bridge checkout 中 `LOCAL_VDA_PATCH.md` 记录 19 个差异文件和升级方法；VDA 的聚合清单见 `docs/third-party/virtuoso-bridge-local-patch.md`。
+
+## 本地验证
+
+### 未修改上游基线
+
+在合并私有 parent 前，Bridge 上游 main 的 Windows 完整基线为：
+
+- `883 passed`
+- `35 failed`
+- `11 skipped`
+
+失败主要来自 Unix `sh/rm/tail` 假设、Windows symlink 权限、长路径和 POSIX/Windows path fixture。
+
+### 最终升级分支
+
+- 相对上游的全部私有测试文件：`122 passed in 23.77s`。加入 10 项 Spectre runtime/split-role 路径测试后的 transport/security/split-host/Paramiko 集：`132 passed in 23.84s`。
+- VDA：`910 passed in 6.00s`。
+- `vda catalog`：成功。
+- `vda plan examples\tasks\inverter-close-loop.demo.json`：成功，生成正常只规划 token。
+- Python `compileall` 与 `git diff --check`：成功。
+
+Bridge 最终完整集使用固定短目录 `C:\vbt\full-final-20260904`：
+
+- collected：959
+- passed：914
+- failed：34
+- skipped：11
+
+34 项失败只出现在相对上游 main 未修改的测试文件：`test_docs_search.py`、`test_layout_streamout.py`、`test_schematic_netlist.py`、`test_spectre_psf.py`、`test_ssh_control_master.py`。其中 symlink 需要 Windows 特权；一项刻意构造的 250 字符目录在再读取子文件时跨过传统 `MAX_PATH`；GDS/docs 项依赖 Unix 命令或 POSIX 路径；两个 schematic netlist fixture 把远端 POSIX 路径表示成 Windows `Path`。比前一轮多出的一项 remote docs cache reuse 断言已在新 basetemp 单独稳定复现。这些边界没有被 deselect，也没有为提高通过数而修改无关产品代码。
+
+## 真实只读验收
+
+授权范围只包含 `/data/xum` 内既有 VDA Bridge runtime 更新和读连接；没有 OA target、OA read/write 或 Spectre analysis。
+
+最终从当前 checkout 执行 `virtuoso-bridge restart -> vda bridge status -> vda doctor -> vda bridge stop`。restart 只把生成 runtime 上传并加载到 `/data/xum/virtuoso_bridge_xum/Aurora_s_Echo/virtuoso_bridge`；旧 daemon 关闭连接被按预期重启确认处理，没有 OA 或 Spectre payload。随后得到：
+
+- Bridge：`0.8.0`
+- daemon host/tunnel target：`nics4304-cad1`，实际 CIW/SSH hostname `cad52`
+- daemon user：`xum`
+- tunnel user：`xum`
+- daemon bind：`127.0.0.1:65346`
+- local forward：`127.0.0.1:65347`
+- Virtuoso：`6.1.8-64b`
+- Spectre binary probe：`21.1.0`
+- VDA doctor evidence：`connected=true`、`skill_probe=3`、`daemon_bind=127.0.0.1:65346`
+- stop 后 local port 65347 listener：0
+- stop 后匹配 `127.0.0.1:65347:127.0.0.1:65346` 的 `ssh.exe`：0
+
+第一次合并态 status 曾因用裸 client 对 Windows managed tunnel 执行 half-close而假报 `NO RESPONSE`，但紧接着 doctor 成功。修正 status 复用 tunnel context 后，status 与 doctor 一致。身份查询又暴露一次 5 s 瞬态超时；只对 USER/bind 两个幂等读查询增加一次立即 retry 后，真实 status 得到 user 一致证据。最终清理审计发现 restart 尚有相同裸 client 风险，故增加 `40ff891`，两条 restart 回归与真实 reload 均通过。这些异常与修复均被保留，没有用单独 return code 0 取代结构化结果。
+
+## 仍未验证的边界
+
+- 34 项上游 Windows portability 测试未闭合；当前 VDA 不依赖其中的 docs search、GDS local streamout 或本地 spiceIn fixture。
+- 上游新增 schematic planner/netlist、GDS、library/category 和全部 Maestro 变化只完成本地回归，未逐项形成新的远端 OA live Gate。
+- Paramiko/SOCKS5 和真正 split-host 部署完成单测，没有在 nics4304 真实环境启用；当前 live profile 仍是 OpenSSH 单 host。
+- loopback 不等于多用户服务器上的应用层认证；原生 Cadence listener 也不属于本 Gate。
+- 初始兼容 Gate 没有 OA 或 Spectre 结果，只有 Bridge/VDA 状态和 SKILL 的 `bridge_readback`；后续 scoped-preview 采用 Gate 单独新增 standalone Spectre `eda_result`，仍没有 OA/`si`/Maestro 访问。
+
+## 升级后的 VDA 工作流采用 Gate
+
+### 采用范围
+
+本次没有把所有新 API 接进 VDA，只处理已经存在的重复调用和证据薄弱点：
+
+1. `_common_source_dc_data_from_result` 与 ordinary-noise 单文件读取改用 Bridge 0.8 公共 `read_psf_ascii()`；VDA 继续选择 nested sweep 中相对深度最小的根 DC/OP 文件，未使用会把多个有效 sweep 文件判成歧义的通用 `result_file()`。
+2. 全部 AC 以及 ordinary-noise 频率轴经过 Bridge `frequency_hz()`；非有限实/复波形、非有限标量和非严格递增频率立即失败。
+3. `netlist_preview` 先渲染完整固定批次，再调用一次 `SpectreSimulator.run_parallel()`，并发上限为 `min(4,N)`。一次批次只安装并验证一个 timeout guard、建立一个 simulator、执行一次远端 deck inventory；每个候选仍有唯一 Bridge 本地/远端目录。
+4. 新证据同时绑定 Bridge 的 submission order 和远端 `preview_<variant>.scs` 唯一路径；共享 guard 副本进入每个候选 manifest。shortlist validator 同时接受历史逐候选布局与新 batch 布局，但拒绝重复目录、错误 deck 路径或超限并发声明。
+
+没有采用 Bridge schematic export 替换 VDA 的 OA→`si`。该公共接口适合下载网表包，但目前不能等价承担 VDA 已验证的 `si.env`/`cds.lib`/Cadence shell 固定、远端原地 wrapper、OA 参数对照和 netlist hash 链；为“少一段代码”替换会降低准确性并增加下载后重传。
+
+### 本地验证
+
+- VDA preview/selection 定向集：`30 passed`。
+- 新增/更新边界覆盖：一次 guard、一个 simulator、一次 `run_parallel`、一次 inventory、deck/manifest 双绑定、旧布局兼容、batch 重复目录拒绝、非有限实/复波形拒绝、非单调频率轴拒绝、strict parser provenance。
+- Bridge 0.8 原生 strict-PSF/scoped-pool 选择集：`7 passed`；Bridge 虚拟环境中的 VDA `_frequency_signal()` 已确认加载 `src/virtuoso_bridge/spectre/psf.py`，而不是测试 fallback。
+- VDA 完整集：`911 passed`；`git diff --check`、worker/validator/test `py_compile`、catalog 和 demo plan 均通过。
+
+### 同任务 live 对照
+
+任务为既有 `common-source-cascode-candidate-preview`，同样的 10 个 variant、TSMC N28 `top_tt`、Spectre `21.1.0.612.isr15`，无 OA target，`allow_remote_write=false`。旧顺序记录是 `artifacts/runs/common-source-cascode-candidate-preview/run-20260727T-candidate-preview-live.json`；新 batch 记录是 `artifacts/runs/common-source-cascode-candidate-preview/run-20260904T013111Z.json`。
+
+| 项目 | 旧顺序路径 | Bridge 0.8 scoped batch |
+|---|---:|---:|
+| simulation action | `70.566828 s` | `40.450857 s` |
+| 完整 run | `71.628403 s` | `42.814626 s` |
+| 最大并发 | 1 | 4 |
+| guard 安装 | 每候选一次 | 1 次 |
+| simulator 实例 | 每候选一个 | 1 个 |
+| 远端 inventory | 每候选一次 | 1 次 |
+| 每候选 manifest | 8 项 | 8 项 |
+
+simulation action 减少 `42.677%`（`1.745×`），完整 run 减少 `40.227%`（`1.673×`）。新旧 893 个 flat metric 的最大绝对/相对差均为 0，10 个 deck SHA-256 无一变化。新 run 的全部候选 analysis 完整，raw simulator 值继续是 `eda_result`，跨候选比较与 batch 配置是 `software_inference`。
+
+真实资源审计得到远端 `spectre=0`、`si=0`、VDA-managed Maestro session `=0`；远端保留一个既有交互 Virtuoso，不是本任务创建。`bridge stop` 后本地 65347 listener、匹配 tunnel `ssh.exe` 和 VDA bridge worker 均为 0。远端只新增唯一 `/data/xum/virtuoso_bridge_smoke/vda_netlist_preview_common-source-cascode-candidate-preview_*` 证据根，没有 OA、`si` 或 Maestro 访问。
+
+该 Gate 只证明无 OA preview 的调用更少、耗时更短且结果/证据不变。它不把 preview 数值升级为 schematic 真值，也不并行化需要逐候选 OA CAS、checkpoint 或人工 ADE 状态的路径。
+
+## 下一步
+
+继续 L5B 主线，而不是为了验证新版本重复扫已知 fixture：对用户给定的大致拓扑执行 read-only onboarding，生成最小 DC/AC 任务；DC 合格后才做有界参数和局部 topology refinement；最终 winner 再做任务需要的质量/PVT。只有该真实模块遇到 Bridge 0.8 新 API 能解决的具体缺口时，才新增对应 VDA operation、证据契约与 live Gate。

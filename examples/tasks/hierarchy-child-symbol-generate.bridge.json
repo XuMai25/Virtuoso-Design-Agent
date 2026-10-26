@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "id": "hierarchy-child-symbol-generate-live",
+  "operation": "schematic.symbol.generate",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_l5b_hier_child_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "symbol_generation": {
+    "schema_version": 1,
+    "expected_schematic_topology_sha256": "a0bb019a7c81a0d4422e90dca0b5ade814d265cd41544ef245104cb3c7856a41",
+    "expected_pins": [
+      {"name": "IN", "direction": "input", "num_bits": 1},
+      {"name": "OUT", "direction": "output", "num_bits": 1},
+      {"name": "VDD", "direction": "inputOutput", "num_bits": 1},
+      {"name": "VSS", "direction": "inputOutput", "num_bits": 1}
+    ],
+    "pin_sort": "geometric",
+    "output_view": "symbol"
+  },
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 600
+  }
+}

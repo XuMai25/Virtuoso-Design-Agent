@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "id": "common-source-quality-tune-demo",
+  "operation": "design.close_loop",
+  "circuit": "common_source",
+  "target": {
+    "library": "vda_demo",
+    "cell": "vda_cs_quality_tune",
+    "view": "schematic"
+  },
+  "analysis": "quality",
+  "ac_sweep": {
+    "start_hz": 10000.0,
+    "stop_hz": 100000000000.0,
+    "points_per_decade": 20
+  },
+  "linearity_sweep": {
+    "frequency_hz": 100000000.0,
+    "amplitudes_v": [0.005, 0.05, 0.15],
+    "settling_cycles": 4,
+    "measurement_cycles": 8,
+    "points_per_cycle": 128,
+    "max_harmonic": 5,
+    "compression_db": 1.0
+  },
+  "noise_sweep": {
+    "start_hz": 1000.0,
+    "stop_hz": 10000000000.0,
+    "points_per_decade": 20
+  },
+  "parameters": {
+    "vdd_v": 0.9
+  },
+  "parameter_space": {
+    "bias_v": [0.32, 0.35],
+    "load_ff": [1.0, 4.0]
+  },
+  "constraints": [
+    {"metric": "saturation_margin_v", "relation": ">=", "value": 0.05},
+    {"metric": "low_frequency_gain_v_per_v", "relation": ">=", "value": 2.5},
+    {"metric": "bandwidth_3db_hz", "relation": ">=", "value": 1000000000.0},
+    {"metric": "input_1db_compression_v_peak", "relation": ">=", "value": 0.1},
+    {"metric": "max_thd_percent", "relation": "<=", "value": 2.0},
+    {
+      "metric": "integrated_input_referred_noise_uv_rms",
+      "relation": "<=",
+      "value": 2000.0
+    }
+  ],
+  "objective": {
+    "metric": "dc_supply_power_uw",
+    "goal": "minimize"
+  },
+  "create_if_missing": true,
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": true,
+    "allowed_library": "vda_demo",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 4, "timeout_seconds": 600}
+}

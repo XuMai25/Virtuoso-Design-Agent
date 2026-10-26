@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-current-mirror-psrr-length-tune-bridge",
+  "operation": "design.tune",
+  "circuit": "differential_pair",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_diffpair_active_gate6_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis": "psrr",
+  "ac_sweep": {
+    "start_hz": 1000.0,
+    "stop_hz": 1000000000000.0,
+    "evaluation_stop_hz": 100000000.0,
+    "points_per_decade": 20,
+    "reference_points": 5,
+    "max_reference_variation_db": 0.5
+  },
+  "parameters": {
+    "tail_bias_v": 0.32,
+    "common_mode_v": 0.55,
+    "vdd_v": 0.9,
+    "load_ff": 0.5
+  },
+  "parameter_space": {
+    "length_um": [0.03, 0.06],
+    "pmos_load_length_um": [0.03, 0.06],
+    "tail_length_um": [0.03, 0.06]
+  },
+  "constraints": [
+    {
+      "metric": "all_signal_devices_saturation_region",
+      "relation": ">=",
+      "value": 1.0
+    },
+    {
+      "metric": "minimum_output_swing_margin_v",
+      "relation": ">=",
+      "value": 0.1
+    },
+    {
+      "metric": "differential_low_frequency_gain_v_per_v",
+      "relation": ">=",
+      "value": 3.0
+    },
+    {
+      "metric": "differential_bandwidth_3db_hz",
+      "relation": ">=",
+      "value": 100000000.0
+    },
+    {
+      "metric": "dc_supply_power_uw",
+      "relation": "<=",
+      "value": 20.0
+    },
+    {
+      "metric": "minimum_psrr_db_in_band",
+      "relation": ">=",
+      "value": 20.0
+    }
+  ],
+  "objective": {
+    "metric": "minimum_psrr_db_in_band",
+    "goal": "maximize"
+  },
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 8, "timeout_seconds": 1200}
+}

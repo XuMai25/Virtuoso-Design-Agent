@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-gate8-theory-seed-validation",
+  "expected_task_id": "differential-pair-current-mirror-theory-seed-gate8-bridge",
+  "expected_task_sha256": "b7be222b54f611f8a1a6dd22dee9f91f7a9190617b7fb8fe775319c708110096",
+  "expected_run_sha256": "7be715fe80c299ae6a250f50582e30d6ae31fe3acfab3bf539e77ab22e6d517f",
+  "minimum_eda_feasible_fraction": 0.5,
+  "require_recommendation_agreement": false,
+  "metric_rules": [
+    {
+      "predicted_metric": "estimated_power_w",
+      "measured_metric": "dc_supply_power_uw",
+      "predicted_scale": 1000000.0,
+      "maximum_absolute_error_percent": 25.0
+    },
+    {
+      "predicted_metric": "estimated_differential_gain_v_per_v",
+      "measured_metric": "differential_low_frequency_gain_v_per_v",
+      "maximum_absolute_error_percent": 25.0
+    },
+    {
+      "predicted_metric": "estimated_bandwidth_hz",
+      "measured_metric": "differential_bandwidth_3db_hz",
+      "maximum_absolute_error_percent": 25.0
+    },
+    {
+      "predicted_metric": "estimated_gain_bandwidth_product_hz",
+      "measured_metric": "differential_gain_bandwidth_product_hz",
+      "maximum_absolute_error_percent": 25.0
+    }
+  ]
+}

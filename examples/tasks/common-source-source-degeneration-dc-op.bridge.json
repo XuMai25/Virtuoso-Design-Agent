@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "id": "common-source-source-degeneration-dc-op",
+  "operation": "simulation.run",
+  "circuit": "common_source",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_param_surface_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "parameters": {
+    "source_resistance_ohm": 1000.0,
+    "bias_v": 0.45,
+    "vdd_v": 0.9
+  },
+  "constraints": [
+    {"metric": "saturation_margin_v", "relation": ">=", "value": 0.05},
+    {"metric": "output_swing_margin_v", "relation": ">=", "value": 0.1},
+    {"metric": "current_mismatch_percent", "relation": "<=", "value": 1.0},
+    {"metric": "source_current_mismatch_percent", "relation": "<=", "value": 1.0}
+  ],
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 600
+  }
+}

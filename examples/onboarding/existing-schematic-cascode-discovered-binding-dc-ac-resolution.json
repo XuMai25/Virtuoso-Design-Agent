@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "draft_sha256": "0751a879aa2138b7dba879433083f349886e7e10532f8f2bbb0836991329cf5a",
+  "task_id": "onboarding-cascode-discovered-binding-dc-ac",
+  "context_id": "onboarding-cascode-discovered-binding-context",
+  "operation": "simulation.run",
+  "roles": [
+    {"role": "signal.input", "nets": ["IN"]},
+    {"role": "signal.output", "nets": ["OUT"]},
+    {"role": "supply.positive", "nets": ["VDD"]},
+    {"role": "supply.return", "nets": ["VSS"]},
+    {"role": "bias.cascode", "nets": ["VCAS"]},
+    {"role": "device.gain", "instances": ["MN0"]},
+    {"role": "device.cascode", "instances": ["MNCAS"]},
+    {"role": "load.resistive", "instances": ["RD0"]}
+  ],
+  "instance_parameter_permissions": [
+    {
+      "instance": "MNCAS",
+      "parameters": ["Wfg"],
+      "modes": ["fixed"]
+    }
+  ],
+  "required_analyses": ["dc", "ac"],
+  "metrics": [
+    "output_dc_v",
+    "low_frequency_gain_v_per_v",
+    "bandwidth_3db_hz",
+    "gain_bandwidth_product_hz"
+  ],
+  "generic_simulation": {
+    "schema_version": 1,
+    "sources": [
+      {
+        "name": "VDD_SRC",
+        "kind": "voltage",
+        "positive_node": "VDD",
+        "negative_node": "0",
+        "dc_value": 0.9
+      },
+      {
+        "name": "VSS_SRC",
+        "kind": "voltage",
+        "positive_node": "VSS",
+        "negative_node": "0",
+        "dc_value": 0.0
+      },
+      {
+        "name": "VCAS_SRC",
+        "kind": "voltage",
+        "positive_node": "VCAS",
+        "negative_node": "0",
+        "dc_value": 0.545
+      },
+      {
+        "name": "VIN_SRC",
+        "kind": "voltage",
+        "positive_node": "IN",
+        "negative_node": "0",
+        "dc_value": 0.35,
+        "ac_magnitude": 1.0,
+        "ac_phase_deg": 0.0
+      }
+    ],
+    "loads": [
+      {
+        "name": "CL0",
+        "kind": "capacitor",
+        "positive_node": "OUT",
+        "negative_node": "0",
+        "value": 2e-15
+      }
+    ],
+    "dc_voltage_metrics": [
+      {
+        "metric": "output_dc_v",
+        "expression": {"positive_node": "OUT", "negative_node": "0"}
+      }
+    ],
+    "transfer": {
+      "input": {"positive_node": "IN", "negative_node": "0"},
+      "output": {"positive_node": "OUT", "negative_node": "0"}
+    },
+    "netlist_parameter_bindings": []
+  },
+  "analysis_stages": [
+    {
+      "id": "dc-operating-point",
+      "analysis": "dc",
+      "constraint_metrics": ["output_dc_v"]
+    },
+    {
+      "id": "ac-response",
+      "analysis": "ac",
+      "constraint_metrics": [
+        "low_frequency_gain_v_per_v",
+        "bandwidth_3db_hz"
+      ]
+    }
+  ],
+  "analysis_stage_execution": "shared_netlist",
+  "ac_sweep": {
+    "start_hz": 1000.0,
+    "stop_hz": 1000000000000.0,
+    "points_per_decade": 30,
+    "reference_points": 5,
+    "max_reference_variation_db": 0.5
+  },
+  "constraints": [
+    {"metric": "output_dc_v", "relation": ">=", "value": 0.1},
+    {"metric": "output_dc_v", "relation": "<=", "value": 0.8},
+    {
+      "metric": "low_frequency_gain_v_per_v",
+      "relation": ">=",
+      "value": 3.0
+    },
+    {"metric": "bandwidth_3db_hz", "relation": ">=", "value": 1000000000.0}
+  ],
+  "limits": {"max_iterations": 1, "timeout_seconds": 600},
+  "evidence_source": "user_input"
+}

@@ -1,0 +1,36 @@
+{
+  "evidence_source": "software_inference",
+  "note": "Hand-authored independent offline fixture; NOT OA or Bridge output.",
+  "schematic": {
+    "instances": [
+      {"name": "M0", "lib": "LOCAL_EXAMPLE", "cell": "not_a_pdk_nmos", "view": "symbol", "xy": [-4, 1], "orient": "R0", "terms": {"D": "OUTP", "G": "INP", "S": "TAIL", "B": "VSS"}, "params": {"w": "2e-6", "l": "1.8e-7"}},
+      {"name": "M1", "lib": "LOCAL_EXAMPLE", "cell": "not_a_pdk_nmos", "view": "symbol", "xy": [4, 1], "orient": "MY", "terms": {"D": "OUTN", "G": "INN", "S": "TAIL", "B": "VSS"}, "params": {"w": "2u", "l": "180n"}},
+      {"name": "RTAIL", "lib": "LOCAL_EXAMPLE", "cell": "not_a_pdk_resistor", "view": "symbol", "xy": [0, -2], "orient": "R90", "terms": {"PLUS": "TAIL", "MINUS": "VSS"}, "params": {"r": "10000"}}
+    ],
+    "nets": {"INP": {}, "INN": {}, "OUTP": {}, "OUTN": {}, "TAIL": {}, "VSS": {}},
+    "pins": {
+      "INP": {"direction": "input", "net": "INP", "numBits": 1},
+      "INN": {"direction": "input", "net": "INN", "numBits": 1},
+      "OUTP": {"direction": "output", "net": "OUTP", "numBits": 1},
+      "OUTN": {"direction": "output", "net": "OUTN", "numBits": 1},
+      "VSS": {"direction": "inputOutput", "net": "VSS", "numBits": 1}
+    }
+  },
+  "wire_records": [
+    {"layer": "wire", "purpose": "drawing", "net": "INP", "points": [[-6, 1], [-4, 1]]},
+    {"layer": "wire", "purpose": "drawing", "net": "INN", "points": [[6, 1], [4, 1]]},
+    {"layer": "wire", "purpose": "drawing", "net": "OUTP", "points": [[-3, 2], [-3, 4]]},
+    {"layer": "wire", "purpose": "drawing", "net": "OUTN", "points": [[3, 2], [3, 4]]},
+    {"layer": "wire", "purpose": "drawing", "net": "TAIL", "points": [[-3, 0], [3, 0]]},
+    {"layer": "wire", "purpose": "drawing", "net": "TAIL", "points": [[0, 0], [0, -1]]},
+    {"layer": "wire", "purpose": "drawing", "net": "VSS", "points": [[0, -3], [0, -4]]},
+    {"layer": "wire", "purpose": "drawing", "net": "VSS", "points": [[-3, 1], [-2.5, 1]]},
+    {"layer": "wire", "purpose": "drawing", "net": "VSS", "points": [[3, 1], [2.5, 1]]}
+  ],
+  "wire_polylines": [
+    [[-6, 1], [-4, 1]], [[6, 1], [4, 1]],
+    [[-3, 2], [-3, 4]], [[3, 2], [3, 4]],
+    [[-3, 0], [3, 0]], [[0, 0], [0, -1]], [[0, -3], [0, -4]],
+    [[-3, 1], [-2.5, 1]], [[3, 1], [2.5, 1]]
+  ]
+}

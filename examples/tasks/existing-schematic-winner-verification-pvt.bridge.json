@@ -1,0 +1,292 @@
+{
+  "schema_version": 1,
+  "id": "existing-schematic-winner-verification-pvt-live",
+  "operation": "design.tune",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_l5b_staged_gate_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis_stage_execution": "shared_netlist",
+  "analysis_stages": [
+    {
+      "id": "nominal-bias",
+      "analysis": "dc",
+      "constraint_metrics": ["output_dc_v"]
+    },
+    {
+      "id": "nominal-ac",
+      "analysis": "ac",
+      "constraint_metrics": [
+        "low_frequency_gain_v_per_v",
+        "bandwidth_3db_hz"
+      ]
+    }
+  ],
+  "ac_sweep": {
+    "start_hz": 1000.0,
+    "stop_hz": 1000000000000.0,
+    "points_per_decade": 30,
+    "reference_points": 5,
+    "max_reference_variation_db": 0.5
+  },
+  "design_context": {
+    "schema_version": 1,
+    "id": "staged-common-source-winner-verification-live",
+    "topology_origin": "existing_oa",
+    "expected_topology_sha256": "a0bb019a7c81a0d4422e90dca0b5ade814d265cd41544ef245104cb3c7856a41",
+    "roles": [
+      {"role": "signal.input", "nets": ["IN"]},
+      {"role": "signal.output", "nets": ["OUT"]},
+      {"role": "supply.positive", "nets": ["VDD"]},
+      {"role": "supply.return", "nets": ["VSS"]},
+      {"role": "device.gain", "instances": ["MN0"]},
+      {"role": "load.resistive", "instances": ["RD0"]},
+      {
+        "role": "device.input_gate",
+        "terminals": [
+          {"instance": "MN0", "terminal": "G", "net": "IN"}
+        ]
+      }
+    ],
+    "instance_parameter_permissions": [
+      {
+        "instance": "MN0",
+        "parameters": ["Wfg", "l", "nf", "simM"],
+        "modes": ["fixed", "search"]
+      },
+      {
+        "instance": "RD0",
+        "parameters": ["r"],
+        "modes": ["fixed", "search"]
+      }
+    ],
+    "frozen_instances": ["MN0", "RD0"],
+    "frozen_nets": ["IN", "OUT", "VDD", "VSS"],
+    "frozen_pins": ["IN", "OUT", "VDD", "VSS"],
+    "required_analyses": ["dc", "ac"],
+    "optional_analyses": ["transient", "noise"],
+    "metrics": [
+      "output_dc_v",
+      "supply_current_a",
+      "mn0_ids_a",
+      "mn0_vgs_v",
+      "mn0_vds_v",
+      "mn0_vdsat_v",
+      "mn0_gm_s",
+      "mn0_gds_s",
+      "low_frequency_gain_v_per_v",
+      "low_frequency_gain_db",
+      "bandwidth_3db_hz",
+      "gain_bandwidth_product_hz",
+      "unity_gain_frequency_hz",
+      "max_thd_percent",
+      "small_signal_gain_v_per_v",
+      "small_signal_supply_power_uw",
+      "large_signal_supply_power_uw",
+      "integrated_output_noise_uv_rms",
+      "integrated_input_referred_noise_uv_rms"
+    ]
+  },
+  "generic_simulation": {
+    "schema_version": 1,
+    "sources": [
+      {
+        "name": "VDD_SRC",
+        "kind": "voltage",
+        "positive_node": "VDD",
+        "negative_node": "0",
+        "dc_value": 0.9
+      },
+      {
+        "name": "VSS_SRC",
+        "kind": "voltage",
+        "positive_node": "VSS",
+        "negative_node": "0",
+        "dc_value": 0.0
+      },
+      {
+        "name": "VIN_SRC",
+        "kind": "voltage",
+        "positive_node": "IN",
+        "negative_node": "0",
+        "dc_value": 0.35,
+        "ac_magnitude": 1.0,
+        "ac_phase_deg": 0.0
+      }
+    ],
+    "loads": [
+      {
+        "name": "CL0",
+        "kind": "capacitor",
+        "positive_node": "OUT",
+        "negative_node": "0",
+        "value": 2e-15
+      }
+    ],
+    "dc_voltage_metrics": [
+      {
+        "metric": "output_dc_v",
+        "expression": {"positive_node": "OUT", "negative_node": "0"}
+      }
+    ],
+    "dc_current_metrics": [
+      {"metric": "supply_current_a", "source": "VDD_SRC"}
+    ],
+    "operating_point_metrics": [
+      {"metric": "mn0_ids_a", "instance": "MN0", "quantity": "ids"},
+      {"metric": "mn0_vgs_v", "instance": "MN0", "quantity": "vgs"},
+      {"metric": "mn0_vds_v", "instance": "MN0", "quantity": "vds"},
+      {"metric": "mn0_vdsat_v", "instance": "MN0", "quantity": "vdsat"},
+      {"metric": "mn0_gm_s", "instance": "MN0", "quantity": "gm"},
+      {"metric": "mn0_gds_s", "instance": "MN0", "quantity": "gds"}
+    ],
+    "transfer": {
+      "input": {"positive_node": "IN", "negative_node": "0"},
+      "output": {"positive_node": "OUT", "negative_node": "0"}
+    },
+    "dynamic_analysis": {
+      "stimulus_source": "VIN_SRC",
+      "power_source": "VDD_SRC"
+    },
+    "netlist_parameter_bindings": [
+      {"instance": "MN0", "oa_parameter": "Wfg", "netlist_parameter": "w"},
+      {"instance": "MN0", "oa_parameter": "l", "netlist_parameter": "l"},
+      {"instance": "MN0", "oa_parameter": "nf", "netlist_parameter": "nf"},
+      {"instance": "MN0", "oa_parameter": "simM", "netlist_parameter": "multi"},
+      {"instance": "RD0", "oa_parameter": "r", "netlist_parameter": "r"}
+    ],
+    "operating_condition_supply_source": "VDD_SRC"
+  },
+  "candidate_set": {
+    "source": {
+      "generator": "user_declared",
+      "id": "winner-verification-two-point",
+      "evidence_source": "user_input"
+    },
+    "candidates": [
+      {
+        "id": "compact-load",
+        "instance_parameter_updates": [
+          {"instance": "MN0", "parameters": {"Wfg": "1u"}},
+          {"instance": "RD0", "parameters": {"r": "5K"}}
+        ]
+      },
+      {
+        "id": "gain-load",
+        "instance_parameter_updates": [
+          {"instance": "MN0", "parameters": {"Wfg": "1.1u"}},
+          {"instance": "RD0", "parameters": {"r": "18.5K"}}
+        ]
+      }
+    ]
+  },
+  "constraints": [
+    {"metric": "output_dc_v", "relation": ">=", "value": 0.05},
+    {"metric": "output_dc_v", "relation": "<=", "value": 0.85},
+    {
+      "metric": "low_frequency_gain_v_per_v",
+      "relation": ">=",
+      "value": 1.5
+    },
+    {
+      "metric": "bandwidth_3db_hz",
+      "relation": ">=",
+      "value": 1000000000.0
+    }
+  ],
+  "objective": {
+    "metric": "gain_bandwidth_product_hz",
+    "goal": "maximize"
+  },
+  "winner_verification": {
+    "analysis_stages": [
+      {
+        "id": "robust-bias",
+        "analysis": "dc",
+        "constraint_metrics": ["output_dc_v"]
+      },
+      {
+        "id": "robust-ac",
+        "analysis": "ac",
+        "constraint_metrics": [
+          "low_frequency_gain_v_per_v",
+          "bandwidth_3db_hz"
+        ]
+      },
+      {
+        "id": "robust-linearity",
+        "analysis": "transient",
+        "constraint_metrics": ["max_thd_percent"]
+      },
+      {
+        "id": "robust-noise",
+        "analysis": "noise",
+        "constraint_metrics": []
+      }
+    ],
+    "constraints": [
+      {"metric": "output_dc_v", "relation": ">=", "value": 0.02},
+      {"metric": "output_dc_v", "relation": "<=", "value": 0.88},
+      {
+        "metric": "low_frequency_gain_v_per_v",
+        "relation": ">=",
+        "value": 1.0
+      },
+      {
+        "metric": "bandwidth_3db_hz",
+        "relation": ">=",
+        "value": 500000000.0
+      },
+      {"metric": "max_thd_percent", "relation": "<=", "value": 20.0}
+    ],
+    "operating_conditions": [
+      {
+        "name": "tt_27c_0p90v",
+        "process_corner": "tt",
+        "temperature_c": 27.0,
+        "vdd_v": 0.9
+      },
+      {
+        "name": "ss_125c_0p81v",
+        "process_corner": "ss",
+        "temperature_c": 125.0,
+        "vdd_v": 0.81
+      }
+    ],
+    "ac_sweep": {
+      "start_hz": 1000.0,
+      "stop_hz": 1000000000000.0,
+      "points_per_decade": 30,
+      "reference_points": 5,
+      "max_reference_variation_db": 0.5
+    },
+    "linearity_sweep": {
+      "frequency_hz": 1000000.0,
+      "amplitudes_v": [0.001, 0.005, 0.01],
+      "settling_cycles": 2,
+      "measurement_cycles": 4,
+      "points_per_cycle": 64,
+      "max_harmonic": 5,
+      "compression_db": 1.0
+    },
+    "noise_sweep": {
+      "start_hz": 1000.0,
+      "stop_hz": 1000000000.0,
+      "points_per_decade": 10
+    }
+  },
+  "limits": {
+    "max_iterations": 2,
+    "timeout_seconds": 600
+  },
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  }
+}

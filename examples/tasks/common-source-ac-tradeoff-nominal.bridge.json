@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "id": "common-source-ac-tradeoff-nominal",
+  "operation": "simulation.run",
+  "circuit": "common_source",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_cs_ac_tradeoff_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis": "ac",
+  "ac_sweep": {
+    "start_hz": 1000.0,
+    "stop_hz": 1000000000000.0,
+    "points_per_decade": 30,
+    "reference_points": 5,
+    "max_reference_variation_db": 0.5
+  },
+  "parameters": {
+    "device_width_um": 0.5,
+    "length_um": 0.03,
+    "load_resistance_ohm": 20000.0,
+    "bias_v": 0.35,
+    "vdd_v": 0.9,
+    "load_ff": 1.0
+  },
+  "constraints": [
+    {"metric": "saturation_region", "relation": ">=", "value": 1.0},
+    {"metric": "output_swing_margin_v", "relation": ">=", "value": 0.1},
+    {"metric": "low_frequency_gain_v_per_v", "relation": ">=", "value": 1.0},
+    {"metric": "bandwidth_3db_hz", "relation": ">=", "value": 1000000000.0}
+  ],
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}

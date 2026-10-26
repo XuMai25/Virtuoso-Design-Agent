@@ -24,6 +24,8 @@ def authorize_execution(task: TaskSpec, plan: ExecutionPlan, token: str) -> None
             raise SafetyViolation(
                 "task includes remote OA write but allow_remote_write is false"
             )
+        if task.target is None:
+            raise SafetyViolation("remote OA write requires an explicit target")
         if not policy.allowed_library:
             raise SafetyViolation("remote OA write requires allowed_library")
         if task.target.library != policy.allowed_library:

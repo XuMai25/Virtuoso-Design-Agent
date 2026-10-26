@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-active-degenerated-restored-dc-bridge",
+  "operation": "simulation.run",
+  "circuit": "differential_pair",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_diffpair_active_deg_generic_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis": "dc",
+  "parameters": {"tail_bias_v": 0.32, "common_mode_v": 0.55, "vdd_v": 0.9},
+  "constraints": [
+    {"metric": "tail_device_saturation_region", "relation": ">=", "value": 1.0},
+    {"metric": "all_signal_devices_saturation_region", "relation": ">=", "value": 1.0},
+    {"metric": "max_load_current_mismatch_percent", "relation": "<=", "value": 1.0},
+    {"metric": "minimum_output_swing_margin_v", "relation": ">=", "value": 0.0}
+  ],
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 900}
+}

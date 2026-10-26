@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "id": "mechanics-only-not-tsmc-measurements",
+  "source": "synthetic_example",
+  "pdk_profile": "nics4304_tsmc28",
+  "process_corner": "top_tt",
+  "temperature_c": 27.0,
+  "characterized_width_um": 1.0,
+  "model_parameters_by_polarity": {},
+  "raw_data_evidence_source": "user_input",
+  "normalized_point_evidence_source": "user_input",
+  "points": [
+    {
+      "id": "synthetic-efficient", "model": "nch_lvt_mac", "polarity": "nmos",
+      "length_um": 0.03, "vgs_magnitude_v": 0.3, "vds_magnitude_v": 0.45,
+      "vsb_magnitude_v": 0.0, "vdsat_magnitude_v": 0.1,
+      "drain_current_density_a_per_um": 0.00001, "gm_over_id_per_v": 20.0, "gds_over_id_per_v": 0.1
+    },
+    {
+      "id": "synthetic-fast", "model": "nch_lvt_mac", "polarity": "nmos",
+      "length_um": 0.03, "vgs_magnitude_v": 0.5, "vds_magnitude_v": 0.45,
+      "vsb_magnitude_v": 0.0, "vdsat_magnitude_v": 0.1,
+      "drain_current_density_a_per_um": 0.00003, "gm_over_id_per_v": 10.0, "gds_over_id_per_v": 0.1
+    }
+  ]
+}

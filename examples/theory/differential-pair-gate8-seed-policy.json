@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-gate8-theory-seed",
+  "expected_theory_request_id": "differential-pair-gate8-tsmc28-theory",
+  "expected_theory_request_sha256": "8f730057225fd0a1556265f4df2105d0265b3766d442b5bce743ed806fd9147b",
+  "maximum_candidates": 6,
+  "ranked_candidate_count": 2,
+  "width_decimal_places": 6,
+  "width_grid_um": 0.005,
+  "selection_strategy": "ranked_then_log_maximin",
+  "parameter_mapping": {
+    "input_width": "input_width_um",
+    "input_length": "length_um",
+    "load_width": "pmos_load_width_um",
+    "load_length": "pmos_load_length_um",
+    "tail_width": "tail_width_um",
+    "tail_length": "tail_length_um"
+  }
+}

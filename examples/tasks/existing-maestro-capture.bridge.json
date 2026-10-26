@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "existing-maestro-capture",
+  "operation": "ade.capture",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_manual_ade_handoff_001",
+    "view": "maestro"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "ade_capture": {
+    "backend": "maestro",
+    "require_results": true,
+    "require_saved_setup": true,
+    "require_structured_outputs": false
+  },
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 600
+  }
+}

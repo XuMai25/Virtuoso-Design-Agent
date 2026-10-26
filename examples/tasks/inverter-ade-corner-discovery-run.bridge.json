@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "id": "inverter-ade-corner-discovery-run",
+  "operation": "ade.run",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_ade_sweep_inv_001",
+    "view": "maestro"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "ade_run": {
+    "backend": "maestro",
+    "require_structured_outputs": true,
+    "require_artifact_manifest": true,
+    "require_simulator_input_consistency": false
+  },
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 600
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "id": "common-source-cascode-forward",
+  "operation": "schematic.transform",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_cs_cascode_gate_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "topology_delta": {
+    "direction": "forward",
+    "expected_output_placement_sha256": "00af355e590acefe3857987692020320110f693cabff0f724c1f0b11a00774ee",
+    "contract": {
+      "schema_version": 1,
+      "id": "common-source-add-cascode-v1",
+      "expected_before_sha256": "a0bb019a7c81a0d4422e90dca0b5ade814d265cd41544ef245104cb3c7856a41",
+      "expected_after_sha256": "2e27d1c68012bc1e7adc0da936a648febde4b685cfa1391512a2d401fb291a51",
+      "operations": [
+        {"operation": "add_net", "net": {"name": "NCAS", "attributes": {"isGlobal": false, "numBits": 1, "sigType": "signal"}}},
+        {"operation": "add_net", "net": {"name": "VCAS", "attributes": {"isGlobal": false, "numBits": 1, "sigType": "signal"}}},
+        {"operation": "reconnect_terminal", "instance": "MN0", "terminal": "D", "expected_net": "OUT", "net": "NCAS"},
+        {
+          "operation": "add_instance",
+          "instance": {
+            "name": "MNCAS",
+            "master": {"library": "tsmcN28", "cell": "nch_lvt_mac", "view": "symbol"},
+            "terminals": {"B": "VSS", "D": "OUT", "G": "VCAS", "S": "NCAS"},
+            "attributes": {"numInst": 1, "orient": "R0", "xy": [0.0, 0.65]}
+          }
+        },
+        {
+          "operation": "add_pin",
+          "pin": {
+            "name": "VCAS",
+            "net": "VCAS",
+            "direction": "input",
+            "attributes": {
+              "numBits": 1,
+              "master": {"library": "basic", "cell": "ipin", "view": "symbol"},
+              "xy": [-1.4, 0.65],
+              "orient": "R0"
+            }
+          }
+        }
+      ],
+      "inverse_operations": [
+        {
+          "operation": "remove_pin",
+          "expected": {
+            "name": "VCAS",
+            "net": "VCAS",
+            "direction": "input",
+            "attributes": {
+              "numBits": 1,
+              "master": {"library": "basic", "cell": "ipin", "view": "symbol"},
+              "xy": [-1.4, 0.65],
+              "orient": "R0"
+            }
+          }
+        },
+        {
+          "operation": "remove_instance",
+          "expected": {
+            "name": "MNCAS",
+            "master": {"library": "tsmcN28", "cell": "nch_lvt_mac", "view": "symbol"},
+            "terminals": {"B": "VSS", "D": "OUT", "G": "VCAS", "S": "NCAS"},
+            "attributes": {"numInst": 1, "orient": "R0", "xy": [0.0, 0.65]}
+          }
+        },
+        {"operation": "reconnect_terminal", "instance": "MN0", "terminal": "D", "expected_net": "NCAS", "net": "OUT"},
+        {"operation": "remove_net", "expected": {"name": "VCAS", "attributes": {"isGlobal": false, "numBits": 1, "sigType": "signal"}}},
+        {"operation": "remove_net", "expected": {"name": "NCAS", "attributes": {"isGlobal": false, "numBits": 1, "sigType": "signal"}}}
+      ],
+      "master_parameter_migrations": []
+    }
+  },
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 600}
+}

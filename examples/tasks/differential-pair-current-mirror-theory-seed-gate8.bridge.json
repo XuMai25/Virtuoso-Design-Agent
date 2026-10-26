@@ -1,0 +1,347 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-current-mirror-theory-seed-gate8-bridge",
+  "operation": "design.tune",
+  "circuit": "differential_pair",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_diffpair_active_gate6_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis": "ac",
+  "ac_sweep": {
+    "start_hz": 1000.0,
+    "stop_hz": 1000000000000.0,
+    "points_per_decade": 20,
+    "reference_points": 5,
+    "max_reference_variation_db": 0.5
+  },
+  "parameters": {
+    "tail_bias_v": 0.32,
+    "common_mode_v": 0.55,
+    "vdd_v": 0.9,
+    "load_ff": 0.5
+  },
+  "theory_seed": {
+    "source": {
+      "generator": "vda.theory",
+      "policy_id": "differential-pair-gate8-theory-seed",
+      "policy_sha256": "5d49335c4ac4d454a6a7804ccb9d290040a0902c2cf9573b0a7f25703fc12c47",
+      "theory_request_id": "differential-pair-gate8-tsmc28-theory",
+      "theory_request_sha256": "8f730057225fd0a1556265f4df2105d0265b3766d442b5bce743ed806fd9147b",
+      "theory_result_sha256": "315ed90a543fbf0afd2ddc6a461faadb9ffd0f6aff18788b2569ededbdc753d6",
+      "device_data_source": "pdk_characterization",
+      "device_data_artifact_id": "differential-pair-gate7d-multi-artifact-heldout.heldout-validation",
+      "device_data_artifact_sha256": "6495473d18b1c32da356d295f0d28d498598b7d3a8db6cad0fbe775d7581cf03",
+      "optimality_classification": "best_in_declared_discrete_characterization_domain",
+      "declared_theory_combinations": 64,
+      "evaluated_theory_combinations": 64,
+      "theory_domain_exhausted": true,
+      "selection_strategy": "ranked_then_log_maximin",
+      "width_quantization": "nearest_grid_half_up",
+      "width_grid_um": 0.005,
+      "continuous_optimum_claim": false,
+      "global_optimum_claim": false,
+      "evidence_source": "software_inference"
+    },
+    "candidates": [
+      {
+        "id": "theory-seed-001",
+        "source_candidate_id": "in=input-02|load=load-02|tail=tail-01",
+        "parameters": {
+          "input_width_um": 1.315,
+          "pmos_load_width_um": 1.18,
+          "tail_width_um": 1.09,
+          "length_um": 0.03,
+          "pmos_load_length_um": 0.03,
+          "tail_length_um": 0.03
+        },
+        "predicted_metrics": {
+          "estimated_branch_current_a": 4.996337120199123e-6,
+          "estimated_tail_current_a": 9.992674240398246e-6,
+          "estimated_power_w": 8.993406816358422e-6,
+          "estimated_input_width_um": 1.316018773627871,
+          "estimated_load_width_um": 1.1801229120186794,
+          "estimated_tail_width_um": 1.088305584090012,
+          "estimated_output_capacitance_f": 1.714294914828706e-15,
+          "estimated_output_resistance_ohm": 35367.57531434227,
+          "estimated_differential_gain_v_per_v": 4.058005973699784,
+          "estimated_differential_gain_db": 12.166253640259718,
+          "estimated_bandwidth_hz": 2625000000.0,
+          "estimated_gain_bandwidth_product_hz": 10652265680.961935,
+          "estimated_input_headroom_v": 0.25776298446040735,
+          "estimated_input_output_headroom_v": 0.25776298446040735,
+          "estimated_input_diode_headroom_v": 0.2577629907050981,
+          "estimated_load_headroom_v": 0.2143555486676908,
+          "estimated_load_output_headroom_v": 0.21435555491238156,
+          "estimated_load_diode_headroom_v": 0.2143555486676908,
+          "estimated_tail_headroom_v": 0.20831858816197196,
+          "estimated_minimum_headroom_v": 0.20831858816197196,
+          "estimated_area_proxy_um2": 0.18241766866149334,
+          "estimated_bandwidth_asymptote_hz": 3705874163.246535,
+          "estimated_gbw_asymptote_hz": 15038459492.23413,
+          "constructed_kcl_residual_a": 0.0
+        },
+        "evidence_source": "software_inference"
+      },
+      {
+        "id": "theory-seed-002",
+        "source_candidate_id": "in=input-02|load=load-02|tail=tail-02",
+        "parameters": {
+          "input_width_um": 1.315,
+          "pmos_load_width_um": 1.18,
+          "tail_width_um": 0.605,
+          "length_um": 0.03,
+          "pmos_load_length_um": 0.03,
+          "tail_length_um": 0.03
+        },
+        "predicted_metrics": {
+          "estimated_branch_current_a": 4.996337120199123e-6,
+          "estimated_tail_current_a": 9.992674240398246e-6,
+          "estimated_power_w": 8.993406816358422e-6,
+          "estimated_input_width_um": 1.316018773627871,
+          "estimated_load_width_um": 1.1801229120186794,
+          "estimated_tail_width_um": 0.6039446877508065,
+          "estimated_output_capacitance_f": 1.714294914828706e-15,
+          "estimated_output_resistance_ohm": 35367.57531434227,
+          "estimated_differential_gain_v_per_v": 4.058005973699784,
+          "estimated_differential_gain_db": 12.166253640259718,
+          "estimated_bandwidth_hz": 2625000000.0,
+          "estimated_gain_bandwidth_product_hz": 10652265680.961935,
+          "estimated_input_headroom_v": 0.25776298446040735,
+          "estimated_input_output_headroom_v": 0.25776298446040735,
+          "estimated_input_diode_headroom_v": 0.2577629907050981,
+          "estimated_load_headroom_v": 0.2143555486676908,
+          "estimated_load_output_headroom_v": 0.21435555491238156,
+          "estimated_load_diode_headroom_v": 0.2143555486676908,
+          "estimated_tail_headroom_v": 0.19933342080349437,
+          "estimated_minimum_headroom_v": 0.19933342080349437,
+          "estimated_area_proxy_um2": 0.16788684177131719,
+          "estimated_bandwidth_asymptote_hz": 3705874163.246535,
+          "estimated_gbw_asymptote_hz": 15038459492.23413,
+          "constructed_kcl_residual_a": 0.0
+        },
+        "evidence_source": "software_inference"
+      },
+      {
+        "id": "theory-seed-003",
+        "source_candidate_id": "in=input-02|load=load-02|tail=tail-03",
+        "parameters": {
+          "input_width_um": 2.205,
+          "pmos_load_width_um": 1.98,
+          "tail_width_um": 0.6,
+          "length_um": 0.03,
+          "pmos_load_length_um": 0.03,
+          "tail_length_um": 0.03
+        },
+        "predicted_metrics": {
+          "estimated_branch_current_a": 8.373834896837208e-6,
+          "estimated_tail_current_a": 0.000016747669793674416,
+          "estimated_power_w": 0.000015072902814306975,
+          "estimated_input_width_um": 2.2056405855693697,
+          "estimated_load_width_um": 1.9778798318607698,
+          "estimated_tail_width_um": 0.6,
+          "estimated_output_capacitance_f": 2.5351519299481015e-15,
+          "estimated_output_resistance_ohm": 21102.437720766276,
+          "estimated_differential_gain_v_per_v": 4.058005973699785,
+          "estimated_differential_gain_db": 12.166253640259722,
+          "estimated_bandwidth_hz": 2974976318.5318785,
+          "estimated_gain_bandwidth_product_hz": 12072471672.217758,
+          "estimated_input_headroom_v": 0.25776298446040735,
+          "estimated_input_output_headroom_v": 0.25776298446040735,
+          "estimated_input_diode_headroom_v": 0.2577629907050981,
+          "estimated_load_headroom_v": 0.2143555486676908,
+          "estimated_load_output_headroom_v": 0.21435555491238156,
+          "estimated_load_diode_headroom_v": 0.2143555486676908,
+          "estimated_tail_headroom_v": 0.1874956403786923,
+          "estimated_minimum_headroom_v": 0.1874956403786923,
+          "estimated_area_proxy_um2": 0.2690112250458083,
+          "estimated_bandwidth_asymptote_hz": 3705874163.246535,
+          "estimated_gbw_asymptote_hz": 15038459492.23413,
+          "constructed_kcl_residual_a": 0.0
+        },
+        "evidence_source": "software_inference"
+      },
+      {
+        "id": "theory-seed-004",
+        "source_candidate_id": "in=input-03|load=load-02|tail=tail-03",
+        "parameters": {
+          "input_width_um": 1.135,
+          "pmos_load_width_um": 1.98,
+          "tail_width_um": 0.6,
+          "length_um": 0.03,
+          "pmos_load_length_um": 0.03,
+          "tail_length_um": 0.03
+        },
+        "predicted_metrics": {
+          "estimated_branch_current_a": 8.373834896837208e-6,
+          "estimated_tail_current_a": 0.000016747669793674416,
+          "estimated_power_w": 0.000015072902814306975,
+          "estimated_input_width_um": 1.1342085722119735,
+          "estimated_load_width_um": 1.9778798318607698,
+          "estimated_tail_width_um": 0.6,
+          "estimated_output_capacitance_f": 2.03839612064691e-15,
+          "estimated_output_resistance_ohm": 21691.38032208971,
+          "estimated_differential_gain_v_per_v": 3.878818695437476,
+          "estimated_differential_gain_db": 11.773989603801851,
+          "estimated_bandwidth_hz": 3599518072.899535,
+          "estimated_gain_bandwidth_product_hz": 13961877995.727793,
+          "estimated_input_headroom_v": 0.25290547456851864,
+          "estimated_input_output_headroom_v": 0.25290547456851864,
+          "estimated_input_diode_headroom_v": 0.2529054808132094,
+          "estimated_load_headroom_v": 0.2143555486676908,
+          "estimated_load_output_headroom_v": 0.21435555491238156,
+          "estimated_load_diode_headroom_v": 0.2143555486676908,
+          "estimated_tail_headroom_v": 0.1874956403786923,
+          "estimated_minimum_headroom_v": 0.1874956403786923,
+          "estimated_area_proxy_um2": 0.2047253042443646,
+          "estimated_bandwidth_asymptote_hz": 4769411192.2951765,
+          "estimated_gbw_asymptote_hz": 18499681298.903275,
+          "constructed_kcl_residual_a": 0.0
+        },
+        "evidence_source": "software_inference"
+      },
+      {
+        "id": "theory-seed-005",
+        "source_candidate_id": "in=input-03|load=load-02|tail=tail-02",
+        "parameters": {
+          "input_width_um": 1.0,
+          "pmos_load_width_um": 1.745,
+          "tail_width_um": 0.89,
+          "length_um": 0.03,
+          "pmos_load_length_um": 0.03,
+          "tail_length_um": 0.03
+        },
+        "predicted_metrics": {
+          "estimated_branch_current_a": 7.382976202080945e-6,
+          "estimated_tail_current_a": 0.00001476595240416189,
+          "estimated_power_w": 0.000013289357163745701,
+          "estimated_input_width_um": 1.0,
+          "estimated_load_width_um": 1.7438413712598193,
+          "estimated_tail_width_um": 0.8924356282947751,
+          "estimated_output_capacitance_f": 1.856360865485857e-15,
+          "estimated_output_resistance_ohm": 24602.54950442427,
+          "estimated_differential_gain_v_per_v": 3.8788186954374764,
+          "estimated_differential_gain_db": 11.773989603801851,
+          "estimated_bandwidth_hz": 3484798033.030234,
+          "estimated_gain_bandwidth_product_hz": 13516899760.341415,
+          "estimated_input_headroom_v": 0.25290547456851864,
+          "estimated_input_output_headroom_v": 0.25290547456851864,
+          "estimated_input_diode_headroom_v": 0.2529054808132094,
+          "estimated_load_headroom_v": 0.2143555486676908,
+          "estimated_load_output_headroom_v": 0.21435555491238156,
+          "estimated_load_diode_headroom_v": 0.2143555486676908,
+          "estimated_tail_headroom_v": 0.19933342080349437,
+          "estimated_minimum_headroom_v": 0.19933342080349437,
+          "estimated_area_proxy_um2": 0.1914035511244324,
+          "estimated_bandwidth_asymptote_hz": 4769411192.2951765,
+          "estimated_gbw_asymptote_hz": 18499681298.903275,
+          "constructed_kcl_residual_a": 0.0
+        },
+        "evidence_source": "software_inference"
+      },
+      {
+        "id": "theory-seed-006",
+        "source_candidate_id": "in=input-02|load=load-03|tail=tail-02",
+        "parameters": {
+          "input_width_um": 2.19,
+          "pmos_load_width_um": 1.0,
+          "tail_width_um": 1.005,
+          "length_um": 0.03,
+          "pmos_load_length_um": 0.03,
+          "tail_length_um": 0.03
+        },
+        "predicted_metrics": {
+          "estimated_branch_current_a": 8.309466968752626e-6,
+          "estimated_tail_current_a": 0.000016618933937505253,
+          "estimated_power_w": 0.000014957040543754727,
+          "estimated_input_width_um": 2.1886862849005104,
+          "estimated_load_width_um": 1.0,
+          "estimated_tail_width_um": 1.0044275062085763,
+          "estimated_output_capacitance_f": 2.0225958290221345e-15,
+          "estimated_output_resistance_ohm": 22658.381400016184,
+          "estimated_differential_gain_v_per_v": 4.3237214722190425,
+          "estimated_differential_gain_db": 12.717154191405404,
+          "estimated_bandwidth_hz": 3472818940.893605,
+          "estimated_gain_bandwidth_product_hz": 15015501823.870674,
+          "estimated_input_headroom_v": 0.25776298446040735,
+          "estimated_input_output_headroom_v": 0.25776298446040735,
+          "estimated_input_diode_headroom_v": 0.2577629907050981,
+          "estimated_load_headroom_v": 0.20976245496225776,
+          "estimated_load_output_headroom_v": 0.20976246120694853,
+          "estimated_load_diode_headroom_v": 0.20976245496225776,
+          "estimated_tail_headroom_v": 0.19933342080349437,
+          "estimated_minimum_headroom_v": 0.19933342080349437,
+          "estimated_area_proxy_um2": 0.22145400228028791,
+          "estimated_bandwidth_asymptote_hz": 4613245991.427422,
+          "estimated_gbw_asymptote_hz": 19946390749.76317,
+          "constructed_kcl_residual_a": 0.0
+        },
+        "evidence_source": "software_inference"
+      }
+    ]
+  },
+  "constraints": [
+    {
+      "metric": "all_signal_devices_saturation_region",
+      "relation": ">=",
+      "value": 1.0
+    },
+    {
+      "metric": "max_load_current_mismatch_percent",
+      "relation": "<=",
+      "value": 1.0
+    },
+    {
+      "metric": "minimum_output_swing_margin_v",
+      "relation": ">=",
+      "value": 0.1
+    },
+    {
+      "metric": "dc_supply_power_uw",
+      "relation": "<=",
+      "value": 25.0
+    },
+    {
+      "metric": "differential_low_frequency_gain_v_per_v",
+      "relation": ">=",
+      "value": 3.0
+    },
+    {
+      "metric": "differential_bandwidth_3db_hz",
+      "relation": ">=",
+      "value": 2500000000.0
+    },
+    {
+      "metric": "differential_gain_bandwidth_product_hz",
+      "relation": ">=",
+      "value": 9000000000.0
+    },
+    {
+      "metric": "differential_gain_peaking_db",
+      "relation": "<=",
+      "value": 3.0
+    },
+    {
+      "metric": "low_frequency_cmrr_db",
+      "relation": ">=",
+      "value": 30.0
+    }
+  ],
+  "objective": {
+    "metric": "dc_supply_power_uw",
+    "goal": "minimize"
+  },
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {
+    "max_iterations": 6,
+    "timeout_seconds": 1200
+  }
+}

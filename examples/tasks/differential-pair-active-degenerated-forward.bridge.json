@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-active-degenerated-forward-bridge",
+  "operation": "schematic.transform",
+  "circuit": "existing_schematic",
+  "target": {"library":"vb_pdk_smoke","cell":"vda_diffpair_active_deg_generic_001","view":"schematic"},
+  "pdk_profile": "nics4304_tsmc28",
+  "topology_delta": {"direction":"forward","contract":{
+  "id": "active-load-symmetric-source-degeneration-v1",
+  "expected_before_sha256": "d3fe4b7328ea54dfbd331bfa71f467d64c18926c16739a89a419d33ccca31b93",
+  "expected_after_sha256": "68c9d2e2625188fac32ae25636f3f3be062dfaa1065eee49e746b3a8bd6a559a",
+  "operations": [
+    {"operation":"add_net","net":{"name":"NSP","attributes":{"isGlobal":false,"numBits":1,"sigType":"signal"}}},
+    {"operation":"add_net","net":{"name":"NSN","attributes":{"isGlobal":false,"numBits":1,"sigType":"signal"}}},
+    {"operation":"reconnect_terminal","instance":"MN0","terminal":"S","expected_net":"TAIL","net":"NSP"},
+    {"operation":"reconnect_terminal","instance":"MN1","terminal":"S","expected_net":"TAIL","net":"NSN"},
+    {"operation":"add_instance","instance":{"name":"RS0","master":{"library":"analogLib","cell":"res","view":"symbol"},"terminals":{"MINUS":"TAIL","PLUS":"NSP"},"attributes":{"numInst":1,"orient":"R0","xy":[-0.8,-0.8]}}},
+    {"operation":"add_instance","instance":{"name":"RS1","master":{"library":"analogLib","cell":"res","view":"symbol"},"terminals":{"MINUS":"TAIL","PLUS":"NSN"},"attributes":{"numInst":1,"orient":"R0","xy":[0.8,-0.8]}}}
+  ],
+  "inverse_operations": [
+    {"operation":"remove_instance","expected":{"name":"RS1","master":{"library":"analogLib","cell":"res","view":"symbol"},"terminals":{"MINUS":"TAIL","PLUS":"NSN"},"attributes":{"numInst":1,"orient":"R0","xy":[0.8,-0.8]}}},
+    {"operation":"remove_instance","expected":{"name":"RS0","master":{"library":"analogLib","cell":"res","view":"symbol"},"terminals":{"MINUS":"TAIL","PLUS":"NSP"},"attributes":{"numInst":1,"orient":"R0","xy":[-0.8,-0.8]}}},
+    {"operation":"reconnect_terminal","instance":"MN1","terminal":"S","expected_net":"NSN","net":"TAIL"},
+    {"operation":"reconnect_terminal","instance":"MN0","terminal":"S","expected_net":"NSP","net":"TAIL"},
+    {"operation":"remove_net","expected":{"name":"NSN","attributes":{"isGlobal":false,"numBits":1,"sigType":"signal"}}},
+    {"operation":"remove_net","expected":{"name":"NSP","attributes":{"isGlobal":false,"numBits":1,"sigType":"signal"}}}
+  ]
+}},
+  "safety": {"allow_remote_compute":false,"allow_remote_write":true,"allowed_library":"vb_pdk_smoke","required_cell_prefix":"vda_","replace_existing":false},
+  "limits": {"max_iterations":1,"timeout_seconds":600}
+}

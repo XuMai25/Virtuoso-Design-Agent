@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "task": "../tasks/pmos-loaded-common-source-onboarding-tune.bridge.json",
+  "task_sha256": "45e01678dfc780aab803c3ee4d73a7b7b59fe8d0789141f3fbcd6883b20e01f8",
+  "hypotheses": [
+    {
+      "id": "joint-change-tradeoff",
+      "observation": "原任务已声明器件尺寸、PMOS 偏置与输出负载的联合候选；这里只引用配置，不声称已经看到 OA 或性能。",
+      "mechanism": "尺寸和偏置共同影响 gm、gds、电流与节点电压，CL 影响输出极点。应同时检查增益和带宽，不能将联合变化归因于某一个参数。",
+      "evidence": [
+        {"kind": "task", "selector": "/design_context/roles"},
+        {"kind": "task", "selector": "/candidate_set/candidates/0"}
+      ],
+      "controls": [
+        {"kind": "cdf", "name": "MN0", "parameter": "Wfg"},
+        {"kind": "cdf", "name": "MP0", "parameter": "Wfg"},
+        {"kind": "source_dc", "name": "VBP_SRC"},
+        {"kind": "load", "name": "CL0"}
+      ],
+      "expectations": [
+        {"metric": "bandwidth_3db_hz", "direction": "decrease", "absolute_tolerance": 0.0}
+      ],
+      "tradeoffs": ["增加 CL 通常降低带宽，但联合改变器件与偏置后，趋势仍须同条件实测。"],
+      "falsification": "若同条件、可比较记录未出现预期带宽趋势，则这条联合假设不被支持；不得反推为 CL 的独立灵敏度。"
+    }
+  ],
+  "uncertainties": []
+}

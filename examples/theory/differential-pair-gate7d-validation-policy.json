@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "id": "differential-pair-gate7d-multi-artifact-heldout",
+  "expected_target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_diffpair_active_gate6_001",
+    "view": "schematic"
+  },
+  "expected_pdk_profile": "nics4304_tsmc28",
+  "expected_process_corner": "top_tt",
+  "expected_temperature_c": 27.0,
+  "expected_vdd_v": 0.9,
+  "expected_topology_variant": "pmos_current_mirror_load_nmos_differential_pair_with_tail_device",
+  "characterization_action": "device.characterize.validate",
+  "characterization_raw_action": "device.characterize",
+  "simulation_action": "simulation.candidate.1",
+  "operating_condition_name": "top_tt_27c_0p90v",
+  "require_exact_characterization_width": true,
+  "require_exact_model_parameters": true,
+  "require_characterization_source_instance_binding": true,
+  "thresholds": {
+    "maximum_device_dc_relative_error": 0.25,
+    "maximum_charge_derivative_normalized_error": 0.25,
+    "maximum_gain_error_db": 0.5,
+    "maximum_phase_error_deg": 5.0,
+    "maximum_bandwidth_relative_error": 0.25,
+    "maximum_gbw_relative_error": 0.25
+  }
+}

@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "id": "existing-maestro-setup-apply",
+  "operation": "ade.setup.apply",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_manual_ade_handoff_001",
+    "view": "maestro"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "ade_setup": {
+    "backend": "maestro",
+    "expected_tests": [
+      "VDA"
+    ],
+    "analyses": [
+      {
+        "test": "VDA",
+        "analysis": "tran",
+        "expected": {
+          "enabled": false,
+          "options": {
+            "anaName": "tran",
+            "trannoisemethod": "default",
+            "noiseseed": "1",
+            "binnum": "16",
+            "noiseruns": "100",
+            "dynamicParameter": "Parameter",
+            "dynParamChoice": "User-defined",
+            "dynParamSetChoice": "User-defined",
+            "dynchoice": "Parameter vector",
+            "dynamicChoice": "Vector",
+            "write": "spectre.ic",
+            "writefinal": "spectre.fc",
+            "annotate": "status",
+            "annotatedigits": "4",
+            "progress_t": "60",
+            "progress_p": "10",
+            "finalTimeOp": true,
+            "maxiters": "5",
+            "threshold": "0.0",
+            "detail": "node",
+            "sort": "name",
+            "triseDelta": "0.0",
+            "thermalmethod": "Steady State",
+            "triseLimit": "300",
+            "resTriseRpt": "No",
+            "iterNum": "2",
+            "thermalTimeStep": "0",
+            "sortMethod": "Temperature Rise",
+            "triseTemp": "0.0",
+            "saveChannelOnly": "No"
+          }
+        },
+        "enabled": true,
+        "options": {
+          "stop": "300p",
+          "maxstep": "1p"
+        }
+      }
+    ],
+    "outputs": [
+      {
+        "test": "VDA",
+        "name": "Vin",
+        "output_type": "net",
+        "signal_name": "/IN"
+      },
+      {
+        "test": "VDA",
+        "name": "Vout",
+        "output_type": "net",
+        "signal_name": "/OUT"
+      },
+      {
+        "test": "VDA",
+        "name": "VoutAvg",
+        "output_type": "point",
+        "expression": "average(VT(\"/OUT\"))",
+        "spec": {
+          "relation": "gt",
+          "value": "0.1"
+        }
+      }
+    ]
+  },
+  "safety": {
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 600
+  }
+}

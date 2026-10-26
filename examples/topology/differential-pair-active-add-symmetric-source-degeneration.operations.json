@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "operations": [
+    {
+      "operation": "add_net",
+      "net": {
+        "name": "NSP",
+        "attributes": {"isGlobal": false, "numBits": 1, "sigType": "signal"}
+      }
+    },
+    {
+      "operation": "add_net",
+      "net": {
+        "name": "NSN",
+        "attributes": {"isGlobal": false, "numBits": 1, "sigType": "signal"}
+      }
+    },
+    {
+      "operation": "reconnect_terminal",
+      "instance": "MN0",
+      "terminal": "S",
+      "expected_net": "TAIL",
+      "net": "NSP"
+    },
+    {
+      "operation": "reconnect_terminal",
+      "instance": "MN1",
+      "terminal": "S",
+      "expected_net": "TAIL",
+      "net": "NSN"
+    },
+    {
+      "operation": "add_instance",
+      "instance": {
+        "name": "RS0",
+        "master": {"library": "analogLib", "cell": "res", "view": "symbol"},
+        "terminals": {"MINUS": "TAIL", "PLUS": "NSP"},
+        "attributes": {"numInst": 1, "orient": "R0", "xy": [-0.8, -0.8]}
+      }
+    },
+    {
+      "operation": "add_instance",
+      "instance": {
+        "name": "RS1",
+        "master": {"library": "analogLib", "cell": "res", "view": "symbol"},
+        "terminals": {"MINUS": "TAIL", "PLUS": "NSN"},
+        "attributes": {"numInst": 1, "orient": "R0", "xy": [0.8, -0.8]}
+      }
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "inverter-ade-vdd-symbol-bind",
+  "operation": "parameters.apply",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_ade_sweep_inv_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "instance_parameter_updates": [
+    {
+      "instance": "VDD0",
+      "parameters": {"vdc": "VDD"}
+    },
+    {
+      "instance": "VIN0",
+      "parameters": {"v2": "VDD"}
+    }
+  ],
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 180}
+}

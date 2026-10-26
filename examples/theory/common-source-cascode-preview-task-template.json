@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "id": "common-source-cascode-candidate-preview",
+  "operation": "simulation.run",
+  "circuit": "netlist_preview",
+  "pdk_profile": "nics4304_tsmc28",
+  "analysis": "ac",
+  "ac_sweep": {
+    "start_hz": 10000.0,
+    "stop_hz": 1000000000000.0,
+    "points_per_decade": 30,
+    "reference_points": 5,
+    "max_reference_variation_db": 0.5
+  },
+  "netlist_preview": {
+    "schema_version": 1,
+    "id": "common-source-cascode-candidate-preview",
+    "temperature_c": 27.0,
+    "input_source": "VIN_SRC",
+    "supply_sources": [
+      "VDD_SRC"
+    ],
+    "voltage_sources": [
+      {
+        "name": "VDD_SRC",
+        "positive": "VDD",
+        "negative": "0",
+        "dc_v": 0.9
+      },
+      {
+        "name": "VIN_SRC",
+        "positive": "IN",
+        "negative": "0",
+        "dc_v": 0.35,
+        "ac_magnitude_v": 1.0
+      }
+    ],
+    "resistors": [
+      {
+        "name": "RLOAD",
+        "positive": "VDD",
+        "negative": "OUT",
+        "resistance_ohm": 20000.0
+      }
+    ],
+    "capacitors": [
+      {
+        "name": "CLOAD",
+        "positive": "OUT",
+        "negative": "0",
+        "capacitance_f": 2e-15
+      }
+    ],
+    "variants": [
+      {
+        "id": "common_source",
+        "output_positive": "OUT",
+        "output_negative": "0",
+        "mosfets": [
+          {
+            "name": "MN0",
+            "polarity": "nmos",
+            "drain": "OUT",
+            "gate": "IN",
+            "source": "0",
+            "bulk": "0",
+            "width_um": 1.0,
+            "length_um": 0.03
+          }
+        ]
+      },
+      {
+        "id": "cascode_template",
+        "output_positive": "OUT",
+        "output_negative": "0",
+        "mosfets": [
+          {
+            "name": "MN0",
+            "polarity": "nmos",
+            "drain": "NCAS",
+            "gate": "IN",
+            "source": "0",
+            "bulk": "0",
+            "width_um": 1.0,
+            "length_um": 0.03
+          },
+          {
+            "name": "MNCAS",
+            "polarity": "nmos",
+            "drain": "OUT",
+            "gate": "VCAS",
+            "source": "NCAS",
+            "bulk": "0",
+            "width_um": 1.0,
+            "length_um": 0.03
+          }
+        ],
+        "voltage_sources": [
+          {
+            "name": "VCAS_SRC",
+            "positive": "VCAS",
+            "negative": "0",
+            "dc_v": 0.55
+          }
+        ]
+      }
+    ]
+  },
+  "constraints": [
+    {
+      "metric": "common_source__all_mos_saturation_region",
+      "relation": ">=",
+      "value": 1.0
+    },
+    {
+      "metric": "cascode_template__all_mos_saturation_region",
+      "relation": ">=",
+      "value": 1.0
+    }
+  ],
+  "safety": {
+    "allow_remote_compute": true,
+    "allow_remote_write": false,
+    "replace_existing": false
+  },
+  "limits": {
+    "max_iterations": 1,
+    "timeout_seconds": 1200
+  }
+}

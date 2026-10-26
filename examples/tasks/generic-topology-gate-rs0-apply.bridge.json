@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "generic-topology-gate-rs0-apply",
+  "operation": "parameters.apply",
+  "circuit": "existing_schematic",
+  "target": {
+    "library": "vb_pdk_smoke",
+    "cell": "vda_generic_topology_delta_001",
+    "view": "schematic"
+  },
+  "pdk_profile": "nics4304_tsmc28",
+  "instance_parameter_updates": [
+    {"instance": "RS0", "parameters": {"r": "1K"}}
+  ],
+  "safety": {
+    "allow_remote_compute": false,
+    "allow_remote_write": true,
+    "allowed_library": "vb_pdk_smoke",
+    "required_cell_prefix": "vda_",
+    "replace_existing": false
+  },
+  "limits": {"max_iterations": 1, "timeout_seconds": 300}
+}
