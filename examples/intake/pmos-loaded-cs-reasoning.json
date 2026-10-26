@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "source": {"kind": "task", "task": "../tasks/pmos-loaded-common-source-onboarding-tune.bridge.json"},
+  "measurements": "../measurements/pmos-loaded-cs.json",
+  "reasoning": "../reasoning/pmos-loaded-cs.json"
+}

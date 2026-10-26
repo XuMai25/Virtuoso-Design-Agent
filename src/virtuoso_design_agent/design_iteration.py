@@ -30,6 +30,7 @@ class IterationRound(_Contract):
     binding_audit: Path | None = None
     completion: Path | None = None
     artifact_root: Path | None = None
+    reasoning: Path | None = None
 
 
 class IterationRequest(_Contract):
@@ -250,6 +251,12 @@ def build_design_iteration(request_path: Path, template_path: Path | None = None
                         <= task.generic_simulation.metric_names_for_analysis(stage.analysis.value)):
                     raise ValueError("iteration stage cannot produce its declared constraint metrics")
         candidate = _point(run, source.candidate_index)
+        reasoning = None
+        if source.reasoning is not None:
+            from .design_reasoning import build_design_reasoning
+            reasoning = build_design_reasoning(_resolve(base, source.reasoning), task, run=run,
+                                                candidate_index=candidate.index if candidate else None)
+            review["sources"].update({f"reasoning_{name}": ref for name, ref in reasoning["sources"].items()})
         inputs = design_input_fingerprints(task, candidate)
         changed = [name for name, sha in inputs["sha256"].items()
                    if previous_inputs and previous_inputs["sha256"][name] != sha]
@@ -397,6 +404,7 @@ def build_design_iteration(request_path: Path, template_path: Path | None = None
                         "input_evidence": review["input_evidence"],
                         "input_artifact_root": review["input_artifact_root"],
                         "completion": completion, "recorded_state_requires_reanchor": reanchor,
+                        "reasoning": reasoning,
                         "objective_score": score})
         previous_inputs, last_task = inputs, task
     assert last_task is not None
@@ -416,6 +424,8 @@ def build_design_iteration(request_path: Path, template_path: Path | None = None
     draft = None
     if report["next_action"] == "inspect_before_restore":
         draft = _reconcile_task(last_task, len(history))
+    elif latest.get("reasoning", {}) and latest["reasoning"]["issues"]:
+        report["draft_issues"].extend(latest["reasoning"]["issues"])
     elif template_path is not None and report["next_action"] not in {"stop", "reanchor"}:
         raw = read_json(template_path)
         report["template"] = file_reference(template_path)
@@ -453,6 +463,12 @@ def build_design_iteration(request_path: Path, template_path: Path | None = None
             draft = None
             report["draft_issues"].append(str(exc))
     if draft is not None:
+        if latest.get("reasoning") and draft.operation.value != "schematic.inspect":
+            from .design_reasoning import reasoning_draft_issues
+            report["draft_issues"].extend(reasoning_draft_issues(latest["reasoning"], draft))
+            if report["draft_issues"]:
+                draft = None
+    if draft is not None:
         from .planner import build_plan
         report["task_draft"] = {"id": draft.id, "operation": draft.operation.value,
                                 "plan_token": build_plan(draft).confirmation_token,
@@ -473,6 +489,9 @@ def render_design_iteration(report: dict) -> str:
     for row in report["history"]:
         lines.append(f"| {row['round']} | {row['status']} | {row['active_stage']} | {', '.join(row['changed_inputs'])} |")
     for row in report["history"]:
+        if row.get("reasoning"):
+            from .design_reasoning import render_design_reasoning
+            lines.extend(["", f"### 第 {row['round']} 轮理由", "", render_design_reasoning(row["reasoning"])])
         for evidence in row.get("input_evidence", []):
             lines.append(f"\n- 第 {row['round']} 轮输入证据（候选 {evidence['candidate_index']}）：{evidence['status']}；"
                          + ("；".join(evidence["issues"]) or "仅核对保存记录，不是新的远端结果。"))

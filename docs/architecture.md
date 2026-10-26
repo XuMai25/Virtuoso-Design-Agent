@@ -161,6 +161,25 @@ design-iterate.rounds，不增加审计器或执行路径。两者保留输入�
 所有关联文件结束时复核哈希，授权/状态/CAS/白名单保持。复用同一 A/B/A 完成本地
 重放与回归后停止此切片，见[收口记录](validation/2026-10-24-intake-iteration-closeout.md)。
 
+### 设计假设与物理坐标接线（2026-10-26）
+
+`design_reasoning.py` 将作者的 observation/mechanism、带 SHA 的 task/run 和精确
+metric/action/JSON pointer、允许 controls、预期趋势、代价/证伪分开。intake 可引用
+reasoning；next 和每轮 iterate 使用同一校验器做保存记录对照。上下文不匹配、混杂、
+缺项或 demo 不支持实测确认；consistent 只指观察一致，不证明因果、事前预测或当前 OA。
+新增草案字段需被理由覆盖；原单项入口无需理由，原恢复/对账/授权门优先。
+
+`physical_refinement.py` 是计算/编译面，不是新 optimizer：复用真实 characterization
+run 的加载器和 manifest 校验，以及现有插值器，有限反查单调 gm/ID 分支；显式
+电流/gm、gm/ID、长度和总宽度/CDF 倍率生成格点化 W/L，直接偏置/负载沿用数值
+binding，输出普通 AtomicCandidateSet/TaskSpec。长度外推、签名不一致、缺留出/原输入、
+PDK include 漂移、缺参/疑点、越界或预算不足不出任务。合成例仅计算。
+
+模型和真实电路层仍分开：不从 |VGS| 猜绝对偏置、不自动解 KCL、不给派生器件量贴
+eda_result，也不为宽度缩放承诺适用于所有器件几何。源目标/规格/测量/权限不扩展，
+compute/write/create/replace 关闭；worker、Bridge 和原局部拟合/留出不变。见
+[使用/边界](design-reasoning-and-physical-refinement.md)。
+
 ## 为什么使用独立 worker
 
 `virtuoso-bridge-lite` 已有自己的 Python 虚拟环境和本机配置。主程序通过该环境中的 Python 启动 JSON worker，而不是把 Bridge 源码复制进来或强制安装成本项目依赖。这样可以保持 Bridge 独立升级、避免依赖漂移，并把跨环境协议缩小到版本化 JSON action。

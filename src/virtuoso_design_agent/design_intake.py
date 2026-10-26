@@ -70,6 +70,8 @@ class DesignIntakeRequest(_Contract):
     source: Annotated[_TaskSource | _OnboardingSource, Field(discriminator="kind")]
     measurements: Path | None = None
     history: _History | None = None
+    reasoning: Path | None = None
+    physical_refinement: Path | None = None
     rationale: list[DesignRationale] = Field(default_factory=list, max_length=128)
     uncertainties: list[StrictStr] = Field(default_factory=list, max_length=128)
 
@@ -174,7 +176,27 @@ def build_design_intake(request_path: Path) -> tuple[dict, TaskSpec | None]:
             task = compiled
     if task.measurement_plan is None:
         issues.append("缺少明确的 measurement_plan；请绑定已有测量请求，不猜测单位、信号或提取定义。")
-    if not request.rationale:
+    physical = None
+    if request.physical_refinement is not None:
+        from .physical_refinement import compile_physical_refinement
+        if request.source.kind != "task":
+            raise ValueError("physical refinement requires an explicit exported task source")
+        physical, compiled = compile_physical_refinement(
+            path_ref("physical_request", request.physical_refinement), Path(sources["task"]["path"]), task)
+        issues.extend(physical["issues"])
+        sources.update({f"physical_{name}": ref for name, ref in physical["sources"].items()})
+        if compiled is not None:
+            task = compiled
+    reasoning = None
+    if request.reasoning is not None:
+        from .design_reasoning import build_design_reasoning
+        reasoning = build_design_reasoning(path_ref("reasoning_request", request.reasoning), task)
+        issues.extend(reasoning["issues"])
+        sources.update({f"reasoning_{name}": ref for name, ref in reasoning["sources"].items()})
+        if physical is not None and physical["status"] == "draft_ready":
+            from .design_reasoning import reasoning_draft_issues
+            issues.extend(reasoning_draft_issues(reasoning, task))
+    if not request.rationale and reasoning is None:
         issues.append("缺少设计理由；请记录已有理论依据、瓶颈、拟议改动理由或停止理由，不自动编造。")
     history = None
     if request.history is not None:
@@ -199,6 +221,7 @@ def build_design_intake(request_path: Path) -> tuple[dict, TaskSpec | None]:
             paths["task"], paths["run"], checkpoint_path=paths.get("checkpoint"),
             binding_audit_path=paths.get("binding_audit"),
             completion_path=paths.get("completion"), artifact_root=artifact_root,
+            reasoning_path=(root / request.reasoning).resolve() if request.reasoning else None,
         )
         selected = next((c for c in review["candidates"] if c["index"] == review["selected_candidate_index"]), None)
         history = {
@@ -216,6 +239,7 @@ def build_design_intake(request_path: Path) -> tuple[dict, TaskSpec | None]:
             "current_metrics_reused": False, "current_remote_state_verified": False,
             "next_status_for_historical_run": next_report["status"],
             "recommendations_for_historical_run": next_report["recommendations"],
+            "reasoning_for_historical_run": next_report.get("reasoning"),
         }
         # Do not turn an interrupted/pending execution into another runnable task.
         if (next_report["status"] == "reconcile_execution_first"
@@ -231,6 +255,7 @@ def build_design_intake(request_path: Path) -> tuple[dict, TaskSpec | None]:
         "status": "draft_ready" if ready else "needs_confirmation" if uncertainties else "needs_definition",
         "sources": sources, "context": _context_summary(task),
         "rationale": [item.model_dump(mode="json", exclude_none=True) for item in request.rationale],
+        "reasoning": reasoning, "physical_refinement": physical,
         "uncertainties": uncertainties, "issues": issues,
         "measurement_compile": {key: value for key, value in measurement.items()
                                 if key not in {"sources", "measurements", "uncertainties", "issues"}} if measurement else None,
@@ -269,6 +294,12 @@ def render_design_intake(report: dict) -> str:
     for item in report["rationale"]:
         target = {key: value for key, value in item.items() if key not in {"text", "source"}}
         lines.append(f"- {target or '整体'}：{item['text']}（{item['source']}）")
+    if report.get("reasoning"):
+        from .design_reasoning import render_design_reasoning
+        lines.extend(["", render_design_reasoning(report["reasoning"])])
+    if report.get("physical_refinement"):
+        from .physical_refinement import render_physical_refinement
+        lines.extend(["", render_physical_refinement(report["physical_refinement"])])
     domain = {key: context[key] for key in ("parameters", "instance_parameter_updates", "instance_parameter_space")}
     if context["candidate_set"]:
         domain["candidate_set"] = context["candidate_set"]
@@ -310,6 +341,10 @@ def render_design_intake(report: dict) -> str:
                 lines.append(f"| {name} | {value} | {candidate['metric_sources'][name]} |")
         lines.append("")
         lines.extend(f"- {step['reason']}" for step in history["recommendations_for_historical_run"])
+        if history.get("reasoning_for_historical_run"):
+            from .design_reasoning import render_design_reasoning
+            lines.extend(["", "以下对照只针对上述历史运行，不是当前设计指标。", "",
+                          render_design_reasoning(history["reasoning_for_historical_run"])])
     lines.extend(["", "## 待确认与边界", ""])
     lines.extend(f"- {item}" for item in [*report["uncertainties"], *report["issues"], *report["boundaries"]])
     lines.extend(["", "## 原始来源", ""])

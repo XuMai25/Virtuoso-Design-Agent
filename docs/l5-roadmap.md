@@ -203,6 +203,13 @@ inspect 收尾，不为了报告再仿真。这解决证据到决策的本地手
 复用同一 A/B/A 本地重放与回归后[收口](validation/2026-10-24-intake-iteration-closeout.md)，
 不继续以 P1-b 名义扩功能、建电路或补校准点；后续按真实设计需求再判断必要性。
 
+2026-10-26 按用户明确批准推进新的第一、第二批本地改进：结构化设计假设连接
+intake/next/iterate 的证据/趋势对照，显式物理变量经现有器件表/插值与数值 binding
+编译为普通安全候选。没有重新搭建求解器或执行器；材料不足/混杂/合成来源不产任务。
+这是决策可追溯和物理坐标接线，不改变上述旧收口结论或补齐 PMOS 多轴数据；第三批
+策略/经验及新真实设计验证另按需求。见[工作流](design-reasoning-and-physical-refinement.md)
+和[本地记录](validation/2026-10-26-design-reasoning-physical-local.md)。
+
 成本观测贯穿 P1/P2，而不是另建监控工程：现有 design-review 有 run/action 时长，
 design-iterate 可用 action-time 预算；`agent_thinking_seconds` 当前明确为 None。
 可靠的 agent/工具调用总数、上下文/模型开销、人工操作/返工和端到端交付时长仍不完整。

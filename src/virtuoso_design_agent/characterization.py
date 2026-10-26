@@ -546,6 +546,52 @@ def interpolate_mos_characterization_point(
     )
 
 
+def lookup_mos_by_gm_over_id(
+    artifact: MosCharacterizationArtifact, *, point_id: str, model: str,
+    polarity: MosPolarity | str, length_um: float, gm_over_id_per_v: float,
+    vds_magnitude_v: float, vsb_magnitude_v: float,
+) -> MosInterpolationResult:
+    """Invert the existing interpolator on one strictly monotone VGS branch.
+
+    No length extrapolation, nearest-point fallback, or inferred bias outside the
+    supplied table. Returned quantities remain width-scaled local estimates.
+    """
+    if not math.isfinite(gm_over_id_per_v) or gm_over_id_per_v <= 0:
+        raise ValueError("gm/ID must be finite and positive")
+    axis = sorted({p.vgs_magnitude_v for p in artifact.points
+                   if p.model == model and p.polarity == MosPolarity(polarity)
+                   and _matches(p.length_um, length_um, tolerance=1e-12)})
+    if not axis:
+        raise ValueError("gm/ID lookup requires an exact characterized length/model plane")
+    coordinates = [(p.vgs_magnitude_v, p.vds_magnitude_v, p.vsb_magnitude_v) for p in artifact.points
+                   if p.model == model and p.polarity == MosPolarity(polarity)
+                   and _matches(p.length_um, length_um, tolerance=1e-12)]
+    if len(coordinates) != len(set(coordinates)):
+        raise ValueError("gm/ID lookup has duplicate bias coordinates")
+
+    def at(vgs):
+        return interpolate_mos_characterization_point(
+            artifact, point_id=point_id, model=model, polarity=polarity, length_um=length_um,
+            vgs_magnitude_v=vgs, vds_magnitude_v=vds_magnitude_v, vsb_magnitude_v=vsb_magnitude_v,
+        )
+
+    samples = [at(vgs) for vgs in axis]
+    values = [s.point.gm_over_id_per_v for s in samples]
+    differences = [b - a for a, b in zip(values, values[1:])]
+    if differences and not (all(d > 0 for d in differences) or all(d < 0 for d in differences)):
+        raise ValueError("gm/ID lookup is ambiguous on a non-monotone or flat VGS branch")
+    for sample in samples:
+        if math.isclose(sample.point.gm_over_id_per_v, gm_over_id_per_v, rel_tol=1e-12):
+            return sample
+    for left, right in zip(samples, samples[1:]):
+        a, b = left.point.gm_over_id_per_v, right.point.gm_over_id_per_v
+        if min(a, b) < gm_over_id_per_v < max(a, b):
+            fraction = (gm_over_id_per_v - a) / (b - a)
+            return at(left.point.vgs_magnitude_v + fraction * (
+                right.point.vgs_magnitude_v - left.point.vgs_magnitude_v))
+    raise ValueError("requested gm/ID is outside the characterized branch; extrapolation is disabled")
+
+
 def _interpolate_holdout(
     settings: DeviceCharacterizationSpec,
     training: list[MosSmallSignalPoint],

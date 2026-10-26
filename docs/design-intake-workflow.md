@@ -72,6 +72,11 @@
 
 ## 历史记录的边界
 
+2026-10-26 新增可选 reasoning / physical_refinement 文件引用：分别保留可证伪的
+设计假设与显式物理坐标换算，沿用原测量、历史和安全草案。旧 rationale 继续兼容；
+没有 run 不做预期对照，合成表或材料不足不生成物理任务。详见
+[设计理由与物理细化](design-reasoning-and-physical-refinement.md)。
+
 history 复用 design-review/next 的原 task/run 身份和 plan 绑定；可选 checkpoint、
 binding_audit 继续使用原 exact-byte 校验。旧 token 不匹配时不得制造 audit 或改记录。
 

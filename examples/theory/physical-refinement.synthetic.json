@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "id": "physical-mechanics-only-not-a-design-recommendation",
+  "task_sha256": "7d05cebc2cd6b4fb5f4c7c52931be5e0513cf9f912631fe2a06534cc712eb699",
+  "pdk_profile_sha256": "40a6a4dcabc65aef52d388b79968c2c4053df974fce0660d1b295aa97142b662",
+  "process_corner": "top_tt",
+  "temperature_c": 27.0,
+  "axes": [
+    {"name": "branch_current", "unit": "A", "minimum": 0.00001, "maximum": 0.00003},
+    {"name": "gmid", "unit": "1/V", "minimum": 10.0, "maximum": 20.0},
+    {"name": "cascode_bias", "unit": "V", "minimum": 0.5, "maximum": 0.6},
+    {"name": "output_load", "unit": "fF", "minimum": 1.0, "maximum": 4.0}
+  ],
+  "devices": [
+    {
+      "id": "gain-device",
+      "characterization": "physical-mos-table.synthetic.json",
+      "characterization_sha256": "ada679150b613ff90acacce2cd8cd870741aab7e528be1ee22e67f24a00d532a",
+      "model": "nch_lvt_mac", "polarity": "nmos", "model_parameters": {},
+      "length_um": {"value": 0.03}, "gm_over_id_per_v": {"axis": "gmid"},
+      "current_a": {"axis": "branch_current"},
+      "vds_magnitude_v": 0.45, "vsb_magnitude_v": 0.0, "minimum_headroom_v": 0.1,
+      "width_binding": {
+        "instance": "MN0", "parameter": "Wfg", "unit": "um", "literal_format": "spectre_si",
+        "meaning": "Synthetic single-finger calculation only; real Wfg/nf/simM must be confirmed before use."
+      },
+      "length_binding": {
+        "instance": "MN0", "parameter": "l", "unit": "um", "literal_format": "spectre_si",
+        "meaning": "Explicit illustrative channel-length mapping, not fresh PDK readback."
+      },
+      "total_width_per_cdf_width": 1.0,
+      "characterization_total_width_per_normalized_width": 1.0,
+      "width_convention": "Illustrative single finger with unit multiplier; this does not establish the actual OA convention.",
+      "minimum_cdf_width_um": 0.1, "maximum_cdf_width_um": 3.0, "width_grid_um": 0.01
+    }
+  ],
+  "direct": [
+    {"value": {"axis": "cascode_bias"}, "testbench": {
+      "target": "source_dc", "name": "VCAS_SRC", "unit": "V", "meaning": "Explicit source DC, not inferred from |VGS|."
+    }},
+    {"value": {"axis": "output_load"}, "testbench": {
+      "target": "load", "name": "CL0", "unit": "fF", "meaning": "Explicit external capacitance."
+    }}
+  ],
+  "points": [
+    {"id": "illustrative-physical-point", "values": {
+      "branch_current": 0.00002, "gmid": 15.0, "cascode_bias": 0.545, "output_load": 2.0
+    }}
+  ],
+  "uncertainties": ["Synthetic numbers are not TSMC characterization and must never be promoted to an OA execution task."]
+}

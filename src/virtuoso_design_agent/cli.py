@@ -261,6 +261,7 @@ def _cmd_design_next(args: argparse.Namespace) -> int:
         data_policy_path=args.data_policy,
         prior_model_path=args.prior_model, prior_policy_path=args.prior_policy,
         completion_path=args.completion, artifact_root=args.artifact_root,
+        reasoning_path=args.reasoning, physical_refinement_path=args.physical_refinement,
     )
     payload = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
     outputs = [(args.output, payload), (args.markdown, render_design_next(report))]
@@ -1530,6 +1531,8 @@ def build_parser() -> argparse.ArgumentParser:
             review.add_argument("--data-policy", type=Path, help="inspect the original model declarations and split without fitting or generating a task")
             review.add_argument("--prior-model", type=Path, help="audit the previous prediction model against this completed candidate run before refreshing")
             review.add_argument("--prior-policy", type=Path, help="exact prior policy, required for legacy error-normalization floors")
+            review.add_argument("--reasoning", type=Path, help="source-bound physical hypotheses and retrospective metric expectations")
+            review.add_argument("--physical-refinement", type=Path, help="explicit physical design points on a fixed baseline; local calculation only")
     stb_audit = subparsers.add_parser("stability-audit", help="verify retained STB bytes and replay margins locally; never invokes Bridge")
     stb_audit.add_argument("evidence", type=Path, help="stability-evidence.json retained by an STB run")
     stb_audit.add_argument("--expected-sha256", help="evidence JSON hash from the original run record")

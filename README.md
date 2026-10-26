@@ -806,6 +806,11 @@ direct `si`/Spectre 路径还会在每个唯一 `/data/xum/.../vda_<task>_<nonce
 
 ## 文档
 
+2026-10-26 本地设计理由与物理细化：`design-intake` 可附结构化假设和物理坐标文件；
+`design-next --reasoning` / `--physical-refinement`、`design-iterate.rounds.reasoning`
+沿用原执行和证据边界。gm/ID/电流到尺寸是有适用域的估算，合成表/缺材料不出任务。
+入口、示例和未验证项见[说明](docs/design-reasoning-and-physical-refinement.md)。
+
 本地设计复盘、下一步建议与窗口复用检查（不启动 Bridge）：
 
 ```powershell
@@ -814,7 +819,7 @@ direct `si`/Spectre 路径还会在每个唯一 `/data/xum/.../vda_<task>_<nonce
 .\.venv\Scripts\vda.exe windows-plan <observed-windows.json> --task-id <task-id> --output <new-window-plan.json>
 ```
 
-`design-next` 可选接入已有 OP/MNA policy 或局部重线性化 model/policy/template；有效模型才
+`design-next` 可选接入已有 OP/MNA policy 或局部重线性化 model/policy/template；局部响应路径须有有效模型才
 输出关闭 compute/write 权限的普通任务草案。窗口检查只建议复用/保存/询问，不自动操纵 UI。
 详见[设计复盘与窗口管理](docs/design-review-workflow.md)。
 

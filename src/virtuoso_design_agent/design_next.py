@@ -40,6 +40,8 @@ def suggest_design_next(
     prior_policy_path: Path | None = None,
     completion_path: Path | None = None,
     artifact_root: Path | None = None,
+    reasoning_path: Path | None = None,
+    physical_refinement_path: Path | None = None,
 ) -> tuple[dict, TaskSpec | None]:
     """No random proposals, hidden remote calls, or fabricated model accuracy."""
     review = build_design_review(task_path, run_path, checkpoint_path, binding_audit_path,
@@ -52,6 +54,8 @@ def suggest_design_next(
         raise ValueError("a decision policy requires model, policy and task template")
     if data_policy_path is not None and any(supplied):
         raise ValueError("data-only inspection cannot be combined with a fitted model/task template")
+    if physical_refinement_path is not None and (any(supplied) or data_policy_path or iteration_path or prior_model_path):
+        raise ValueError("physical design points cannot be mixed with model fitting, data inspection or iteration templates")
     if prior_policy_path is not None and prior_model_path is None:
         raise ValueError("a prior policy requires the corresponding prior prediction model")
     report = {
@@ -66,6 +70,11 @@ def suggest_design_next(
                                             "当前 OA/会话状态与人工改动"]},
     }
     steps = report["recommendations"]
+    if reasoning_path is not None:
+        from .design_reasoning import build_design_reasoning
+        reasoning = build_design_reasoning(reasoning_path, task, run=run)
+        report["reasoning"] = reasoning
+        report["sources"].update({f"reasoning_{name}": ref for name, ref in reasoning["sources"].items()})
 
     def add(kind: str, reason: str, evidence: str) -> None:
         steps.append({"kind": kind, "reason": reason, "evidence": evidence,
@@ -86,7 +95,7 @@ def suggest_design_next(
     if restored_elsewhere:
         add('recorded_restore', '探针执行后已记录恢复基线；不能把其选中 OA/testbench 元组当作最后已验证状态。'
             '下一轮应显式改用收尾中的 baseline/final task/run，旧结果不代替新鲜 OA 检查。', 'completion')
-        if any(supplied) or iteration_path is not None:
+        if any(supplied) or iteration_path is not None or physical_refinement_path is not None:
             report['status'] = 'recorded_state_requires_reanchor'
             return report, None
 
@@ -103,6 +112,12 @@ def suggest_design_next(
         if iteration["status"] not in {"refine_stage", "refine_objective"}:
             report["status"] = iteration["status"]
             report["task_draft"] = iteration["task_draft"]
+            if report.get("reasoning") and guarded_draft and guarded_draft.operation.value != "schematic.inspect":
+                from .design_reasoning import reasoning_draft_issues
+                report["reasoning"]["issues"].extend(reasoning_draft_issues(report["reasoning"], guarded_draft))
+                if report["reasoning"]["issues"]:
+                    report["task_draft"] = None
+                    return report, None
             return report, guarded_draft
 
     if run.status is RunStatus.FAILED or review["execution"]["incomplete_evidence"]:
@@ -131,6 +146,28 @@ def suggest_design_next(
         report["status"] = "software_only"
         add("evidence_boundary", "离线记录只验证软件逻辑，不据此给出实际器件尺寸优化或电路性能结论。", "run.adapter")
         return report, None
+    if report.get("reasoning", {}).get("issues"):
+        report["status"] = "reasoning_requires_confirmation"
+        add("reasoning_uncertainty", "设计假设尚有未解决疑点；保留证据和诊断，不生成下一轮任务。", "reasoning.issues")
+        return report, None
+    if physical_refinement_path is not None:
+        from .physical_refinement import compile_physical_refinement
+        physical, draft = compile_physical_refinement(physical_refinement_path, task_path, task)
+        if draft and report.get("reasoning"):
+            from .design_reasoning import reasoning_draft_issues
+            physical["issues"].extend(reasoning_draft_issues(report["reasoning"], draft))
+            if physical["issues"]:
+                physical["status"], draft = "needs_definition", None
+        report["physical_refinement"] = physical
+        report["sources"].update({f"physical_{name}": ref for name, ref in physical["sources"].items()})
+        report["status"] = "physical_design_draft_ready" if draft else "physical_design_needs_evidence"
+        add("physical_design_points", "将显式电流/gm、gm/ID、长度或偏置/负载换算为普通原子候选；"
+            "这是有条件的理论估算，不是已校准灵敏度或实测改善。", "physical_refinement.points / limitations")
+        if draft:
+            report["task_draft"] = {"id": draft.id, "plan_token": build_plan(draft).confirmation_token,
+                "remote_compute": False, "remote_write": False, "user_confirmation_required": True,
+                "candidate_count": len(draft.candidate_set.candidates)}
+        return report, draft
     if small_signal_policy_path is not None:
         small_signal_policy = OperatingPointSmallSignalPolicy.model_validate(read_json(small_signal_policy_path))
         if small_signal_policy.expected_pdk_profile != task.pdk_profile:
@@ -292,6 +329,13 @@ def suggest_design_next(
     raw["safety"].update(allow_remote_compute=False, allow_remote_write=False,
                          replace_existing=False)
     draft = TaskSpec.model_validate(raw)
+    if report.get("reasoning"):
+        from .design_reasoning import reasoning_draft_issues
+        reasoning_issues = reasoning_draft_issues(report["reasoning"], draft)
+        if reasoning_issues:
+            report["reasoning"]["issues"].extend(reasoning_issues)
+            report["status"] = "reasoning_requires_definition"
+            return report, None
     comparisons = []
     for candidate in recomputed.candidate_set.candidates:
         comparisons.append({
@@ -332,6 +376,12 @@ def render_design_next(report: dict) -> str:
     lines = [f"# 下一步建议：{report['task_id']}", "", f"状态：`{report['status']}`。仅建议，未执行。", ""]
     for step in report["recommendations"]:
         lines.extend([f"- {step['reason']}（依据：{step['evidence']}）"])
+    if report.get("reasoning"):
+        from .design_reasoning import render_design_reasoning
+        lines.extend(["", render_design_reasoning(report["reasoning"])])
+    if report.get("physical_refinement"):
+        from .physical_refinement import render_physical_refinement
+        lines.extend(["", render_physical_refinement(report["physical_refinement"])])
     if report.get('input_evidence'):
         lines.extend(['', '## 保存的输入证据', ''])
         for row in report['input_evidence']:
