@@ -1,8 +1,8 @@
-# Virtuoso Design Pack
+# Virtuoso Analog IC Design & Verification Agent
 
 **Give your AI agent an analog design task in Cadence Virtuoso, from sizing and schematic capture through Spectre verification and ADE handoff.**
 
-Virtuoso Design Pack brings workflows from Virtuoso Design Agent (VDA) to your existing CAD environment. Bridge connects your agent to Virtuoso and Spectre. The pack guides the agent through the design steps, checks the saved circuit, and turns simulation results into a report you can review and reproduce. [Virtuoso Bridge](https://github.com/Arcadia-1/virtuoso-bridge-lite)
+Virtuoso Analog IC Design & Verification Agent brings workflows from Virtuoso Design Agent (VDA) to your existing CAD environment. Bridge connects your agent to Virtuoso and Spectre. The pack guides the agent through the design steps, checks the saved circuit, and turns simulation results into a report you can review and reproduce. [Virtuoso Bridge](https://github.com/Arcadia-1/virtuoso-bridge-lite)
 
 ## What you can do with it
 
@@ -23,4 +23,4 @@ The agent checks those inputs against the saved schematic and Virtuoso’s nativ
 
 Bring a licensed Virtuoso and Spectre environment, an installed PDK, and an agent with shell and file access. The pack includes six skills, runnable scripts, and configuration templates. Start with a read-only check on a familiar cell before moving on to design changes or larger sweeps.
 
-[View Virtuoso Design Pack on Agensi](https://agensi.io/skills/virtuoso-design-pack)
+[View Virtuoso Analog IC Design & Verification Agent on Agensi](https://agensi.io/skills/virtuoso-analog-ic-design-verification-agent)
